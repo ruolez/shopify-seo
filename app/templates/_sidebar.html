@@ -1,0 +1,68 @@
+<aside class="sidebar">
+    <div class="sidebar-header">
+        <div class="logo">S</div>
+        <h1>SEO Platform</h1>
+    </div>
+    <nav class="sidebar-nav">
+        <div class="nav-section">
+            <a href="/" class="nav-item" data-page="dashboard">
+                <span class="material-symbols-rounded">dashboard</span>
+                Dashboard
+            </a>
+        </div>
+        <div class="nav-section">
+            <div class="nav-section-label">Optimize</div>
+            <a href="/seo" class="nav-item" data-page="seo">
+                <span class="material-symbols-rounded">search</span>
+                SEO
+            </a>
+            <a href="/interlinking" class="nav-item" data-page="interlinking">
+                <span class="material-symbols-rounded">link</span>
+                Interlinking
+            </a>
+            <div class="nav-item" style="opacity: 0.5; cursor: default;">
+                <span class="material-symbols-rounded">ads_click</span>
+                Ads
+                <span class="coming-soon">Soon</span>
+            </div>
+            <div class="nav-item" style="opacity: 0.5; cursor: default;">
+                <span class="material-symbols-rounded">mail</span>
+                Email Marketing
+                <span class="coming-soon">Soon</span>
+            </div>
+            <div class="nav-item" style="opacity: 0.5; cursor: default;">
+                <span class="material-symbols-rounded">support_agent</span>
+                Customer Support
+                <span class="coming-soon">Soon</span>
+            </div>
+        </div>
+        <div class="nav-section">
+            <div class="nav-section-label">Manage</div>
+            <a href="/stores" class="nav-item" data-page="stores">
+                <span class="material-symbols-rounded">store</span>
+                Stores
+            </a>
+            <a href="/settings" class="nav-item" data-page="settings">
+                <span class="material-symbols-rounded">settings</span>
+                Settings
+            </a>
+        </div>
+    </nav>
+    <div class="sidebar-footer">
+        <a href="/logout" class="nav-item">
+            <span class="material-symbols-rounded">logout</span>
+            Logout
+        </a>
+    </div>
+</aside>
+
+<script>
+    (function() {
+        const path = window.location.pathname;
+        document.querySelectorAll('.nav-item[data-page]').forEach(item => {
+            const page = item.dataset.page;
+            if (page === 'dashboard' && path === '/') item.classList.add('active');
+            else if (page !== 'dashboard' && path.startsWith('/' + page)) item.classList.add('active');
+        });
+    })();
+</script>

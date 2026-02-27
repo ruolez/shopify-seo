@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Interlinking — SEO Platform</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+    <div class="app-layout">
+        {% include '_sidebar.html' %}
+        <div class="main-content">
+            <div class="topbar">
+                <div class="topbar-left">
+                    <button id="sidebar-toggle" class="icon-btn"><span class="material-symbols-rounded">menu</span></button>
+                    <h2>Interlinking Analysis</h2>
+                </div>
+                <div class="topbar-right">
+                    <button id="theme-toggle" class="icon-btn"><span class="material-symbols-rounded">dark_mode</span></button>
+                </div>
+            </div>
+            <div class="page-content">
+                <div id="interlinking-store-select" style="margin-bottom: 24px;">
+                    <div class="form-group" style="max-width: 320px; margin-bottom: 0;">
+                        <label for="store-select">Store</label>
+                        <select id="store-select" class="form-control">
+                            <option value="">Select a store...</option>
+                        </select>
+                    </div>
+                </div>
+
+                <div id="interlinking-content">
+                    <div class="empty-state">
+                        <span class="material-symbols-rounded">link</span>
+                        <p>Select a store and run analysis to view interlinking data.</p>
+                    </div>
+                </div>
+
+                <!-- Item Detail Modal -->
+                <div class="modal-overlay" id="item-detail-modal">
+                    <div class="modal modal-fullscreen">
+                        <div class="modal-header">
+                            <h3 id="item-detail-title">Link Details</h3>
+                            <button class="icon-btn" onclick="closeItemModal()"><span class="material-symbols-rounded">close</span></button>
+                        </div>
+                        <div class="modal-body" id="item-detail-content"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/js/app.js"></script>
+    <script src="/static/js/interlinking.js"></script>
+</body>
+</html>

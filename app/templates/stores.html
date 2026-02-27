@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Stores — SEO Platform</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+    <div class="app-layout">
+        {% include '_sidebar.html' %}
+        <div class="main-content">
+            <div class="topbar">
+                <div class="topbar-left">
+                    <button id="sidebar-toggle" class="icon-btn"><span class="material-symbols-rounded">menu</span></button>
+                    <h2>Stores</h2>
+                </div>
+                <div class="topbar-right">
+                    <button class="btn btn-primary" onclick="openAddModal()">
+                        <span class="material-symbols-rounded">add</span>
+                        Add Store
+                    </button>
+                    <button id="theme-toggle" class="icon-btn"><span class="material-symbols-rounded">dark_mode</span></button>
+                </div>
+            </div>
+            <div class="page-content">
+                <div id="stores-container">
+                    <div class="loading-spinner"><div class="spinner"></div><p>Loading stores...</p></div>
+                </div>
+            </div>
+            <div class="progress-overlay" id="sync-progress-overlay">
+                <div class="progress-card">
+                    <span class="material-symbols-rounded" style="font-size: 40px; color: var(--primary); margin-bottom: 12px;">sync</span>
+                    <h3>Syncing Store</h3>
+                    <p class="progress-subtitle" id="sync-progress-subtitle">Connecting to Shopify...</p>
+                    <div class="progress-bar-container">
+                        <div class="progress-bar" id="sync-progress-bar"></div>
+                    </div>
+                    <div class="progress-stats" id="sync-progress-stats"></div>
+                    <div class="progress-current" id="sync-progress-current"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal-overlay" id="store-modal">
+        <div class="modal">
+            <div class="modal-header">
+                <h3 id="modal-title">Add Store</h3>
+                <button class="icon-btn" onclick="closeModal()"><span class="material-symbols-rounded">close</span></button>
+            </div>
+            <form id="store-form">
+                <input type="hidden" id="store-id">
+                <div class="form-group">
+                    <label for="store-name">Store Name</label>
+                    <input type="text" id="store-name" class="form-control" placeholder="My Shopify Store" required>
+                </div>
+                <div class="form-group">
+                    <label for="store-domain">Domain</label>
+                    <input type="text" id="store-domain" class="form-control" placeholder="my-store.myshopify.com" required>
+                </div>
+                <div class="form-group">
+                    <label for="store-token">Access Token</label>
+                    <input type="password" id="store-token" class="form-control" placeholder="shpat_xxxxxxxx">
+                    <small style="color: var(--on-surface-secondary); font-size: 12px;">Leave blank when editing to keep existing token</small>
+                </div>
+                <div class="form-group">
+                    <label for="store-api-version">API Version</label>
+                    <input type="text" id="store-api-version" class="form-control" value="2024-10">
+                </div>
+                <div class="form-actions">
+                    <button type="submit" class="btn btn-primary" id="save-btn">Save Store</button>
+                    <button type="button" class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <script src="/static/js/app.js"></script>
+    <script src="/static/js/stores.js"></script>
+</body>
+</html>

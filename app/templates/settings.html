@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Settings — SEO Platform</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+    <div class="app-layout">
+        {% include '_sidebar.html' %}
+        <div class="main-content">
+            <div class="topbar">
+                <div class="topbar-left">
+                    <button id="sidebar-toggle" class="icon-btn"><span class="material-symbols-rounded">menu</span></button>
+                    <h2>Settings</h2>
+                </div>
+                <div class="topbar-right">
+                    <button id="theme-toggle" class="icon-btn"><span class="material-symbols-rounded">dark_mode</span></button>
+                </div>
+            </div>
+            <div class="page-content">
+                <div class="card" style="max-width: 640px;">
+                    <div class="card-header">
+                        <h3>AI Configuration</h3>
+                    </div>
+                    <form id="ai-form">
+                        <div class="form-group">
+                            <label for="ai-key">OpenRouter API Key</label>
+                            <input type="password" id="ai-key" class="form-control" placeholder="sk-or-v1-xxxxx">
+                            <small style="color: var(--on-surface-secondary); font-size: 12px;" id="key-status"></small>
+                        </div>
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label for="ai-model">Model</label>
+                                <select id="ai-model" class="form-control">
+                                    <option value="">Loading models...</option>
+                                </select>
+                                <small style="color: var(--on-surface-secondary); font-size: 12px;">Only models that support tool-calling are shown</small>
+                            </div>
+                            <div class="form-group">
+                                <label for="ai-budget">Daily Budget ($)</label>
+                                <input type="number" id="ai-budget" class="form-control" step="0.50" min="0" value="10.00">
+                            </div>
+                        </div>
+                        <div class="form-actions">
+                            <button type="submit" class="btn btn-primary">Save Configuration</button>
+                            <button type="button" class="btn btn-secondary" id="test-ai-btn">Test Connection</button>
+                        </div>
+                    </form>
+                </div>
+
+                <div class="card" style="max-width: 640px; margin-top: 24px;">
+                    <div class="card-header">
+                        <h3>Brave Search API</h3>
+                    </div>
+                    <p style="color: var(--on-surface-secondary); font-size: 13px; margin: 0 0 16px;">
+                        Enables live SERP research during SEO optimization. Free tier: 2,000 queries/month.
+                        Get your key at <a href="https://api.search.brave.com/" target="_blank" style="color: var(--primary);">api.search.brave.com</a>
+                    </p>
+                    <form id="brave-form">
+                        <div class="form-group">
+                            <label for="brave-key">API Key</label>
+                            <input type="password" id="brave-key" class="form-control" placeholder="BSA...">
+                            <small style="color: var(--on-surface-secondary); font-size: 12px;" id="brave-key-status"></small>
+                        </div>
+                        <div class="form-actions">
+                            <button type="submit" class="btn btn-primary">Save Brave Key</button>
+                            <button type="button" class="btn btn-secondary" id="test-brave-btn">Test Connection</button>
+                        </div>
+                    </form>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/js/app.js"></script>
+    <script src="/static/js/settings.js"></script>
+</body>
+</html>

@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dashboard — SEO Platform</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+    <div class="app-layout">
+        {% include '_sidebar.html' %}
+        <div class="main-content">
+            <div class="topbar">
+                <div class="topbar-left">
+                    <button id="sidebar-toggle" class="icon-btn"><span class="material-symbols-rounded">menu</span></button>
+                    <h2>Dashboard</h2>
+                </div>
+                <div class="topbar-right">
+                    <button id="theme-toggle" class="icon-btn"><span class="material-symbols-rounded">dark_mode</span></button>
+                </div>
+            </div>
+            <div class="page-content">
+                <div class="stats-grid" id="stats-grid">
+                    <div class="stat-card">
+                        <div class="stat-icon blue"><span class="material-symbols-rounded">store</span></div>
+                        <div class="stat-value" id="stat-stores">—</div>
+                        <div class="stat-label">Connected Stores</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-icon green"><span class="material-symbols-rounded">inventory_2</span></div>
+                        <div class="stat-value" id="stat-products">—</div>
+                        <div class="stat-label">Synced Products</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-icon orange"><span class="material-symbols-rounded">speed</span></div>
+                        <div class="stat-value" id="stat-seo">—</div>
+                        <div class="stat-label">Avg SEO Score</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-icon blue"><span class="material-symbols-rounded">smart_toy</span></div>
+                        <div class="stat-value" id="stat-tasks">—</div>
+                        <div class="stat-label">AI Tasks Run</div>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div class="card-header">
+                        <h3>Quick Actions</h3>
+                    </div>
+                    <div style="display: flex; gap: 12px; flex-wrap: wrap;">
+                        <a href="/stores" class="btn btn-secondary">
+                            <span class="material-symbols-rounded">add</span>
+                            Add Store
+                        </a>
+                        <a href="/seo" class="btn btn-secondary">
+                            <span class="material-symbols-rounded">search</span>
+                            View SEO Analysis
+                        </a>
+                        <a href="/settings" class="btn btn-secondary">
+                            <span class="material-symbols-rounded">settings</span>
+                            Configure AI
+                        </a>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/js/app.js"></script>
+    <script src="/static/js/dashboard.js"></script>
+</body>
+</html>
