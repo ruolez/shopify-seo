@@ -89,7 +89,7 @@ def _get_org_settings(store_id):
 
 def _get_store_domain(store_id):
     with db.get_cursor() as cur:
-        cur.execute("SELECT domain FROM stores WHERE id = %s", (store_id,))
+        cur.execute("SELECT COALESCE(primary_domain, domain) as domain FROM stores WHERE id = %s", (store_id,))
         row = cur.fetchone()
         if row:
             domain = row["domain"]
@@ -104,7 +104,7 @@ def list_products_schema():
     with db.get_cursor() as cur:
         cur.execute("""
             SELECT sp.id, sp.store_id, sp.shopify_id, sp.title, sp.handle, sp.status,
-                   s.name as store_name,
+                   COALESCE(s.shop_name, s.name) as store_name,
                    sm.id as schema_id, sm.is_valid, sm.pushed_to_shopify, sm.pushed_at
             FROM synced_products sp
             JOIN stores s ON s.id = sp.store_id

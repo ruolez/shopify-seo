@@ -1,4 +1,10 @@
+import json
+import logging
+import time
+
 import requests
+
+logger = logging.getLogger(__name__)
 
 
 class ShopifyClient:
@@ -20,30 +26,49 @@ class ShopifyClient:
         payload = {"query": query}
         if variables:
             payload["variables"] = variables
-        resp = requests.post(
-            self.graphql_url, json=payload, headers=self.headers, timeout=30
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        if "errors" in data:
-            raise Exception(data["errors"][0].get("message", str(data["errors"])))
-        return data.get("data", {})
+
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                resp = requests.post(
+                    self.graphql_url, json=payload, headers=self.headers, timeout=30
+                )
+                if resp.status_code == 429:
+                    retry_after = float(resp.headers.get("Retry-After", 2))
+                    logger.warning("Shopify rate limited, retrying after %.1fs", retry_after)
+                    time.sleep(retry_after)
+                    continue
+                resp.raise_for_status()
+                data = resp.json()
+                if "errors" in data:
+                    raise Exception(data["errors"][0].get("message", str(data["errors"])))
+                return data.get("data", {})
+            except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+                if attempt < max_retries - 1:
+                    wait = 2 ** attempt
+                    logger.warning("Shopify connection error (attempt %d/%d), retrying in %ds: %s", attempt + 1, max_retries, wait, e)
+                    time.sleep(wait)
+                else:
+                    raise
 
     def test_connection(self):
-        query = "{ shop { name id myshopifyDomain } }"
+        query = "{ shop { name id myshopifyDomain primaryDomain { host url } } }"
         data = self._graphql(query)
         shop = data.get("shop", {})
+        primary = shop.get("primaryDomain") or {}
         return {
             "name": shop.get("name"),
             "domain": shop.get("myshopifyDomain"),
             "id": shop.get("id"),
+            "primary_domain": primary.get("host"),
         }
 
-    def get_products(self, limit=50, cursor=None):
+    def get_products(self, limit=50, cursor=None, query_filter=None):
         after = f', after: "{cursor}"' if cursor else ""
+        q_filter = f', query: "{query_filter}"' if query_filter else ""
         query = f"""
         {{
-          products(first: {limit}{after}) {{
+          products(first: {limit}{after}{q_filter}) {{
             pageInfo {{ hasNextPage endCursor }}
             edges {{
               node {{
@@ -69,7 +94,9 @@ class ShopifyClient:
                 }}
                 variants(first: 10) {{
                   edges {{
-                    node {{ id title price sku availableForSale compareAtPrice barcode }}
+                    node {{
+                      id title price sku availableForSale compareAtPrice barcode
+                    }}
                   }}
                 }}
               }}
@@ -227,37 +254,38 @@ class ShopifyClient:
         if not valid:
             return []
 
-        media_items = []
-        for m in valid:
-            mid = m["media_id"]
-            alt = m["alt"].replace('"', '\\"')
-            media_items.append(f'{{ id: "{mid}", alt: "{alt}" }}')
-
-        media_str = ", ".join(media_items)
-        query = f"""
-        mutation {{
-          fileUpdate(files: [{media_str}]) {{
-            files {{ ... on MediaImage {{ id alt }} }}
-            userErrors {{ field message }}
-          }}
-        }}
+        files_input = [{"id": m["media_id"], "alt": m["alt"]} for m in valid]
+        query = """
+        mutation fileUpdate($files: [FileUpdateInput!]!) {
+          fileUpdate(files: $files) {
+            files { ... on MediaImage { id alt } }
+            userErrors { field message }
+          }
+        }
         """
-        data = self._graphql(query)
+        data = self._graphql(query, variables={"files": files_input})
         result = data.get("fileUpdate", {})
         errors = result.get("userErrors", [])
         if errors:
             raise Exception(f"Shopify media update error: {errors[0].get('message', str(errors))}")
-        return result.get("files", [])
 
-    def get_all_products(self):
-        all_products = []
+        updated_files = result.get("files", [])
+        logger.info("Updated alt text for %d/%d images on product %s", len(updated_files), len(valid), shopify_id)
+        return updated_files
+
+    def iter_products(self, page_size=50, query_filter=None):
         cursor = None
         while True:
-            result = self.get_products(limit=50, cursor=cursor)
-            all_products.extend(result["products"])
+            result = self.get_products(limit=page_size, cursor=cursor, query_filter=query_filter)
+            yield result["products"]
             if not result["has_next"]:
                 break
             cursor = result["cursor"]
+
+    def get_all_products(self, query_filter=None):
+        all_products = []
+        for page in self.iter_products(query_filter=query_filter):
+            all_products.extend(page)
         return all_products
 
     def get_collection_products(self, shopify_id):
@@ -294,21 +322,21 @@ class ShopifyClient:
     def get_all_collection_products(self, shopify_id):
         all_products = []
         cursor = None
+        query = """
+        query ($id: ID!, $first: Int!, $after: String) {
+          collection(id: $id) {
+            products(first: $first, after: $after) {
+              pageInfo { hasNextPage endCursor }
+              edges {
+                node { id title handle status }
+              }
+            }
+          }
+        }
+        """
         while True:
-            after = f', after: "{cursor}"' if cursor else ""
-            query = f"""
-            {{
-              collection(id: "{shopify_id}") {{
-                products(first: 50{after}) {{
-                  pageInfo {{ hasNextPage endCursor }}
-                  edges {{
-                    node {{ id title handle status }}
-                  }}
-                }}
-              }}
-            }}
-            """
-            data = self._graphql(query)
+            variables = {"id": shopify_id, "first": 50, "after": cursor}
+            data = self._graphql(query, variables=variables)
             collection = data.get("collection") or {}
             products_data = collection.get("products") or {}
             page_info = products_data.get("pageInfo", {})
@@ -516,6 +544,194 @@ class ShopifyClient:
             "handle": collection.get("handle", ""),
         }
 
+    def create_smart_collection(self, title, vendor, description_html="", seo_title="", seo_description=""):
+        query = """
+        mutation ($input: CollectionInput!) {
+          collectionCreate(input: $input) {
+            collection { id title handle }
+            userErrors { field message }
+          }
+        }
+        """
+        input_vars = {
+            "title": title,
+            "ruleSet": {
+                "appliedDisjunctively": False,
+                "rules": [{"column": "VENDOR", "relation": "EQUALS", "condition": vendor}],
+            },
+        }
+        if description_html:
+            input_vars["descriptionHtml"] = description_html
+        if seo_title or seo_description:
+            input_vars["seo"] = {}
+            if seo_title:
+                input_vars["seo"]["title"] = seo_title
+            if seo_description:
+                input_vars["seo"]["description"] = seo_description
+
+        data = self._graphql(query, {"input": input_vars})
+        result = data.get("collectionCreate", {})
+        errors = result.get("userErrors", [])
+        if errors:
+            raise Exception(f"Shopify collectionCreate error: {errors[0].get('message', str(errors))}")
+        collection = result.get("collection", {})
+        return {
+            "shopify_id": collection.get("id", ""),
+            "title": collection.get("title", ""),
+            "handle": collection.get("handle", ""),
+        }
+
+    def staged_upload_create(self, filename, mime_type, file_size, resource="PRODUCT_IMAGE"):
+        query = """
+        mutation ($input: [StagedUploadInput!]!) {
+          stagedUploadsCreate(input: $input) {
+            stagedTargets {
+              url
+              resourceUrl
+              parameters { name value }
+            }
+            userErrors { field message }
+          }
+        }
+        """
+        variables = {
+            "input": [
+                {
+                    "resource": resource,
+                    "filename": filename,
+                    "mimeType": mime_type,
+                    "fileSize": str(file_size),
+                    "httpMethod": "POST",
+                }
+            ]
+        }
+        data = self._graphql(query, variables)
+        result = data.get("stagedUploadsCreate", {})
+        errors = result.get("userErrors", [])
+        if errors:
+            raise Exception(f"Shopify stagedUploadsCreate error: {errors[0].get('message', str(errors))}")
+        targets = result.get("stagedTargets", [])
+        if not targets:
+            raise Exception("No staged upload target returned")
+        return targets[0]
+
+    def upload_staged_file(self, staged_target, file_bytes, content_type="image/png", filename="image.png"):
+        form_data = {p["name"]: p["value"] for p in staged_target["parameters"]}
+        import requests as req
+        files = {"file": (filename, file_bytes, content_type)}
+        resp = req.post(staged_target["url"], data=form_data, files=files, timeout=60)
+        resp.raise_for_status()
+        return staged_target["resourceUrl"]
+
+    def file_create(self, resource_url, filename=None, alt_text=None):
+        query = """
+        mutation ($files: [FileCreateInput!]!) {
+          fileCreate(files: $files) {
+            files {
+              ... on MediaImage {
+                id
+                fileStatus
+                alt
+                image { url }
+              }
+              ... on GenericFile {
+                id
+                fileStatus
+                url
+              }
+            }
+            userErrors { field message }
+          }
+        }
+        """
+        file_input = {"originalSource": resource_url, "contentType": "IMAGE"}
+        if filename:
+            file_input["filename"] = filename
+        if alt_text:
+            file_input["alt"] = alt_text
+        data = self._graphql(query, {"files": [file_input]})
+        result = data.get("fileCreate", {})
+        errors = result.get("userErrors", [])
+        if errors:
+            raise Exception(f"Shopify fileCreate error: {errors[0].get('message', str(errors))}")
+        files = result.get("files", [])
+        return files[0] if files else {}
+
+    def file_get_url(self, file_id, max_attempts=10):
+        query = """
+        query ($id: ID!) {
+          node(id: $id) {
+            ... on MediaImage {
+              fileStatus
+              image { url }
+            }
+          }
+        }
+        """
+        import time
+        for _ in range(max_attempts):
+            data = self._graphql(query, {"id": file_id})
+            node = data.get("node", {})
+            status = node.get("fileStatus")
+            if status == "READY":
+                image = node.get("image", {})
+                url = image.get("url")
+                if url:
+                    return url
+            elif status == "FAILED":
+                raise Exception("Shopify file processing failed")
+            time.sleep(2)
+        raise Exception("Shopify file processing timed out")
+
+    def delete_files(self, file_ids):
+        query = """
+        mutation ($fileIds: [ID!]!) {
+          fileDelete(fileIds: $fileIds) {
+            deletedFileIds
+            userErrors { field message }
+          }
+        }
+        """
+        data = self._graphql(query, {"fileIds": file_ids})
+        result = data.get("fileDelete", {})
+        errors = result.get("userErrors", [])
+        if errors:
+            raise Exception(f"Shopify fileDelete error: {errors[0].get('message', str(errors))}")
+        return result.get("deletedFileIds", [])
+
+    def create_product_media(self, product_shopify_id, resource_url, alt_text):
+        query = """
+        mutation ($productId: ID!, $media: [CreateMediaInput!]!) {
+          productCreateMedia(productId: $productId, media: $media) {
+            media {
+              ... on MediaImage {
+                id
+                alt
+                preview { image { url } }
+              }
+            }
+            mediaUserErrors { field message }
+          }
+        }
+        """
+        variables = {
+            "productId": product_shopify_id,
+            "media": [
+                {
+                    "originalSource": resource_url,
+                    "alt": alt_text,
+                    "mediaContentType": "IMAGE",
+                }
+            ],
+        }
+        data = self._graphql(query, variables)
+        result = data.get("productCreateMedia", {})
+        errors = result.get("mediaUserErrors", [])
+        if errors:
+            raise Exception(f"Shopify productCreateMedia error: {errors[0].get('message', str(errors))}")
+        media_list = result.get("media", [])
+        return media_list[0] if media_list else {}
+
     def get_product_metafield(self, product_shopify_id, namespace, key):
         query = """
         query ($id: ID!, $namespace: String!, $key: String!) {
@@ -533,3 +749,970 @@ class ShopifyClient:
         })
         product = data.get("product") or {}
         return product.get("metafield")
+
+    def get_collection_products_with_images(self, collection_shopify_id, limit=4):
+        query = """
+        query ($id: ID!, $first: Int!) {
+          collection(id: $id) {
+            products(first: $first) {
+              edges {
+                node {
+                  id
+                  title
+                  media(first: 1) {
+                    edges {
+                      node {
+                        ... on MediaImage {
+                          preview { image { url } }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+        """
+        data = self._graphql(query, {"id": collection_shopify_id, "first": limit})
+        collection = data.get("collection") or {}
+        edges = (collection.get("products") or {}).get("edges", [])
+
+        products = []
+        for edge in edges:
+            node = edge["node"]
+            media_edges = (node.get("media") or {}).get("edges", [])
+            image_url = ""
+            for m in media_edges:
+                image_url = ((m["node"].get("preview") or {}).get("image") or {}).get("url", "")
+                if image_url:
+                    break
+            if image_url:
+                products.append({
+                    "shopify_id": node["id"],
+                    "title": node.get("title", ""),
+                    "image_url": image_url,
+                })
+        return products
+
+    def get_blogs(self, limit=50, cursor=None):
+        after = f', after: "{cursor}"' if cursor else ""
+        query = f"""
+        {{
+          blogs(first: {limit}{after}) {{
+            pageInfo {{ hasNextPage endCursor }}
+            edges {{
+              node {{
+                id
+                title
+                handle
+                commentPolicy
+                articlesCount {{ count }}
+              }}
+            }}
+          }}
+        }}
+        """
+        data = self._graphql(query)
+        blogs_data = data.get("blogs", {})
+        page_info = blogs_data.get("pageInfo", {})
+        edges = blogs_data.get("edges", [])
+        blogs = []
+        for edge in edges:
+            node = edge["node"]
+            blogs.append({
+                "shopify_id": node["id"],
+                "title": node.get("title", ""),
+                "handle": node.get("handle", ""),
+                "comment_policy": node.get("commentPolicy", ""),
+                "articles_count": (node.get("articlesCount") or {}).get("count", 0),
+            })
+        return {
+            "blogs": blogs,
+            "has_next": page_info.get("hasNextPage", False),
+            "cursor": page_info.get("endCursor"),
+        }
+
+    def get_all_blogs(self):
+        all_blogs = []
+        cursor = None
+        while True:
+            result = self.get_blogs(limit=50, cursor=cursor)
+            all_blogs.extend(result["blogs"])
+            if not result["has_next"]:
+                break
+            cursor = result["cursor"]
+        return all_blogs
+
+    def create_blog(self, title):
+        escaped_title = title.replace('"', '\\"')
+        query = f"""
+        mutation {{
+          blogCreate(blog: {{ title: "{escaped_title}" }}) {{
+            blog {{ id title handle }}
+            userErrors {{ field message }}
+          }}
+        }}
+        """
+        data = self._graphql(query)
+        result = data.get("blogCreate", {})
+        errors = result.get("userErrors", [])
+        if errors:
+            raise Exception(f"Shopify blogCreate error: {errors[0].get('message', str(errors))}")
+        blog = result.get("blog", {})
+        return {
+            "shopify_id": blog.get("id", ""),
+            "title": blog.get("title", ""),
+            "handle": blog.get("handle", ""),
+        }
+
+    def delete_blog(self, shopify_id):
+        query = """
+        mutation ($id: ID!) {
+          blogDelete(id: $id) {
+            deletedBlogId
+            userErrors { field message }
+          }
+        }
+        """
+        data = self._graphql(query, {"id": shopify_id})
+        result = data.get("blogDelete", {})
+        errors = result.get("userErrors", [])
+        if errors:
+            raise Exception(f"Shopify blogDelete error: {errors[0].get('message', str(errors))}")
+        return result.get("deletedBlogId")
+
+    def update_blog(self, shopify_id, fields):
+        query = """
+        mutation ($id: ID!, $blog: BlogUpdateInput!) {
+          blogUpdate(id: $id, blog: $blog) {
+            blog { id title handle }
+            userErrors { field message }
+          }
+        }
+        """
+        blog_input = {}
+        if "title" in fields:
+            blog_input["title"] = fields["title"]
+        data = self._graphql(query, {"id": shopify_id, "blog": blog_input})
+        result = data.get("blogUpdate", {})
+        errors = result.get("userErrors", [])
+        if errors:
+            raise Exception(f"Shopify blogUpdate error: {errors[0].get('message', str(errors))}")
+        blog = result.get("blog", {})
+        return {
+            "shopify_id": blog.get("id", ""),
+            "title": blog.get("title", ""),
+            "handle": blog.get("handle", ""),
+        }
+
+    def get_articles(self, limit=50, cursor=None, blog_id=None):
+        after = f', after: "{cursor}"' if cursor else ""
+        blog_filter = f', query: "blog_id:{blog_id}"' if blog_id else ""
+        query = f"""
+        {{
+          articles(first: {limit}{after}{blog_filter}) {{
+            pageInfo {{ hasNextPage endCursor }}
+            edges {{
+              node {{
+                id
+                title
+                handle
+                body
+                summary
+                tags
+                blog {{ id title handle }}
+                author {{ name }}
+                image {{ url altText }}
+                publishedAt
+                templateSuffix
+                metafields(first: 10, namespace: "global") {{
+                  edges {{
+                    node {{ key value }}
+                  }}
+                }}
+              }}
+            }}
+          }}
+        }}
+        """
+        data = self._graphql(query)
+        articles_data = data.get("articles", {})
+        page_info = articles_data.get("pageInfo", {})
+        edges = articles_data.get("edges", [])
+        articles = []
+        for edge in edges:
+            node = edge["node"]
+            image = node.get("image") or {}
+            blog = node.get("blog") or {}
+            author = node.get("author") or {}
+            meta_title = ""
+            meta_description = ""
+            news_category = ""
+            news_date_modified = ""
+            for mf_edge in (node.get("metafields") or {}).get("edges", []):
+                mf = mf_edge.get("node", {})
+                if mf.get("key") == "title_tag":
+                    meta_title = mf.get("value", "")
+                elif mf.get("key") == "description_tag":
+                    meta_description = mf.get("value", "")
+                elif mf.get("key") == "news_category":
+                    news_category = mf.get("value", "")
+                elif mf.get("key") == "news_date_modified":
+                    news_date_modified = mf.get("value", "")
+            articles.append({
+                "shopify_id": node["id"],
+                "title": node.get("title", ""),
+                "handle": node.get("handle", ""),
+                "body": node.get("body", ""),
+                "summary": node.get("summary", ""),
+                "tags": ", ".join(node.get("tags", [])),
+                "blog_shopify_id": blog.get("id", ""),
+                "blog_title": blog.get("title", ""),
+                "blog_handle": blog.get("handle", ""),
+                "author": author.get("name", ""),
+                "meta_title": meta_title,
+                "meta_description": meta_description,
+                "image_url": image.get("url", ""),
+                "image_alt": image.get("altText", ""),
+                "published_at": node.get("publishedAt"),
+                "is_published": node.get("publishedAt") is not None,
+                "template_suffix": node.get("templateSuffix") or "",
+                "news_category": news_category,
+                "news_date_modified": news_date_modified,
+            })
+        return {
+            "articles": articles,
+            "has_next": page_info.get("hasNextPage", False),
+            "cursor": page_info.get("endCursor"),
+        }
+
+    def get_all_articles(self, blog_id=None):
+        all_articles = []
+        cursor = None
+        while True:
+            result = self.get_articles(limit=50, cursor=cursor, blog_id=blog_id)
+            all_articles.extend(result["articles"])
+            if not result["has_next"]:
+                break
+            cursor = result["cursor"]
+        return all_articles
+
+    def create_article(self, blog_shopify_id, fields):
+        query = """
+        mutation ($article: ArticleCreateInput!) {
+          articleCreate(article: $article) {
+            article {
+              id title handle
+              blog { id }
+              image { url altText }
+              publishedAt
+            }
+            userErrors { field message }
+          }
+        }
+        """
+        article_input = {
+            "blogId": blog_shopify_id,
+            "author": {"name": fields.get("author", "A2Z")},
+        }
+        if "title" in fields:
+            article_input["title"] = fields["title"]
+        if "body" in fields:
+            article_input["body"] = fields["body"]
+        if "summary" in fields:
+            article_input["summary"] = fields["summary"]
+        if "tags" in fields:
+            article_input["tags"] = fields["tags"] if isinstance(fields["tags"], list) else [t.strip() for t in fields["tags"].split(",") if t.strip()]
+        if "is_published" in fields:
+            article_input["isPublished"] = fields["is_published"]
+        if "publish_date" in fields:
+            article_input["publishDate"] = fields["publish_date"]
+        if "image_url" in fields and fields["image_url"]:
+            article_input["image"] = {"url": fields["image_url"]}
+            if "image_alt" in fields:
+                article_input["image"]["altText"] = fields["image_alt"]
+        if "template_suffix" in fields:
+            article_input["templateSuffix"] = fields["template_suffix"]
+
+        data = self._graphql(query, {"article": article_input})
+        result = data.get("articleCreate", {})
+        errors = result.get("userErrors", [])
+        if errors:
+            raise Exception(f"Shopify articleCreate error: {errors[0].get('message', str(errors))}")
+        article = result.get("article", {})
+        image = article.get("image") or {}
+        return {
+            "shopify_id": article.get("id", ""),
+            "title": article.get("title", ""),
+            "handle": article.get("handle", ""),
+            "image_url": image.get("url", ""),
+            "image_alt": image.get("altText", ""),
+        }
+
+    def update_article(self, shopify_id, fields):
+        query = """
+        mutation ($article: ArticleUpdateInput!, $id: ID!) {
+          articleUpdate(article: $article, id: $id) {
+            article { id title handle }
+            userErrors { field message }
+          }
+        }
+        """
+        article_input = {
+            "author": {"name": fields.get("author", "A2Z")},
+        }
+        if "blog_id" in fields:
+            article_input["blogId"] = fields["blog_id"]
+        if "title" in fields:
+            article_input["title"] = fields["title"]
+        if "body" in fields:
+            article_input["body"] = fields["body"]
+        if "summary" in fields:
+            article_input["summary"] = fields["summary"]
+        if "tags" in fields:
+            article_input["tags"] = fields["tags"] if isinstance(fields["tags"], list) else [t.strip() for t in fields["tags"].split(",") if t.strip()]
+        if "is_published" in fields:
+            article_input["isPublished"] = fields["is_published"]
+        if "publish_date" in fields:
+            article_input["publishDate"] = fields["publish_date"]
+        if "image_url" in fields:
+            if fields["image_url"]:
+                article_input["image"] = {"url": fields["image_url"]}
+                if "image_alt" in fields:
+                    article_input["image"]["altText"] = fields["image_alt"]
+            elif fields.get("clear_image"):
+                article_input["image"] = None
+        if "template_suffix" in fields:
+            article_input["templateSuffix"] = fields["template_suffix"]
+
+        data = self._graphql(query, {"article": article_input, "id": shopify_id})
+        result = data.get("articleUpdate", {})
+        errors = result.get("userErrors", [])
+        if errors:
+            raise Exception(f"Shopify articleUpdate error: {errors[0].get('message', str(errors))}")
+
+        if "meta_title" in fields or "meta_description" in fields:
+            self.set_article_seo(shopify_id, fields.get("meta_title"), fields.get("meta_description"))
+
+        return result.get("article", {})
+
+    def set_article_seo(self, article_shopify_id, meta_title=None, meta_description=None):
+        metafields = []
+        if meta_title is not None:
+            metafields.append({
+                "ownerId": article_shopify_id,
+                "namespace": "global",
+                "key": "title_tag",
+                "value": meta_title,
+                "type": "single_line_text_field",
+            })
+        if meta_description is not None:
+            metafields.append({
+                "ownerId": article_shopify_id,
+                "namespace": "global",
+                "key": "description_tag",
+                "value": meta_description,
+                "type": "single_line_text_field",
+            })
+        if not metafields:
+            return []
+
+        query = """
+        mutation ($metafields: [MetafieldsSetInput!]!) {
+          metafieldsSet(metafields: $metafields) {
+            metafields { id namespace key }
+            userErrors { field message }
+          }
+        }
+        """
+        data = self._graphql(query, {"metafields": metafields})
+        result = data.get("metafieldsSet", {})
+        errors = result.get("userErrors", [])
+        if errors:
+            raise Exception(f"Shopify article SEO metafieldsSet error: {errors[0].get('message', str(errors))}")
+        logger.info("Set article SEO metafields for %s", article_shopify_id)
+        return result.get("metafields", [])
+
+    def set_article_metafields(self, article_shopify_id, pairs):
+        """Set arbitrary metafields on an article.
+
+        pairs: list of (namespace, key, value, type) tuples. Values that are
+        None are skipped. Uses the same metafieldsSet pattern as set_article_seo.
+        The 'global' namespace is readable from Liquid without a definition.
+        """
+        metafields = []
+        for namespace, key, value, mtype in pairs:
+            if value is None:
+                continue
+            metafields.append({
+                "ownerId": article_shopify_id,
+                "namespace": namespace,
+                "key": key,
+                "value": value,
+                "type": mtype,
+            })
+        if not metafields:
+            return []
+
+        query = """
+        mutation ($metafields: [MetafieldsSetInput!]!) {
+          metafieldsSet(metafields: $metafields) {
+            metafields { id namespace key }
+            userErrors { field message }
+          }
+        }
+        """
+        data = self._graphql(query, {"metafields": metafields})
+        result = data.get("metafieldsSet", {})
+        errors = result.get("userErrors", [])
+        if errors:
+            raise Exception(f"Shopify article metafieldsSet error: {errors[0].get('message', str(errors))}")
+        logger.info("Set %d article metafields for %s", len(metafields), article_shopify_id)
+        return result.get("metafields", [])
+
+    def set_blog_seo(self, blog_shopify_id, meta_title=None, meta_description=None):
+        metafields = []
+        if meta_title is not None:
+            metafields.append({
+                "ownerId": blog_shopify_id,
+                "namespace": "global",
+                "key": "title_tag",
+                "value": meta_title,
+                "type": "single_line_text_field",
+            })
+        if meta_description is not None:
+            metafields.append({
+                "ownerId": blog_shopify_id,
+                "namespace": "global",
+                "key": "description_tag",
+                "value": meta_description,
+                "type": "single_line_text_field",
+            })
+        if not metafields:
+            return []
+
+        query = """
+        mutation ($metafields: [MetafieldsSetInput!]!) {
+          metafieldsSet(metafields: $metafields) {
+            metafields { id namespace key }
+            userErrors { field message }
+          }
+        }
+        """
+        data = self._graphql(query, {"metafields": metafields})
+        result = data.get("metafieldsSet", {})
+        errors = result.get("userErrors", [])
+        if errors:
+            raise Exception(f"Shopify blog SEO metafieldsSet error: {errors[0].get('message', str(errors))}")
+        logger.info("Set blog SEO metafields for %s", blog_shopify_id)
+        return result.get("metafields", [])
+
+    def delete_article(self, shopify_id):
+        query = """
+        mutation ($id: ID!) {
+          articleDelete(id: $id) {
+            deletedArticleId
+            userErrors { field message }
+          }
+        }
+        """
+        data = self._graphql(query, {"id": shopify_id})
+        result = data.get("articleDelete", {})
+        errors = result.get("userErrors", [])
+        if errors:
+            raise Exception(f"Shopify articleDelete error: {errors[0].get('message', str(errors))}")
+        return result.get("deletedArticleId")
+
+    def create_url_redirect(self, path, target):
+        query = """
+        mutation ($urlRedirect: UrlRedirectInput!) {
+          urlRedirectCreate(urlRedirect: $urlRedirect) {
+            urlRedirect { id path target }
+            userErrors { field message }
+          }
+        }
+        """
+        data = self._graphql(query, {"urlRedirect": {"path": path, "target": target}})
+        result = data.get("urlRedirectCreate", {})
+        errors = result.get("userErrors", [])
+        if errors:
+            raise Exception(f"Shopify urlRedirectCreate error: {errors[0].get('message', str(errors))}")
+        return result.get("urlRedirect", {})
+
+    def get_pages(self, limit=50, cursor=None):
+        after = f', after: "{cursor}"' if cursor else ""
+        query = f"""
+        {{
+          pages(first: {limit}{after}) {{
+            pageInfo {{ hasNextPage endCursor }}
+            edges {{
+              node {{
+                id
+                title
+                handle
+                body
+                isPublished
+                publishedAt
+                templateSuffix
+                metafields(first: 5, namespace: "global") {{
+                  edges {{
+                    node {{ key value }}
+                  }}
+                }}
+              }}
+            }}
+          }}
+        }}
+        """
+        data = self._graphql(query)
+        pages_data = data.get("pages", {})
+        page_info = pages_data.get("pageInfo", {})
+        edges = pages_data.get("edges", [])
+
+        pages = []
+        for edge in edges:
+            node = edge["node"]
+            metafield_edges = (node.get("metafields") or {}).get("edges", [])
+            seo_title = ""
+            seo_description = ""
+            for mf in metafield_edges:
+                mf_node = mf.get("node", {})
+                if mf_node.get("key") == "title_tag":
+                    seo_title = mf_node.get("value", "")
+                elif mf_node.get("key") == "description_tag":
+                    seo_description = mf_node.get("value", "")
+            pages.append({
+                "shopify_id": node["id"],
+                "title": node.get("title", ""),
+                "handle": node.get("handle", ""),
+                "body_html": node.get("body", ""),
+                "is_published": node.get("isPublished", False),
+                "published_at": node.get("publishedAt"),
+                "template_suffix": node.get("templateSuffix") or "",
+                "seo_title": seo_title,
+                "seo_description": seo_description,
+            })
+
+        return {
+            "pages": pages,
+            "has_next": page_info.get("hasNextPage", False),
+            "cursor": page_info.get("endCursor"),
+        }
+
+    def get_all_pages(self):
+        all_pages = []
+        cursor = None
+        while True:
+            result = self.get_pages(limit=50, cursor=cursor)
+            all_pages.extend(result["pages"])
+            if not result["has_next"]:
+                break
+            cursor = result["cursor"]
+        return all_pages
+
+    def get_homepage_data(self):
+        """Fetch the shop's homepage SEO metadata (title_tag, description_tag) and storefront URL."""
+        query = """
+        {
+          shop {
+            id
+            name
+            description
+            primaryDomain { host url }
+            myshopifyDomain
+            titleTag: metafield(namespace: "global", key: "title_tag") { value }
+            descriptionTag: metafield(namespace: "global", key: "description_tag") { value }
+          }
+        }
+        """
+        data = self._graphql(query)
+        shop = data.get("shop", {})
+        primary = shop.get("primaryDomain") or {}
+        storefront_url = primary.get("url") or f"https://{shop.get('myshopifyDomain', self.domain)}"
+
+        theme_sections = []
+        menus = {}
+        try:
+            theme_sections = self.get_homepage_theme_sections()
+        except Exception as e:
+            logger.warning("Could not fetch homepage theme sections: %s", e)
+        try:
+            menus = self.get_menus(handles=["main-menu", "footer"])
+        except Exception as e:
+            logger.warning("Could not fetch menus: %s", e)
+
+        body_html = self._theme_sections_to_html(theme_sections)
+
+        return {
+            "shop_id": shop.get("id", ""),
+            "shop_name": shop.get("name", ""),
+            "storefront_url": storefront_url,
+            "seo_title": (shop.get("titleTag") or {}).get("value", ""),
+            "seo_description": (shop.get("descriptionTag") or {}).get("value", ""),
+            "body_html": body_html,
+            "theme_sections": theme_sections,
+            "menus": menus,
+        }
+
+    def _theme_sections_to_html(self, sections):
+        """Generate synthetic HTML from structured theme sections for SEO scoring."""
+        parts = []
+        for s in sections:
+            settings = s.get("settings", {})
+            stype = s.get("type", "")
+            blocks = s.get("blocks", {})
+
+            if stype == "custom-liquid":
+                parts.append(settings.get("custom_liquid", ""))
+            elif stype == "featured-collection":
+                title = settings.get("title", "")
+                coll = settings.get("collection", "")
+                if title:
+                    parts.append(f"<h2>{title}</h2>")
+                if coll:
+                    parts.append(f'<a href="/collections/{coll}">{title or coll}</a>')
+            elif stype == "featured-collections":
+                heading = settings.get("heading", "")
+                if heading:
+                    parts.append(f"<h2>{heading}</h2>")
+                for block in blocks.values():
+                    bs = block.get("settings", {})
+                    coll = bs.get("collection", "")
+                    if coll:
+                        parts.append(f'<a href="/collections/{coll}">{coll}</a>')
+            elif stype == "logo-list":
+                title = settings.get("title", "")
+                if title:
+                    parts.append(f"<h2>{title}</h2>")
+                for block in blocks.values():
+                    bs = block.get("settings", {})
+                    link = bs.get("link", "")
+                    name = bs.get("title", "")
+                    if link and name:
+                        parts.append(f'<a href="{link}">{name}</a>')
+                    if bs.get("image"):
+                        parts.append(f'<img src="{bs["image"]}" alt="{name}">')
+            elif stype == "text-with-icons":
+                for block in blocks.values():
+                    bs = block.get("settings", {})
+                    title = bs.get("title", "")
+                    text = bs.get("text", "")
+                    if title:
+                        parts.append(f"<p><strong>{title}</strong></p>")
+                    if text:
+                        parts.append(f"<p>{text}</p>")
+            elif stype == "newsletter":
+                heading = settings.get("heading", "")
+                subtext = settings.get("subtext", "")
+                if heading:
+                    parts.append(f"<h2>{heading}</h2>")
+                if subtext:
+                    parts.append(subtext)
+            elif stype in ("rich-text", "rich_text"):
+                heading = settings.get("heading", "")
+                if heading:
+                    parts.append(f"<h2>{heading}</h2>")
+                for block in blocks.values():
+                    bs = block.get("settings", {})
+                    if bs.get("text"):
+                        parts.append(bs["text"])
+            elif stype in ("image-banner", "slideshow"):
+                heading = settings.get("heading", "")
+                subheading = settings.get("subheading", "")
+                if heading:
+                    parts.append(f"<h1>{heading}</h1>")
+                if subheading:
+                    parts.append(f"<p>{subheading}</p>")
+                if settings.get("image"):
+                    parts.append(f'<img src="{settings["image"]}" alt="{heading}">')
+
+        return "\n".join(parts)
+
+    def get_homepage_theme_sections(self):
+        """Fetch structured homepage sections from the theme's templates/index.json."""
+        theme_id = self.get_main_theme_id()
+        if not theme_id:
+            return []
+        raw = self.get_theme_asset(theme_id, "templates/index.json")
+        if not raw:
+            return []
+        template = json.loads(raw)
+        sections_map = template.get("sections", {})
+        order = template.get("order", list(sections_map.keys()))
+        result = []
+        for key in order:
+            section = sections_map.get(key)
+            if section:
+                result.append({
+                    "key": key,
+                    "type": section.get("type", ""),
+                    "settings": section.get("settings", {}),
+                    "blocks": section.get("blocks", {}),
+                    "block_order": section.get("block_order", []),
+                })
+        return result
+
+    def get_menus(self, handles=None):
+        """Fetch navigation menus via GraphQL."""
+        query = """
+        {
+          menus(first: 10) {
+            nodes {
+              id title handle isDefault
+              items(limit: 30) {
+                id title type url resourceId
+                items {
+                  id title type url resourceId
+                }
+              }
+            }
+          }
+        }
+        """
+        data = self._graphql(query)
+        menus = data.get("menus", {}).get("nodes", [])
+        if handles:
+            menus = [m for m in menus if m.get("handle") in handles]
+        result = {}
+        for menu in menus:
+            result[menu["handle"]] = {
+                "title": menu["title"],
+                "is_default": menu.get("isDefault", False),
+                "items": self._flatten_menu_items(menu.get("items", [])),
+            }
+        return result
+
+    def _flatten_menu_items(self, items):
+        result = []
+        for item in items:
+            entry = {
+                "title": item.get("title", ""),
+                "type": item.get("type", ""),
+                "url": item.get("url", ""),
+                "resource_id": item.get("resourceId"),
+                "children": self._flatten_menu_items(item.get("items", [])),
+            }
+            result.append(entry)
+        return result
+
+    def update_homepage_seo(self, seo_title=None, seo_description=None):
+        """Update the shop-level SEO title and/or meta description via metafieldsSet."""
+        query = """
+        {
+          shop { id }
+        }
+        """
+        data = self._graphql(query)
+        shop_id = data.get("shop", {}).get("id")
+        if not shop_id:
+            raise Exception("Could not retrieve shop ID")
+
+        metafields = []
+        if seo_title is not None:
+            metafields.append({
+                "ownerId": shop_id,
+                "namespace": "global",
+                "key": "title_tag",
+                "value": seo_title,
+                "type": "single_line_text_field",
+            })
+        if seo_description is not None:
+            metafields.append({
+                "ownerId": shop_id,
+                "namespace": "global",
+                "key": "description_tag",
+                "value": seo_description,
+                "type": "single_line_text_field",
+            })
+        if not metafields:
+            return
+
+        mutation = """
+        mutation ($metafields: [MetafieldsSetInput!]!) {
+          metafieldsSet(metafields: $metafields) {
+            metafields { key value }
+            userErrors { code field message }
+          }
+        }
+        """
+        data = self._graphql(mutation, {"metafields": metafields})
+        result = data.get("metafieldsSet", {})
+        errors = result.get("userErrors", [])
+        if errors:
+            raise Exception(f"Shopify metafieldsSet error: {errors[0].get('message', str(errors))}")
+        return result.get("metafields", [])
+
+    def delete_page(self, shopify_id):
+        query = """
+        mutation ($id: ID!) {
+          pageDelete(id: $id) {
+            deletedPageId
+            userErrors { code field message }
+          }
+        }
+        """
+        data = self._graphql(query, {"id": shopify_id})
+        result = data.get("pageDelete", {})
+        errors = result.get("userErrors", [])
+        if errors:
+            raise Exception(f"Shopify pageDelete error: {errors[0].get('message', str(errors))}")
+        return result.get("deletedPageId")
+
+    def create_page(self, title, body_html, handle=None, is_published=True, seo_title=None, seo_description=None):
+        query = """
+        mutation ($page: PageCreateInput!) {
+          pageCreate(page: $page) {
+            page { id title handle }
+            userErrors { code field message }
+          }
+        }
+        """
+        page_input = {
+            "title": title,
+            "body": body_html,
+            "isPublished": is_published,
+        }
+        if handle:
+            page_input["handle"] = handle
+        metafields = []
+        if seo_title:
+            metafields.append({"namespace": "global", "key": "title_tag", "value": seo_title, "type": "single_line_text_field"})
+        if seo_description:
+            metafields.append({"namespace": "global", "key": "description_tag", "value": seo_description, "type": "single_line_text_field"})
+        if metafields:
+            page_input["metafields"] = metafields
+        data = self._graphql(query, {"page": page_input})
+        result = data.get("pageCreate", {})
+        errors = result.get("userErrors", [])
+        if errors:
+            raise Exception(f"Shopify pageCreate error: {errors[0].get('message', str(errors))}")
+        page = result.get("page", {})
+        return {
+            "shopify_id": page.get("id", ""),
+            "title": page.get("title", ""),
+            "handle": page.get("handle", ""),
+        }
+
+    def update_page(self, shopify_id, fields):
+        query = """
+        mutation ($id: ID!, $page: PageUpdateInput!) {
+          pageUpdate(id: $id, page: $page) {
+            page { id title handle }
+            userErrors { code field message }
+          }
+        }
+        """
+        page_input = {}
+        if "title" in fields:
+            page_input["title"] = fields["title"]
+        if "body" in fields:
+            page_input["body"] = fields["body"]
+        if "handle" in fields:
+            page_input["handle"] = fields["handle"]
+        if "is_published" in fields:
+            page_input["isPublished"] = fields["is_published"]
+        metafields = []
+        if "seo_title" in fields:
+            metafields.append({"namespace": "global", "key": "title_tag", "value": fields["seo_title"], "type": "single_line_text_field"})
+        if "seo_description" in fields:
+            metafields.append({"namespace": "global", "key": "description_tag", "value": fields["seo_description"], "type": "single_line_text_field"})
+        if metafields:
+            page_input["metafields"] = metafields
+        data = self._graphql(query, {"id": shopify_id, "page": page_input})
+        result = data.get("pageUpdate", {})
+        errors = result.get("userErrors", [])
+        if errors:
+            raise Exception(f"Shopify pageUpdate error: {errors[0].get('message', str(errors))}")
+        page = result.get("page", {})
+        return {
+            "shopify_id": page.get("id", ""),
+            "title": page.get("title", ""),
+            "handle": page.get("handle", ""),
+        }
+
+    def update_collection_image(self, collection_shopify_id, image_src_url, alt_text):
+        query = """
+        mutation ($input: CollectionInput!) {
+          collectionUpdate(input: $input) {
+            collection { id title image { url altText } }
+            userErrors { field message }
+          }
+        }
+        """
+        variables = {
+            "input": {
+                "id": collection_shopify_id,
+                "image": {
+                    "src": image_src_url,
+                    "altText": alt_text,
+                },
+            }
+        }
+        data = self._graphql(query, variables)
+        result = data.get("collectionUpdate", {})
+        errors = result.get("userErrors", [])
+        if errors:
+            raise Exception(f"Shopify collectionUpdate image error: {errors[0].get('message', str(errors))}")
+        return result.get("collection", {})
+
+    # ── Theme REST API ─────────────────────────────────────────────
+
+    def _rest_url(self, path):
+        return f"https://{self.domain}/admin/api/{self.api_version}/{path}"
+
+    def get_main_theme_id(self):
+        resp = requests.get(self._rest_url("themes.json"), headers=self.headers, timeout=15)
+        resp.raise_for_status()
+        for theme in resp.json().get("themes", []):
+            if theme.get("role") == "main":
+                return theme["id"]
+        return None
+
+    def list_theme_assets(self, theme_id):
+        resp = requests.get(
+            self._rest_url(f"themes/{theme_id}/assets.json"),
+            headers=self.headers,
+            timeout=15,
+        )
+        resp.raise_for_status()
+        return [a["key"] for a in resp.json().get("assets", [])]
+
+    def get_theme_asset(self, theme_id, asset_key):
+        resp = requests.get(
+            self._rest_url(f"themes/{theme_id}/assets.json"),
+            headers=self.headers,
+            params={"asset[key]": asset_key},
+            timeout=15,
+        )
+        if resp.status_code == 404:
+            return None
+        resp.raise_for_status()
+        return resp.json().get("asset", {}).get("value", "")
+
+    def upsert_theme_asset(self, theme_id, asset_key, value):
+        resp = requests.put(
+            self._rest_url(f"themes/{theme_id}/assets.json"),
+            headers=self.headers,
+            json={"asset": {"key": asset_key, "value": value}},
+            timeout=15,
+        )
+        if resp.status_code == 422:
+            body = resp.text
+            logger.error("Shopify theme asset 422 for %s: %s", asset_key, body)
+            raise Exception(f"Shopify rejected theme asset '{asset_key}': {body}")
+        resp.raise_for_status()
+        return resp.json().get("asset", {})
+
+    def delete_theme_asset(self, theme_id, asset_key):
+        """Delete a theme file. Returns True if deleted, False if it didn't exist."""
+        resp = requests.delete(
+            self._rest_url(f"themes/{theme_id}/assets.json"),
+            headers=self.headers,
+            params={"asset[key]": asset_key},
+            timeout=15,
+        )
+        if resp.status_code == 404:
+            return False
+        resp.raise_for_status()
+        return True

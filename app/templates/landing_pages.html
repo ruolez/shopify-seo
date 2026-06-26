@@ -1,0 +1,298 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Landing Pages — SEO Platform</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+    <div class="app-layout">
+        {% include '_sidebar.html' %}
+        <div class="main-content">
+            <div class="topbar">
+                <div class="topbar-left">
+                    <button id="sidebar-toggle" class="icon-btn"><span class="material-symbols-rounded">menu</span></button>
+                    <h2>Landing Pages</h2>
+                </div>
+                <div class="topbar-right">
+                    <button id="theme-toggle" class="icon-btn"><span class="material-symbols-rounded">dark_mode</span></button>
+                </div>
+            </div>
+            <div class="page-content">
+                <div class="tabs">
+                    <button class="tab active" data-tab="existing">Existing Pages</button>
+                    <button class="tab" data-tab="builder">Builder</button>
+                    <button class="tab" data-tab="seo-analysis">SEO Analysis</button>
+                </div>
+
+                <!-- Tab 1: Existing Pages -->
+                <div class="tab-panel active" id="tab-existing">
+                    <div class="card" style="margin-bottom: 16px;">
+                        <div style="display: flex; align-items: center; gap: 12px; flex-wrap: wrap;">
+                            <select id="lp-store-select" class="form-control" style="max-width: 300px;"></select>
+                            <button class="btn btn-primary btn-sm" onclick="LandingPages.syncPages()">
+                                <span class="material-symbols-rounded">sync</span>
+                                Sync Pages
+                            </button>
+                            <button class="btn btn-secondary btn-sm" onclick="LandingPages.openNewPageModal()">
+                                <span class="material-symbols-rounded">add</span>
+                                New Page
+                            </button>
+                            <button class="btn btn-secondary btn-sm" onclick="LandingPages.openGenerateModal()">
+                                <span class="material-symbols-rounded">auto_awesome</span>
+                                AI Generate
+                            </button>
+                        </div>
+                    </div>
+                    <div id="synced-pages-container">
+                        <div class="empty-state">Select a store and sync pages to get started.</div>
+                    </div>
+                </div>
+
+                <!-- Tab 2: Builder -->
+                <div class="tab-panel" id="tab-builder">
+                    <div id="builder-empty" class="empty-state">
+                        <p>Select a page to edit or create a new one.</p>
+                    </div>
+                    <div id="builder-workspace" style="display: none;">
+                        <div class="card" style="margin-bottom: 16px;">
+                            <div style="display: flex; align-items: center; gap: 12px; flex-wrap: wrap;">
+                                <h3 id="builder-page-title" style="margin: 0; flex: 1;"></h3>
+                                <span id="builder-published-badge" class="badge badge-success" style="display: none;">Published</span>
+                                <button class="btn btn-secondary btn-sm" onclick="LandingPages.saveBuilderPage()">
+                                    <span class="material-symbols-rounded">save</span> Save
+                                </button>
+                                <button class="btn btn-secondary btn-sm" onclick="LandingPages.updatePreview()">
+                                    <span class="material-symbols-rounded">visibility</span> Preview
+                                </button>
+                                <button class="btn btn-secondary btn-sm" onclick="LandingPages.toggleVersions()">
+                                    <span class="material-symbols-rounded">history</span> Versions
+                                </button>
+                                <button class="btn btn-primary btn-sm" onclick="LandingPages.publishPage()">
+                                    <span class="material-symbols-rounded">publish</span> Publish
+                                </button>
+                            </div>
+                        </div>
+
+                        <!-- Version History Panel -->
+                        <div id="versions-panel" class="card" style="display: none; margin-bottom: 16px;">
+                            <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px;">
+                                <h4 style="margin: 0;">
+                                    <span class="material-symbols-rounded" style="vertical-align: middle; font-size: 20px;">history</span>
+                                    Version History
+                                </h4>
+                                <button class="btn btn-primary btn-sm" onclick="LandingPages.saveManualVersion()">
+                                    <span class="material-symbols-rounded">add</span> Save Version
+                                </button>
+                            </div>
+                            <div id="versions-list" style="max-height: 300px; overflow-y: auto;">
+                                <div class="empty-state" style="padding: 16px 0;">No versions saved yet.</div>
+                            </div>
+                        </div>
+
+                        <!-- Page Settings -->
+                        <div class="card" style="margin-bottom: 16px;">
+                            <h4 style="margin: 0 0 12px;">Page Settings</h4>
+                            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
+                                <div class="form-group">
+                                    <label>Title</label>
+                                    <input type="text" id="bp-title" class="form-control" placeholder="Page Title">
+                                </div>
+                                <div class="form-group">
+                                    <label>Handle</label>
+                                    <input type="text" id="bp-handle" class="form-control" placeholder="page-handle">
+                                </div>
+                                <div class="form-group">
+                                    <label>Meta Title <span style="color: var(--on-surface-secondary); font-weight: normal;">(50-60 chars)</span></label>
+                                    <input type="text" id="bp-meta-title" class="form-control" maxlength="70" placeholder="SEO Meta Title">
+                                    <span id="bp-meta-title-counter" class="char-counter">0/60 characters</span>
+                                </div>
+                                <div class="form-group">
+                                    <label>Meta Description <span style="color: var(--on-surface-secondary); font-weight: normal;">(140-160 chars)</span></label>
+                                    <textarea id="bp-meta-desc" class="form-control" rows="2" maxlength="200" placeholder="SEO Meta Description"></textarea>
+                                    <span id="bp-meta-desc-counter" class="char-counter">0/160 characters</span>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Builder Layout -->
+                        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px;">
+                            <!-- Left: Sections -->
+                            <div>
+                                <div class="card">
+                                    <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px;">
+                                        <h4 style="margin: 0;">Sections</h4>
+                                        <div class="dropdown" style="position: relative;">
+                                            <button class="btn btn-primary btn-sm" onclick="LandingPages.toggleAddMenu()">
+                                                <span class="material-symbols-rounded">add</span> Add Section
+                                            </button>
+                                            <div id="add-section-menu" class="dropdown-menu" style="display: none; position: absolute; right: 0; top: 100%; z-index: 100; background: var(--surface); border: 1px solid var(--outline); border-radius: 8px; box-shadow: var(--shadow-md); min-width: 200px; margin-top: 4px;">
+                                                <div class="dropdown-item" onclick="LandingPages.addSection('hero')">Hero</div>
+                                                <div class="dropdown-item" onclick="LandingPages.addSection('features')">Features</div>
+                                                <div class="dropdown-item" onclick="LandingPages.addSection('product_showcase')">Product Showcase</div>
+                                                <div class="dropdown-item" onclick="LandingPages.addSection('testimonials')">Testimonials</div>
+                                                <div class="dropdown-item" onclick="LandingPages.addSection('faq')">FAQ</div>
+                                                <div class="dropdown-item" onclick="LandingPages.addSection('cta_banner')">CTA Banner</div>
+                                                <div class="dropdown-item" onclick="LandingPages.addSection('trust_badges')">Trust Badges</div>
+                                                <div class="dropdown-item" onclick="LandingPages.addSection('rich_text')">Rich Text</div>
+                                                <div class="dropdown-item" onclick="LandingPages.addSection('image_gallery')">Image Gallery</div>
+                                                <div class="dropdown-item" onclick="LandingPages.addSection('statistics')">Statistics</div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <div id="sections-list"></div>
+                                </div>
+                            </div>
+                            <!-- Right: Preview -->
+                            <div>
+                                <div class="card" style="min-height: 400px;">
+                                    <h4 style="margin: 0 0 12px;">Preview</h4>
+                                    <div id="preview-container" style="border: 1px solid var(--outline); border-radius: 8px; padding: 16px; min-height: 300px; overflow: auto; max-height: 600px; background: #fff;">
+                                        <div class="empty-state" style="padding: 40px 0;">Add sections to see preview</div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Tab 3: SEO Analysis -->
+                <div class="tab-panel" id="tab-seo-analysis">
+                    <div id="seo-empty" class="empty-state">
+                        <p>Select a page from the Existing Pages tab to view SEO analysis.</p>
+                    </div>
+                    <div id="seo-detail" style="display: none;">
+                        <div class="card" style="margin-bottom: 16px;">
+                            <div style="display: flex; align-items: center; gap: 20px;">
+                                <div class="seo-score-ring" id="seo-score-ring" style="--score: 0; --color: #dc2626;">
+                                    <span id="seo-score-value">0</span>
+                                </div>
+                                <div>
+                                    <h3 id="seo-page-title" style="margin: 0 0 4px;"></h3>
+                                    <p id="seo-page-handle" style="margin: 0; color: var(--on-surface-secondary); font-size: 13px;"></p>
+                                </div>
+                                <div style="margin-left: auto; display: flex; gap: 8px;">
+                                    <button class="btn btn-secondary btn-sm" id="seo-ai-btn" onclick="LandingPages.runAiOptimize()">
+                                        <span class="material-symbols-rounded">auto_awesome</span> AI Optimize
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="card">
+                            <h4 style="margin: 0 0 12px;">SEO Breakdown</h4>
+                            <table class="data-table" id="seo-breakdown-table">
+                                <thead>
+                                    <tr><th>Check</th><th>Score</th><th>Detail</th><th>Status</th></tr>
+                                </thead>
+                                <tbody></tbody>
+                            </table>
+                        </div>
+                        <div class="card" id="ai-recommendations-card" style="display: none; margin-top: 16px;">
+                            <h4 style="margin: 0 0 12px;">AI Recommendations</h4>
+                            <div id="ai-recommendations-content"></div>
+                            <div style="margin-top: 12px;">
+                                <button class="btn btn-primary btn-sm" id="apply-recs-btn" onclick="LandingPages.applyRecommendations()">
+                                    <span class="material-symbols-rounded">check</span> Apply Recommendations
+                                </button>
+                            </div>
+                        </div>
+                        <div class="card" id="schema-card" style="display: none; margin-top: 16px;">
+                            <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px;">
+                                <h4 style="margin: 0;">Schema Markup (JSON-LD)</h4>
+                                <button class="btn btn-secondary btn-sm" onclick="LandingPages.toggleSchema()">Toggle</button>
+                            </div>
+                            <pre id="schema-content" style="display: none; background: var(--surface-dim); padding: 12px; border-radius: 8px; font-size: 12px; overflow: auto; max-height: 300px;"></pre>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- New Page Modal -->
+    <div class="modal-overlay" id="new-page-modal">
+        <div class="modal" style="max-width: 500px;">
+            <div class="modal-header">
+                <h3>New Landing Page</h3>
+                <button class="icon-btn" onclick="LandingPages.closeModal('new-page-modal')"><span class="material-symbols-rounded">close</span></button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label>Page Title</label>
+                    <input type="text" id="new-page-title" class="form-control" placeholder="e.g., About Us, Summer Sale">
+                </div>
+                <div class="form-group">
+                    <label>Handle (URL slug)</label>
+                    <input type="text" id="new-page-handle" class="form-control" placeholder="e.g., about-us, summer-sale">
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" onclick="LandingPages.closeModal('new-page-modal')">Cancel</button>
+                <button class="btn btn-primary" onclick="LandingPages.createNewPage()">Create</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- AI Generate Modal -->
+    <div class="modal-overlay" id="generate-modal">
+        <div class="modal" style="max-width: 500px;">
+            <div class="modal-header">
+                <h3>AI Generate Landing Page</h3>
+                <button class="icon-btn" onclick="LandingPages.closeModal('generate-modal')"><span class="material-symbols-rounded">close</span></button>
+            </div>
+            <div class="modal-body">
+                <div class="form-group">
+                    <label>Topic / Theme</label>
+                    <input type="text" id="gen-topic" class="form-control" placeholder="e.g., Summer Collection, About Our Brand">
+                </div>
+                <div class="form-group">
+                    <label>Target Keywords (comma-separated)</label>
+                    <input type="text" id="gen-keywords" class="form-control" placeholder="e.g., summer sale, best deals">
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" onclick="LandingPages.closeModal('generate-modal')">Cancel</button>
+                <button class="btn btn-primary" onclick="LandingPages.generatePage()">
+                    <span class="material-symbols-rounded">auto_awesome</span> Generate
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Section Edit Modal -->
+    <div class="modal-overlay" id="section-edit-modal">
+        <div class="modal" style="max-width: 600px; max-height: 80vh; overflow-y: auto;">
+            <div class="modal-header">
+                <h3 id="section-edit-title">Edit Section</h3>
+                <button class="icon-btn" onclick="LandingPages.closeModal('section-edit-modal')"><span class="material-symbols-rounded">close</span></button>
+            </div>
+            <div class="modal-body" id="section-edit-form"></div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" onclick="LandingPages.closeModal('section-edit-modal')">Cancel</button>
+                <button class="btn btn-primary" onclick="LandingPages.saveSectionEdit()">Save</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Confirm Modal -->
+    <div class="modal-overlay" id="confirm-modal">
+        <div class="modal" style="max-width: 400px;">
+            <div class="modal-header">
+                <h3 id="confirm-modal-title">Confirm</h3>
+                <button class="icon-btn" onclick="LandingPages.closeModal('confirm-modal')"><span class="material-symbols-rounded">close</span></button>
+            </div>
+            <div class="modal-body">
+                <p id="confirm-modal-message"></p>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" onclick="LandingPages.closeModal('confirm-modal')">Cancel</button>
+                <button class="btn btn-primary" onclick="LandingPages.confirmModalAction()" style="background: var(--error); border-color: var(--error);">Delete</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/js/app.js"></script>
+    <script src="/static/js/landing_pages.js"></script>
+</body>
+</html>

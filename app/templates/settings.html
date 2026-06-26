@@ -20,55 +20,136 @@
                 </div>
             </div>
             <div class="page-content">
-                <div class="card" style="max-width: 640px;">
-                    <div class="card-header">
-                        <h3>AI Configuration</h3>
-                    </div>
-                    <form id="ai-form">
-                        <div class="form-group">
-                            <label for="ai-key">OpenRouter API Key</label>
-                            <input type="password" id="ai-key" class="form-control" placeholder="sk-or-v1-xxxxx">
-                            <small style="color: var(--on-surface-secondary); font-size: 12px;" id="key-status"></small>
-                        </div>
-                        <div class="form-row">
-                            <div class="form-group">
-                                <label for="ai-model">Model</label>
-                                <select id="ai-model" class="form-control">
-                                    <option value="">Loading models...</option>
-                                </select>
-                                <small style="color: var(--on-surface-secondary); font-size: 12px;">Only models that support tool-calling are shown</small>
-                            </div>
-                            <div class="form-group">
-                                <label for="ai-budget">Daily Budget ($)</label>
-                                <input type="number" id="ai-budget" class="form-control" step="0.50" min="0" value="10.00">
-                            </div>
-                        </div>
-                        <div class="form-actions">
-                            <button type="submit" class="btn btn-primary">Save Configuration</button>
-                            <button type="button" class="btn btn-secondary" id="test-ai-btn">Test Connection</button>
-                        </div>
-                    </form>
+                <div class="tabs">
+                    <button class="tab active" data-tab="api-keys">API Keys</button>
+                    <button class="tab" data-tab="ai-prompts">AI Prompts</button>
+                    <button class="tab" data-tab="seo-rules">SEO Rules</button>
+                    <button class="tab" data-tab="word-lists">Word Lists</button>
                 </div>
 
-                <div class="card" style="max-width: 640px; margin-top: 24px;">
-                    <div class="card-header">
-                        <h3>Brave Search API</h3>
+                <!-- Tab 1: API Keys -->
+                <div class="tab-panel active" id="tab-api-keys">
+                    <div class="card" style="max-width: 640px;">
+                        <div class="card-header">
+                            <h3>AI Configuration</h3>
+                        </div>
+                        <form id="ai-form">
+                            <div class="form-group">
+                                <label for="ai-key">OpenRouter API Key</label>
+                                <input type="password" id="ai-key" class="form-control" placeholder="sk-or-v1-xxxxx">
+                                <small style="color: var(--on-surface-secondary); font-size: 12px;" id="key-status"></small>
+                            </div>
+                            <div class="form-row">
+                                <div class="form-group">
+                                    <label for="ai-model">Text AI Model</label>
+                                    <select id="ai-model" class="form-control">
+                                        <option value="">Loading models...</option>
+                                    </select>
+                                    <small style="color: var(--on-surface-secondary); font-size: 12px;">Only models that support tool-calling are shown</small>
+                                </div>
+                                <div class="form-group">
+                                    <label for="ai-budget">Daily Budget ($)</label>
+                                    <input type="number" id="ai-budget" class="form-control" step="0.50" min="0" value="10.00">
+                                </div>
+                            </div>
+                            <div class="form-group">
+                                <label for="ai-image-model">Image Generation Model</label>
+                                <select id="ai-image-model" class="form-control">
+                                    <option value="">Loading image models...</option>
+                                </select>
+                                <small style="color: var(--on-surface-secondary); font-size: 12px;">Used for AI-powered collection image generation</small>
+                            </div>
+                            <div class="form-actions">
+                                <button type="submit" class="btn btn-primary">Save Configuration</button>
+                                <button type="button" class="btn btn-secondary" id="test-ai-btn">Test Connection</button>
+                            </div>
+                        </form>
                     </div>
+
+                    <div class="card" style="max-width: 640px; margin-top: 24px;">
+                        <div class="card-header">
+                            <h3>Brave Search API</h3>
+                        </div>
+                        <p style="color: var(--on-surface-secondary); font-size: 13px; margin: 0 0 16px;">
+                            Enables live SERP research during SEO optimization. Free tier: 2,000 queries/month.
+                            Get your key at <a href="https://api.search.brave.com/" target="_blank" style="color: var(--primary);">api.search.brave.com</a>
+                        </p>
+                        <form id="brave-form">
+                            <div class="form-group">
+                                <label for="brave-key">API Key</label>
+                                <input type="password" id="brave-key" class="form-control" placeholder="BSA...">
+                                <small style="color: var(--on-surface-secondary); font-size: 12px;" id="brave-key-status"></small>
+                            </div>
+                            <div class="form-actions">
+                                <button type="submit" class="btn btn-primary">Save Brave Key</button>
+                                <button type="button" class="btn btn-secondary" id="test-brave-btn">Test Connection</button>
+                            </div>
+                        </form>
+                    </div>
+                    <div class="card" style="max-width: 640px; margin-top: 24px;">
+                        <div class="card-header">
+                            <h3>Google Search Console</h3>
+                        </div>
+                        <p style="color: var(--on-surface-secondary); font-size: 13px; margin: 0 0 16px;">
+                            Connect Google Search Console for rank tracking, traffic data, and SEO progress monitoring.
+                            Create OAuth credentials in <a href="https://console.cloud.google.com/apis/credentials" target="_blank" style="color: var(--primary);">Google Cloud Console</a>
+                            — enable the "Search Console API" and create an "OAuth 2.0 Client ID" (Web application type).
+                            Add <code id="gsc-redirect-hint"></code> as an authorized redirect URI.
+                        </p>
+                        <form id="gsc-form">
+                            <div class="form-group">
+                                <label for="gsc-client-id">OAuth Client ID</label>
+                                <input type="password" id="gsc-client-id" class="form-control" placeholder="xxxx.apps.googleusercontent.com">
+                                <small style="color: var(--on-surface-secondary); font-size: 12px;" id="gsc-id-status"></small>
+                            </div>
+                            <div class="form-group">
+                                <label for="gsc-client-secret">OAuth Client Secret</label>
+                                <input type="password" id="gsc-client-secret" class="form-control" placeholder="GOCSPX-xxxxx">
+                                <small style="color: var(--on-surface-secondary); font-size: 12px;" id="gsc-secret-status"></small>
+                            </div>
+                            <div class="form-actions">
+                                <button type="submit" class="btn btn-primary">Save GSC Credentials</button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+
+                <!-- Tab 2: AI Prompts -->
+                <div class="tab-panel" id="tab-ai-prompts">
                     <p style="color: var(--on-surface-secondary); font-size: 13px; margin: 0 0 16px;">
-                        Enables live SERP research during SEO optimization. Free tier: 2,000 queries/month.
-                        Get your key at <a href="https://api.search.brave.com/" target="_blank" style="color: var(--primary);">api.search.brave.com</a>
+                        Customize AI system prompts. Prompts with <code>{placeholders}</code> are filled at runtime — do not remove them.
+                        Click "Reset to Default" to revert any changes.
                     </p>
-                    <form id="brave-form">
-                        <div class="form-group">
-                            <label for="brave-key">API Key</label>
-                            <input type="password" id="brave-key" class="form-control" placeholder="BSA...">
-                            <small style="color: var(--on-surface-secondary); font-size: 12px;" id="brave-key-status"></small>
+
+                    <div class="settings-card" style="margin-bottom: 20px;">
+                        <h3 style="font-size: 14px; margin: 0 0 8px;">Blog Search Keywords</h3>
+                        <p style="color: var(--on-surface-secondary); font-size: 12px; margin: 0 0 8px;">
+                            Keywords used to research competitor blogs during blog SEO suggestions. Defaults to generic terms if blank.
+                        </p>
+                        <div style="display: flex; gap: 8px; align-items: center;">
+                            <input type="text" id="blog-search-keywords" class="form-control" placeholder="e.g. blog tips deals" style="flex: 1;">
+                            <button class="btn btn-primary btn-sm" id="save-blog-keywords-btn">Save</button>
+                            <button class="btn btn-secondary btn-sm" id="reset-blog-keywords-btn">Reset</button>
                         </div>
-                        <div class="form-actions">
-                            <button type="submit" class="btn btn-primary">Save Brave Key</button>
-                            <button type="button" class="btn btn-secondary" id="test-brave-btn">Test Connection</button>
-                        </div>
-                    </form>
+                    </div>
+
+                    <div id="prompts-container"></div>
+                </div>
+
+                <!-- Tab 3: SEO Rules -->
+                <div class="tab-panel" id="tab-seo-rules">
+                    <p style="color: var(--on-surface-secondary); font-size: 13px; margin: 0 0 16px;">
+                        Adjust SEO scoring weights and thresholds. Weights within each category must sum to 1.0.
+                    </p>
+                    <div id="rules-container"></div>
+                </div>
+
+                <!-- Tab 4: Word Lists -->
+                <div class="tab-panel" id="tab-word-lists">
+                    <p style="color: var(--on-surface-secondary); font-size: 13px; margin: 0 0 16px;">
+                        Edit word lists used in SEO analysis and AI prompts.
+                    </p>
+                    <div id="lists-container"></div>
                 </div>
             </div>
         </div>

@@ -188,14 +188,15 @@ def create_bulk_task():
     product_ids = data.get("product_ids", [])
     auto_apply = data.get("auto_apply", True)
     skip_tags = data.get("skip_tags", True)
+    skip_title = data.get("skip_title", False)
 
     if not product_ids:
         return jsonify({"error": "product_ids is required"}), 400
 
     with db.get_cursor() as cur:
         cur.execute(
-            "INSERT INTO bulk_tasks (status, total, auto_apply, skip_tags) VALUES ('pending', %s, %s, %s) RETURNING id",
-            (len(product_ids), auto_apply, skip_tags),
+            "INSERT INTO bulk_tasks (status, total, auto_apply, skip_tags, skip_title) VALUES ('pending', %s, %s, %s, %s) RETURNING id",
+            (len(product_ids), auto_apply, skip_tags, skip_title),
         )
         bulk_task_id = cur.fetchone()["id"]
 
@@ -266,14 +267,15 @@ def create_bulk_collection_task():
     data = request.get_json() or {}
     collection_ids = data.get("collection_ids", [])
     auto_apply = data.get("auto_apply", True)
+    skip_title = data.get("skip_title", False)
 
     if not collection_ids:
         return jsonify({"error": "collection_ids is required"}), 400
 
     with db.get_cursor() as cur:
         cur.execute(
-            "INSERT INTO bulk_tasks (status, total, auto_apply, task_type) VALUES ('pending', %s, %s, 'collection') RETURNING id",
-            (len(collection_ids), auto_apply),
+            "INSERT INTO bulk_tasks (status, total, auto_apply, task_type, skip_title) VALUES ('pending', %s, %s, 'collection', %s) RETURNING id",
+            (len(collection_ids), auto_apply, skip_title),
         )
         bulk_task_id = cur.fetchone()["id"]
 
@@ -313,6 +315,8 @@ def _execute_bulk_collection_task(bulk_task_id):
         items = cur.fetchall()
 
     auto_apply = bulk_task["auto_apply"]
+    skip_title = bulk_task.get("skip_title", False)
+    claimed_keywords = []
 
     for item in items:
         item_id = item["item_id"]
@@ -329,13 +333,24 @@ def _execute_bulk_collection_task(bulk_task_id):
             )
 
         try:
-            ai_result = run_task("collection_seo", {"collection_id": collection_id})
+            task_input = {"collection_id": collection_id}
+            if claimed_keywords:
+                task_input["claimed_keywords"] = list(claimed_keywords)
+            ai_result = run_task("collection_seo", task_input)
 
             with db.get_cursor() as cur:
                 cur.execute(
                     "UPDATE bulk_task_items SET ai_result = %s WHERE id = %s",
                     (json.dumps(ai_result), item_id),
                 )
+
+            if "error" not in ai_result and "raw_response" not in ai_result:
+                target_kw = ai_result.get("target_keywords") or {}
+                primary_kw = target_kw.get("primary", "") if isinstance(target_kw, dict) else ""
+                if isinstance(primary_kw, str) and primary_kw:
+                    clean_kw = primary_kw.split("(")[0].strip().lower()
+                    if clean_kw:
+                        claimed_keywords.append(clean_kw)
 
             if auto_apply and "error" not in ai_result and "raw_response" not in ai_result:
                 try:
@@ -346,7 +361,7 @@ def _execute_bulk_collection_task(bulk_task_id):
                     )
 
                     collection_fields = {}
-                    if ai_result.get("h1_tag"):
+                    if not skip_title and ai_result.get("h1_tag"):
                         collection_fields["title"] = ai_result["h1_tag"]
                     if ai_result.get("optimized_description"):
                         collection_fields["description_html"] = ai_result["optimized_description"]
@@ -435,6 +450,8 @@ def _execute_bulk_task(bulk_task_id):
 
     auto_apply = bulk_task["auto_apply"]
     skip_tags = bulk_task.get("skip_tags", True)
+    skip_title = bulk_task.get("skip_title", False)
+    claimed_keywords = []
 
     for item in items:
         item_id = item["item_id"]
@@ -451,13 +468,24 @@ def _execute_bulk_task(bulk_task_id):
             )
 
         try:
-            ai_result = run_task("product_seo", {"product_id": product_id, "skip_tags": skip_tags})
+            task_input = {"product_id": product_id, "skip_tags": skip_tags}
+            if claimed_keywords:
+                task_input["claimed_keywords"] = list(claimed_keywords)
+            ai_result = run_task("product_seo", task_input)
 
             with db.get_cursor() as cur:
                 cur.execute(
                     "UPDATE bulk_task_items SET ai_result = %s WHERE id = %s",
                     (json.dumps(ai_result), item_id),
                 )
+
+            if "error" not in ai_result and "raw_response" not in ai_result:
+                target_kw = ai_result.get("target_keywords") or {}
+                primary_kw = target_kw.get("primary", "") if isinstance(target_kw, dict) else ""
+                if isinstance(primary_kw, str) and primary_kw:
+                    clean_kw = primary_kw.split("(")[0].strip().lower()
+                    if clean_kw:
+                        claimed_keywords.append(clean_kw)
 
             if auto_apply and "error" not in ai_result and "raw_response" not in ai_result:
                 try:
@@ -468,7 +496,7 @@ def _execute_bulk_task(bulk_task_id):
                     )
 
                     product_fields = {}
-                    if ai_result.get("h1_tag"):
+                    if not skip_title and ai_result.get("h1_tag"):
                         product_fields["title"] = ai_result["h1_tag"]
                     if ai_result.get("optimized_description"):
                         product_fields["description_html"] = ai_result["optimized_description"]
@@ -490,7 +518,9 @@ def _execute_bulk_task(bulk_task_id):
                             if isinstance(s, dict)
                         ]
                         if media_updates:
-                            client.update_product_media(item["shopify_id"], media_updates)
+                            logger.info("Applying alt text for %d images on product %s (bulk)", len(media_updates), product_id)
+                            media_result = client.update_product_media(item["shopify_id"], media_updates)
+                            logger.info("Alt text bulk apply result: %s", media_result)
 
                     with db.get_cursor() as cur:
                         if product_fields.get("title"):
@@ -531,6 +561,262 @@ def _execute_bulk_task(bulk_task_id):
                             "UPDATE bulk_task_items SET apply_result = %s WHERE id = %s",
                             (json.dumps({"applied": False, "error": str(apply_err)}), item_id),
                         )
+
+            with db.get_cursor() as cur:
+                cur.execute(
+                    "UPDATE bulk_task_items SET status = 'completed', completed_at = NOW() WHERE id = %s",
+                    (item_id,),
+                )
+                cur.execute(
+                    "UPDATE bulk_tasks SET completed = completed + 1 WHERE id = %s",
+                    (bulk_task_id,),
+                )
+
+        except Exception as e:
+            with db.get_cursor() as cur:
+                cur.execute(
+                    "UPDATE bulk_task_items SET status = 'failed', error = %s, completed_at = NOW() WHERE id = %s",
+                    (str(e), item_id),
+                )
+                cur.execute(
+                    "UPDATE bulk_tasks SET failed = failed + 1 WHERE id = %s",
+                    (bulk_task_id,),
+                )
+
+        time.sleep(0.5)
+
+    with db.get_cursor() as cur:
+        cur.execute(
+            "UPDATE bulk_tasks SET status = 'completed', current_product_title = NULL, completed_at = NOW() WHERE id = %s",
+            (bulk_task_id,),
+        )
+
+
+@task_bp.route("/api/tasks/bulk-titles", methods=["POST"])
+def create_bulk_title_task():
+    data = request.get_json() or {}
+    product_ids = data.get("product_ids", [])
+
+    if not product_ids:
+        return jsonify({"error": "product_ids is required"}), 400
+
+    with db.get_cursor() as cur:
+        cur.execute(
+            "INSERT INTO bulk_tasks (status, total, auto_apply, task_type) VALUES ('pending', %s, true, 'title') RETURNING id",
+            (len(product_ids),),
+        )
+        bulk_task_id = cur.fetchone()["id"]
+
+        for pid in product_ids:
+            cur.execute(
+                "INSERT INTO bulk_task_items (bulk_task_id, product_id) VALUES (%s, %s)",
+                (bulk_task_id, pid),
+            )
+
+    thread = threading.Thread(
+        target=_execute_bulk_title_task, args=(bulk_task_id,), daemon=True
+    )
+    thread.start()
+
+    return jsonify({"ok": True, "bulk_task_id": bulk_task_id, "total": len(product_ids)}), 201
+
+
+def _execute_bulk_title_task(bulk_task_id):
+    with db.get_cursor() as cur:
+        cur.execute(
+            "UPDATE bulk_tasks SET status = 'running' WHERE id = %s", (bulk_task_id,)
+        )
+        cur.execute(
+            """
+            SELECT bti.id as item_id, bti.product_id, sp.shopify_id, sp.title,
+                   sp.store_id, s.domain, s.access_token_enc, s.api_version
+            FROM bulk_task_items bti
+            JOIN synced_products sp ON sp.id = bti.product_id
+            JOIN stores s ON s.id = sp.store_id
+            WHERE bti.bulk_task_id = %s
+            ORDER BY bti.id
+            """,
+            (bulk_task_id,),
+        )
+        items = cur.fetchall()
+
+    for item in items:
+        item_id = item["item_id"]
+        product_id = item["product_id"]
+
+        with db.get_cursor() as cur:
+            cur.execute(
+                "UPDATE bulk_task_items SET status = 'running' WHERE id = %s",
+                (item_id,),
+            )
+            cur.execute(
+                "UPDATE bulk_tasks SET current_product_title = %s WHERE id = %s",
+                (item["title"], bulk_task_id),
+            )
+
+        try:
+            ai_result = run_task("product_title_seo", {"product_id": product_id})
+
+            with db.get_cursor() as cur:
+                cur.execute(
+                    "UPDATE bulk_task_items SET ai_result = %s WHERE id = %s",
+                    (json.dumps(ai_result), item_id),
+                )
+
+            if "error" not in ai_result and "raw_response" not in ai_result:
+                new_title = ai_result.get("optimized_title")
+                if new_title:
+                    try:
+                        client = ShopifyClient(
+                            item["domain"],
+                            decrypt_value(item["access_token_enc"]),
+                            item["api_version"],
+                        )
+                        client.update_product(item["shopify_id"], {"title": new_title})
+
+                        with db.get_cursor() as cur:
+                            cur.execute(
+                                "UPDATE synced_products SET title = %s WHERE id = %s",
+                                (new_title, product_id),
+                            )
+                            cur.execute(
+                                "UPDATE bulk_task_items SET apply_result = %s WHERE id = %s",
+                                (json.dumps({"applied": True}), item_id),
+                            )
+                    except Exception as apply_err:
+                        with db.get_cursor() as cur:
+                            cur.execute(
+                                "UPDATE bulk_task_items SET apply_result = %s WHERE id = %s",
+                                (json.dumps({"applied": False, "error": str(apply_err)}), item_id),
+                            )
+
+            with db.get_cursor() as cur:
+                cur.execute(
+                    "UPDATE bulk_task_items SET status = 'completed', completed_at = NOW() WHERE id = %s",
+                    (item_id,),
+                )
+                cur.execute(
+                    "UPDATE bulk_tasks SET completed = completed + 1 WHERE id = %s",
+                    (bulk_task_id,),
+                )
+
+        except Exception as e:
+            with db.get_cursor() as cur:
+                cur.execute(
+                    "UPDATE bulk_task_items SET status = 'failed', error = %s, completed_at = NOW() WHERE id = %s",
+                    (str(e), item_id),
+                )
+                cur.execute(
+                    "UPDATE bulk_tasks SET failed = failed + 1 WHERE id = %s",
+                    (bulk_task_id,),
+                )
+
+        time.sleep(0.5)
+
+    with db.get_cursor() as cur:
+        cur.execute(
+            "UPDATE bulk_tasks SET status = 'completed', current_product_title = NULL, completed_at = NOW() WHERE id = %s",
+            (bulk_task_id,),
+        )
+
+
+@task_bp.route("/api/tasks/bulk-collection-titles", methods=["POST"])
+def create_bulk_collection_title_task():
+    data = request.get_json() or {}
+    collection_ids = data.get("collection_ids", [])
+
+    if not collection_ids:
+        return jsonify({"error": "collection_ids is required"}), 400
+
+    with db.get_cursor() as cur:
+        cur.execute(
+            "INSERT INTO bulk_tasks (status, total, auto_apply, task_type) VALUES ('pending', %s, true, 'collection_title') RETURNING id",
+            (len(collection_ids),),
+        )
+        bulk_task_id = cur.fetchone()["id"]
+
+        for cid in collection_ids:
+            cur.execute(
+                "INSERT INTO bulk_task_items (bulk_task_id, collection_id) VALUES (%s, %s)",
+                (bulk_task_id, cid),
+            )
+
+    thread = threading.Thread(
+        target=_execute_bulk_collection_title_task, args=(bulk_task_id,), daemon=True
+    )
+    thread.start()
+
+    return jsonify({"ok": True, "bulk_task_id": bulk_task_id, "total": len(collection_ids)}), 201
+
+
+def _execute_bulk_collection_title_task(bulk_task_id):
+    with db.get_cursor() as cur:
+        cur.execute(
+            "UPDATE bulk_tasks SET status = 'running' WHERE id = %s", (bulk_task_id,)
+        )
+        cur.execute(
+            """
+            SELECT bti.id as item_id, bti.collection_id, sc.shopify_id, sc.title,
+                   sc.store_id, s.domain, s.access_token_enc, s.api_version
+            FROM bulk_task_items bti
+            JOIN synced_collections sc ON sc.id = bti.collection_id
+            JOIN stores s ON s.id = sc.store_id
+            WHERE bti.bulk_task_id = %s
+            ORDER BY bti.id
+            """,
+            (bulk_task_id,),
+        )
+        items = cur.fetchall()
+
+    for item in items:
+        item_id = item["item_id"]
+        collection_id = item["collection_id"]
+
+        with db.get_cursor() as cur:
+            cur.execute(
+                "UPDATE bulk_task_items SET status = 'running' WHERE id = %s",
+                (item_id,),
+            )
+            cur.execute(
+                "UPDATE bulk_tasks SET current_product_title = %s WHERE id = %s",
+                (item["title"], bulk_task_id),
+            )
+
+        try:
+            ai_result = run_task("collection_title_seo", {"collection_id": collection_id})
+
+            with db.get_cursor() as cur:
+                cur.execute(
+                    "UPDATE bulk_task_items SET ai_result = %s WHERE id = %s",
+                    (json.dumps(ai_result), item_id),
+                )
+
+            if "error" not in ai_result and "raw_response" not in ai_result:
+                new_title = ai_result.get("optimized_title")
+                if new_title:
+                    try:
+                        client = ShopifyClient(
+                            item["domain"],
+                            decrypt_value(item["access_token_enc"]),
+                            item["api_version"],
+                        )
+                        client.update_collection(item["shopify_id"], {"title": new_title})
+
+                        with db.get_cursor() as cur:
+                            cur.execute(
+                                "UPDATE synced_collections SET title = %s WHERE id = %s",
+                                (new_title, collection_id),
+                            )
+                            cur.execute(
+                                "UPDATE bulk_task_items SET apply_result = %s WHERE id = %s",
+                                (json.dumps({"applied": True}), item_id),
+                            )
+                    except Exception as apply_err:
+                        with db.get_cursor() as cur:
+                            cur.execute(
+                                "UPDATE bulk_task_items SET apply_result = %s WHERE id = %s",
+                                (json.dumps({"applied": False, "error": str(apply_err)}), item_id),
+                            )
 
             with db.get_cursor() as cur:
                 cur.execute(

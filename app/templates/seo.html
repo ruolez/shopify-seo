@@ -23,6 +23,7 @@
                 <div class="tabs">
                     <button class="tab active" data-tab="products">Products</button>
                     <button class="tab" data-tab="collections">Collections</button>
+                    <button class="tab" data-tab="priorities">Priorities</button>
                     <button class="tab" data-tab="schema">Schema Markup</button>
                 </div>
 
@@ -35,6 +36,12 @@
                 <div class="tab-panel" id="tab-collections">
                     <div id="collections-container">
                         <div class="loading-spinner"><div class="spinner"></div><p>Loading collections...</p></div>
+                    </div>
+                </div>
+
+                <div class="tab-panel" id="tab-priorities">
+                    <div id="priorities-container">
+                        <div class="loading-spinner"><div class="spinner"></div><p>Loading priorities...</p></div>
                     </div>
                 </div>
 
@@ -63,6 +70,17 @@
                             <button class="icon-btn" onclick="closeProductModal()"><span class="material-symbols-rounded">close</span></button>
                         </div>
                         <div class="modal-body" id="product-detail-content"></div>
+                    </div>
+                </div>
+
+                <!-- Action Preview / Impact Modal (z-index above product modal) -->
+                <div class="modal-overlay" id="impact-modal" style="z-index: 250;">
+                    <div class="modal" style="max-width: 620px; max-height: 80vh; overflow-y: auto;">
+                        <div class="modal-header">
+                            <h3 id="impact-modal-title">Action Preview</h3>
+                            <button class="icon-btn" onclick="closeImpactModal()"><span class="material-symbols-rounded">close</span></button>
+                        </div>
+                        <div class="modal-body" id="impact-modal-content"></div>
                     </div>
                 </div>
 

@@ -165,12 +165,12 @@ function pollSyncStatus(storeId) {
                 bar.classList.remove("indeterminate");
                 bar.style.width = "100%";
                 subtitle.textContent = "Sync complete!";
-                stats.textContent = `${status.products_synced} products, ${status.collections_synced} collections`;
+                stats.textContent = `${status.products_synced} products, ${status.collections_synced} collections, ${status.blogs_synced || 0} blogs, ${status.articles_synced || 0} articles`;
                 current.textContent = "";
                 setTimeout(() => {
                     hideSyncOverlay();
                     showToast(
-                        `Sync complete: ${status.products_synced} products, ${status.collections_synced} collections`,
+                        `Sync complete: ${status.products_synced} products, ${status.collections_synced} collections, ${status.blogs_synced || 0} blogs, ${status.articles_synced || 0} articles`,
                         "success"
                     );
                     loadStores();
@@ -224,6 +224,18 @@ function pollSyncStatus(storeId) {
                 bar.style.width = pct + "%";
                 subtitle.textContent = "Mapping collection products...";
                 stats.textContent = `${done} / ${total} collections mapped`;
+                current.textContent = "";
+            } else if (phase === "fetching_blogs") {
+                bar.classList.add("indeterminate");
+                bar.style.width = "";
+                subtitle.textContent = "Fetching blogs & articles from Shopify...";
+                stats.textContent = "";
+                current.textContent = "";
+            } else if (phase === "saving_blogs") {
+                bar.classList.add("indeterminate");
+                bar.style.width = "";
+                subtitle.textContent = "Saving blogs & articles...";
+                stats.textContent = `${status.blogs_synced || 0} blogs, ${status.articles_synced || 0} articles`;
                 current.textContent = "";
             }
         } catch {

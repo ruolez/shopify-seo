@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Semrush Data — SEO Platform</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+    <div class="app-layout">
+        {% include '_sidebar.html' %}
+        <div class="main-content">
+            <div class="topbar">
+                <div class="topbar-left">
+                    <button id="sidebar-toggle" class="icon-btn"><span class="material-symbols-rounded">menu</span></button>
+                    <h2>Semrush Data</h2>
+                </div>
+                <div class="topbar-right">
+                    <button id="theme-toggle" class="icon-btn"><span class="material-symbols-rounded">dark_mode</span></button>
+                </div>
+            </div>
+            <div class="page-content">
+
+                <div style="margin-bottom: 24px;">
+                    <div class="form-group" style="max-width: 320px; margin-bottom: 0;">
+                        <label for="sr-store-select">Store</label>
+                        <select id="sr-store-select" class="form-control">
+                            <option value="">Select a store...</option>
+                        </select>
+                    </div>
+                </div>
+
+                <!-- Upload Zone -->
+                <div class="card" style="margin-bottom: 24px;" id="sr-upload-card">
+                    <div id="sr-drop-zone" class="upload-zone">
+                        <span class="material-symbols-rounded" style="font-size: 40px; color: var(--on-surface-secondary);">upload_file</span>
+                        <p style="margin: 8px 0 4px; font-weight: 600;">Drop Semrush CSV here</p>
+                        <p style="font-size: 12px; color: var(--on-surface-secondary); margin: 0;">Position Tracking, Organic Research, Site Audit, or Keyword Gap exports</p>
+                        <button class="btn btn-secondary btn-sm" style="margin-top: 12px;" id="sr-file-btn">Browse Files</button>
+                        <input type="file" id="sr-file-input" accept=".csv" style="display: none;">
+                    </div>
+                    <div id="sr-preview" style="display: none;"></div>
+                </div>
+
+                <!-- Overview Cards -->
+                <div id="sr-overview" style="display: none; margin-bottom: 24px;">
+                    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px;">
+                        <div class="card metric-card">
+                            <div class="metric-label">Keywords</div>
+                            <div class="metric-value" id="sr-total-kw">0</div>
+                        </div>
+                        <div class="card metric-card">
+                            <div class="metric-label">Avg Position</div>
+                            <div class="metric-value" id="sr-avg-pos">—</div>
+                        </div>
+                        <div class="card metric-card">
+                            <div class="metric-label">Total Volume</div>
+                            <div class="metric-value" id="sr-total-vol">0</div>
+                        </div>
+                        <div class="card metric-card">
+                            <div class="metric-label">Position Buckets</div>
+                            <div style="font-size: 12px; margin-top: 4px;">
+                                <span class="badge badge-success" id="sr-top3">0 top 3</span>
+                                <span class="badge badge-warning" id="sr-top10">0 top 10</span>
+                                <span class="badge badge-error" id="sr-beyond">0 20+</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Tabs -->
+                <div id="sr-tabs-container" style="display: none;">
+                    <div class="tabs">
+                        <button class="tab active" data-sr-tab="keywords">Keywords</button>
+                        <button class="tab" data-sr-tab="striking">Striking Distance</button>
+                        <button class="tab" data-sr-tab="cross-ref">Cross-Reference</button>
+                        <button class="tab" data-sr-tab="audit">Audit Issues</button>
+                        <button class="tab" data-sr-tab="imports">Import History</button>
+                    </div>
+
+                    <!-- Keywords Tab -->
+                    <div class="sr-tab-panel active" id="sr-tab-keywords">
+                        <div class="card" style="border-top-left-radius: 0; border-top-right-radius: 0;">
+                            <div style="display: flex; gap: 8px; margin-bottom: 12px; align-items: center; flex-wrap: wrap;">
+                                <input type="text" id="sr-kw-search" class="form-control" placeholder="Search keywords..." style="width: auto; min-width: 200px; font-size: 13px;">
+                                <select id="sr-kw-source" class="form-control" style="width: auto; font-size: 13px;">
+                                    <option value="">All Sources</option>
+                                    <option value="position_tracking">Position Tracking</option>
+                                    <option value="organic_research">Organic Research</option>
+                                    <option value="keyword_gap">Keyword Gap</option>
+                                </select>
+                                <span id="sr-kw-count" style="font-size: 12px; color: var(--on-surface-secondary); margin-left: auto;"></span>
+                            </div>
+                            <table class="data-table">
+                                <thead><tr id="sr-kw-thead"></tr></thead>
+                                <tbody id="sr-kw-tbody"></tbody>
+                            </table>
+                            <div id="sr-kw-empty" class="empty-state" style="display: none;">No keyword data. Import a Semrush CSV to get started.</div>
+                        </div>
+                    </div>
+
+                    <!-- Striking Distance Tab -->
+                    <div class="sr-tab-panel" id="sr-tab-striking" style="display: none;">
+                        <div class="card" style="border-top-left-radius: 0; border-top-right-radius: 0;">
+                            <p style="color: var(--on-surface-secondary); font-size: 13px; margin: 0 0 12px;">
+                                Keywords ranking at positions 4-20 sorted by monthly search volume. These are your best opportunities — a small ranking improvement puts you on page 1.
+                            </p>
+                            <div style="display: flex; gap: 8px; margin-bottom: 12px; align-items: center; flex-wrap: wrap;">
+                                <span style="font-size: 13px;">Position range:</span>
+                                <select id="sr-striking-range" class="form-control" style="width: auto; font-size: 13px;">
+                                    <option value="4-10">4-10 (almost page 1)</option>
+                                    <option value="4-20" selected>4-20 (striking distance)</option>
+                                    <option value="11-20">11-20 (page 2)</option>
+                                    <option value="11-30">11-30 (pages 2-3)</option>
+                                </select>
+                                <input type="text" id="sr-striking-search" class="form-control" placeholder="Search keywords..." style="width: auto; min-width: 180px; font-size: 13px;">
+                                <span id="sr-striking-count" style="font-size: 12px; color: var(--on-surface-secondary); margin-left: auto;"></span>
+                            </div>
+                            <table class="data-table">
+                                <thead><tr id="sr-striking-thead"></tr></thead>
+                                <tbody id="sr-striking-tbody"></tbody>
+                            </table>
+                            <div id="sr-striking-empty" class="empty-state" style="display: none;">No keywords in this position range.</div>
+                        </div>
+                    </div>
+
+                    <!-- Cross-Reference Tab -->
+                    <div class="sr-tab-panel" id="sr-tab-cross-ref" style="display: none;">
+                        <div class="card" style="border-top-left-radius: 0; border-top-right-radius: 0;">
+                            <p style="color: var(--on-surface-secondary); font-size: 13px; margin: 0 0 12px;">
+                                Keywords found in both Semrush and Google Search Console, showing data from both sources side by side.
+                            </p>
+                            <input type="text" id="sr-xref-search" class="form-control" placeholder="Search keywords..." style="width: auto; min-width: 200px; font-size: 13px; margin-bottom: 12px;">
+                            <table class="data-table">
+                                <thead><tr>
+                                    <th>Keyword</th>
+                                    <th>SR Position</th>
+                                    <th>GSC Position</th>
+                                    <th>SR Volume</th>
+                                    <th>GSC Clicks</th>
+                                    <th>GSC Impressions</th>
+                                    <th>URL</th>
+                                </tr></thead>
+                                <tbody id="sr-xref-tbody"></tbody>
+                            </table>
+                            <div id="sr-xref-empty" class="empty-state" style="display: none;">No cross-reference data available.</div>
+                        </div>
+                    </div>
+
+                    <!-- Audit Issues Tab -->
+                    <div class="sr-tab-panel" id="sr-tab-audit" style="display: none;">
+                        <div class="card" style="border-top-left-radius: 0; border-top-right-radius: 0;">
+                            <div id="sr-audit-summary" style="display: flex; gap: 8px; margin-bottom: 12px;">
+                                <select id="sr-audit-severity" class="form-control" style="width: auto; font-size: 13px;">
+                                    <option value="">All Severity</option>
+                                    <option value="error">Errors</option>
+                                    <option value="warning">Warnings</option>
+                                    <option value="notice">Notices</option>
+                                </select>
+                                <span id="sr-audit-counts" style="font-size: 12px; color: var(--on-surface-secondary); display: flex; gap: 6px; align-items: center;"></span>
+                            </div>
+                            <table class="data-table">
+                                <thead><tr>
+                                    <th style="width: 35%;">Page URL</th>
+                                    <th>Issue Type</th>
+                                    <th>Severity</th>
+                                    <th style="width: 35%;">Description</th>
+                                </tr></thead>
+                                <tbody id="sr-audit-tbody"></tbody>
+                            </table>
+                            <div id="sr-audit-empty" class="empty-state" style="display: none;">No audit issues. Import a Semrush Site Audit CSV.</div>
+                        </div>
+                    </div>
+
+                    <!-- Import History Tab -->
+                    <div class="sr-tab-panel" id="sr-tab-imports" style="display: none;">
+                        <div class="card" style="border-top-left-radius: 0; border-top-right-radius: 0;">
+                            <table class="data-table">
+                                <thead><tr>
+                                    <th>Date</th>
+                                    <th>Filename</th>
+                                    <th>Type</th>
+                                    <th>Rows</th>
+                                    <th>Status</th>
+                                    <th>Actions</th>
+                                </tr></thead>
+                                <tbody id="sr-imports-tbody"></tbody>
+                            </table>
+                            <div id="sr-imports-empty" class="empty-state" style="display: none;">No imports yet.</div>
+                        </div>
+                    </div>
+                </div>
+
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/js/app.js"></script>
+    <script src="/static/js/semrush.js"></script>
+</body>
+</html>

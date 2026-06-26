@@ -1,0 +1,1144 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ecommerce SEO Keyword Strategy Guide — 2025/2026</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500&display=swap');
+
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg: #0a0a0f;
+    --surface: #12121a;
+    --surface-2: #1a1a26;
+    --surface-3: #222233;
+    --border: #2a2a3d;
+    --border-light: #3a3a55;
+    --text: #e8e8f0;
+    --text-muted: #8888a8;
+    --text-dim: #6666888;
+    --accent: #6366f1;
+    --accent-light: #818cf8;
+    --accent-glow: rgba(99, 102, 241, 0.15);
+    --green: #22c55e;
+    --green-dim: rgba(34, 197, 94, 0.12);
+    --amber: #f59e0b;
+    --amber-dim: rgba(245, 158, 11, 0.12);
+    --rose: #f43f5e;
+    --rose-dim: rgba(244, 63, 94, 0.12);
+    --cyan: #06b6d4;
+    --cyan-dim: rgba(6, 182, 212, 0.12);
+    --purple: #a855f7;
+    --purple-dim: rgba(168, 85, 247, 0.12);
+  }
+
+  html { scroll-behavior: smooth; }
+
+  body {
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.7;
+    font-size: 16px;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* ─── HERO ─── */
+  .hero {
+    position: relative;
+    padding: 100px 24px 80px;
+    text-align: center;
+    overflow: hidden;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .hero::before {
+    content: '';
+    position: absolute;
+    top: -50%;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 800px;
+    height: 800px;
+    background: radial-gradient(circle, var(--accent-glow) 0%, transparent 70%);
+    pointer-events: none;
+  }
+
+  .hero-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 16px;
+    border-radius: 100px;
+    border: 1px solid var(--border-light);
+    background: var(--surface);
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--accent-light);
+    margin-bottom: 28px;
+    letter-spacing: 0.03em;
+  }
+
+  .hero-badge .dot {
+    width: 6px; height: 6px;
+    border-radius: 50%;
+    background: var(--green);
+    animation: pulse 2s ease-in-out infinite;
+  }
+
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
+  }
+
+  .hero h1 {
+    font-size: clamp(2.2rem, 5vw, 3.6rem);
+    font-weight: 900;
+    line-height: 1.15;
+    letter-spacing: -0.03em;
+    margin-bottom: 20px;
+    background: linear-gradient(135deg, #fff 0%, #c4c4e0 50%, var(--accent-light) 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+    max-width: 700px;
+    margin-left: auto;
+    margin-right: auto;
+  }
+
+  .hero p {
+    font-size: 1.15rem;
+    color: var(--text-muted);
+    max-width: 560px;
+    margin: 0 auto 40px;
+    line-height: 1.7;
+  }
+
+  /* ─── NAV (sticky TOC) ─── */
+  .toc-bar {
+    position: sticky;
+    top: 0;
+    z-index: 100;
+    background: rgba(10, 10, 15, 0.85);
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+    border-bottom: 1px solid var(--border);
+    padding: 0 24px;
+  }
+
+  .toc-inner {
+    max-width: 960px;
+    margin: 0 auto;
+    display: flex;
+    gap: 4px;
+    overflow-x: auto;
+    scrollbar-width: none;
+    padding: 12px 0;
+  }
+
+  .toc-inner::-webkit-scrollbar { display: none; }
+
+  .toc-link {
+    flex-shrink: 0;
+    padding: 6px 14px;
+    border-radius: 8px;
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--text-muted);
+    text-decoration: none;
+    transition: all 0.2s;
+    white-space: nowrap;
+  }
+
+  .toc-link:hover {
+    color: var(--text);
+    background: var(--surface-2);
+  }
+
+  /* ─── MAIN CONTENT ─── */
+  .content {
+    max-width: 800px;
+    margin: 0 auto;
+    padding: 0 24px 120px;
+  }
+
+  /* ─── SECTION ─── */
+  .section {
+    padding-top: 72px;
+  }
+
+  .section-header {
+    margin-bottom: 36px;
+  }
+
+  .priority-tag {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    padding: 4px 12px;
+    border-radius: 6px;
+    margin-bottom: 14px;
+  }
+
+  .priority-tag.p1 { background: var(--rose-dim); color: var(--rose); }
+  .priority-tag.p2 { background: var(--amber-dim); color: var(--amber); }
+  .priority-tag.p3 { background: var(--cyan-dim); color: var(--cyan); }
+  .priority-tag.p4 { background: var(--green-dim); color: var(--green); }
+  .priority-tag.p5 { background: var(--purple-dim); color: var(--purple); }
+
+  .section h2 {
+    font-size: 1.65rem;
+    font-weight: 800;
+    letter-spacing: -0.02em;
+    line-height: 1.3;
+    margin-bottom: 8px;
+  }
+
+  .section-lead {
+    font-size: 1.05rem;
+    color: var(--text-muted);
+    line-height: 1.7;
+  }
+
+  /* ─── CARDS ─── */
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 28px;
+    margin-top: 24px;
+    transition: border-color 0.2s;
+  }
+
+  .card:hover { border-color: var(--border-light); }
+
+  .card h3 {
+    font-size: 1.1rem;
+    font-weight: 700;
+    margin-bottom: 16px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .card h3 .icon {
+    width: 32px; height: 32px;
+    border-radius: 8px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 16px;
+    flex-shrink: 0;
+  }
+
+  .card p { color: var(--text-muted); margin-bottom: 12px; }
+  .card p:last-child { margin-bottom: 0; }
+
+  /* ─── GRID CARDS ─── */
+  .card-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+    gap: 16px;
+    margin-top: 24px;
+  }
+
+  .card-grid .card { margin-top: 0; }
+
+  .mini-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 20px 22px;
+    transition: border-color 0.2s;
+  }
+
+  .mini-card:hover { border-color: var(--border-light); }
+
+  .mini-card .label {
+    font-size: 12px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    margin-bottom: 8px;
+  }
+
+  .mini-card h4 {
+    font-size: 1rem;
+    font-weight: 700;
+    margin-bottom: 8px;
+  }
+
+  .mini-card p {
+    font-size: 0.9rem;
+    color: var(--text-muted);
+    line-height: 1.6;
+  }
+
+  /* ─── TABLES ─── */
+  .table-wrap {
+    overflow-x: auto;
+    margin-top: 24px;
+    border-radius: 14px;
+    border: 1px solid var(--border);
+    background: var(--surface);
+  }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.9rem;
+  }
+
+  thead th {
+    text-align: left;
+    padding: 14px 18px;
+    font-weight: 600;
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-muted);
+    background: var(--surface-2);
+    border-bottom: 1px solid var(--border);
+    white-space: nowrap;
+  }
+
+  tbody td {
+    padding: 13px 18px;
+    border-bottom: 1px solid var(--border);
+    color: var(--text-muted);
+    vertical-align: top;
+  }
+
+  tbody tr:last-child td { border-bottom: none; }
+
+  tbody tr:hover { background: var(--surface-2); }
+
+  td:first-child { color: var(--text); font-weight: 600; white-space: nowrap; }
+
+  /* ─── QUOTE / CALLOUT ─── */
+  .callout {
+    position: relative;
+    margin-top: 24px;
+    padding: 22px 24px 22px 52px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--accent);
+    border-radius: 12px;
+    font-size: 0.95rem;
+    color: var(--text-muted);
+    line-height: 1.7;
+    font-style: italic;
+  }
+
+  .callout::before {
+    content: '"';
+    position: absolute;
+    left: 18px;
+    top: 14px;
+    font-size: 2rem;
+    color: var(--accent);
+    font-style: normal;
+    line-height: 1;
+    font-weight: 800;
+  }
+
+  .callout cite {
+    display: block;
+    margin-top: 8px;
+    font-size: 0.82rem;
+    font-style: normal;
+    color: var(--accent-light);
+  }
+
+  /* ─── STAT STRIP ─── */
+  .stats-strip {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 16px;
+    margin-top: 28px;
+  }
+
+  .stat-box {
+    text-align: center;
+    padding: 24px 16px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+  }
+
+  .stat-box .number {
+    font-size: 2rem;
+    font-weight: 800;
+    letter-spacing: -0.03em;
+    background: linear-gradient(135deg, var(--accent-light), var(--cyan));
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+
+  .stat-box .desc {
+    font-size: 0.82rem;
+    color: var(--text-muted);
+    margin-top: 6px;
+    line-height: 1.4;
+  }
+
+  /* ─── FUNNEL VISUAL ─── */
+  .funnel {
+    margin-top: 28px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .funnel-stage {
+    display: flex;
+    gap: 20px;
+    align-items: flex-start;
+    padding: 24px;
+    border-radius: 14px;
+    border: 1px solid var(--border);
+    background: var(--surface);
+    transition: border-color 0.2s;
+  }
+
+  .funnel-stage:hover { border-color: var(--border-light); }
+
+  .funnel-icon {
+    width: 48px; height: 48px;
+    border-radius: 12px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 22px;
+    flex-shrink: 0;
+  }
+
+  .funnel-stage h4 {
+    font-size: 1rem;
+    font-weight: 700;
+    margin-bottom: 4px;
+  }
+
+  .funnel-tag {
+    display: inline-block;
+    font-size: 11px;
+    font-weight: 600;
+    padding: 2px 8px;
+    border-radius: 4px;
+    margin-bottom: 8px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+  }
+
+  .funnel-stage p { font-size: 0.9rem; color: var(--text-muted); line-height: 1.6; margin-bottom: 6px; }
+
+  .funnel-keywords {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 8px;
+  }
+
+  .kw-chip {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12px;
+    padding: 4px 10px;
+    border-radius: 6px;
+    background: var(--surface-3);
+    color: var(--text-muted);
+    border: 1px solid var(--border);
+  }
+
+  /* ─── ARCHITECTURE DIAGRAM ─── */
+  .arch-tree {
+    margin-top: 24px;
+    padding: 32px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.85rem;
+    line-height: 2;
+    color: var(--text-muted);
+    overflow-x: auto;
+  }
+
+  .arch-tree .highlight { color: var(--accent-light); font-weight: 600; }
+  .arch-tree .green { color: var(--green); }
+  .arch-tree .amber { color: var(--amber); }
+  .arch-tree .cyan { color: var(--cyan); }
+  .arch-tree .rose { color: var(--rose); }
+  .arch-tree .dim { color: #555570; }
+
+  /* ─── KEYWORD TABLE COLORS ─── */
+  .kw-head { color: var(--rose); font-weight: 600; }
+  .kw-mid { color: var(--amber); font-weight: 600; }
+  .kw-long { color: var(--green); font-weight: 600; }
+
+  /* ─── CHECK LIST ─── */
+  .checklist {
+    list-style: none;
+    margin-top: 16px;
+  }
+
+  .checklist li {
+    position: relative;
+    padding: 10px 0 10px 32px;
+    border-bottom: 1px solid var(--border);
+    color: var(--text-muted);
+    font-size: 0.92rem;
+  }
+
+  .checklist li:last-child { border-bottom: none; }
+
+  .checklist li::before {
+    content: '✓';
+    position: absolute;
+    left: 4px;
+    top: 10px;
+    color: var(--green);
+    font-weight: 700;
+    font-size: 14px;
+  }
+
+  .checklist li strong { color: var(--text); }
+
+  /* ─── ACTION PLAN ─── */
+  .action-list {
+    margin-top: 24px;
+    counter-reset: action;
+  }
+
+  .action-item {
+    display: flex;
+    gap: 18px;
+    align-items: flex-start;
+    padding: 20px 0;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .action-item:last-child { border-bottom: none; }
+
+  .action-num {
+    counter-increment: action;
+    width: 36px; height: 36px;
+    border-radius: 10px;
+    background: var(--accent-glow);
+    border: 1px solid rgba(99, 102, 241, 0.3);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 800;
+    font-size: 14px;
+    color: var(--accent-light);
+    flex-shrink: 0;
+  }
+
+  .action-body h4 {
+    font-size: 0.95rem;
+    font-weight: 700;
+    margin-bottom: 4px;
+  }
+
+  .action-body p {
+    font-size: 0.88rem;
+    color: var(--text-muted);
+    line-height: 1.6;
+  }
+
+  .impact-tag {
+    display: inline-block;
+    font-size: 11px;
+    font-weight: 600;
+    padding: 2px 8px;
+    border-radius: 4px;
+    margin-left: 8px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+
+  .impact-critical { background: var(--rose-dim); color: var(--rose); }
+  .impact-high { background: var(--amber-dim); color: var(--amber); }
+  .impact-medium { background: var(--cyan-dim); color: var(--cyan); }
+  .impact-foundation { background: var(--purple-dim); color: var(--purple); }
+
+  /* ─── SOURCES ─── */
+  .sources-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+    gap: 10px;
+    margin-top: 20px;
+  }
+
+  .source-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 12px 16px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    font-size: 0.85rem;
+    color: var(--text-muted);
+    transition: border-color 0.2s;
+  }
+
+  .source-item:hover { border-color: var(--border-light); }
+
+  .source-dot {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+
+  .source-item strong { color: var(--text); }
+
+  /* ─── FOOTER ─── */
+  footer {
+    text-align: center;
+    padding: 48px 24px;
+    border-top: 1px solid var(--border);
+    color: var(--text-muted);
+    font-size: 0.82rem;
+  }
+
+  /* ─── RESPONSIVE ─── */
+  @media (max-width: 640px) {
+    .hero { padding: 60px 20px 50px; }
+    .content { padding: 0 16px 80px; }
+    .section { padding-top: 48px; }
+    .card { padding: 20px; }
+    .card-grid { grid-template-columns: 1fr; }
+    .stats-strip { grid-template-columns: repeat(2, 1fr); }
+    .funnel-stage { flex-direction: column; gap: 12px; }
+    .arch-tree { padding: 20px; font-size: 0.75rem; }
+    .sources-grid { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+
+<!-- ════════════ HERO ════════════ -->
+<header class="hero">
+  <div class="hero-badge"><span class="dot"></span> Updated for 2025 / 2026</div>
+  <h1>Ecommerce SEO Keyword Strategy</h1>
+  <p>A research-backed guide to choosing the right keywords, mapping them across your store, and driving relevant traffic that converts.</p>
+</header>
+
+<!-- ════════════ TOC ════════════ -->
+<nav class="toc-bar">
+  <div class="toc-inner">
+    <a href="#intent" class="toc-link">Search Intent</a>
+    <a href="#funnel" class="toc-link">Buyer Funnel</a>
+    <a href="#pages" class="toc-link">Page Types</a>
+    <a href="#clustering" class="toc-link">Clustering</a>
+    <a href="#topical" class="toc-link">Topical Authority</a>
+    <a href="#longtail" class="toc-link">Long-Tail</a>
+    <a href="#technical" class="toc-link">Technical</a>
+    <a href="#eeat" class="toc-link">E-E-A-T</a>
+    <a href="#action" class="toc-link">Action Plan</a>
+    <a href="#sources" class="toc-link">Sources</a>
+  </div>
+</nav>
+
+<main class="content">
+
+  <!-- ════════════ CORE PRINCIPLE ════════════ -->
+  <div class="section" style="padding-top: 56px;">
+    <div class="card" style="border-left: 3px solid var(--accent);">
+      <h3><span class="icon" style="background: var(--accent-glow); color: var(--accent-light);">⚡</span> The Core Principle</h3>
+      <p>Google no longer matches keywords literally. It uses <strong style="color:var(--text)">semantic understanding</strong> to match pages to <em>what the searcher actually wants</em>. Your entire keyword strategy must be built around <strong style="color:var(--text)">search intent</strong>, not keyword volume alone.</p>
+    </div>
+    <div class="callout">
+      AI changes intent interpretation by shifting search from keyword matching to vector-based semantic comparison. Instead of checking for exact phrases, modern systems convert queries and pages into numerical vectors that represent meaning.
+      <cite>— ClickRank.ai</cite>
+    </div>
+  </div>
+
+  <!-- ════════════ 1 · SEARCH INTENT ════════════ -->
+  <section class="section" id="intent">
+    <div class="section-header">
+      <div class="priority-tag p1">Priority 1</div>
+      <h2>Understand the 4 Types of Search Intent</h2>
+      <p class="section-lead">Every keyword falls into one of these buckets. You need content for <strong style="color:var(--text)">all four</strong>.</p>
+    </div>
+
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr><th>Intent Type</th><th>What They Want</th><th>Example Keywords</th><th>Best Page Type</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td style="color:var(--cyan)">Informational</td>
+            <td>Learn something</td>
+            <td><code class="kw-chip">how to style linen pants</code></td>
+            <td>Blog posts, guides</td>
+          </tr>
+          <tr>
+            <td style="color:var(--purple)">Navigational</td>
+            <td>Find a specific brand/site</td>
+            <td><code class="kw-chip">Nike running shoes</code></td>
+            <td>Homepage, brand pages</td>
+          </tr>
+          <tr>
+            <td style="color:var(--amber)">Commercial</td>
+            <td>Compare before buying</td>
+            <td><code class="kw-chip">best wireless earbuds 2026</code></td>
+            <td>Comparison pages, buying guides</td>
+          </tr>
+          <tr>
+            <td style="color:var(--green)">Transactional</td>
+            <td>Ready to buy NOW</td>
+            <td><code class="kw-chip">buy organic coffee beans online</code></td>
+            <td>Product &amp; category pages</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <p style="font-size: 0.82rem; color: var(--text-muted); margin-top: 12px;">Sources: Semrush, Search Engine Land, BuilderGrowthEngine.com</p>
+  </section>
+
+  <!-- ════════════ 2 · BUYER FUNNEL ════════════ -->
+  <section class="section" id="funnel">
+    <div class="section-header">
+      <div class="priority-tag p1">Priority 2</div>
+      <h2>Map Keywords to the Buyer Funnel</h2>
+      <p class="section-lead">Think of your site as a funnel that guides visitors from discovery to purchase.</p>
+    </div>
+
+    <div class="funnel">
+      <!-- TOFU -->
+      <div class="funnel-stage">
+        <div class="funnel-icon" style="background: var(--cyan-dim); color: var(--cyan);">🔍</div>
+        <div>
+          <span class="funnel-tag" style="background: var(--cyan-dim); color: var(--cyan);">TOFU — Awareness</span>
+          <h4>Top of Funnel</h4>
+          <p>Attract people who don't know your brand yet. Broad, educational, informational keywords.</p>
+          <p><strong style="color:var(--text)">Page types:</strong> Blog posts, how-to guides, educational articles</p>
+          <p><strong style="color:var(--text)">Traits:</strong> High volume · Low purchase intent · Low competition</p>
+          <div class="funnel-keywords">
+            <span class="kw-chip">how to choose running shoes</span>
+            <span class="kw-chip">skincare routine for oily skin</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- MOFU -->
+      <div class="funnel-stage">
+        <div class="funnel-icon" style="background: var(--amber-dim); color: var(--amber);">⚖️</div>
+        <div>
+          <span class="funnel-tag" style="background: var(--amber-dim); color: var(--amber);">MOFU — Consideration</span>
+          <h4>Middle of Funnel</h4>
+          <p>Help them evaluate and compare options. "Best of" lists, reviews, comparisons.</p>
+          <p><strong style="color:var(--text)">Page types:</strong> Buying guides, comparison pages, curated collections</p>
+          <p><strong style="color:var(--text)">Traits:</strong> Medium volume · Medium intent · Medium competition</p>
+          <div class="funnel-keywords">
+            <span class="kw-chip">best trail running shoes 2026</span>
+            <span class="kw-chip">retinol vs vitamin C for acne</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- BOFU -->
+      <div class="funnel-stage">
+        <div class="funnel-icon" style="background: var(--green-dim); color: var(--green);">💰</div>
+        <div>
+          <span class="funnel-tag" style="background: var(--green-dim); color: var(--green);">BOFU — Purchase</span>
+          <h4>Bottom of Funnel</h4>
+          <p>Capture the sale. Transactional, product-specific, "buy", "discount", "near me" keywords.</p>
+          <p><strong style="color:var(--text)">Page types:</strong> Product pages, category/collection pages, landing pages</p>
+          <p><strong style="color:var(--text)">Traits:</strong> Lower volume · HIGHEST conversion rate · Higher competition</p>
+          <div class="funnel-keywords">
+            <span class="kw-chip">buy Nike Pegasus 41 men's size 10</span>
+            <span class="kw-chip">organic face serum free shipping</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="stats-strip">
+      <div class="stat-box">
+        <div class="number">91%</div>
+        <div class="desc">of all web searches are long-tail keywords (3+ words)</div>
+      </div>
+      <div class="stat-box">
+        <div class="number">2.5×</div>
+        <div class="desc">higher conversion rate from long-tail vs head terms</div>
+      </div>
+    </div>
+
+    <p style="font-size: 0.82rem; color: var(--text-muted); margin-top: 12px;">Sources: Screaming Frog, Semrush, Terakeet, Yotpo, Ringly.io</p>
+  </section>
+
+  <!-- ════════════ 3 · PAGE TYPES ════════════ -->
+  <section class="section" id="pages">
+    <div class="section-header">
+      <div class="priority-tag p2">Priority 3</div>
+      <h2>Site Architecture — Which Page Gets Which Keywords</h2>
+      <p class="section-lead">This is where most ecommerce sites get it wrong. Every page type has a specific keyword role.</p>
+    </div>
+
+    <div class="arch-tree">
+      <span class="highlight">Homepage</span> <span class="dim">─── brand name + 1-2 broadest terms</span><br>
+      <span class="dim">├──</span> <span class="rose">Category / Collection Pages</span> <span class="dim">─── broad commercial keywords (MONEY PAGES)</span><br>
+      <span class="dim">│&nbsp;&nbsp; ├──</span> <span class="amber">Product Pages</span> <span class="dim">─── specific long-tail transactional keywords</span><br>
+      <span class="dim">│&nbsp;&nbsp; └──</span> <span class="amber">Product Pages</span> <span class="dim">─── brand + attributes (size, color, material)</span><br>
+      <span class="dim">├──</span> <span class="cyan">Blog Posts</span> <span class="dim">─── informational + commercial investigation keywords</span><br>
+      <span class="dim">└──</span> <span class="green">Landing Pages</span> <span class="dim">─── seasonal, promotional, specific commercial keywords</span>
+    </div>
+
+    <div class="card-grid" style="margin-top: 20px;">
+      <div class="mini-card">
+        <div class="label" style="color: var(--rose);">★ Highest Priority</div>
+        <h4>Category / Collection Pages</h4>
+        <p>Your most important SEO pages. Target broad commercial keywords with high search volume. Add 150-300 words of unique descriptive content. Internal link to subcategories and top products.</p>
+      </div>
+      <div class="mini-card">
+        <div class="label" style="color: var(--amber);">Product Pages</div>
+        <h4>Long-Tail Transactional</h4>
+        <p>Target specific keywords: brand + product name + attributes. Write unique descriptions (never copy-paste manufacturer text). Add schema markup for rich snippets.</p>
+      </div>
+      <div class="mini-card">
+        <div class="label" style="color: var(--cyan);">Blog Posts</div>
+        <h4>Informational &amp; Commercial</h4>
+        <p>Attract top-of-funnel traffic and build topical authority. Always link from blog posts to relevant category and product pages to pass SEO value.</p>
+      </div>
+      <div class="mini-card">
+        <div class="label" style="color: var(--green);">Landing Pages</div>
+        <h4>Seasonal &amp; Promotional</h4>
+        <p>Target time-specific keywords like "Black Friday running shoe deals" or "gifts for mom under $50". Can be temporary or evergreen.</p>
+      </div>
+    </div>
+
+    <div class="callout">
+      Category pages drive more revenue than individual product pages for commercial keywords. Focus optimization effort here first.
+      <cite>— Reddit r/SEO consensus + multiple leading agencies (SEOClarity, Semrush, DigitalCommerce)</cite>
+    </div>
+  </section>
+
+  <!-- ════════════ 4 · CLUSTERING ════════════ -->
+  <section class="section" id="clustering">
+    <div class="section-header">
+      <div class="priority-tag p2">Priority 4</div>
+      <h2>Keyword Clustering — One Page Per Intent</h2>
+      <p class="section-lead">Don't create a separate page for every keyword. Group related keywords that share the same search intent onto <strong style="color:var(--text)">one page</strong>.</p>
+    </div>
+
+    <div class="card">
+      <h3><span class="icon" style="background: var(--purple-dim); color: var(--purple);">🧩</span> How Clustering Works</h3>
+      <ul class="checklist">
+        <li><strong>Gather all keywords</strong> — from Semrush, GSC, competitor research</li>
+        <li><strong>Check Google's SERPs</strong> — if two keywords show the same top 10 results, they belong in the same cluster</li>
+        <li><strong>Assign each cluster to ONE page</strong> on your site</li>
+        <li><strong>Target primary keyword + all related keywords</strong> naturally on that page</li>
+      </ul>
+    </div>
+
+    <div class="card">
+      <h3><span class="icon" style="background: var(--green-dim); color: var(--green);">✓</span> Example: One Category Page, One Cluster</h3>
+      <div style="margin-top: 8px;">
+        <p><strong style="color:var(--text)">Primary keyword:</strong></p>
+        <div style="margin: 8px 0 16px;"><span class="kw-chip" style="border-color: var(--accent); color: var(--accent-light);">organic face serum</span></div>
+        <p><strong style="color:var(--text)">Clustered related keywords (same page):</strong></p>
+        <div class="funnel-keywords" style="margin-top: 8px;">
+          <span class="kw-chip">natural face serum</span>
+          <span class="kw-chip">organic vitamin C serum</span>
+          <span class="kw-chip">best organic serum for face</span>
+          <span class="kw-chip">plant-based face serum</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="card" style="border-left: 3px solid var(--rose);">
+      <h3><span class="icon" style="background: var(--rose-dim); color: var(--rose);">⚠</span> Why This Matters</h3>
+      <p>Creating separate pages for keywords with the same intent causes <strong style="color:var(--rose)">keyword cannibalization</strong> — your pages compete against each other and both rank lower.</p>
+    </div>
+
+    <p style="font-size: 0.82rem; color: var(--text-muted); margin-top: 12px;">Sources: Semrush, ContentGecko, Keyword Cupid, ALM Corp, PageOptimizer Pro</p>
+  </section>
+
+  <!-- ════════════ 5 · TOPICAL AUTHORITY ════════════ -->
+  <section class="section" id="topical">
+    <div class="section-header">
+      <div class="priority-tag p3">Priority 5</div>
+      <h2>Build Topical Authority with Pillar + Cluster Content</h2>
+      <p class="section-lead">Google rewards sites that demonstrate deep expertise on a topic, not just isolated keyword matches.</p>
+    </div>
+
+    <div class="arch-tree">
+      <span class="highlight">PILLAR PAGE</span> <span class="dim">───── "The Complete Guide to Running Shoes"</span><br>
+      <span class="dim">│</span><br>
+      <span class="dim">├──</span> <span class="cyan">Cluster</span> <span class="dim">── "How to Choose Running Shoes for Your Foot Type"</span><br>
+      <span class="dim">├──</span> <span class="cyan">Cluster</span> <span class="dim">── "Best Trail Running Shoes 2026"</span><br>
+      <span class="dim">├──</span> <span class="cyan">Cluster</span> <span class="dim">── "Road vs Trail Running Shoes — What's the Difference"</span><br>
+      <span class="dim">└──</span> <span class="cyan">Cluster</span> <span class="dim">── "How to Care for Your Running Shoes"</span><br>
+      <br>
+      <span class="dim">───── Internal Linking Rules ─────</span><br>
+      <span class="green">✓</span> Every cluster page links <strong>back</strong> to the pillar page<br>
+      <span class="green">✓</span> Pillar page links <strong>out</strong> to every cluster page<br>
+      <span class="green">✓</span> Cluster pages link to <strong>each other</strong> where relevant<br>
+      <span class="green">✓</span> Blog content links to <strong>category/product pages</strong> (money pages)
+    </div>
+
+    <div class="stats-strip">
+      <div class="stat-box">
+        <div class="number">+40%</div>
+        <div class="desc">ranking boost from proper internal linking<br><span style="font-size:0.75rem">(Authority Hacker study, 1M+ websites)</span></div>
+      </div>
+    </div>
+
+    <p style="font-size: 0.82rem; color: var(--text-muted); margin-top: 12px;">Sources: Search Engine Land, Digital Applied, Authority Hacker, IndexCraft, Brafton, Fly High Media</p>
+  </section>
+
+  <!-- ════════════ 6 · LONG-TAIL ════════════ -->
+  <section class="section" id="longtail">
+    <div class="section-header">
+      <div class="priority-tag p3">Priority 6</div>
+      <h2>Long-Tail Keywords Are Your Secret Weapon</h2>
+      <p class="section-lead">More specific = less competition = higher conversion.</p>
+    </div>
+
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr><th>Type</th><th>Example</th><th>Volume</th><th>Competition</th><th>Conversion</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td class="kw-head">Head term</td>
+            <td>"running shoes"</td>
+            <td>Very high</td>
+            <td>Brutal</td>
+            <td>~1-2%</td>
+          </tr>
+          <tr>
+            <td class="kw-mid">Mid-tail</td>
+            <td>"men's trail running shoes"</td>
+            <td>Medium</td>
+            <td>Medium</td>
+            <td>~2-3%</td>
+          </tr>
+          <tr>
+            <td class="kw-long">Long-tail</td>
+            <td>"best waterproof trail running shoes for wide feet"</td>
+            <td>Low</td>
+            <td>Low</td>
+            <td>~3-5%+</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="card" style="margin-top: 20px;">
+      <h3><span class="icon" style="background: var(--green-dim); color: var(--green);">🎯</span> Where Each Type Goes</h3>
+      <ul class="checklist">
+        <li><strong>Category pages</strong> → target head + mid-tail terms</li>
+        <li><strong>Product pages</strong> → naturally capture long-tail through specific attributes</li>
+        <li><strong>Blog posts</strong> → target informational long-tail questions</li>
+        <li><strong>Landing pages</strong> → target commercial long-tail with buying intent</li>
+      </ul>
+    </div>
+
+    <div class="callout">
+      Use head terms for reach and authority, and long-tail keywords to capture high-intent clicks. Plan clusters where a broad hub builds awareness while supporting pages tackle specific, lower-difficulty queries.
+      <cite>— SingleGrain</cite>
+    </div>
+
+    <p style="font-size: 0.82rem; color: var(--text-muted); margin-top: 12px;">Sources: Shopify, Keywords Everywhere, SingleGrain, Ignite Visibility, Content Whale</p>
+  </section>
+
+  <!-- ════════════ 7 · TECHNICAL ════════════ -->
+  <section class="section" id="technical">
+    <div class="section-header">
+      <div class="priority-tag p4">Priority 7</div>
+      <h2>Technical Foundations That Make Keywords Work</h2>
+      <p class="section-lead">Even the best keyword strategy fails without these technical basics in place.</p>
+    </div>
+
+    <div class="card-grid">
+      <div class="mini-card">
+        <h4 style="font-size: 0.95rem;">Schema / Structured Data</h4>
+        <p>Product schema (price, availability, reviews) can increase CTR by up to <strong style="color:var(--green)">30%</strong> in search results.</p>
+      </div>
+      <div class="mini-card">
+        <h4 style="font-size: 0.95rem;">Site Speed</h4>
+        <p>Average ecommerce Lighthouse score is only <strong style="color:var(--amber)">67/100</strong>. Faster = higher rankings.</p>
+      </div>
+      <div class="mini-card">
+        <h4 style="font-size: 0.95rem;">Mobile-First</h4>
+        <p>Google indexes the mobile version first. Your mobile experience <strong style="color:var(--text)">IS</strong> your SEO.</p>
+      </div>
+      <div class="mini-card">
+        <h4 style="font-size: 0.95rem;">Clean URL Structure</h4>
+        <p><code style="color:var(--green); font-family: 'JetBrains Mono', monospace; font-size: 12px;">/collections/running-shoes/trail</code><br>not <code style="color:var(--rose); font-family: 'JetBrains Mono', monospace; font-size: 12px;">/collection?id=42&filter=3</code></p>
+      </div>
+      <div class="mini-card">
+        <h4 style="font-size: 0.95rem;">No Duplicate Content</h4>
+        <p>Use canonical tags on filtered/sorted pages to avoid confusing Google.</p>
+      </div>
+      <div class="mini-card">
+        <h4 style="font-size: 0.95rem;">Crawlability</h4>
+        <p>Flat architecture — any page reachable in <strong style="color:var(--text)">3 clicks</strong> from homepage.</p>
+      </div>
+    </div>
+
+    <p style="font-size: 0.82rem; color: var(--text-muted); margin-top: 12px;">Sources: Search Engine Land, Ringly.io, W3Era, SMA Marketing, DebugBear</p>
+  </section>
+
+  <!-- ════════════ 8 · E-E-A-T ════════════ -->
+  <section class="section" id="eeat">
+    <div class="section-header">
+      <div class="priority-tag p4">Priority 8</div>
+      <h2>E-E-A-T — Experience, Expertise, Authority, Trust</h2>
+      <p class="section-lead">Google's quality guidelines emphasize this more than ever because AI-generated content has flooded the web.</p>
+    </div>
+
+    <div class="card-grid">
+      <div class="mini-card">
+        <h4>🏷️ Experience</h4>
+        <p>Show real product usage, real customer reviews, real photos. First-hand knowledge matters.</p>
+      </div>
+      <div class="mini-card">
+        <h4>🎓 Expertise</h4>
+        <p>Detailed, accurate product information and buying guides. Demonstrate deep knowledge in your niche.</p>
+      </div>
+      <div class="mini-card">
+        <h4>🏛️ Authoritativeness</h4>
+        <p>Build backlinks, get cited by others in your niche. Become the go-to source.</p>
+      </div>
+      <div class="mini-card">
+        <h4>🔒 Trustworthiness</h4>
+        <p>Secure site (HTTPS), clear return policies, real contact info, transparent business practices.</p>
+      </div>
+    </div>
+
+    <div class="callout">
+      Google's quality rater guidelines emphasize E-E-A-T more than ever in 2026 now that AI has led to tons of published subpar content.
+      <cite>— Backlinko</cite>
+    </div>
+  </section>
+
+  <!-- ════════════ ACTION PLAN ════════════ -->
+  <section class="section" id="action">
+    <div class="section-header">
+      <h2>The Action Plan</h2>
+      <p class="section-lead">Follow these steps in order of priority to build your keyword strategy.</p>
+    </div>
+
+    <div class="action-list">
+      <div class="action-item">
+        <div class="action-num">1</div>
+        <div class="action-body">
+          <h4>Audit your current keywords <span class="impact-tag impact-foundation">Foundation</span></h4>
+          <p>What are you ranking for now? Use Google Search Console + Semrush to understand your starting point.</p>
+        </div>
+      </div>
+      <div class="action-item">
+        <div class="action-num">2</div>
+        <div class="action-body">
+          <h4>Map search intent <span class="impact-tag impact-critical">Critical</span></h4>
+          <p>Categorize every keyword as Informational, Commercial, or Transactional. This determines where it goes on your site.</p>
+        </div>
+      </div>
+      <div class="action-item">
+        <div class="action-num">3</div>
+        <div class="action-body">
+          <h4>Cluster keywords by intent <span class="impact-tag impact-critical">Critical</span></h4>
+          <p>Group related keywords that share SERP overlap. One cluster = one page. Prevents cannibalization.</p>
+        </div>
+      </div>
+      <div class="action-item">
+        <div class="action-num">4</div>
+        <div class="action-body">
+          <h4>Optimize category pages FIRST <span class="impact-tag impact-high">Highest ROI</span></h4>
+          <p>These are your money pages. Add unique content, optimize titles and H1s, build internal links. This drives the most revenue.</p>
+        </div>
+      </div>
+      <div class="action-item">
+        <div class="action-num">5</div>
+        <div class="action-body">
+          <h4>Write unique product descriptions <span class="impact-tag impact-high">Conversion</span></h4>
+          <p>Target long-tail keywords with buying intent. Never use manufacturer copy-paste. Include schema markup.</p>
+        </div>
+      </div>
+      <div class="action-item">
+        <div class="action-num">6</div>
+        <div class="action-body">
+          <h4>Build pillar + cluster blog content <span class="impact-tag impact-high">Traffic + Authority</span></h4>
+          <p>Target informational keywords, build topical authority, and link from every blog post to your money pages.</p>
+        </div>
+      </div>
+      <div class="action-item">
+        <div class="action-num">7</div>
+        <div class="action-body">
+          <h4>Internal linking strategy <span class="impact-tag impact-high">+40% Rankings</span></h4>
+          <p>Blog → Category → Product. Every page connected logically. Pillar-cluster model. Proper anchor text.</p>
+        </div>
+      </div>
+      <div class="action-item">
+        <div class="action-num">8</div>
+        <div class="action-body">
+          <h4>Add schema markup <span class="impact-tag impact-medium">+30% CTR</span></h4>
+          <p>Product, Review, FAQ, Breadcrumb schema. Enables rich snippets in search results.</p>
+        </div>
+      </div>
+      <div class="action-item">
+        <div class="action-num">9</div>
+        <div class="action-body">
+          <h4>Technical SEO cleanup <span class="impact-tag impact-medium">Unlock Potential</span></h4>
+          <p>Speed optimization, mobile-first, crawlability audit, canonical tags on filtered pages.</p>
+        </div>
+      </div>
+      <div class="action-item">
+        <div class="action-num">10</div>
+        <div class="action-body">
+          <h4>Monitor and iterate <span class="impact-tag impact-foundation">Sustained Growth</span></h4>
+          <p>Track rankings weekly, update content quarterly. SEO is continuous optimization, not set-and-forget.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ════════════ SOURCES ════════════ -->
+  <section class="section" id="sources">
+    <div class="section-header">
+      <h2>Sources</h2>
+      <p class="section-lead">Research compiled from 40+ sources. Key references below.</p>
+    </div>
+
+    <div class="sources-grid">
+      <div class="source-item"><span class="source-dot" style="background: var(--accent);"></span><strong>Semrush</strong> — Clustering, Category SEO, Funnel</div>
+      <div class="source-item"><span class="source-dot" style="background: var(--cyan);"></span><strong>Search Engine Land</strong> — Topic Clusters, SEO 2025</div>
+      <div class="source-item"><span class="source-dot" style="background: var(--green);"></span><strong>Backlinko</strong> — SEO Strategy 2026, E-E-A-T</div>
+      <div class="source-item"><span class="source-dot" style="background: var(--amber);"></span><strong>Shopify Blog</strong> — Long-Tail, SEO Checklist</div>
+      <div class="source-item"><span class="source-dot" style="background: var(--rose);"></span><strong>Screaming Frog</strong> — Keyword Mapping</div>
+      <div class="source-item"><span class="source-dot" style="background: var(--purple);"></span><strong>Authority Hacker</strong> — Internal Linking (1M+ sites)</div>
+      <div class="source-item"><span class="source-dot" style="background: var(--cyan);"></span><strong>Ringly.io</strong> — Ecommerce SEO Stats 2026</div>
+      <div class="source-item"><span class="source-dot" style="background: var(--green);"></span><strong>Yotpo</strong> — Long-Tail Conversions</div>
+      <div class="source-item"><span class="source-dot" style="background: var(--amber);"></span><strong>W3Era</strong> — Ecommerce SEO Guide 2026</div>
+      <div class="source-item"><span class="source-dot" style="background: var(--accent);"></span><strong>ResultFirst</strong> — Scalable Growth Guide</div>
+      <div class="source-item"><span class="source-dot" style="background: var(--rose);"></span><strong>Digital Applied</strong> — Content Clusters 2026</div>
+      <div class="source-item"><span class="source-dot" style="background: var(--purple);"></span><strong>DebugBear</strong> — Complete Ecommerce SEO</div>
+      <div class="source-item"><span class="source-dot" style="background: var(--cyan);"></span><strong>OuterBox Design</strong> — SEO Strategies 2025</div>
+      <div class="source-item"><span class="source-dot" style="background: var(--green);"></span><strong>SEOClarity</strong> — Product &amp; Category Pages</div>
+      <div class="source-item"><span class="source-dot" style="background: var(--amber);"></span><strong>SingleGrain</strong> — Long-Tail Strategy</div>
+    </div>
+  </section>
+
+</main>
+
+<footer>
+  Ecommerce SEO Keyword Strategy Guide &mdash; Research compiled April 2026<br>
+  Based on 40+ industry sources &middot; Updated for Google's latest algorithm changes
+</footer>
+
+</body>
+</html>

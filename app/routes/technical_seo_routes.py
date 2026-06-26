@@ -1,0 +1,882 @@
+import json
+import logging
+import threading
+
+from flask import Blueprint, jsonify, render_template, request
+
+from app.auth import decrypt_value
+from app.database import db
+from app.services.technical_seo_analyzer import (
+    analyze_collection_technical_seo,
+    analyze_product_technical_seo,
+)
+from app.shopify_client import ShopifyClient
+
+logger = logging.getLogger(__name__)
+
+technical_seo_bp = Blueprint("technical_seo", __name__)
+
+
+def _enforce_meta_limits(shopify_fields):
+    meta_desc = shopify_fields.get("meta_description")
+    if meta_desc and isinstance(meta_desc, str) and len(meta_desc) > 160:
+        truncated = meta_desc[:157].rsplit(" ", 1)[0] + "..."
+        shopify_fields["meta_description"] = truncated if len(truncated) <= 160 else meta_desc[:160]
+    meta_title = shopify_fields.get("meta_title")
+    if meta_title and isinstance(meta_title, str) and len(meta_title) > 60:
+        truncated = meta_title[:57].rsplit(" ", 1)[0] + "..."
+        shopify_fields["meta_title"] = truncated if len(truncated) <= 60 else meta_title[:60]
+    return shopify_fields
+
+
+def _enrich_collection_data(collection_dict):
+    store_id = collection_dict.get("store_id")
+    title_lower = (collection_dict.get("title") or "").lower().strip()
+    if not title_lower or not store_id:
+        return collection_dict
+
+    with db.get_cursor() as cur:
+        cur.execute(
+            "SELECT vendor, COUNT(*) as cnt FROM synced_products "
+            "WHERE store_id = %s AND vendor IS NOT NULL AND vendor != '' "
+            "GROUP BY vendor ORDER BY cnt DESC",
+            (store_id,),
+        )
+        vendors = cur.fetchall()
+
+    for v in vendors:
+        vendor_lower = v["vendor"].lower()
+        if title_lower.startswith(vendor_lower + " ") or title_lower == vendor_lower:
+            collection_dict["vendor"] = v["vendor"]
+            remainder = title_lower[len(vendor_lower):].strip()
+            if remainder:
+                remainder = remainder.split(" - ")[0].split(" & ")[0].strip()
+                collection_dict["product_type"] = remainder
+            break
+
+    return collection_dict
+
+
+@technical_seo_bp.route("/technical-seo")
+def technical_seo_page():
+    return render_template("technical_seo.html")
+
+
+@technical_seo_bp.route("/api/technical-seo/products", methods=["GET"])
+def list_products_technical_seo():
+    store_id = request.args.get("store_id")
+    status = request.args.get("status", "").strip().upper()
+    sort_by = request.args.get("sort_by", "title")
+    sort_dir = request.args.get("sort_dir", "asc")
+
+    valid_sql_sorts = {
+        "title": "sp.title",
+        "store": "s.name",
+        "status": "sp.status",
+    }
+    order_clause = "ORDER BY sp.title"
+    if sort_by in valid_sql_sorts:
+        direction = "DESC" if sort_dir == "desc" else "ASC"
+        order_clause = f"ORDER BY {valid_sql_sorts[sort_by]} {direction}"
+
+    valid_statuses = {"ACTIVE", "DRAFT", "ARCHIVED"}
+    conditions = []
+    params = []
+
+    if store_id:
+        conditions.append("sp.store_id = %s")
+        params.append(store_id)
+    if status in valid_statuses:
+        conditions.append("sp.status = %s")
+        params.append(status)
+
+    where_clause = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+
+    with db.get_cursor() as cur:
+        cur.execute(
+            f"""
+            SELECT sp.id, sp.store_id, sp.shopify_id, sp.title, sp.handle, sp.status,
+                   COALESCE(s.shop_name, s.name) as store_name,
+                   tsa.score as tech_seo_score,
+                   tsa.issues_count,
+                   tsa.updated_at as analyzed_at
+            FROM synced_products sp
+            JOIN stores s ON s.id = sp.store_id
+            LEFT JOIN technical_seo_analyses tsa
+                ON tsa.store_id = sp.store_id AND tsa.item_type = 'product' AND tsa.item_id = sp.id
+            {where_clause}
+            {order_clause}
+            """,
+            tuple(params),
+        )
+        products = cur.fetchall()
+
+    result = [
+        {
+            "id": p["id"],
+            "store_id": p["store_id"],
+            "store_name": p["store_name"],
+            "shopify_id": p["shopify_id"],
+            "title": p["title"],
+            "handle": p["handle"],
+            "status": p["status"],
+            "tech_seo_score": p["tech_seo_score"],
+            "issues_count": p["issues_count"],
+            "analyzed_at": p["analyzed_at"].isoformat() if p["analyzed_at"] else None,
+        }
+        for p in products
+    ]
+
+    if sort_by == "tech_seo_score":
+        reverse = sort_dir == "desc"
+        result.sort(key=lambda x: x["tech_seo_score"] if x["tech_seo_score"] is not None else -1, reverse=reverse)
+
+    return jsonify(result)
+
+
+@technical_seo_bp.route("/api/technical-seo/collections", methods=["GET"])
+def list_collections_technical_seo():
+    store_id = request.args.get("store_id")
+    sort_by = request.args.get("sort_by", "title")
+    sort_dir = request.args.get("sort_dir", "asc")
+
+    valid_sql_sorts = {
+        "title": "sc.title",
+        "store": "s.name",
+        "products_count": "sc.products_count",
+    }
+    order_clause = "ORDER BY sc.title"
+    if sort_by in valid_sql_sorts:
+        direction = "DESC" if sort_dir == "desc" else "ASC"
+        order_clause = f"ORDER BY {valid_sql_sorts[sort_by]} {direction}"
+
+    conditions = []
+    params = []
+    if store_id:
+        conditions.append("sc.store_id = %s")
+        params.append(store_id)
+
+    where_clause = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+
+    with db.get_cursor() as cur:
+        cur.execute(
+            f"""
+            SELECT sc.id, sc.store_id, sc.shopify_id, sc.title, sc.handle, sc.products_count,
+                   COALESCE(s.shop_name, s.name) as store_name,
+                   tsa.score as tech_seo_score,
+                   tsa.issues_count,
+                   tsa.updated_at as analyzed_at
+            FROM synced_collections sc
+            JOIN stores s ON s.id = sc.store_id
+            LEFT JOIN technical_seo_analyses tsa
+                ON tsa.store_id = sc.store_id AND tsa.item_type = 'collection' AND tsa.item_id = sc.id
+            {where_clause}
+            {order_clause}
+            """,
+            tuple(params),
+        )
+        collections = cur.fetchall()
+
+    result = [
+        {
+            "id": c["id"],
+            "store_id": c["store_id"],
+            "store_name": c["store_name"],
+            "shopify_id": c["shopify_id"],
+            "title": c["title"],
+            "handle": c["handle"],
+            "products_count": c["products_count"],
+            "tech_seo_score": c["tech_seo_score"],
+            "issues_count": c["issues_count"],
+            "analyzed_at": c["analyzed_at"].isoformat() if c["analyzed_at"] else None,
+        }
+        for c in collections
+    ]
+
+    if sort_by == "tech_seo_score":
+        reverse = sort_dir == "desc"
+        result.sort(key=lambda x: x["tech_seo_score"] if x["tech_seo_score"] is not None else -1, reverse=reverse)
+
+    return jsonify(result)
+
+
+@technical_seo_bp.route("/api/technical-seo/analyze", methods=["POST"])
+def analyze_item():
+    data = request.get_json() or {}
+    item_type = data.get("item_type", "product")
+    item_id = data.get("item_id")
+
+    if not item_id:
+        return jsonify({"error": "item_id is required"}), 400
+
+    with db.get_cursor() as cur:
+        if item_type == "product":
+            cur.execute("SELECT * FROM synced_products WHERE id = %s", (item_id,))
+        else:
+            cur.execute("SELECT * FROM synced_collections WHERE id = %s", (item_id,))
+        item = cur.fetchone()
+
+    if not item:
+        return jsonify({"error": f"{item_type} not found"}), 404
+
+    if item_type == "product":
+        analysis = analyze_product_technical_seo(dict(item))
+    else:
+        analysis = analyze_collection_technical_seo(_enrich_collection_data(dict(item)))
+
+    store_id = item["store_id"]
+    with db.get_cursor() as cur:
+        cur.execute(
+            """INSERT INTO technical_seo_analyses
+            (store_id, item_type, item_id, score, detected_keywords, checks, issues_count, fixable_count, updated_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NOW())
+            ON CONFLICT (store_id, item_type, item_id) DO UPDATE SET
+                score = EXCLUDED.score,
+                detected_keywords = EXCLUDED.detected_keywords,
+                checks = EXCLUDED.checks,
+                issues_count = EXCLUDED.issues_count,
+                fixable_count = EXCLUDED.fixable_count,
+                updated_at = NOW()
+            RETURNING id""",
+            (
+                store_id,
+                item_type,
+                item_id,
+                analysis["score"],
+                json.dumps(analysis["detected_keywords"]),
+                json.dumps(analysis["checks"]),
+                analysis["issues_count"],
+                analysis["fixable_count"],
+            ),
+        )
+        row = cur.fetchone()
+        analysis["analysis_id"] = row["id"]
+
+    return jsonify(analysis)
+
+
+@technical_seo_bp.route("/api/technical-seo/bulk-analyze", methods=["POST"])
+def bulk_analyze():
+    data = request.get_json() or {}
+    item_type = data.get("item_type", "product")
+    item_ids = data.get("item_ids", [])
+
+    if not item_ids:
+        return jsonify({"error": "item_ids is required"}), 400
+
+    results = []
+    for item_id in item_ids:
+        with db.get_cursor() as cur:
+            if item_type == "product":
+                cur.execute("SELECT * FROM synced_products WHERE id = %s", (item_id,))
+            else:
+                cur.execute("SELECT * FROM synced_collections WHERE id = %s", (item_id,))
+            item = cur.fetchone()
+
+        if not item:
+            results.append({"item_id": item_id, "error": "not found"})
+            continue
+
+        if item_type == "product":
+            analysis = analyze_product_technical_seo(dict(item))
+        else:
+            analysis = analyze_collection_technical_seo(_enrich_collection_data(dict(item)))
+
+        store_id = item["store_id"]
+        with db.get_cursor() as cur:
+            cur.execute(
+                """INSERT INTO technical_seo_analyses
+                (store_id, item_type, item_id, score, detected_keywords, checks, issues_count, fixable_count, updated_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NOW())
+                ON CONFLICT (store_id, item_type, item_id) DO UPDATE SET
+                    score = EXCLUDED.score,
+                    detected_keywords = EXCLUDED.detected_keywords,
+                    checks = EXCLUDED.checks,
+                    issues_count = EXCLUDED.issues_count,
+                    fixable_count = EXCLUDED.fixable_count,
+                    updated_at = NOW()""",
+                (
+                    store_id,
+                    item_type,
+                    item_id,
+                    analysis["score"],
+                    json.dumps(analysis["detected_keywords"]),
+                    json.dumps(analysis["checks"]),
+                    analysis["issues_count"],
+                    analysis["fixable_count"],
+                ),
+            )
+
+        results.append({"item_id": item_id, "score": analysis["score"], "issues_count": analysis["issues_count"]})
+
+    return jsonify({"results": results, "analyzed": len([r for r in results if "error" not in r])})
+
+
+@technical_seo_bp.route("/api/technical-seo/analysis/<item_type>/<int:item_id>", methods=["GET"])
+def get_analysis(item_type, item_id):
+    with db.get_cursor() as cur:
+        cur.execute(
+            "SELECT * FROM technical_seo_analyses WHERE item_type = %s AND item_id = %s",
+            (item_type, item_id),
+        )
+        analysis = cur.fetchone()
+
+    if not analysis:
+        return jsonify({"error": "Analysis not found. Run analysis first."}), 404
+
+    return jsonify({
+        "id": analysis["id"],
+        "store_id": analysis["store_id"],
+        "item_type": analysis["item_type"],
+        "item_id": analysis["item_id"],
+        "score": analysis["score"],
+        "detected_keywords": analysis["detected_keywords"],
+        "checks": analysis["checks"],
+        "issues_count": analysis["issues_count"],
+        "fixable_count": analysis["fixable_count"],
+        "ai_fixes": analysis["ai_fixes"],
+        "ai_task_id": analysis["ai_task_id"],
+        "created_at": analysis["created_at"].isoformat() if analysis["created_at"] else None,
+        "updated_at": analysis["updated_at"].isoformat() if analysis["updated_at"] else None,
+    })
+
+
+@technical_seo_bp.route("/api/technical-seo/fix", methods=["POST"])
+def create_fix_task():
+    data = request.get_json() or {}
+    item_type = data.get("item_type", "product")
+    item_id = data.get("item_id")
+
+    if not item_id:
+        return jsonify({"error": "item_id is required"}), 400
+
+    with db.get_cursor() as cur:
+        cur.execute(
+            "SELECT * FROM technical_seo_analyses WHERE item_type = %s AND item_id = %s",
+            (item_type, item_id),
+        )
+        analysis = cur.fetchone()
+
+    if not analysis:
+        return jsonify({"error": "Run analysis first before requesting fixes"}), 400
+
+    with db.get_cursor() as cur:
+        if item_type == "product":
+            cur.execute("SELECT store_id FROM synced_products WHERE id = %s", (item_id,))
+        else:
+            cur.execute("SELECT store_id FROM synced_collections WHERE id = %s", (item_id,))
+        item = cur.fetchone()
+
+    if not item:
+        return jsonify({"error": f"{item_type} not found"}), 404
+
+    store_id = item["store_id"]
+    task_input = {
+        "item_type": item_type,
+        "item_id": item_id,
+        "analysis_id": analysis["id"],
+    }
+
+    with db.get_cursor() as cur:
+        cur.execute(
+            "INSERT INTO ai_tasks (store_id, task_type, input) VALUES (%s, 'technical_seo_fix', %s) RETURNING id",
+            (store_id, json.dumps(task_input)),
+        )
+        task_id = cur.fetchone()["id"]
+
+        cur.execute(
+            "UPDATE technical_seo_analyses SET ai_task_id = %s WHERE id = %s",
+            (task_id, analysis["id"]),
+        )
+
+    thread = threading.Thread(target=_execute_fix_task, args=(task_id, analysis["id"]), daemon=True)
+    thread.start()
+
+    return jsonify({"ok": True, "task_id": task_id}), 201
+
+
+def _execute_fix_task(task_id, analysis_id):
+    from app.ai_agent import run_task
+
+    with db.get_cursor() as cur:
+        cur.execute("SELECT * FROM ai_tasks WHERE id = %s", (task_id,))
+        task = cur.fetchone()
+
+    if not task:
+        return
+
+    with db.get_cursor() as cur:
+        cur.execute("UPDATE ai_tasks SET status = 'running' WHERE id = %s", (task_id,))
+
+    try:
+        result = run_task(task["task_type"], task["input"], task.get("store_id"))
+
+        with db.get_cursor() as cur:
+            cur.execute(
+                "UPDATE ai_tasks SET status = 'completed', result = %s, completed_at = NOW() WHERE id = %s",
+                (json.dumps(result), task_id),
+            )
+
+        if "error" not in result and "raw_response" not in result:
+            with db.get_cursor() as cur:
+                cur.execute(
+                    "UPDATE technical_seo_analyses SET ai_fixes = %s, updated_at = NOW() WHERE id = %s",
+                    (json.dumps(result), analysis_id),
+                )
+
+    except Exception as e:
+        with db.get_cursor() as cur:
+            cur.execute(
+                "UPDATE ai_tasks SET status = 'failed', error = %s, completed_at = NOW() WHERE id = %s",
+                (str(e), task_id),
+            )
+
+
+@technical_seo_bp.route("/api/technical-seo/apply", methods=["POST"])
+def apply_fixes():
+    data = request.get_json() or {}
+    item_type = data.get("item_type", "product")
+    item_id = data.get("item_id")
+    fixes = data.get("fixes", [])
+
+    if not item_id or not fixes:
+        return jsonify({"error": "item_id and fixes are required"}), 400
+
+    with db.get_cursor() as cur:
+        if item_type == "product":
+            cur.execute(
+                """SELECT sp.*, s.domain, s.access_token_enc, s.api_version
+                FROM synced_products sp
+                JOIN stores s ON s.id = sp.store_id
+                WHERE sp.id = %s""",
+                (item_id,),
+            )
+        else:
+            cur.execute(
+                """SELECT sc.*, s.domain, s.access_token_enc, s.api_version
+                FROM synced_collections sc
+                JOIN stores s ON s.id = sc.store_id
+                WHERE sc.id = %s""",
+                (item_id,),
+            )
+        item = cur.fetchone()
+
+    if not item:
+        return jsonify({"error": f"{item_type} not found"}), 404
+
+    try:
+        client = ShopifyClient(
+            item["domain"],
+            decrypt_value(item["access_token_enc"]),
+            item["api_version"],
+        )
+
+        updated_fields = []
+        shopify_fields = {}
+        media_updates = []
+
+        for fix in fixes:
+            field = fix.get("field")
+            value = fix.get("value")
+            if not field or not value:
+                continue
+
+            if field == "meta_title":
+                shopify_fields["meta_title"] = value
+                updated_fields.append("meta_title")
+            elif field == "meta_description":
+                shopify_fields["meta_description"] = value
+                updated_fields.append("meta_description")
+            elif field == "title":
+                shopify_fields["title"] = value
+                updated_fields.append("title")
+            elif field == "tags":
+                if isinstance(value, list):
+                    shopify_fields["tags"] = value
+                elif isinstance(value, str):
+                    shopify_fields["tags"] = [t.strip() for t in value.split(",")]
+                updated_fields.append("tags")
+            elif field == "description":
+                shopify_fields["description_html"] = value
+                updated_fields.append("description")
+            elif field == "image_alt":
+                if isinstance(value, list):
+                    media_updates = value
+                    updated_fields.append("image_alt")
+
+        _enforce_meta_limits(shopify_fields)
+
+        if shopify_fields:
+            if item_type == "product":
+                client.update_product(item["shopify_id"], shopify_fields)
+            else:
+                client.update_collection(item["shopify_id"], shopify_fields)
+
+        if media_updates and item_type == "product":
+            client.update_product_media(item["shopify_id"], media_updates)
+
+        with db.get_cursor() as cur:
+            if item_type == "product":
+                if shopify_fields.get("title"):
+                    cur.execute("UPDATE synced_products SET title = %s WHERE id = %s", (shopify_fields["title"], item_id))
+                if shopify_fields.get("meta_title"):
+                    cur.execute("UPDATE synced_products SET meta_title = %s WHERE id = %s", (shopify_fields["meta_title"], item_id))
+                if shopify_fields.get("meta_description"):
+                    cur.execute("UPDATE synced_products SET meta_description = %s WHERE id = %s", (shopify_fields["meta_description"], item_id))
+                if shopify_fields.get("description_html"):
+                    cur.execute("UPDATE synced_products SET description = %s WHERE id = %s", (shopify_fields["description_html"], item_id))
+                if shopify_fields.get("tags"):
+                    cur.execute("UPDATE synced_products SET tags = %s WHERE id = %s", (", ".join(shopify_fields["tags"]), item_id))
+                if media_updates:
+                    images = item.get("images") or []
+                    if isinstance(images, str):
+                        images = json.loads(images)
+                    alt_map = {m["media_id"]: m["alt"] for m in media_updates if m.get("media_id")}
+                    for img in images:
+                        if img.get("media_id") in alt_map:
+                            img["alt"] = alt_map[img["media_id"]]
+                    cur.execute("UPDATE synced_products SET images = %s WHERE id = %s", (json.dumps(images), item_id))
+                cur.execute("UPDATE synced_products SET last_optimized_at = NOW() WHERE id = %s", (item_id,))
+            else:
+                if shopify_fields.get("title"):
+                    cur.execute("UPDATE synced_collections SET title = %s WHERE id = %s", (shopify_fields["title"], item_id))
+                if shopify_fields.get("meta_title"):
+                    cur.execute("UPDATE synced_collections SET meta_title = %s WHERE id = %s", (shopify_fields["meta_title"], item_id))
+                if shopify_fields.get("meta_description"):
+                    cur.execute("UPDATE synced_collections SET meta_description = %s WHERE id = %s", (shopify_fields["meta_description"], item_id))
+                if shopify_fields.get("description_html"):
+                    cur.execute("UPDATE synced_collections SET description = %s WHERE id = %s", (shopify_fields["description_html"], item_id))
+                cur.execute("UPDATE synced_collections SET last_optimized_at = NOW() WHERE id = %s", (item_id,))
+
+        # Re-analyze after applying
+        with db.get_cursor() as cur:
+            if item_type == "product":
+                cur.execute("SELECT * FROM synced_products WHERE id = %s", (item_id,))
+            else:
+                cur.execute("SELECT * FROM synced_collections WHERE id = %s", (item_id,))
+            updated_item = cur.fetchone()
+
+        if updated_item:
+            if item_type == "product":
+                new_analysis = analyze_product_technical_seo(dict(updated_item))
+            else:
+                new_analysis = analyze_collection_technical_seo(_enrich_collection_data(dict(updated_item)))
+
+            store_id = updated_item["store_id"]
+            with db.get_cursor() as cur:
+                cur.execute(
+                    """UPDATE technical_seo_analyses SET
+                        score = %s, detected_keywords = %s, checks = %s,
+                        issues_count = %s, fixable_count = %s, updated_at = NOW()
+                    WHERE store_id = %s AND item_type = %s AND item_id = %s""",
+                    (
+                        new_analysis["score"],
+                        json.dumps(new_analysis["detected_keywords"]),
+                        json.dumps(new_analysis["checks"]),
+                        new_analysis["issues_count"],
+                        new_analysis["fixable_count"],
+                        store_id,
+                        item_type,
+                        item_id,
+                    ),
+                )
+
+            return jsonify({
+                "ok": True,
+                "updated_fields": updated_fields,
+                "new_score": new_analysis["score"],
+                "new_issues_count": new_analysis["issues_count"],
+            })
+
+        return jsonify({"ok": True, "updated_fields": updated_fields})
+
+    except Exception as e:
+        logger.exception("Failed to apply technical SEO fixes")
+        return jsonify({"error": str(e)}), 500
+
+
+@technical_seo_bp.route("/api/technical-seo/bulk-fix-apply", methods=["POST"])
+def bulk_fix_apply():
+    data = request.get_json() or {}
+    item_type = data.get("item_type", "product")
+    item_ids = data.get("item_ids", [])
+
+    if not item_ids:
+        return jsonify({"error": "item_ids is required"}), 400
+
+    with db.get_cursor() as cur:
+        cur.execute(
+            "INSERT INTO bulk_tasks (status, total, auto_apply, task_type) VALUES ('pending', %s, true, 'technical_seo') RETURNING id",
+            (len(item_ids),),
+        )
+        bulk_task_id = cur.fetchone()["id"]
+
+        for iid in item_ids:
+            if item_type == "product":
+                cur.execute(
+                    "INSERT INTO bulk_task_items (bulk_task_id, product_id) VALUES (%s, %s)",
+                    (bulk_task_id, iid),
+                )
+            else:
+                cur.execute(
+                    "INSERT INTO bulk_task_items (bulk_task_id, collection_id) VALUES (%s, %s)",
+                    (bulk_task_id, iid),
+                )
+
+    thread = threading.Thread(
+        target=_execute_bulk_fix_apply, args=(bulk_task_id, item_type), daemon=True
+    )
+    thread.start()
+
+    return jsonify({"ok": True, "bulk_task_id": bulk_task_id, "total": len(item_ids)}), 201
+
+
+def _execute_bulk_fix_apply(bulk_task_id, item_type):
+    import time
+    from app.ai_agent import run_task
+
+    with db.get_cursor() as cur:
+        cur.execute("UPDATE bulk_tasks SET status = 'running' WHERE id = %s", (bulk_task_id,))
+
+        if item_type == "product":
+            cur.execute(
+                """SELECT bti.id as item_id, bti.product_id as ref_id,
+                          sp.shopify_id, sp.title, sp.store_id,
+                          s.domain, s.access_token_enc, s.api_version
+                FROM bulk_task_items bti
+                JOIN synced_products sp ON sp.id = bti.product_id
+                JOIN stores s ON s.id = sp.store_id
+                WHERE bti.bulk_task_id = %s
+                ORDER BY bti.id""",
+                (bulk_task_id,),
+            )
+        else:
+            cur.execute(
+                """SELECT bti.id as item_id, bti.collection_id as ref_id,
+                          sc.shopify_id, sc.title, sc.store_id,
+                          s.domain, s.access_token_enc, s.api_version
+                FROM bulk_task_items bti
+                JOIN synced_collections sc ON sc.id = bti.collection_id
+                JOIN stores s ON s.id = sc.store_id
+                WHERE bti.bulk_task_id = %s
+                ORDER BY bti.id""",
+                (bulk_task_id,),
+            )
+        items = cur.fetchall()
+
+    for item in items:
+        bti_id = item["item_id"]
+        ref_id = item["ref_id"]
+
+        with db.get_cursor() as cur:
+            cur.execute("UPDATE bulk_task_items SET status = 'running' WHERE id = %s", (bti_id,))
+            cur.execute("UPDATE bulk_tasks SET current_product_title = %s WHERE id = %s", (item["title"], bulk_task_id))
+
+        try:
+            # Step 1: Analyze
+            with db.get_cursor() as cur:
+                if item_type == "product":
+                    cur.execute("SELECT * FROM synced_products WHERE id = %s", (ref_id,))
+                else:
+                    cur.execute("SELECT * FROM synced_collections WHERE id = %s", (ref_id,))
+                full_item = cur.fetchone()
+
+            if not full_item:
+                raise ValueError(f"{item_type} {ref_id} not found")
+
+            if item_type == "product":
+                analysis = analyze_product_technical_seo(dict(full_item))
+            else:
+                analysis = analyze_collection_technical_seo(_enrich_collection_data(dict(full_item)))
+
+            store_id = full_item["store_id"]
+            with db.get_cursor() as cur:
+                cur.execute(
+                    """INSERT INTO technical_seo_analyses
+                    (store_id, item_type, item_id, score, detected_keywords, checks, issues_count, fixable_count, updated_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NOW())
+                    ON CONFLICT (store_id, item_type, item_id) DO UPDATE SET
+                        score = EXCLUDED.score, detected_keywords = EXCLUDED.detected_keywords,
+                        checks = EXCLUDED.checks, issues_count = EXCLUDED.issues_count,
+                        fixable_count = EXCLUDED.fixable_count, updated_at = NOW()
+                    RETURNING id""",
+                    (
+                        store_id, item_type, ref_id,
+                        analysis["score"], json.dumps(analysis["detected_keywords"]),
+                        json.dumps(analysis["checks"]), analysis["issues_count"], analysis["fixable_count"],
+                    ),
+                )
+                analysis_row = cur.fetchone()
+                analysis_id = analysis_row["id"]
+
+            if analysis["fixable_count"] == 0:
+                with db.get_cursor() as cur:
+                    cur.execute(
+                        "UPDATE bulk_task_items SET status = 'completed', ai_result = %s, completed_at = NOW() WHERE id = %s",
+                        (json.dumps({"skipped": True, "reason": "no fixable issues"}), bti_id),
+                    )
+                    cur.execute("UPDATE bulk_tasks SET completed = completed + 1 WHERE id = %s", (bulk_task_id,))
+                continue
+
+            # Step 2: AI fix
+            task_input = {"item_type": item_type, "item_id": ref_id, "analysis_id": analysis_id}
+            ai_result = run_task("technical_seo_fix", task_input, store_id)
+
+            with db.get_cursor() as cur:
+                cur.execute(
+                    "UPDATE bulk_task_items SET ai_result = %s WHERE id = %s",
+                    (json.dumps(ai_result), bti_id),
+                )
+
+            if "error" in ai_result or "raw_response" in ai_result:
+                with db.get_cursor() as cur:
+                    cur.execute(
+                        "UPDATE bulk_task_items SET status = 'completed', completed_at = NOW() WHERE id = %s",
+                        (bti_id,),
+                    )
+                    cur.execute("UPDATE bulk_tasks SET completed = completed + 1 WHERE id = %s", (bulk_task_id,))
+                continue
+
+            with db.get_cursor() as cur:
+                cur.execute(
+                    "UPDATE technical_seo_analyses SET ai_fixes = %s, updated_at = NOW() WHERE id = %s",
+                    (json.dumps(ai_result), analysis_id),
+                )
+
+            # Step 3: Apply
+            ai_fixes = ai_result.get("fixes", [])
+            if ai_fixes:
+                try:
+                    client = ShopifyClient(
+                        item["domain"],
+                        decrypt_value(item["access_token_enc"]),
+                        item["api_version"],
+                    )
+
+                    shopify_fields = {}
+                    media_updates = []
+                    for fix in ai_fixes:
+                        field = fix.get("field")
+                        value = fix.get("proposed_value")
+                        if not field or not value:
+                            continue
+                        if field in ("meta_title", "meta_description", "title"):
+                            shopify_fields[field] = value
+                        elif field == "description":
+                            shopify_fields["description_html"] = value
+                        elif field == "tags" and isinstance(value, list):
+                            shopify_fields["tags"] = value
+                        elif field == "image_alt" and isinstance(value, list):
+                            media_updates = value
+
+                    _enforce_meta_limits(shopify_fields)
+
+                    if shopify_fields:
+                        if item_type == "product":
+                            client.update_product(item["shopify_id"], shopify_fields)
+                        else:
+                            client.update_collection(item["shopify_id"], shopify_fields)
+
+                    if media_updates and item_type == "product":
+                        client.update_product_media(item["shopify_id"], media_updates)
+
+                    with db.get_cursor() as cur:
+                        if item_type == "product":
+                            for f, v in shopify_fields.items():
+                                if f == "tags" and isinstance(v, list):
+                                    cur.execute("UPDATE synced_products SET tags = %s WHERE id = %s", (", ".join(v), ref_id))
+                                elif f == "title":
+                                    cur.execute("UPDATE synced_products SET title = %s WHERE id = %s", (v, ref_id))
+                                elif f == "meta_title":
+                                    cur.execute("UPDATE synced_products SET meta_title = %s WHERE id = %s", (v, ref_id))
+                                elif f == "meta_description":
+                                    cur.execute("UPDATE synced_products SET meta_description = %s WHERE id = %s", (v, ref_id))
+                                elif f == "description_html":
+                                    cur.execute("UPDATE synced_products SET description = %s WHERE id = %s", (v, ref_id))
+                            cur.execute("UPDATE synced_products SET last_optimized_at = NOW() WHERE id = %s", (ref_id,))
+                        else:
+                            for f, v in shopify_fields.items():
+                                if f == "title":
+                                    cur.execute("UPDATE synced_collections SET title = %s WHERE id = %s", (v, ref_id))
+                                elif f == "meta_title":
+                                    cur.execute("UPDATE synced_collections SET meta_title = %s WHERE id = %s", (v, ref_id))
+                                elif f == "meta_description":
+                                    cur.execute("UPDATE synced_collections SET meta_description = %s WHERE id = %s", (v, ref_id))
+                                elif f == "description_html":
+                                    cur.execute("UPDATE synced_collections SET description = %s WHERE id = %s", (v, ref_id))
+                            cur.execute("UPDATE synced_collections SET last_optimized_at = NOW() WHERE id = %s", (ref_id,))
+
+                    with db.get_cursor() as cur:
+                        cur.execute(
+                            "UPDATE bulk_task_items SET apply_result = %s WHERE id = %s",
+                            (json.dumps({"applied": True}), bti_id),
+                        )
+
+                    with db.get_cursor() as cur:
+                        if item_type == "product":
+                            cur.execute("SELECT * FROM synced_products WHERE id = %s", (ref_id,))
+                        else:
+                            cur.execute("SELECT * FROM synced_collections WHERE id = %s", (ref_id,))
+                        updated_item = cur.fetchone()
+
+                    if updated_item:
+                        if item_type == "product":
+                            new_analysis = analyze_product_technical_seo(dict(updated_item))
+                        else:
+                            new_analysis = analyze_collection_technical_seo(_enrich_collection_data(dict(updated_item)))
+
+                        with db.get_cursor() as cur:
+                            cur.execute(
+                                """UPDATE technical_seo_analyses SET
+                                    score = %s, detected_keywords = %s, checks = %s,
+                                    issues_count = %s, fixable_count = %s, updated_at = NOW()
+                                WHERE store_id = %s AND item_type = %s AND item_id = %s""",
+                                (
+                                    new_analysis["score"],
+                                    json.dumps(new_analysis["detected_keywords"]),
+                                    json.dumps(new_analysis["checks"]),
+                                    new_analysis["issues_count"],
+                                    new_analysis["fixable_count"],
+                                    store_id, item_type, ref_id,
+                                ),
+                            )
+
+                except Exception as apply_err:
+                    with db.get_cursor() as cur:
+                        cur.execute(
+                            "UPDATE bulk_task_items SET apply_result = %s WHERE id = %s",
+                            (json.dumps({"applied": False, "error": str(apply_err)}), bti_id),
+                        )
+
+            with db.get_cursor() as cur:
+                cur.execute(
+                    "UPDATE bulk_task_items SET status = 'completed', completed_at = NOW() WHERE id = %s",
+                    (bti_id,),
+                )
+                cur.execute("UPDATE bulk_tasks SET completed = completed + 1 WHERE id = %s", (bulk_task_id,))
+
+        except Exception as e:
+            logger.exception("Bulk fix-apply failed for %s %s", item_type, ref_id)
+            with db.get_cursor() as cur:
+                cur.execute(
+                    "UPDATE bulk_task_items SET status = 'failed', error = %s, completed_at = NOW() WHERE id = %s",
+                    (str(e), bti_id),
+                )
+                cur.execute("UPDATE bulk_tasks SET failed = failed + 1 WHERE id = %s", (bulk_task_id,))
+
+        time.sleep(0.5)
+
+    with db.get_cursor() as cur:
+        cur.execute(
+            "UPDATE bulk_tasks SET status = 'completed', current_product_title = NULL, completed_at = NOW() WHERE id = %s",
+            (bulk_task_id,),
+        )
+
+
+def _get_stored_analysis(store_id, item_type, item_id):
+    with db.get_cursor() as cur:
+        cur.execute(
+            "SELECT * FROM technical_seo_analyses WHERE store_id = %s AND item_type = %s AND item_id = %s",
+            (store_id, item_type, item_id),
+        )
+        return cur.fetchone()

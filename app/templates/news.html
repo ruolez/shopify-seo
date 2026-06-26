@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>News — SEO Platform</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+    <style>
+        .news-review-grid { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 20px; align-items: start; }
+        @media (max-width: 980px) { .news-review-grid { grid-template-columns: 1fr; } }
+        .news-body-textarea { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; line-height: 1.5; }
+        .news-preview { border: 1px solid var(--outline); border-radius: 10px; padding: 16px; max-height: 420px; overflow: auto; background: var(--surface); }
+        .news-inline-item { display: flex; gap: 10px; align-items: center; padding: 8px; border: 1px solid var(--outline); border-radius: 8px; margin-bottom: 8px; font-size: 13px; }
+        .news-inline-item img { width: 64px; height: 48px; object-fit: cover; border-radius: 6px; flex: none; }
+        .news-badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 600; }
+        .news-badge--ok { background: var(--success-light, #e6f4ea); color: var(--success, #1e8e3e); }
+        .news-badge--fail { background: #fce8e6; color: #d93025; }
+        .news-badge--pending { background: #f1f3f4; color: #5f6368; }
+        .news-hero-preview { width: 100%; border-radius: 10px; border: 1px solid var(--outline); margin-bottom: 8px; }
+        .news-toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 16px; }
+        .news-toolbar .spacer { flex: 1; }
+        .char-count { font-size: 11px; color: var(--on-surface-secondary); }
+        .news-link { color: var(--primary); text-decoration: none; font-weight: 500; word-break: break-word; text-underline-offset: 3px; }
+        .news-link:hover { color: var(--primary-hover); text-decoration: underline; }
+    </style>
+</head>
+<body>
+    <div class="app-layout">
+        {% include '_sidebar.html' %}
+        <div class="main-content">
+            <div class="topbar">
+                <div class="topbar-left">
+                    <button id="sidebar-toggle" class="icon-btn"><span class="material-symbols-rounded">menu</span></button>
+                    <h2>News</h2>
+                </div>
+                <div class="topbar-right">
+                    <button id="theme-toggle" class="icon-btn"><span class="material-symbols-rounded">dark_mode</span></button>
+                </div>
+            </div>
+            <div class="page-content">
+
+                <div class="news-toolbar">
+                    <span id="template-status-chip" class="news-badge news-badge--pending">Template: checking…</span>
+                    <button class="btn btn-secondary btn-sm" id="install-template-btn" onclick="installTemplate()">
+                        <span class="material-symbols-rounded">download</span> Install News Template
+                    </button>
+                    <button class="btn btn-secondary btn-sm" id="revert-template-btn" onclick="revertTemplate()" style="display:none;">
+                        <span class="material-symbols-rounded">undo</span> Revert
+                    </button>
+                    <div class="spacer"></div>
+                    <button class="btn btn-secondary btn-sm" onclick="regenerateHub()">
+                        <span class="material-symbols-rounded">grid_view</span> Regenerate News Hub
+                    </button>
+                </div>
+
+                <div class="tabs">
+                    <button class="tab active" data-tab="create">Create News</button>
+                    <button class="tab" data-tab="published">Published</button>
+                </div>
+
+                <!-- Create News -->
+                <div class="tab-panel active" id="tab-create">
+
+                    <!-- Step 1: Paste -->
+                    <div id="news-step-paste">
+                        <div class="card" style="max-width: 760px; margin: 0 auto;">
+                            <h3>Paste a news article</h3>
+                            <p style="font-size: 13px; color: var(--on-surface-secondary);">
+                                Paste the finished article text. We preserve your facts and wording, then add structure,
+                                SEO, images, tags, and internal links. Published to <strong>/blogs/news/</strong>.
+                            </p>
+                            <div class="form-group">
+                                <label>Article text</label>
+                                <textarea id="news-source" class="form-control" rows="14" placeholder="Paste the full news article here…"></textarea>
+                            </div>
+                            <div class="form-group">
+                                <label>Source URLs <span style="color: var(--on-surface-secondary); font-weight: normal;">(optional — add one or more; shown as a “Sources” section)</span></label>
+                                <div id="source-urls"></div>
+                                <button type="button" class="btn btn-secondary btn-sm" onclick="addSourceUrl()" style="margin-top:6px;">
+                                    <span class="material-symbols-rounded">add</span> Add source
+                                </button>
+                            </div>
+                            <button class="btn btn-primary" onclick="analyzeNews()">
+                                <span class="material-symbols-rounded">auto_awesome</span> Analyze &amp; Enhance
+                            </button>
+                            <div id="news-analyze-status" style="margin-top: 12px;"></div>
+                        </div>
+                    </div>
+
+                    <!-- Step 2: Review -->
+                    <div id="news-step-review" style="display:none;">
+                        <div class="news-review-grid">
+                            <div class="card">
+                                <div class="form-group">
+                                    <label>Headline</label>
+                                    <input type="text" id="f-headline" class="form-control">
+                                </div>
+                                <div style="display:grid; grid-template-columns: 1fr 1fr; gap: 12px;">
+                                    <div class="form-group">
+                                        <label>Kicker / Overline</label>
+                                        <input type="text" id="f-kicker" class="form-control">
+                                    </div>
+                                    <div class="form-group">
+                                        <label>Category</label>
+                                        <input type="text" id="f-category" class="form-control" list="category-list">
+                                        <datalist id="category-list"></datalist>
+                                    </div>
+                                </div>
+                                <div class="form-group">
+                                    <label>Meta Title <span id="cc-metatitle" class="char-count"></span></label>
+                                    <input type="text" id="f-metatitle" class="form-control" oninput="countChar('f-metatitle','cc-metatitle',60)">
+                                </div>
+                                <div class="form-group">
+                                    <label>Meta Description <span id="cc-metadesc" class="char-count"></span></label>
+                                    <textarea id="f-metadesc" class="form-control" rows="2" oninput="countChar('f-metadesc','cc-metadesc',160)"></textarea>
+                                </div>
+                                <div class="form-group">
+                                    <label>Summary / Excerpt <span id="cc-summary" class="char-count"></span></label>
+                                    <textarea id="f-summary" class="form-control" rows="2" oninput="countChar('f-summary','cc-summary',160)"></textarea>
+                                </div>
+                                <div class="form-group">
+                                    <label>Tags <span style="color: var(--on-surface-secondary); font-weight: normal;">(comma-separated; type:news is enforced)</span></label>
+                                    <input type="text" id="f-tags" class="form-control">
+                                </div>
+                                <div class="form-group">
+                                    <label>Body HTML</label>
+                                    <textarea id="f-body" class="form-control news-body-textarea" rows="18" oninput="renderPreview()"></textarea>
+                                </div>
+                            </div>
+
+                            <div>
+                                <div class="card">
+                                    <h4 style="margin-top:0;">Hero image</h4>
+                                    <div id="hero-preview-wrap"></div>
+                                    <button class="btn btn-secondary btn-sm" id="hero-btn" onclick="generateHero()" style="width:100%;">
+                                        <span class="material-symbols-rounded">image</span> Generate Hero
+                                    </button>
+                                </div>
+
+                                <div class="card">
+                                    <h4 style="margin-top:0;">Inline images</h4>
+                                    <div id="inline-list"></div>
+                                    <button class="btn btn-secondary btn-sm" id="inline-btn" onclick="generateInline()" style="width:100%;">
+                                        <span class="material-symbols-rounded">add_photo_alternate</span> Generate Inline Images
+                                    </button>
+                                </div>
+
+                                <div class="card">
+                                    <h4 style="margin-top:0;">Internal links</h4>
+                                    <p style="font-size:12px;color:var(--on-surface-secondary);margin-top:0;">
+                                        Final pass: weaves in contextual links to relevant products, collections, and articles.
+                                    </p>
+                                    <div id="links-status"></div>
+                                    <button class="btn btn-secondary btn-sm" id="links-btn" onclick="generateLinks()" style="width:100%;">
+                                        <span class="material-symbols-rounded">link</span> Generate Internal Links
+                                    </button>
+                                </div>
+
+                                <div class="card">
+                                    <h4 style="margin-top:0;">Preview</h4>
+                                    <div class="news-preview" id="news-preview"></div>
+                                </div>
+
+                                <div class="card">
+                                    <button class="btn btn-secondary" onclick="publishNews(false)" style="width:100%; margin-bottom:8px;">
+                                        <span class="material-symbols-rounded">save</span> Save as Draft
+                                    </button>
+                                    <button class="btn btn-primary" onclick="publishNews(true)" style="width:100%;">
+                                        <span class="material-symbols-rounded">publish</span> Publish Now
+                                    </button>
+                                    <p style="font-size: 12px; color: var(--on-surface-secondary); margin: 10px 0 0;">
+                                        Tip: generate the hero &amp; inline images before publishing.
+                                    </p>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Step 3: Done -->
+                    <div id="news-step-done" style="display:none;">
+                        <div class="card" style="max-width: 560px; margin: 40px auto; text-align:center;">
+                            <span class="material-symbols-rounded" style="font-size:56px; color: var(--success, #1e8e3e);">check_circle</span>
+                            <h3 id="done-msg">Published!</h3>
+                            <p><a id="done-link" class="news-link" href="#" target="_blank" rel="noopener"></a></p>
+                            <div style="display:flex; gap:8px; justify-content:center; margin-top:16px;">
+                                <button class="btn btn-secondary" onclick="resetCreate()">Create Another</button>
+                                <button class="btn btn-primary" onclick="switchTab('published')">View Published</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Published -->
+                <div class="tab-panel" id="tab-published">
+                    <div id="news-articles-container"><p style="color: var(--on-surface-secondary);">Loading…</p></div>
+                </div>
+
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/js/app.js"></script>
+    <script src="/static/js/news.js"></script>
+</body>
+</html>

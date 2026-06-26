@@ -1,0 +1,346 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Search Console — SEO Platform</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+    <div class="app-layout">
+        {% include '_sidebar.html' %}
+        <div class="main-content">
+            <div class="topbar">
+                <div class="topbar-left">
+                    <button id="sidebar-toggle" class="icon-btn"><span class="material-symbols-rounded">menu</span></button>
+                    <h2>Search Console</h2>
+                </div>
+                <div class="topbar-right">
+                    <button id="theme-toggle" class="icon-btn"><span class="material-symbols-rounded">dark_mode</span></button>
+                </div>
+            </div>
+            <div class="page-content">
+
+                <!-- Store selector -->
+                <div style="margin-bottom: 24px;">
+                    <div class="form-group" style="max-width: 320px; margin-bottom: 0;">
+                        <label for="gsc-store-select">Store</label>
+                        <select id="gsc-store-select" class="form-control">
+                            <option value="">Select a store...</option>
+                        </select>
+                    </div>
+                </div>
+
+                <!-- Connection state: not connected -->
+                <div id="gsc-not-connected" style="display: none;">
+                    <div class="card" style="max-width: 600px; text-align: center; padding: 48px 32px;">
+                        <span class="material-symbols-rounded" style="font-size: 48px; color: var(--on-surface-secondary); margin-bottom: 16px;">link_off</span>
+                        <h3 style="margin-bottom: 8px;">Connect Google Search Console</h3>
+                        <p style="color: var(--on-surface-secondary); margin-bottom: 24px; font-size: 14px;">
+                            Link your Google Search Console to see real ranking data, traffic trends, and SEO opportunities.<br>
+                            Configure your Google OAuth credentials in <a href="/settings" style="color: var(--primary);">Settings</a> first.
+                        </p>
+                        <button id="gsc-connect-btn" class="btn btn-primary">
+                            <span class="material-symbols-rounded" style="font-size: 18px; vertical-align: middle; margin-right: 4px;">login</span>
+                            Connect Google Account
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Connection state: needs property selection -->
+                <div id="gsc-select-property" style="display: none;">
+                    <div class="card" style="max-width: 600px;">
+                        <div class="card-header">
+                            <h3>Select a Property</h3>
+                        </div>
+                        <p style="color: var(--on-surface-secondary); font-size: 14px; margin-bottom: 16px;">
+                            Choose the Google Search Console property to track. Data will be backfilled automatically.
+                        </p>
+                        <div id="gsc-properties-list"></div>
+                    </div>
+                </div>
+
+                <!-- Connection state: connected — dashboard -->
+                <div id="gsc-dashboard" style="display: none;">
+
+                    <!-- Connection info bar -->
+                    <div style="display: flex; align-items: center; gap: 16px; margin-bottom: 24px; flex-wrap: wrap;">
+                        <div style="flex: 1; display: flex; align-items: center; gap: 8px;">
+                            <span class="badge badge-success" style="font-size: 11px;">Connected</span>
+                            <span id="gsc-property-name" style="font-weight: 600; font-size: 14px;"></span>
+                            <span id="gsc-data-range" style="color: var(--on-surface-secondary); font-size: 12px;"></span>
+                        </div>
+                        <div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap;">
+                            <select id="gsc-date-range" class="form-control" style="width: auto; min-width: 140px;">
+                                <option value="1">Last 24 hours</option>
+                                <option value="3">Last 3 days</option>
+                                <option value="7">Last 7 days</option>
+                                <option value="28" selected>Last 28 days</option>
+                                <option value="90">Last 3 months</option>
+                            </select>
+                            <select id="gsc-device-filter" class="form-control" style="width: auto; min-width: 120px;">
+                                <option value="">All Devices</option>
+                                <option value="DESKTOP">Desktop</option>
+                                <option value="MOBILE">Mobile</option>
+                                <option value="TABLET">Tablet</option>
+                            </select>
+                            <select id="gsc-country-filter" class="form-control" style="width: auto; min-width: 120px;">
+                                <option value="">All Countries</option>
+                            </select>
+                            <button id="gsc-refresh-btn" class="btn btn-secondary btn-sm" title="Pull latest data">
+                                <span class="material-symbols-rounded" style="font-size: 16px;">sync</span>
+                            </button>
+                            <button id="gsc-disconnect-btn" class="btn btn-secondary btn-sm" title="Disconnect" style="color: var(--error);">
+                                <span class="material-symbols-rounded" style="font-size: 16px;">link_off</span>
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- Overview Cards -->
+                    <div class="metric-cards" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; margin-bottom: 24px;">
+                        <div class="card metric-card">
+                            <div class="metric-label">Total Clicks</div>
+                            <div class="metric-value" id="gsc-total-clicks">—</div>
+                            <div class="metric-change" id="gsc-clicks-change"></div>
+                        </div>
+                        <div class="card metric-card">
+                            <div class="metric-label">Total Impressions</div>
+                            <div class="metric-value" id="gsc-total-impressions">—</div>
+                            <div class="metric-change" id="gsc-impressions-change"></div>
+                        </div>
+                        <div class="card metric-card">
+                            <div class="metric-label">Avg CTR</div>
+                            <div class="metric-value" id="gsc-avg-ctr">—</div>
+                            <div class="metric-change" id="gsc-ctr-change"></div>
+                        </div>
+                        <div class="card metric-card">
+                            <div class="metric-label">Avg Position</div>
+                            <div class="metric-value" id="gsc-avg-position">—</div>
+                            <div class="metric-change" id="gsc-position-change"></div>
+                        </div>
+                    </div>
+
+                    <!-- Trend Chart -->
+                    <div class="card" style="margin-bottom: 24px;">
+                        <div class="card-header" style="display: flex; align-items: center; justify-content: space-between;">
+                            <h3>Performance Trends</h3>
+                            <div style="display: flex; gap: 12px;">
+                                <label style="font-size: 12px; display: flex; align-items: center; gap: 4px; cursor: pointer;">
+                                    <input type="checkbox" id="chart-clicks" checked style="accent-color: var(--primary);"> Clicks
+                                </label>
+                                <label style="font-size: 12px; display: flex; align-items: center; gap: 4px; cursor: pointer;">
+                                    <input type="checkbox" id="chart-impressions" checked style="accent-color: #8b5cf6;"> Impressions
+                                </label>
+                            </div>
+                        </div>
+                        <div id="gsc-trend-chart" style="width: 100%; height: 260px; position: relative;"></div>
+                    </div>
+
+                    <!-- Tabs: Pages / Queries / Opportunities / Cannibalization / Score Trends -->
+                    <div class="tabs" style="margin-bottom: 0;">
+                        <button class="tab active" data-gsc-tab="pages">Top Pages</button>
+                        <button class="tab" data-gsc-tab="queries">Top Queries</button>
+                        <button class="tab" data-gsc-tab="opportunities">Opportunities</button>
+                        <button class="tab" data-gsc-tab="cannibalization">Cannibalization</button>
+                        <button class="tab" data-gsc-tab="scores">SEO Scores</button>
+                    </div>
+
+                    <!-- Top Pages -->
+                    <div class="gsc-tab-panel active" id="gsc-tab-pages">
+                        <div class="card" style="border-top-left-radius: 0; border-top-right-radius: 0;">
+                            <table class="data-table">
+                                <thead>
+                                    <tr>
+                                        <th style="width: 50%;">Page</th>
+                                        <th>Clicks</th>
+                                        <th>Impressions</th>
+                                        <th>CTR</th>
+                                        <th>Position</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="gsc-pages-tbody"></tbody>
+                            </table>
+                            <div id="gsc-pages-empty" class="empty-state" style="display: none;">No page data available for this period.</div>
+                        </div>
+                    </div>
+
+                    <!-- Top Queries -->
+                    <div class="gsc-tab-panel" id="gsc-tab-queries" style="display: none;">
+                        <div class="card" style="border-top-left-radius: 0; border-top-right-radius: 0;">
+                            <table class="data-table">
+                                <thead>
+                                    <tr>
+                                        <th style="width: 40%;">Query</th>
+                                        <th>Clicks</th>
+                                        <th>Impressions</th>
+                                        <th>CTR</th>
+                                        <th>Position</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="gsc-queries-tbody"></tbody>
+                            </table>
+                            <div id="gsc-queries-empty" class="empty-state" style="display: none;">No query data available for this period.</div>
+                        </div>
+                    </div>
+
+                    <!-- Opportunities -->
+                    <div class="gsc-tab-panel" id="gsc-tab-opportunities" style="display: none;">
+                        <div class="card" style="border-top-left-radius: 0; border-top-right-radius: 0;">
+                            <p style="color: var(--on-surface-secondary); font-size: 13px; margin: 0 0 16px;">
+                                Pages with high impressions but low CTR (&lt;5%). Improving meta titles and descriptions on these pages can quickly boost traffic.
+                            </p>
+                            <table class="data-table">
+                                <thead>
+                                    <tr>
+                                        <th style="width: 30%;">Page</th>
+                                        <th style="width: 20%;">Query</th>
+                                        <th>Impressions</th>
+                                        <th>CTR</th>
+                                        <th>Position</th>
+                                        <th>Potential +Clicks</th>
+                                        <th>Action</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="gsc-opportunities-tbody"></tbody>
+                            </table>
+                            <div id="gsc-opportunities-empty" class="empty-state" style="display: none;">No opportunities detected — your CTR looks healthy!</div>
+                        </div>
+                    </div>
+
+                    <!-- Cannibalization -->
+                    <div class="gsc-tab-panel" id="gsc-tab-cannibalization" style="display: none;">
+                        <div class="card" style="border-top-left-radius: 0; border-top-right-radius: 0;">
+
+                            <!-- Summary Cards -->
+                            <div id="cannibal-summary" style="display: none; margin-bottom: 16px;">
+                                <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin-bottom: 16px;">
+                                    <div class="metric-card" style="padding: 12px;">
+                                        <div class="metric-label">Cannibalizing Queries</div>
+                                        <div style="font-size: 24px; font-weight: 700;" id="cannibal-total-queries">0</div>
+                                    </div>
+                                    <div class="metric-card" style="padding: 12px;">
+                                        <div class="metric-label">Pages Affected</div>
+                                        <div style="font-size: 24px; font-weight: 700;" id="cannibal-total-pages">0</div>
+                                    </div>
+                                    <div class="metric-card" style="padding: 12px;">
+                                        <div class="metric-label">Impressions at Risk</div>
+                                        <div style="font-size: 24px; font-weight: 700;" id="cannibal-total-impressions">0</div>
+                                    </div>
+                                    <div class="metric-card" style="padding: 12px;">
+                                        <div class="metric-label">Monthly Volume</div>
+                                        <div style="font-size: 24px; font-weight: 700;" id="cannibal-total-volume">0</div>
+                                    </div>
+                                    <div class="metric-card" style="padding: 12px;">
+                                        <div class="metric-label">Severity</div>
+                                        <div style="font-size: 13px; margin-top: 4px;">
+                                            <span class="badge badge-error" id="cannibal-high">0 high</span>
+                                            <span class="badge badge-warning" id="cannibal-medium">0 med</span>
+                                            <span class="badge badge-info" id="cannibal-low">0 low</span>
+                                        </div>
+                                    </div>
+                                </div>
+                                <button class="btn btn-secondary btn-sm" id="cannibal-verify-btn" onclick="verifyCannibalizationFixes()" style="margin-top: 8px;">
+                                    <span class="material-symbols-rounded" style="font-size: 14px; vertical-align: middle;">verified</span>
+                                    Verify Pending Fixes
+                                </button>
+                            </div>
+
+                            <!-- Filters & Sort Controls -->
+                            <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 16px; flex-wrap: wrap;">
+                                <span style="font-size: 13px; color: var(--on-surface-secondary);">Filter:</span>
+                                <select id="cannibal-severity-filter" class="form-control" style="width: auto; min-width: 120px; font-size: 13px;">
+                                    <option value="">All Severity</option>
+                                    <option value="high">High</option>
+                                    <option value="medium">Medium</option>
+                                    <option value="low">Low</option>
+                                </select>
+                                <select id="cannibal-status-filter" class="form-control" style="width: auto; min-width: 130px; font-size: 13px;">
+                                    <option value="">All Status</option>
+                                    <option value="unfixed">Unfixed</option>
+                                    <option value="pending">Fix Pending</option>
+                                    <option value="needs_attention">Needs Attention</option>
+                                    <option value="verified">Verified</option>
+                                </select>
+                                <span style="font-size: 13px; color: var(--on-surface-secondary); margin-left: 8px;">Sort:</span>
+                                <select id="cannibal-sort" class="form-control" style="width: auto; min-width: 180px; font-size: 13px;">
+                                    <option value="severity">Severity (highest first)</option>
+                                    <option value="volume_desc">Monthly Volume (highest)</option>
+                                    <option value="impressions_desc">Impressions (most first)</option>
+                                    <option value="impressions_asc">Impressions (least first)</option>
+                                    <option value="clicks_desc">Clicks (most first)</option>
+                                    <option value="pages_desc">Page Count (most first)</option>
+                                    <option value="pages_asc">Page Count (least first)</option>
+                                    <option value="query_asc">Query (A-Z)</option>
+                                    <option value="query_desc">Query (Z-A)</option>
+                                </select>
+                                <input type="text" id="cannibal-search" class="form-control" placeholder="Search queries..." style="width: auto; min-width: 180px; font-size: 13px;">
+                                <span id="cannibal-showing" style="font-size: 12px; color: var(--on-surface-secondary); margin-left: auto;"></span>
+                            </div>
+
+                            <div id="gsc-cannibalization-list"></div>
+                            <div id="gsc-cannibalization-empty" class="empty-state" style="display: none;">No keyword cannibalization detected.</div>
+
+                            <!-- Load More -->
+                            <div id="cannibal-load-more" style="display: none; text-align: center; padding: 12px;">
+                                <button class="btn btn-secondary btn-sm" id="cannibal-load-more-btn">Load More</button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- SEO Score Trends -->
+                    <div class="gsc-tab-panel" id="gsc-tab-scores" style="display: none;">
+                        <div class="card" style="border-top-left-radius: 0; border-top-right-radius: 0;">
+                            <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px;">
+                                <p style="color: var(--on-surface-secondary); font-size: 13px; margin: 0;">
+                                    Track your SEO score progress over time. Take snapshots to record current scores.
+                                </p>
+                                <button id="gsc-snapshot-btn" class="btn btn-primary btn-sm">
+                                    <span class="material-symbols-rounded" style="font-size: 16px; vertical-align: middle; margin-right: 4px;">photo_camera</span>
+                                    Take Snapshot
+                                </button>
+                            </div>
+                            <div id="gsc-score-chart" style="width: 100%; height: 220px; position: relative; margin-bottom: 24px;"></div>
+                            <h4 style="margin-bottom: 12px;">Biggest Changes</h4>
+                            <table class="data-table">
+                                <thead>
+                                    <tr>
+                                        <th>Type</th>
+                                        <th style="width: 40%;">Title</th>
+                                        <th>Current Score</th>
+                                        <th>Previous Score</th>
+                                        <th>Change</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="gsc-improvements-tbody"></tbody>
+                            </table>
+                            <div id="gsc-improvements-empty" class="empty-state" style="display: none;">No score history yet. Take a snapshot to start tracking.</div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Detail Modal -->
+                <div id="gsc-detail-modal" class="modal-overlay" style="display: none;">
+                    <div class="modal" style="max-width: 700px;">
+                        <div class="modal-header">
+                            <h3 id="gsc-detail-title">Detail</h3>
+                            <button class="icon-btn" id="gsc-detail-close"><span class="material-symbols-rounded">close</span></button>
+                        </div>
+                        <div class="modal-body">
+                            <table class="data-table">
+                                <thead>
+                                    <tr id="gsc-detail-thead"></tr>
+                                </thead>
+                                <tbody id="gsc-detail-tbody"></tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/js/app.js"></script>
+    <script src="/static/js/gsc.js"></script>
+</body>
+</html>

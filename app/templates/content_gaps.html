@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Content Gaps — SEO Platform</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+    <div class="app-layout">
+        {% include '_sidebar.html' %}
+        <div class="main-content">
+            <div class="topbar">
+                <div class="topbar-left">
+                    <button id="sidebar-toggle" class="icon-btn"><span class="material-symbols-rounded">menu</span></button>
+                    <h2>Content Gaps</h2>
+                </div>
+                <div class="topbar-right">
+                    <button id="theme-toggle" class="icon-btn"><span class="material-symbols-rounded">dark_mode</span></button>
+                </div>
+            </div>
+            <div class="page-content">
+                <div style="display: flex; gap: 12px; align-items: center; margin-bottom: 24px; flex-wrap: wrap;">
+                    <div class="form-group" style="max-width: 320px; margin-bottom: 0;">
+                        <label for="cg-store-select">Store</label>
+                        <select id="cg-store-select" class="form-control"><option value="">Select a store...</option></select>
+                    </div>
+                    <button id="cg-discover-btn" class="btn btn-primary" style="margin-top: 18px;">
+                        <span class="material-symbols-rounded" style="font-size:16px;vertical-align:middle;">search</span> Run Gap Discovery
+                    </button>
+                </div>
+
+                <div id="cg-overview" style="display:none;margin-bottom:24px;">
+                    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;">
+                        <div class="card metric-card"><div class="metric-label">Total Gaps</div><div class="metric-value" id="cg-total">0</div></div>
+                        <div class="card metric-card"><div class="metric-label">Total Volume</div><div class="metric-value" id="cg-volume">0</div></div>
+                        <div class="card metric-card"><div class="metric-label">Avg Score</div><div class="metric-value" id="cg-score">0</div></div>
+                        <div class="card metric-card"><div class="metric-label">By Type</div>
+                            <div style="font-size:12px;margin-top:4px;">
+                                <span class="badge badge-error" id="cg-missing">0 missing</span>
+                                <span class="badge badge-warning" id="cg-weak">0 weak</span>
+                            </div>
+                        </div>
+                        <div class="card metric-card"><div class="metric-label">By Intent</div>
+                            <div style="font-size:12px;margin-top:4px;">
+                                <span class="badge badge-success" id="cg-transactional">0 txn</span>
+                                <span class="badge badge-warning" id="cg-commercial">0 com</span>
+                                <span class="badge badge-info" id="cg-informational">0 info</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div id="cg-content" style="display:none;">
+                    <div class="card">
+                        <div style="display:flex;gap:8px;margin-bottom:12px;align-items:center;flex-wrap:wrap;">
+                            <input type="text" id="cg-search" class="form-control" placeholder="Search keywords..." style="width:auto;min-width:200px;font-size:13px;">
+                            <select id="cg-type-filter" class="form-control" style="width:auto;font-size:13px;">
+                                <option value="">All Types</option><option value="missing">Missing</option><option value="weak">Weak</option>
+                            </select>
+                            <select id="cg-intent-filter" class="form-control" style="width:auto;font-size:13px;">
+                                <option value="">All Intent</option><option value="transactional">Transactional</option><option value="commercial">Commercial</option><option value="informational">Informational</option>
+                            </select>
+                            <select id="cg-status-filter" class="form-control" style="width:auto;font-size:13px;">
+                                <option value="">All Status</option><option value="new">New</option><option value="briefed">Briefed</option><option value="in_progress">In Progress</option><option value="published">Published</option><option value="dismissed">Dismissed</option>
+                            </select>
+                            <span id="cg-count" style="font-size:12px;color:var(--on-surface-secondary);margin-left:auto;"></span>
+                        </div>
+                        <table class="data-table">
+                            <thead><tr id="cg-thead"></tr></thead>
+                            <tbody id="cg-tbody"></tbody>
+                        </table>
+                        <div id="cg-empty" class="empty-state" style="display:none;">No content gaps found. Run Gap Discovery first.</div>
+                    </div>
+                </div>
+
+                <div id="cg-brief-modal" class="modal-overlay">
+                    <div class="modal" style="max-width:800px;">
+                        <div class="modal-header">
+                            <h3 id="cg-brief-title">Content Brief</h3>
+                            <button class="icon-btn" onclick="document.getElementById('cg-brief-modal').classList.remove('active')"><span class="material-symbols-rounded">close</span></button>
+                        </div>
+                        <div class="modal-body" id="cg-brief-content"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    <script src="/static/js/app.js"></script>
+    <script src="/static/js/content_gaps.js"></script>
+</body>
+</html>

@@ -1,9 +1,13 @@
+import json
+
 from flask import Blueprint, jsonify, render_template, request
 
 from openai import OpenAI
 
 from app.auth import decrypt_value, encrypt_value
 from app.database import db
+from app.prompt_defaults import DEFAULTS
+from app.settings_manager import delete_setting, get_all_custom, get_effective, get_setting, set_setting
 
 settings_bp = Blueprint("settings", __name__)
 
@@ -28,6 +32,9 @@ def get_ai_config():
             "model": config.get("model") or "anthropic/claude-sonnet-4",
             "daily_budget": float(config.get("daily_budget") or 10),
             "has_brave_key": bool(config.get("brave_api_key_enc")),
+            "image_model": config.get("image_model") or "google/gemini-2.5-flash-image",
+            "has_gsc_client_id": bool(config.get("gsc_client_id_enc")),
+            "has_gsc_client_secret": bool(config.get("gsc_client_secret_enc")),
         }
     )
 
@@ -38,6 +45,7 @@ def save_ai_config():
     api_key = (data.get("api_key") or "").strip()
     model = (data.get("model") or "anthropic/claude-sonnet-4").strip()
     daily_budget = data.get("daily_budget", 10.00)
+    image_model = (data.get("image_model") or "google/gemini-2.5-flash-image").strip()
 
     with db.get_cursor() as cur:
         cur.execute("SELECT id FROM ai_config ORDER BY id LIMIT 1")
@@ -47,19 +55,49 @@ def save_ai_config():
             if api_key:
                 key_enc = encrypt_value(api_key)
                 cur.execute(
-                    "UPDATE ai_config SET api_key_enc=%s, model=%s, daily_budget=%s, updated_at=NOW() WHERE id=%s",
-                    (key_enc, model, daily_budget, existing["id"]),
+                    "UPDATE ai_config SET api_key_enc=%s, model=%s, daily_budget=%s, image_model=%s, updated_at=NOW() WHERE id=%s",
+                    (key_enc, model, daily_budget, image_model, existing["id"]),
                 )
             else:
                 cur.execute(
-                    "UPDATE ai_config SET model=%s, daily_budget=%s, updated_at=NOW() WHERE id=%s",
-                    (model, daily_budget, existing["id"]),
+                    "UPDATE ai_config SET model=%s, daily_budget=%s, image_model=%s, updated_at=NOW() WHERE id=%s",
+                    (model, daily_budget, image_model, existing["id"]),
                 )
         else:
             key_enc = encrypt_value(api_key) if api_key else None
             cur.execute(
-                "INSERT INTO ai_config (api_key_enc, model, daily_budget) VALUES (%s, %s, %s)",
-                (key_enc, model, daily_budget),
+                "INSERT INTO ai_config (api_key_enc, model, daily_budget, image_model) VALUES (%s, %s, %s, %s)",
+                (key_enc, model, daily_budget, image_model),
+            )
+
+    return jsonify({"ok": True})
+
+
+@settings_bp.route("/api/settings/gsc", methods=["POST"])
+def save_gsc_config():
+    data = request.get_json()
+    client_id = (data.get("client_id") or "").strip()
+    client_secret = (data.get("client_secret") or "").strip()
+
+    if not client_id or not client_secret:
+        return jsonify({"error": "Both client_id and client_secret are required"}), 400
+
+    id_enc = encrypt_value(client_id)
+    secret_enc = encrypt_value(client_secret)
+
+    with db.get_cursor() as cur:
+        cur.execute("SELECT id FROM ai_config ORDER BY id LIMIT 1")
+        existing = cur.fetchone()
+
+        if existing:
+            cur.execute(
+                "UPDATE ai_config SET gsc_client_id_enc = %s, gsc_client_secret_enc = %s, updated_at = NOW() WHERE id = %s",
+                (id_enc, secret_enc, existing["id"]),
+            )
+        else:
+            cur.execute(
+                "INSERT INTO ai_config (gsc_client_id_enc, gsc_client_secret_enc) VALUES (%s, %s)",
+                (id_enc, secret_enc),
             )
 
     return jsonify({"ok": True})
@@ -165,6 +203,56 @@ def get_ai_models():
         return jsonify({"error": str(e)}), 500
 
 
+@settings_bp.route("/api/settings/ai/image-models", methods=["GET"])
+def get_image_models():
+    import requests
+
+    try:
+        response = requests.get("https://openrouter.ai/api/v1/models", timeout=15)
+        if response.status_code != 200:
+            return jsonify({"models": _fallback_image_models()})
+
+        data = response.json()
+        models = []
+        for model in data.get("data", []):
+            arch = model.get("architecture", {})
+            output_mods = arch.get("output_modalities", [])
+            if "image" not in output_mods:
+                continue
+            model_id = model.get("id", "")
+            if model_id == "openrouter/auto":
+                continue
+
+            pricing = model.get("pricing", {})
+            prompt_per_m = float(pricing.get("prompt", "0")) * 1_000_000
+            image_per_m = float(pricing.get("image", pricing.get("completion", "0"))) * 1_000_000
+
+            models.append({
+                "id": model_id,
+                "name": model.get("name", model_id),
+                "pricing": {
+                    "prompt": round(prompt_per_m, 2),
+                    "image": round(image_per_m, 2),
+                },
+            })
+
+        models.sort(key=lambda m: m["pricing"]["prompt"])
+        if models:
+            return jsonify({"models": models})
+        return jsonify({"models": _fallback_image_models()})
+    except Exception:
+        return jsonify({"models": _fallback_image_models()})
+
+
+def _fallback_image_models():
+    return [
+        {"id": "google/gemini-2.5-flash-image", "name": "Google: Gemini 2.5 Flash Image", "pricing": {"prompt": 0, "image": 0}},
+        {"id": "google/gemini-3-pro-image-preview", "name": "Google: Gemini 3 Pro Image Preview", "pricing": {"prompt": 0, "image": 0}},
+        {"id": "openai/gpt-5-image-mini", "name": "OpenAI: GPT-5 Image Mini", "pricing": {"prompt": 0, "image": 0}},
+        {"id": "openai/gpt-5-image", "name": "OpenAI: GPT-5 Image", "pricing": {"prompt": 0, "image": 0}},
+    ]
+
+
 @settings_bp.route("/api/settings/ai/test", methods=["POST"])
 def test_ai_connection():
     with db.get_cursor() as cur:
@@ -191,3 +279,67 @@ def test_ai_connection():
         return jsonify({"ok": True, "response": reply})
     except Exception as e:
         return jsonify({"error": str(e)}), 400
+
+
+@settings_bp.route("/api/settings/custom", methods=["GET"])
+def list_custom_settings():
+    prefix = request.args.get("prefix", "")
+    effective = get_effective(prefix if prefix else None)
+    overrides = get_all_custom(prefix if prefix else None)
+    result = {}
+    for key, value in effective.items():
+        result[key] = {
+            "value": value,
+            "is_custom": key in overrides,
+        }
+    return jsonify(result)
+
+
+@settings_bp.route("/api/settings/custom/<path:key>", methods=["GET"])
+def get_custom_setting(key):
+    overrides = get_all_custom()
+    value = get_setting(key)
+    if value is None:
+        return jsonify({"error": "Unknown setting key"}), 404
+    return jsonify({
+        "key": key,
+        "value": value,
+        "is_custom": key in overrides,
+    })
+
+
+@settings_bp.route("/api/settings/custom/<path:key>", methods=["POST"])
+def save_custom_setting(key):
+    if key not in DEFAULTS:
+        return jsonify({"error": f"Unknown setting key: {key}"}), 400
+
+    data = request.get_json()
+    value = data.get("value")
+    if value is None:
+        return jsonify({"error": "value is required"}), 400
+
+    default = DEFAULTS[key]
+    if isinstance(default, dict):
+        if not isinstance(value, dict):
+            return jsonify({"error": "Value must be a JSON object"}), 400
+        if "weights" in default and "weights" in value:
+            total = sum(value["weights"].values())
+            if abs(total - 1.0) > 0.01:
+                return jsonify({"error": f"Weights must sum to 1.0 (currently {total:.2f})"}), 400
+
+    set_setting(key, value)
+    return jsonify({"ok": True})
+
+
+@settings_bp.route("/api/settings/custom/<path:key>", methods=["DELETE"])
+def reset_custom_setting(key):
+    delete_setting(key)
+    default_value = DEFAULTS.get(key)
+    return jsonify({"ok": True, "default_value": default_value})
+
+
+@settings_bp.route("/api/settings/defaults/<path:key>", methods=["GET"])
+def get_default_setting(key):
+    if key not in DEFAULTS:
+        return jsonify({"error": "Unknown setting key"}), 404
+    return jsonify({"key": key, "value": DEFAULTS[key]})

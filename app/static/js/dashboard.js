@@ -1,14 +1,171 @@
-document.addEventListener("DOMContentLoaded", loadStats);
+let dashStoreId = null;
+
+document.addEventListener("DOMContentLoaded", async () => {
+    try {
+        const stores = await apiRequest("/api/stores");
+        if (stores.length) dashStoreId = stores[0].id;
+    } catch {}
+    loadStats();
+    loadGSCSummary();
+    loadTopPriorities();
+});
 
 async function loadStats() {
     try {
-        const stats = await apiRequest("/api/dashboard/stats");
+        const url = dashStoreId ? `/api/dashboard/stats?store_id=${dashStoreId}` : "/api/dashboard/stats";
+        const stats = await apiRequest(url);
         document.getElementById("stat-stores").textContent = stats.stores;
         document.getElementById("stat-products").textContent =
             stats.products.toLocaleString();
         document.getElementById("stat-seo").textContent = stats.avg_seo_score;
         document.getElementById("stat-tasks").textContent = stats.ai_tasks;
+
+        if (stats.insights) {
+            renderInsights(stats.insights);
+        }
     } catch (err) {
         showToast("Failed to load dashboard stats", "error");
+    }
+}
+
+function renderInsights(insights) {
+    const container = document.getElementById("dash-insights");
+    if (!container) return;
+
+    let html = '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px;">';
+
+    // Semrush summary
+    if (insights.semrush) {
+        const sr = insights.semrush;
+        html += `<a href="/semrush" class="insight-card insight-clickable">
+            <div class="insight-icon" style="color:var(--primary);"><span class="material-symbols-rounded">search</span></div>
+            <div class="insight-label">Semrush Keywords</div>
+            <div class="insight-value">${sr.total_keywords.toLocaleString()}</div>
+            <div class="insight-detail">Avg pos: ${sr.avg_position} | Striking: ${sr.striking_count}</div>
+        </a>`;
+    }
+
+    // Cannibalization
+    if (insights.cannibalization_count > 0) {
+        html += `<a href="/seo?tab=priorities" class="insight-card insight-clickable" style="border-color:var(--error);">
+            <div class="insight-icon" style="color:var(--error);"><span class="material-symbols-rounded">warning</span></div>
+            <div class="insight-label">Cannibalization Issues</div>
+            <div class="insight-value" style="color:var(--error);">${insights.cannibalization_count}</div>
+            <div class="insight-detail">Keywords ranking on multiple pages</div>
+        </a>`;
+    }
+
+    // Competitor alerts
+    if (insights.unread_competitor_alerts > 0) {
+        html += `<a href="/competitors" class="insight-card insight-clickable" style="border-color:var(--warning);">
+            <div class="insight-icon" style="color:var(--warning);"><span class="material-symbols-rounded">groups</span></div>
+            <div class="insight-label">Competitor Alerts</div>
+            <div class="insight-value" style="color:var(--warning);">${insights.unread_competitor_alerts}</div>
+            <div class="insight-detail">Unread ranking changes</div>
+        </a>`;
+    }
+
+    // Content gaps
+    if (insights.content_gaps && insights.content_gaps.new > 0) {
+        html += `<a href="/content-gaps" class="insight-card insight-clickable">
+            <div class="insight-icon" style="color:var(--primary);"><span class="material-symbols-rounded">lightbulb</span></div>
+            <div class="insight-label">Content Gaps</div>
+            <div class="insight-value">${insights.content_gaps.new}</div>
+            <div class="insight-detail">${insights.content_gaps.total} total opportunities</div>
+        </a>`;
+    }
+
+    // Technical SEO
+    if (insights.technical_seo && insights.technical_seo.total_issues > 0) {
+        html += `<a href="/technical-seo" class="insight-card insight-clickable">
+            <div class="insight-icon" style="color:var(--warning);"><span class="material-symbols-rounded">build</span></div>
+            <div class="insight-label">Technical Issues</div>
+            <div class="insight-value">${insights.technical_seo.total_issues}</div>
+            <div class="insight-detail">${insights.technical_seo.fixable_issues} auto-fixable</div>
+        </a>`;
+    }
+
+    // Interlinking
+    if (insights.interlinking) {
+        const il = insights.interlinking;
+        const orphans = il.orphan_products + il.orphan_collections;
+        if (orphans > 0 || il.broken_links > 0) {
+            html += `<a href="/interlinking" class="insight-card insight-clickable">
+                <div class="insight-icon" style="color:var(--on-surface-secondary);"><span class="material-symbols-rounded">link</span></div>
+                <div class="insight-label">Link Health</div>
+                <div class="insight-value">${orphans} orphans</div>
+                <div class="insight-detail">${il.under_linked} under-linked | ${il.broken_links} broken</div>
+            </a>`;
+        }
+    }
+
+    // Recent optimizations
+    if (insights.recent_optimizations > 0) {
+        html += `<a href="/seo?tab=priorities&view=optimized" class="insight-card insight-clickable">
+            <div class="insight-icon" style="color:var(--success);"><span class="material-symbols-rounded">auto_fix_high</span></div>
+            <div class="insight-label">Recent Optimizations</div>
+            <div class="insight-value">${insights.recent_optimizations}</div>
+            <div class="insight-detail">Last 30 days</div>
+        </a>`;
+    }
+
+    html += '</div>';
+    container.innerHTML = html;
+    container.style.display = "";
+}
+
+async function loadGSCSummary() {
+    try {
+        if (!dashStoreId) return;
+        const status = await apiRequest(`/api/gsc/status?store_id=${dashStoreId}`);
+        if (!status.connected || !status.property) return;
+
+        const today = new Date();
+        const dateTo = new Date(today);
+        dateTo.setDate(dateTo.getDate() - 3);
+        const dateFrom = new Date(dateTo);
+        dateFrom.setDate(dateFrom.getDate() - 28);
+        const df = dateFrom.toISOString().split("T")[0];
+        const dt = dateTo.toISOString().split("T")[0];
+
+        const data = await apiRequest(`/api/gsc/overview?store_id=${dashStoreId}&date_from=${df}&date_to=${dt}`);
+        document.getElementById("dash-gsc-clicks").textContent = Math.round(data.total_clicks).toLocaleString();
+        document.getElementById("dash-gsc-impressions").textContent = Math.round(data.total_impressions).toLocaleString();
+        document.getElementById("dash-gsc-ctr").textContent = (data.avg_ctr * 100).toFixed(1) + "%";
+        document.getElementById("dash-gsc-position").textContent = data.avg_position.toFixed(1);
+        document.getElementById("gsc-summary").style.display = "";
+    } catch {
+        // GSC not connected or error — leave hidden
+    }
+}
+
+async function loadTopPriorities() {
+    try {
+        if (!dashStoreId) return;
+
+        const items = await apiRequest(`/api/seo/priorities?store_id=${dashStoreId}&type=product&limit=5`);
+        const container = document.getElementById("dash-priorities");
+        if (!container || !items.length) return;
+
+        let html = "";
+        for (const item of items) {
+            const prioClass = item.priority_score >= 80 ? "badge-error" : item.priority_score >= 60 ? "badge-warning" : "badge-info";
+            const actionParam = encodeURIComponent(item.recommended_action || '');
+            const optimizeUrl = `/seo?optimize=${item.item_type}&id=${item.id}&action=${actionParam}`;
+            const cannibalIcon = item.cannibalization_warning ? '<span class="material-symbols-rounded" style="font-size:14px;color:var(--error);vertical-align:middle;" title="Cannibalization risk">warning</span> ' : '';
+            html += `<div style="display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--outline);cursor:pointer;" onclick="window.location='${optimizeUrl}'">
+                <span class="badge ${prioClass}" style="min-width:32px;text-align:center;">${item.priority_score}</span>
+                <div style="flex:1;min-width:0;">
+                    <div style="font-weight:600;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${cannibalIcon}${escapeHtml(item.title)}</div>
+                    <div style="font-size:11px;color:var(--on-surface-secondary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${item.recommended_action || item.top_opportunity || ''}</div>
+                </div>
+                <a href="${optimizeUrl}" class="action-icon" title="Optimize" onclick="event.stopPropagation()"><span class="material-symbols-rounded" style="font-size:18px;">arrow_forward</span></a>
+            </div>`;
+        }
+
+        container.innerHTML = html;
+        container.closest(".card").style.display = "";
+    } catch {
+        // No priorities available
     }
 }

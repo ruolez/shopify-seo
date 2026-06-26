@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Brand Collections — SEO Platform</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+    <div class="app-layout">
+        {% include '_sidebar.html' %}
+        <div class="main-content">
+            <div class="topbar">
+                <div class="topbar-left">
+                    <button id="sidebar-toggle" class="icon-btn"><span class="material-symbols-rounded">menu</span></button>
+                    <h2>Brand Collections</h2>
+                </div>
+                <div class="topbar-right">
+                    <button id="theme-toggle" class="icon-btn"><span class="material-symbols-rounded">dark_mode</span></button>
+                </div>
+            </div>
+            <div class="page-content">
+                <div id="brands-container">
+                    <div class="loading-spinner"><div class="spinner"></div><p>Loading vendors...</p></div>
+                </div>
+
+                <!-- Progress Overlay -->
+                <div class="progress-overlay" id="brand-progress-overlay">
+                    <div class="progress-card">
+                        <span class="material-symbols-rounded" style="font-size: 40px; color: var(--primary); margin-bottom: 12px;">sync</span>
+                        <h3>Creating Brand Collections</h3>
+                        <p class="progress-subtitle" id="brand-progress-subtitle">Creating smart collections on Shopify...</p>
+                        <div class="progress-bar-container">
+                            <div class="progress-bar" id="brand-progress-bar"></div>
+                        </div>
+                        <div class="progress-stats" id="brand-progress-stats">0 / 0 completed</div>
+                        <div class="progress-current" id="brand-progress-current"></div>
+                    </div>
+                </div>
+
+                <!-- Image Preview Modal -->
+                <div class="modal-overlay" id="brand-image-preview-overlay" onclick="if(event.target===this)closeBrandImagePreview()">
+                    <div class="modal" style="max-width: 700px; width: 90vw;">
+                        <div class="modal-header">
+                            <h3 id="brand-preview-title">Brand Image</h3>
+                            <button class="icon-btn" onclick="closeBrandImagePreview()"><span class="material-symbols-rounded">close</span></button>
+                        </div>
+                        <div class="modal-body" style="padding: 16px; text-align: center;">
+                            <img id="brand-preview-img" src="" alt="Brand collection image" style="max-width: 100%; border-radius: 8px;">
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Brand SEO Modal -->
+                <div class="modal-overlay" id="brand-seo-modal-overlay" onclick="if(event.target===this)closeBrandSeoModal()">
+                    <div class="modal modal-fullscreen">
+                        <div class="modal-header">
+                            <h3 id="brand-seo-modal-title">Brand SEO Optimization</h3>
+                            <button class="icon-btn" onclick="closeBrandSeoModal()"><span class="material-symbols-rounded">close</span></button>
+                        </div>
+                        <div class="modal-body" id="brand-seo-modal-body">
+                            <div class="loading-spinner"><div class="spinner"></div><p>Loading SEO data...</p></div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Bulk SEO Progress Overlay -->
+                <div class="progress-overlay" id="brand-seo-progress-overlay">
+                    <div class="progress-card">
+                        <span class="material-symbols-rounded" style="font-size: 40px; color: var(--primary); margin-bottom: 12px;">auto_awesome</span>
+                        <h3>Optimizing Brand SEO</h3>
+                        <p class="progress-subtitle" id="brand-seo-progress-subtitle">Running AI optimization...</p>
+                        <div class="progress-bar-container">
+                            <div class="progress-bar" id="brand-seo-progress-bar"></div>
+                        </div>
+                        <div class="progress-stats" id="brand-seo-progress-stats">0 / 0 completed</div>
+                        <div class="progress-current" id="brand-seo-progress-current"></div>
+                    </div>
+                </div>
+
+                <!-- Confirm Dialog -->
+                <div class="confirm-overlay" id="brand-confirm-dialog-overlay">
+                    <div class="confirm-dialog">
+                        <h3 id="brand-confirm-dialog-title">Confirm</h3>
+                        <p id="brand-confirm-dialog-message">Are you sure?</p>
+                        <div class="confirm-actions">
+                            <button class="btn btn-secondary" onclick="closeBrandConfirmDialog()">Cancel</button>
+                            <button class="btn btn-primary" id="brand-confirm-dialog-ok">Continue</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/js/app.js"></script>
+    <script src="/static/js/brands.js"></script>
+</body>
+</html>

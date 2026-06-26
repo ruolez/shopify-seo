@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Competitors — SEO Platform</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+    <div class="app-layout">
+        {% include '_sidebar.html' %}
+        <div class="main-content">
+            <div class="topbar">
+                <div class="topbar-left">
+                    <button id="sidebar-toggle" class="icon-btn"><span class="material-symbols-rounded">menu</span></button>
+                    <h2>Competitor Monitoring</h2>
+                </div>
+                <div class="topbar-right">
+                    <button id="theme-toggle" class="icon-btn"><span class="material-symbols-rounded">dark_mode</span></button>
+                </div>
+            </div>
+            <div class="page-content">
+                <div style="display:flex;gap:12px;align-items:center;margin-bottom:24px;flex-wrap:wrap;">
+                    <div class="form-group" style="max-width:320px;margin-bottom:0;">
+                        <label for="comp-store-select">Store</label>
+                        <select id="comp-store-select" class="form-control"><option value="">Select a store...</option></select>
+                    </div>
+                </div>
+
+                <!-- Add Competitor -->
+                <div class="card" style="margin-bottom:24px;">
+                    <div class="card-header" style="display:flex;align-items:center;justify-content:space-between;">
+                        <h3>Tracked Competitors</h3>
+                        <button class="btn btn-secondary btn-sm" id="comp-discover-btn">
+                            <span class="material-symbols-rounded" style="font-size:14px;vertical-align:middle;">explore</span> Discover Competitors
+                        </button>
+                    </div>
+                    <div style="display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap;">
+                        <input type="text" id="comp-domain" class="form-control" placeholder="competitor-domain.com" style="width:auto;min-width:250px;">
+                        <input type="text" id="comp-name" class="form-control" placeholder="Display name (optional)" style="width:auto;min-width:200px;">
+                        <button class="btn btn-primary btn-sm" id="comp-add-btn">
+                            <span class="material-symbols-rounded" style="font-size:14px;vertical-align:middle;">add</span> Add
+                        </button>
+                        <div style="margin-left:auto;display:flex;align-items:center;gap:6px;">
+                            <label style="font-size:12px;color:var(--on-surface-secondary);white-space:nowrap;">Keywords:</label>
+                            <select id="comp-keyword-limit" class="form-control" style="width:auto;font-size:13px;padding:4px 8px;">
+                                <option value="10">10</option>
+                                <option value="20">20</option>
+                                <option value="50">50</option>
+                                <option value="100" selected>100</option>
+                                <option value="200">200</option>
+                                <option value="300">300</option>
+                                <option value="400">400</option>
+                            </select>
+                            <button class="btn btn-secondary btn-sm" id="comp-check-btn">
+                                <span class="material-symbols-rounded" style="font-size:14px;vertical-align:middle;">sync</span> Run Check Now
+                            </button>
+                        </div>
+                    </div>
+                    <div id="comp-list"></div>
+                </div>
+
+                <!-- Overview -->
+                <div id="comp-overview" style="display:none;margin-bottom:24px;">
+                    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;">
+                        <div class="card metric-card"><div class="metric-label">Competitors</div><div class="metric-value" id="comp-count">0</div></div>
+                        <div class="card metric-card"><div class="metric-label">Keywords Tracked</div><div class="metric-value" id="comp-kw-count">0</div></div>
+                        <div class="card metric-card"><div class="metric-label">Unread Alerts</div><div class="metric-value" id="comp-alerts-count" style="color:var(--error);">0</div></div>
+                        <div class="card metric-card"><div class="metric-label">Last Check</div><div class="metric-value" id="comp-last-check" style="font-size:16px;">—</div></div>
+                    </div>
+                </div>
+
+                <!-- Tabs -->
+                <div id="comp-tabs" style="display:none;">
+                    <div class="tabs">
+                        <button class="tab active" data-comp-tab="rankings">Rankings</button>
+                        <button class="tab" data-comp-tab="alerts">Alerts</button>
+                        <button class="tab" data-comp-tab="history">Check History</button>
+                    </div>
+
+                    <div class="comp-tab-panel active" id="comp-tab-rankings">
+                        <div class="card" style="border-top-left-radius:0;border-top-right-radius:0;">
+                            <div style="display:flex;align-items:center;gap:8px;margin-bottom:16px;flex-wrap:wrap;">
+                                <input type="text" id="comp-rank-search" class="form-control" placeholder="Search keywords..." style="width:auto;min-width:220px;font-size:13px;">
+                                <div style="flex:1;"></div>
+                                <span id="comp-rank-count" style="font-size:12px;color:var(--on-surface-secondary);"></span>
+                            </div>
+                            <div id="comp-rankings-list"></div>
+                            <div id="comp-rankings-empty" class="empty-state" style="display:none;">
+                                <span class="material-symbols-rounded" style="font-size:40px;">query_stats</span>
+                                <p>No ranking data. Run a check first.</p>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="comp-tab-panel" id="comp-tab-alerts" style="display:none;">
+                        <div class="card" style="border-top-left-radius:0;border-top-right-radius:0;">
+                            <div style="display:flex;align-items:center;gap:8px;margin-bottom:16px;flex-wrap:wrap;">
+                                <select id="comp-alert-severity" class="form-control" style="width:auto;font-size:13px;">
+                                    <option value="">All Severity</option><option value="high">High</option><option value="medium">Medium</option><option value="low">Low</option>
+                                </select>
+                                <div style="flex:1;"></div>
+                                <button class="btn btn-secondary btn-sm" id="comp-mark-all-read" style="font-size:12px;">
+                                    <span class="material-symbols-rounded" style="font-size:14px;vertical-align:middle;">done_all</span> Mark All Read
+                                </button>
+                            </div>
+                            <div id="comp-alerts-list"></div>
+                            <div id="comp-alerts-empty" class="empty-state" style="display:none;">
+                                <span class="material-symbols-rounded" style="font-size:40px;color:var(--success);">check_circle</span>
+                                <p>No alerts — you're in the clear!</p>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="comp-tab-panel" id="comp-tab-history" style="display:none;">
+                        <div class="card" style="border-top-left-radius:0;border-top-right-radius:0;">
+                            <table class="data-table">
+                                <thead><tr><th>Date</th><th>Keywords</th><th>Competitors</th><th>Alerts</th><th>Status</th></tr></thead>
+                                <tbody id="comp-history-tbody"></tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    <!-- Discover Competitors Modal -->
+    <div class="modal-overlay" id="discover-modal">
+        <div class="modal" style="max-width:800px;">
+            <div class="modal-header">
+                <h3 id="discover-modal-title">Discover Competitors</h3>
+                <button class="icon-btn" onclick="document.getElementById('discover-modal').classList.remove('active')"><span class="material-symbols-rounded">close</span></button>
+            </div>
+            <div class="modal-body" id="discover-modal-content" style="max-height:70vh;overflow-y:auto;"></div>
+        </div>
+    </div>
+    <script src="/static/js/app.js"></script>
+    <script src="/static/js/competitors.js"></script>
+</body>
+</html>

@@ -46,6 +46,23 @@
                         <div class="modal-body" id="item-detail-content"></div>
                     </div>
                 </div>
+
+                <!-- Broken Link Fix Modal -->
+                <div class="modal-overlay" id="broken-link-fix-modal">
+                    <div class="modal" style="max-width: 560px;">
+                        <div class="modal-header">
+                            <h3>Fix Broken Link</h3>
+                            <button class="icon-btn" onclick="window._closeBrokenLinkModal()">
+                                <span class="material-symbols-rounded">close</span>
+                            </button>
+                        </div>
+                        <div class="modal-body" id="broken-link-fix-content"></div>
+                        <div class="modal-footer">
+                            <button class="btn btn-secondary" onclick="window._closeBrokenLinkModal()">Cancel</button>
+                            <button class="btn btn-primary" id="confirm-broken-fix-btn" onclick="window._confirmBrokenLinkFix()">Apply Fix</button>
+                        </div>
+                    </div>
+                </div>
             </div>
         </div>
     </div>

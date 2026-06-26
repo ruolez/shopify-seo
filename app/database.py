@@ -322,6 +322,12 @@ class Database:
             """)
             cur.execute("""
                 DO $$ BEGIN
+                    ALTER TABLE bulk_tasks ADD COLUMN skip_title BOOLEAN DEFAULT FALSE;
+                EXCEPTION WHEN duplicate_column THEN NULL;
+                END $$
+            """)
+            cur.execute("""
+                DO $$ BEGIN
                     ALTER TABLE generated_collections ADD COLUMN parent_collection_id INTEGER REFERENCES synced_collections(id) ON DELETE SET NULL;
                 EXCEPTION WHEN duplicate_column THEN NULL;
                 END $$
@@ -338,6 +344,716 @@ class Database:
                 EXCEPTION WHEN duplicate_column THEN NULL;
                 END $$
             """)
+            cur.execute("""
+                DO $$ BEGIN
+                    ALTER TABLE ai_config ADD COLUMN image_model VARCHAR(100) DEFAULT 'google/gemini-2.5-flash-image';
+                EXCEPTION WHEN duplicate_column THEN NULL;
+                END $$
+            """)
+            cur.execute("""
+                DO $$ BEGIN
+                    ALTER TABLE generated_collections ADD COLUMN image_url TEXT;
+                EXCEPTION WHEN duplicate_column THEN NULL;
+                END $$
+            """)
+            cur.execute("""
+                UPDATE generated_collections gc
+                SET image_url = sc.image_url
+                FROM synced_collections sc
+                WHERE gc.collection_id = sc.id
+                  AND gc.generation_mode = 'brands'
+                  AND sc.image_url IS NOT NULL AND sc.image_url <> ''
+                  AND (gc.image_url IS NULL OR gc.image_url = '')
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS placeholder_images (
+                    id SERIAL PRIMARY KEY,
+                    product_id INTEGER REFERENCES synced_products(id) ON DELETE CASCADE,
+                    store_id INTEGER REFERENCES stores(id) ON DELETE CASCADE,
+                    shopify_media_id VARCHAR(100),
+                    shopify_media_url TEXT,
+                    alt_text VARCHAR(500),
+                    uploaded_at TIMESTAMP DEFAULT NOW(),
+                    UNIQUE(product_id)
+                )
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS technical_seo_analyses (
+                    id SERIAL PRIMARY KEY,
+                    store_id INTEGER REFERENCES stores(id) ON DELETE CASCADE,
+                    item_type VARCHAR(50) NOT NULL,
+                    item_id INTEGER NOT NULL,
+                    score INTEGER DEFAULT 0,
+                    detected_keywords JSONB DEFAULT '[]',
+                    checks JSONB DEFAULT '{}',
+                    issues_count INTEGER DEFAULT 0,
+                    fixable_count INTEGER DEFAULT 0,
+                    ai_fixes JSONB,
+                    ai_task_id INTEGER REFERENCES ai_tasks(id),
+                    created_at TIMESTAMP DEFAULT NOW(),
+                    updated_at TIMESTAMP DEFAULT NOW(),
+                    UNIQUE(store_id, item_type, item_id)
+                )
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS synced_blogs (
+                    id SERIAL PRIMARY KEY,
+                    store_id INTEGER REFERENCES stores(id) ON DELETE CASCADE,
+                    shopify_id VARCHAR(100) NOT NULL,
+                    title VARCHAR(500),
+                    handle VARCHAR(500),
+                    comment_policy VARCHAR(50),
+                    articles_count INTEGER DEFAULT 0,
+                    synced_at TIMESTAMP DEFAULT NOW(),
+                    UNIQUE(store_id, shopify_id)
+                )
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS synced_articles (
+                    id SERIAL PRIMARY KEY,
+                    store_id INTEGER REFERENCES stores(id) ON DELETE CASCADE,
+                    blog_id INTEGER REFERENCES synced_blogs(id) ON DELETE CASCADE,
+                    shopify_id VARCHAR(100) NOT NULL,
+                    shopify_blog_id VARCHAR(100),
+                    title VARCHAR(500),
+                    handle VARCHAR(500),
+                    body TEXT,
+                    summary TEXT,
+                    tags TEXT,
+                    author VARCHAR(255),
+                    meta_title VARCHAR(500),
+                    meta_description TEXT,
+                    image_url TEXT,
+                    image_alt VARCHAR(500),
+                    is_published BOOLEAN DEFAULT FALSE,
+                    published_at TIMESTAMP,
+                    last_optimized_at TIMESTAMP,
+                    synced_at TIMESTAMP DEFAULT NOW(),
+                    UNIQUE(store_id, shopify_id)
+                )
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS article_wizard_sessions (
+                    id SERIAL PRIMARY KEY,
+                    store_id INTEGER REFERENCES stores(id) ON DELETE CASCADE,
+                    status VARCHAR(50) DEFAULT 'draft',
+                    current_step INTEGER DEFAULT 1,
+                    topic VARCHAR(500),
+                    target_keywords JSONB DEFAULT '[]',
+                    target_product_ids JSONB DEFAULT '[]',
+                    target_collection_ids JSONB DEFAULT '[]',
+                    blog_id INTEGER,
+                    research_data JSONB,
+                    outline_data JSONB,
+                    generated_article JSONB,
+                    featured_image_url TEXT,
+                    created_at TIMESTAMP DEFAULT NOW(),
+                    updated_at TIMESTAMP DEFAULT NOW()
+                )
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS blog_landing_pages (
+                    id SERIAL PRIMARY KEY,
+                    store_id INTEGER REFERENCES stores(id) ON DELETE CASCADE,
+                    blog_id INTEGER REFERENCES synced_blogs(id) ON DELETE CASCADE,
+                    shopify_page_id VARCHAR(100),
+                    page_handle VARCHAR(500),
+                    page_title VARCHAR(500),
+                    articles_count INTEGER DEFAULT 0,
+                    tags_count INTEGER DEFAULT 0,
+                    last_generated_at TIMESTAMP,
+                    created_at TIMESTAMP DEFAULT NOW(),
+                    UNIQUE(store_id, blog_id)
+                )
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS brand_landing_pages (
+                    id SERIAL PRIMARY KEY,
+                    store_id INTEGER REFERENCES stores(id) ON DELETE CASCADE,
+                    shopify_page_id VARCHAR(100),
+                    page_handle VARCHAR(500),
+                    page_title VARCHAR(500),
+                    brands_count INTEGER DEFAULT 0,
+                    last_generated_at TIMESTAMP,
+                    created_at TIMESTAMP DEFAULT NOW(),
+                    UNIQUE(store_id)
+                )
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS blog_migrations (
+                    id SERIAL PRIMARY KEY,
+                    store_id INTEGER REFERENCES stores(id) ON DELETE CASCADE,
+                    status VARCHAR(50) DEFAULT 'pending',
+                    total_articles INTEGER DEFAULT 0,
+                    migrated_articles INTEGER DEFAULT 0,
+                    redirects_created INTEGER DEFAULT 0,
+                    failed_articles INTEGER DEFAULT 0,
+                    error TEXT,
+                    started_at TIMESTAMP DEFAULT NOW(),
+                    completed_at TIMESTAMP
+                )
+            """)
+            cur.execute("""
+                DO $$ BEGIN
+                    ALTER TABLE blog_landing_pages ADD COLUMN intro_text TEXT;
+                EXCEPTION WHEN duplicate_column THEN NULL;
+                END $$
+            """)
+            cur.execute("""
+                DO $$ BEGIN
+                    ALTER TABLE bulk_task_items ADD COLUMN article_id INTEGER REFERENCES synced_articles(id) ON DELETE CASCADE;
+                EXCEPTION WHEN duplicate_column THEN NULL;
+                END $$
+            """)
+            cur.execute("""
+                DO $$ BEGIN
+                    ALTER TABLE blog_landing_pages ADD COLUMN hero_image_url TEXT;
+                EXCEPTION WHEN duplicate_column THEN NULL;
+                END $$
+            """)
+            cur.execute("""
+                DO $$ BEGIN
+                    ALTER TABLE blog_landing_pages ADD COLUMN hero_image_alt VARCHAR(500);
+                EXCEPTION WHEN duplicate_column THEN NULL;
+                END $$
+            """)
+            # --- News section additions ---
+            cur.execute("""
+                DO $$ BEGIN
+                    ALTER TABLE synced_articles ADD COLUMN template_suffix VARCHAR(100);
+                EXCEPTION WHEN duplicate_column THEN NULL;
+                END $$
+            """)
+            cur.execute("""
+                DO $$ BEGIN
+                    ALTER TABLE synced_articles ADD COLUMN article_type VARCHAR(50);
+                EXCEPTION WHEN duplicate_column THEN NULL;
+                END $$
+            """)
+            cur.execute("""
+                DO $$ BEGIN
+                    ALTER TABLE synced_articles ADD COLUMN category VARCHAR(160);
+                EXCEPTION WHEN duplicate_column THEN NULL;
+                END $$
+            """)
+            cur.execute("""
+                DO $$ BEGIN
+                    ALTER TABLE synced_articles ADD COLUMN date_modified TIMESTAMP;
+                EXCEPTION WHEN duplicate_column THEN NULL;
+                END $$
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS news_sessions (
+                    id SERIAL PRIMARY KEY,
+                    store_id INTEGER REFERENCES stores(id) ON DELETE CASCADE,
+                    status VARCHAR(30) DEFAULT 'draft',
+                    source_text TEXT,
+                    source_url TEXT,
+                    source_urls JSONB DEFAULT '[]',
+                    analyze_result JSONB,
+                    edited_result JSONB,
+                    category VARCHAR(160),
+                    tags JSONB DEFAULT '[]',
+                    meta_title VARCHAR(500),
+                    meta_description TEXT,
+                    summary TEXT,
+                    hero_image_url TEXT,
+                    hero_image_alt VARCHAR(500),
+                    hero_image_prompt TEXT,
+                    inline_images JSONB DEFAULT '[]',
+                    shopify_article_id VARCHAR(100),
+                    article_handle VARCHAR(500),
+                    error TEXT,
+                    created_at TIMESTAMP DEFAULT NOW(),
+                    updated_at TIMESTAMP DEFAULT NOW()
+                )
+            """)
+            cur.execute("""
+                DO $$ BEGIN
+                    ALTER TABLE news_sessions ADD COLUMN source_urls JSONB DEFAULT '[]';
+                EXCEPTION WHEN duplicate_column THEN NULL;
+                END $$
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS news_hub_pages (
+                    store_id INTEGER PRIMARY KEY REFERENCES stores(id) ON DELETE CASCADE,
+                    shopify_page_id VARCHAR(100),
+                    handle VARCHAR(200) DEFAULT 'news',
+                    intro_text TEXT,
+                    hero_image_url TEXT,
+                    hero_image_alt VARCHAR(500),
+                    last_generated_at TIMESTAMP
+                )
+            """)
+            cur.execute("""
+                DO $$ BEGIN
+                    ALTER TABLE stores ADD COLUMN shop_name VARCHAR(255);
+                EXCEPTION WHEN duplicate_column THEN NULL;
+                END $$
+            """)
+            cur.execute("""
+                DO $$ BEGIN
+                    ALTER TABLE stores ADD COLUMN primary_domain VARCHAR(255);
+                EXCEPTION WHEN duplicate_column THEN NULL;
+                END $$
+            """)
+            cur.execute("""
+                DO $$ BEGIN
+                    ALTER TABLE sync_jobs ADD COLUMN blogs_synced INTEGER DEFAULT 0;
+                EXCEPTION WHEN duplicate_column THEN NULL;
+                END $$
+            """)
+            cur.execute("""
+                DO $$ BEGIN
+                    ALTER TABLE sync_jobs ADD COLUMN articles_synced INTEGER DEFAULT 0;
+                EXCEPTION WHEN duplicate_column THEN NULL;
+                END $$
+            """)
+            cur.execute("""
+                DO $$ BEGIN
+                    ALTER TABLE placeholder_images ADD COLUMN filename VARCHAR(500);
+                EXCEPTION WHEN duplicate_column THEN NULL;
+                END $$
+            """)
+            cur.execute("""
+                DO $$ BEGIN
+                    ALTER TABLE placeholder_images ADD COLUMN seo_optimized BOOLEAN DEFAULT FALSE;
+                EXCEPTION WHEN duplicate_column THEN NULL;
+                END $$
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS synced_pages (
+                    id SERIAL PRIMARY KEY,
+                    store_id INTEGER REFERENCES stores(id) ON DELETE CASCADE,
+                    shopify_id VARCHAR(100) NOT NULL,
+                    title VARCHAR(500),
+                    handle VARCHAR(500),
+                    body_html TEXT,
+                    seo_title VARCHAR(500),
+                    seo_description TEXT,
+                    is_published BOOLEAN DEFAULT FALSE,
+                    published_at TIMESTAMP,
+                    template_suffix VARCHAR(100),
+                    seo_score INTEGER DEFAULT 0,
+                    seo_breakdown JSONB DEFAULT '{}',
+                    is_homepage BOOLEAN DEFAULT FALSE,
+                    created_at TIMESTAMP DEFAULT NOW(),
+                    updated_at TIMESTAMP DEFAULT NOW(),
+                    UNIQUE(store_id, shopify_id)
+                )
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS landing_pages (
+                    id SERIAL PRIMARY KEY,
+                    store_id INTEGER REFERENCES stores(id) ON DELETE CASCADE,
+                    synced_page_id INTEGER REFERENCES synced_pages(id) ON DELETE SET NULL,
+                    shopify_page_id VARCHAR(100),
+                    title VARCHAR(500) NOT NULL,
+                    handle VARCHAR(500),
+                    meta_title VARCHAR(500),
+                    meta_description TEXT,
+                    is_published BOOLEAN DEFAULT FALSE,
+                    sections JSONB DEFAULT '[]',
+                    seo_score INTEGER DEFAULT 0,
+                    seo_breakdown JSONB DEFAULT '{}',
+                    schema_json JSONB,
+                    last_generated_html TEXT,
+                    last_published_at TIMESTAMP,
+                    created_at TIMESTAMP DEFAULT NOW(),
+                    updated_at TIMESTAMP DEFAULT NOW(),
+                    UNIQUE(store_id, handle)
+                )
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS landing_page_versions (
+                    id SERIAL PRIMARY KEY,
+                    landing_page_id INTEGER REFERENCES landing_pages(id) ON DELETE CASCADE,
+                    label VARCHAR(200) NOT NULL,
+                    title VARCHAR(500),
+                    handle VARCHAR(500),
+                    meta_title VARCHAR(500),
+                    meta_description TEXT,
+                    sections JSONB DEFAULT '[]',
+                    schema_json JSONB,
+                    last_generated_html TEXT,
+                    created_at TIMESTAMP DEFAULT NOW()
+                )
+            """)
+            cur.execute("""
+                DO $$ BEGIN
+                    ALTER TABLE synced_pages ADD COLUMN theme_sections JSONB;
+                EXCEPTION WHEN duplicate_column THEN NULL;
+                END $$
+            """)
+            cur.execute("""
+                DO $$ BEGIN
+                    ALTER TABLE synced_pages ADD COLUMN menus JSONB;
+                EXCEPTION WHEN duplicate_column THEN NULL;
+                END $$
+            """)
+            # ── Phase 1: GSC Integration + SEO Progress Dashboard ──
+            cur.execute("""
+                DO $$ BEGIN
+                    ALTER TABLE ai_config ADD COLUMN gsc_client_id_enc TEXT;
+                EXCEPTION WHEN duplicate_column THEN NULL;
+                END $$
+            """)
+            cur.execute("""
+                DO $$ BEGIN
+                    ALTER TABLE ai_config ADD COLUMN gsc_client_secret_enc TEXT;
+                EXCEPTION WHEN duplicate_column THEN NULL;
+                END $$
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS gsc_credentials (
+                    id SERIAL PRIMARY KEY,
+                    store_id INTEGER REFERENCES stores(id) ON DELETE CASCADE,
+                    access_token_enc TEXT NOT NULL,
+                    refresh_token_enc TEXT NOT NULL,
+                    token_expiry TIMESTAMP,
+                    gsc_property VARCHAR(500),
+                    connected_email VARCHAR(255),
+                    created_at TIMESTAMP DEFAULT NOW(),
+                    updated_at TIMESTAMP DEFAULT NOW(),
+                    UNIQUE(store_id)
+                )
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS gsc_daily_metrics (
+                    id SERIAL PRIMARY KEY,
+                    store_id INTEGER REFERENCES stores(id) ON DELETE CASCADE,
+                    date DATE NOT NULL,
+                    page TEXT,
+                    query TEXT,
+                    clicks DOUBLE PRECISION DEFAULT 0,
+                    impressions DOUBLE PRECISION DEFAULT 0,
+                    ctr DOUBLE PRECISION DEFAULT 0,
+                    position DOUBLE PRECISION DEFAULT 0,
+                    device VARCHAR(20),
+                    country VARCHAR(10),
+                    created_at TIMESTAMP DEFAULT NOW(),
+                    UNIQUE(store_id, date, page, query, device, country)
+                )
+            """)
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_gsc_metrics_store_date
+                ON gsc_daily_metrics(store_id, date)
+            """)
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_gsc_metrics_page
+                ON gsc_daily_metrics(store_id, page)
+            """)
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_gsc_metrics_query
+                ON gsc_daily_metrics(store_id, query)
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS gsc_data_pulls (
+                    id SERIAL PRIMARY KEY,
+                    store_id INTEGER REFERENCES stores(id) ON DELETE CASCADE,
+                    pull_type VARCHAR(50) DEFAULT 'incremental',
+                    date_from DATE,
+                    date_to DATE,
+                    rows_pulled INTEGER DEFAULT 0,
+                    status VARCHAR(50) DEFAULT 'pending',
+                    error_message TEXT,
+                    started_at TIMESTAMP DEFAULT NOW(),
+                    completed_at TIMESTAMP
+                )
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS seo_score_history (
+                    id SERIAL PRIMARY KEY,
+                    store_id INTEGER REFERENCES stores(id) ON DELETE CASCADE,
+                    item_type VARCHAR(50) NOT NULL,
+                    item_id INTEGER NOT NULL,
+                    shopify_id VARCHAR(100),
+                    title VARCHAR(500),
+                    score INTEGER DEFAULT 0,
+                    breakdown JSONB DEFAULT '{}',
+                    recorded_at TIMESTAMP DEFAULT NOW()
+                )
+            """)
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_score_history_store_date
+                ON seo_score_history(store_id, recorded_at)
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS cannibalization_fixes (
+                    id SERIAL PRIMARY KEY,
+                    store_id INTEGER REFERENCES stores(id) ON DELETE CASCADE,
+                    query TEXT NOT NULL,
+                    page_url TEXT NOT NULL,
+                    item_type VARCHAR(50),
+                    item_id INTEGER,
+                    action VARCHAR(50),
+                    target_keyword TEXT,
+                    old_meta_title TEXT,
+                    new_meta_title TEXT,
+                    old_meta_description TEXT,
+                    new_meta_description TEXT,
+                    old_title TEXT,
+                    new_title TEXT,
+                    image_alts_changed INTEGER DEFAULT 0,
+                    status VARCHAR(50) DEFAULT 'pending',
+                    applied_at TIMESTAMP DEFAULT NOW(),
+                    verified_at TIMESTAMP,
+                    UNIQUE(store_id, query, page_url)
+                )
+            """)
+            # ── SEO Change Events (impact tracking) ──
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS seo_change_events (
+                    id SERIAL PRIMARY KEY,
+                    store_id INTEGER REFERENCES stores(id) ON DELETE CASCADE,
+                    item_type VARCHAR(50) NOT NULL,
+                    item_id INTEGER NOT NULL,
+                    change_type VARCHAR(50) NOT NULL,
+                    changes_applied JSONB,
+                    seo_score_before INTEGER,
+                    search_score_before INTEGER,
+                    composite_score_before INTEGER,
+                    created_at TIMESTAMP DEFAULT NOW()
+                )
+            """)
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_seo_change_events_item ON seo_change_events(store_id, item_type, item_id)")
+            # ── Phase 2: Semrush CSV Import ──
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS semrush_imports (
+                    id SERIAL PRIMARY KEY,
+                    store_id INTEGER REFERENCES stores(id) ON DELETE CASCADE,
+                    import_type VARCHAR(50) NOT NULL,
+                    filename VARCHAR(500),
+                    row_count INTEGER DEFAULT 0,
+                    status VARCHAR(50) DEFAULT 'pending',
+                    error_message TEXT,
+                    created_at TIMESTAMP DEFAULT NOW()
+                )
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS semrush_keywords (
+                    id SERIAL PRIMARY KEY,
+                    store_id INTEGER REFERENCES stores(id) ON DELETE CASCADE,
+                    import_id INTEGER REFERENCES semrush_imports(id) ON DELETE CASCADE,
+                    source_type VARCHAR(50) NOT NULL,
+                    keyword VARCHAR(500) NOT NULL,
+                    position INTEGER,
+                    previous_position INTEGER,
+                    search_volume INTEGER,
+                    cpc NUMERIC(10,2),
+                    competition NUMERIC(5,4),
+                    traffic NUMERIC(10,2),
+                    traffic_percent NUMERIC(6,3),
+                    traffic_cost NUMERIC(12,2),
+                    url TEXT,
+                    serp_features TEXT,
+                    competitor_positions JSONB,
+                    data_timestamp DATE,
+                    created_at TIMESTAMP DEFAULT NOW()
+                )
+            """)
+            cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_semrush_kw_unique ON semrush_keywords(store_id, keyword, COALESCE(url, ''), source_type)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_semrush_kw_store ON semrush_keywords(store_id)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_semrush_kw_keyword ON semrush_keywords(store_id, keyword)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_semrush_kw_url ON semrush_keywords(store_id, url)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_semrush_kw_import ON semrush_keywords(import_id)")
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS semrush_audit_issues (
+                    id SERIAL PRIMARY KEY,
+                    store_id INTEGER REFERENCES stores(id) ON DELETE CASCADE,
+                    import_id INTEGER REFERENCES semrush_imports(id) ON DELETE CASCADE,
+                    page_url TEXT NOT NULL,
+                    issue_type VARCHAR(255),
+                    severity VARCHAR(50),
+                    description TEXT,
+                    created_at TIMESTAMP DEFAULT NOW()
+                )
+            """)
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_semrush_audit_store ON semrush_audit_issues(store_id)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_semrush_audit_import ON semrush_audit_issues(import_id)")
+            # ── Phase 4: Content Gap Analysis + Competitor Monitoring ──
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS content_gaps (
+                    id SERIAL PRIMARY KEY,
+                    store_id INTEGER REFERENCES stores(id) ON DELETE CASCADE,
+                    keyword VARCHAR(500) NOT NULL,
+                    search_volume INTEGER,
+                    cpc NUMERIC(10,2),
+                    competition NUMERIC(5,4),
+                    intent VARCHAR(50),
+                    gap_type VARCHAR(50),
+                    our_position INTEGER,
+                    our_url TEXT,
+                    competitor_positions JSONB,
+                    opportunity_score NUMERIC(12,2) DEFAULT 0,
+                    suggested_content_type VARCHAR(50),
+                    matched_product_id INTEGER,
+                    matched_collection_id INTEGER,
+                    status VARCHAR(50) DEFAULT 'new',
+                    brief JSONB,
+                    created_at TIMESTAMP DEFAULT NOW(),
+                    updated_at TIMESTAMP DEFAULT NOW(),
+                    UNIQUE(store_id, keyword)
+                )
+            """)
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_content_gaps_store ON content_gaps(store_id)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_content_gaps_score ON content_gaps(store_id, opportunity_score DESC)")
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS competitors (
+                    id SERIAL PRIMARY KEY,
+                    store_id INTEGER REFERENCES stores(id) ON DELETE CASCADE,
+                    domain VARCHAR(255) NOT NULL,
+                    name VARCHAR(255),
+                    notes TEXT,
+                    created_at TIMESTAMP DEFAULT NOW(),
+                    UNIQUE(store_id, domain)
+                )
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS competitor_rankings (
+                    id SERIAL PRIMARY KEY,
+                    store_id INTEGER REFERENCES stores(id) ON DELETE CASCADE,
+                    competitor_id INTEGER REFERENCES competitors(id) ON DELETE CASCADE,
+                    keyword VARCHAR(500) NOT NULL,
+                    position INTEGER,
+                    url TEXT,
+                    previous_position INTEGER,
+                    checked_at TIMESTAMP DEFAULT NOW(),
+                    UNIQUE(store_id, competitor_id, keyword)
+                )
+            """)
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_comp_rank_store ON competitor_rankings(store_id)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_comp_rank_keyword ON competitor_rankings(store_id, keyword)")
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS competitor_alerts (
+                    id SERIAL PRIMARY KEY,
+                    store_id INTEGER REFERENCES stores(id) ON DELETE CASCADE,
+                    alert_type VARCHAR(50) NOT NULL,
+                    keyword VARCHAR(500),
+                    our_position INTEGER,
+                    competitor_domain VARCHAR(255),
+                    competitor_position INTEGER,
+                    severity VARCHAR(20) DEFAULT 'medium',
+                    is_read BOOLEAN DEFAULT FALSE,
+                    created_at TIMESTAMP DEFAULT NOW()
+                )
+            """)
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_comp_alerts_store ON competitor_alerts(store_id, is_read)")
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS competitor_check_runs (
+                    id SERIAL PRIMARY KEY,
+                    store_id INTEGER REFERENCES stores(id) ON DELETE CASCADE,
+                    keywords_checked INTEGER DEFAULT 0,
+                    competitors_checked INTEGER DEFAULT 0,
+                    alerts_generated INTEGER DEFAULT 0,
+                    status VARCHAR(50) DEFAULT 'pending',
+                    started_at TIMESTAMP DEFAULT NOW(),
+                    completed_at TIMESTAMP
+                )
+            """)
+            # --- Keyword Strategy & Site Audit tables ---
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS master_keyword_clusters (
+                    id SERIAL PRIMARY KEY,
+                    store_id INTEGER REFERENCES stores(id) ON DELETE CASCADE,
+                    name VARCHAR(500) NOT NULL,
+                    parent_cluster_id INTEGER REFERENCES master_keyword_clusters(id) ON DELETE SET NULL,
+                    keyword_count INTEGER DEFAULT 0,
+                    total_volume INTEGER DEFAULT 0,
+                    created_at TIMESTAMP DEFAULT NOW(),
+                    UNIQUE(store_id, name)
+                )
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS master_keywords (
+                    id SERIAL PRIMARY KEY,
+                    store_id INTEGER REFERENCES stores(id) ON DELETE CASCADE,
+                    keyword VARCHAR(500) NOT NULL,
+                    search_volume INTEGER DEFAULT 0,
+                    cpc NUMERIC(10,2),
+                    competition NUMERIC(5,4),
+                    best_position NUMERIC(6,1),
+                    clicks DOUBLE PRECISION DEFAULT 0,
+                    impressions DOUBLE PRECISION DEFAULT 0,
+                    ctr DOUBLE PRECISION DEFAULT 0,
+                    intent VARCHAR(50),
+                    source VARCHAR(20) NOT NULL DEFAULT 'manual',
+                    current_url TEXT,
+                    cluster_id INTEGER REFERENCES master_keyword_clusters(id) ON DELETE SET NULL,
+                    status VARCHAR(50) DEFAULT 'active',
+                    created_at TIMESTAMP DEFAULT NOW(),
+                    updated_at TIMESTAMP DEFAULT NOW(),
+                    UNIQUE(store_id, keyword)
+                )
+            """)
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_master_kw_store ON master_keywords(store_id)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_master_kw_cluster ON master_keywords(store_id, cluster_id)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_master_kw_volume ON master_keywords(store_id, search_volume DESC)")
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS content_keyword_map (
+                    id SERIAL PRIMARY KEY,
+                    store_id INTEGER REFERENCES stores(id) ON DELETE CASCADE,
+                    master_keyword_id INTEGER REFERENCES master_keywords(id) ON DELETE CASCADE,
+                    item_type VARCHAR(50) NOT NULL,
+                    item_id INTEGER NOT NULL,
+                    found_in JSONB DEFAULT '[]',
+                    is_primary BOOLEAN DEFAULT FALSE,
+                    relevance_score NUMERIC(6,2) DEFAULT 0,
+                    created_at TIMESTAMP DEFAULT NOW(),
+                    UNIQUE(store_id, master_keyword_id, item_type, item_id)
+                )
+            """)
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_ckm_item ON content_keyword_map(store_id, item_type, item_id)")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_ckm_keyword ON content_keyword_map(store_id, master_keyword_id)")
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS keyword_assignments (
+                    id SERIAL PRIMARY KEY,
+                    store_id INTEGER REFERENCES stores(id) ON DELETE CASCADE,
+                    master_keyword_id INTEGER REFERENCES master_keywords(id) ON DELETE CASCADE,
+                    assigned_item_type VARCHAR(50),
+                    assigned_item_id INTEGER,
+                    assignment_reason TEXT,
+                    priority VARCHAR(20) DEFAULT 'medium',
+                    status VARCHAR(50) DEFAULT 'proposed',
+                    proposed_changes JSONB DEFAULT '{}',
+                    cannibalization_items JSONB DEFAULT '[]',
+                    created_at TIMESTAMP DEFAULT NOW(),
+                    updated_at TIMESTAMP DEFAULT NOW(),
+                    UNIQUE(store_id, master_keyword_id)
+                )
+            """)
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_ka_store ON keyword_assignments(store_id, status)")
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS keyword_strategy_runs (
+                    id SERIAL PRIMARY KEY,
+                    store_id INTEGER REFERENCES stores(id) ON DELETE CASCADE,
+                    run_type VARCHAR(50) NOT NULL,
+                    status VARCHAR(50) DEFAULT 'pending',
+                    total_items INTEGER DEFAULT 0,
+                    completed_items INTEGER DEFAULT 0,
+                    failed_items INTEGER DEFAULT 0,
+                    summary JSONB DEFAULT '{}',
+                    error TEXT,
+                    started_at TIMESTAMP DEFAULT NOW(),
+                    completed_at TIMESTAMP
+                )
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS keyword_strategy_changes (
+                    id SERIAL PRIMARY KEY,
+                    store_id INTEGER REFERENCES stores(id) ON DELETE CASCADE,
+                    assignment_id INTEGER REFERENCES keyword_assignments(id) ON DELETE SET NULL,
+                    item_type VARCHAR(50) NOT NULL,
+                    item_id INTEGER NOT NULL,
+                    field_name VARCHAR(100) NOT NULL,
+                    old_value TEXT,
+                    new_value TEXT,
+                    applied_at TIMESTAMP DEFAULT NOW(),
+                    reverted_at TIMESTAMP
+                )
+            """)
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_ksc_store ON keyword_strategy_changes(store_id)")
+
             cur.execute("SELECT pg_advisory_unlock(1)")
 
 

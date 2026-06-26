@@ -8,6 +8,8 @@ let selectedCollectionIds = new Set();
 let currentProducts = [];
 let currentCollections = [];
 let currentProductId = null;
+let currentItemStoreId = null;
+let currentItemType = "product";
 let lastClickedProductIndex = -1;
 let lastClickedCollectionIndex = -1;
 let schemaSort = loadFilter("schemaSort", { by: "title", dir: "asc" });
@@ -15,6 +17,8 @@ let schemaFilter = loadFilter("schemaFilter", { generated: "", valid: "", pushed
 let currentSchemaProducts = [];
 let cachedSchemaStats = null;
 let cachedSchemaSettings = null;
+let productSearchTerm = "";
+let _productSearchTimer = null;
 
 function openLightbox(src) {
     const overlay = document.createElement("div");
@@ -30,10 +34,321 @@ function closeLightbox() {
     return false;
 }
 
+function renderPositionBadge(pos) {
+    if (pos == null || pos <= 0) return '—';
+    const rounded = pos.toFixed(1);
+    if (pos <= 3) return `<span class="badge badge-success">${rounded}</span>`;
+    if (pos <= 10) return `<span class="badge badge-warning">${rounded}</span>`;
+    return `<span class="badge badge-error">${rounded}</span>`;
+}
+
 function formatOptimizedDate(dateStr) {
     if (!dateStr) return '<span style="color: var(--on-surface-secondary);">Never</span>';
     const d = new Date(dateStr);
     return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+}
+
+function renderScoreRing(score, size = 44, item = null) {
+    const cls = score >= 80 ? "high" : score >= 50 ? "medium" : "low";
+    const r = (size - 8) / 2;
+    const circ = 2 * Math.PI * r;
+    const offset = circ - (score / 100) * circ;
+    const isLg = size > 60;
+    let tooltip = "";
+    if (item && item.on_page_score != null) {
+        const parts = [`On-Page: ${item.on_page_score}`];
+        if (item.search_score != null) parts.push(`Search: ${item.search_score}`);
+        parts.push(`Composite: ${score}`);
+        tooltip = `title="${parts.join(' | ')}"`;
+    }
+    return `<div class="${isLg ? "score-ring-lg" : "score-ring"}" style="${isLg ? "" : "width:" + size + "px;height:" + size + "px;"}" ${tooltip}>
+        <svg width="${size}" height="${size}" viewBox="0 0 ${size} ${size}">
+            <circle class="score-ring-bg" cx="${size/2}" cy="${size/2}" r="${r}"/>
+            <circle class="score-ring-fill ${cls}" cx="${size/2}" cy="${size/2}" r="${r}"
+                stroke-dasharray="${circ}" stroke-dashoffset="${offset}"/>
+        </svg>
+        <span class="score-ring-value">${score}</span>
+    </div>`;
+}
+
+function renderPriorityBadge(score) {
+    if (score == null || score <= 0) return '';
+    if (score >= 80) return `<span class="badge badge-error" title="Priority: ${score}">${score}</span>`;
+    if (score >= 60) return `<span class="badge badge-warning" title="Priority: ${score}">${score}</span>`;
+    if (score >= 30) return `<span class="badge badge-info" title="Priority: ${score}">${score}</span>`;
+    return `<span class="badge" title="Priority: ${score}" style="background:var(--surface-variant);color:var(--on-surface-secondary)">${score}</span>`;
+}
+
+function toggleDescription() {
+    const el = document.getElementById("desc-preview");
+    if (!el) return;
+    const btn = document.getElementById("desc-toggle-btn");
+    if (el.classList.contains("collapsed")) {
+        el.classList.remove("collapsed");
+        el.style.maxHeight = "none";
+        if (btn) btn.textContent = "Show less";
+    } else {
+        el.classList.add("collapsed");
+        el.style.maxHeight = "";
+        if (btn) btn.textContent = "Show more";
+    }
+}
+
+function renderActionableRecommendations(result) {
+    const actionableRecs = result.actionable_recommendations || [];
+    const legacyRecs = result.additional_recommendations || [];
+    let html = '';
+
+    if (actionableRecs.length > 0) {
+        html += `<div class="form-group">
+            <label><span class="material-symbols-rounded" style="font-size:16px;vertical-align:middle;">task_alt</span> Recommendations</label>
+            <div id="actionable-recs-list">`;
+        const typeIcons = { internal_linking: 'link', image_alt_text: 'image', faq_schema: 'quiz', advisory: 'info' };
+        const typeLabels = { internal_linking: 'Internal Linking', image_alt_text: 'Image Alt Text', faq_schema: 'FAQ Schema', advisory: 'Advisory' };
+        const typeColors = { internal_linking: 'var(--primary)', image_alt_text: 'var(--success)', faq_schema: '#e65100', advisory: 'var(--on-surface-secondary)' };
+
+        for (let i = 0; i < actionableRecs.length; i++) {
+            const rec = actionableRecs[i];
+            const recType = rec.type || 'advisory';
+            const isActionable = recType !== 'advisory';
+            const color = typeColors[recType] || 'var(--on-surface-secondary)';
+
+            html += `<div class="rec-item" id="rec-item-${i}" style="display:flex;align-items:flex-start;gap:10px;padding:10px;margin-bottom:8px;border-radius:8px;border:1px solid var(--outline);background:var(--surface-dim);">
+                <span class="material-symbols-rounded" style="font-size:20px;color:${color};margin-top:1px;">${typeIcons[recType] || 'info'}</span>
+                <div style="flex:1;min-width:0;">
+                    <div style="font-size:13px;line-height:1.5;">${escapeHtml(rec.text || String(rec))}</div>
+                    <span style="display:inline-block;font-size:10px;padding:2px 6px;margin-top:4px;border-radius:4px;background:${color}15;color:${color};font-weight:600;">${typeLabels[recType] || recType}</span>
+                </div>`;
+            if (isActionable) {
+                html += `<button class="btn btn-sm btn-primary" style="white-space:nowrap;flex-shrink:0;" onclick='applyRecommendation(${i}, ${JSON.stringify(rec).replace(/'/g, "&#39;")})' id="rec-apply-btn-${i}">
+                    <span class="material-symbols-rounded" style="font-size:14px;">preview</span> Preview
+                </button>`;
+            }
+            html += `</div>`;
+        }
+        html += `</div></div>`;
+    } else if (legacyRecs.length > 0) {
+        html += `<div class="form-group">
+            <label>Additional Recommendations</label>
+            <ul style="padding-left: 20px; margin: 8px 0;">`;
+        for (const rec of legacyRecs) {
+            html += `<li style="margin-bottom: 6px; font-size: 14px;">${escapeHtml(typeof rec === 'string' ? rec : rec.text || JSON.stringify(rec))}</li>`;
+        }
+        html += `</ul></div>`;
+    }
+    return html;
+}
+
+let _pendingPreviewData = null;
+
+async function applyRecommendation(index, rec) {
+    const btn = document.getElementById(`rec-apply-btn-${index}`);
+    if (!btn) return;
+    btn.disabled = true;
+    btn.innerHTML = '<span class="material-symbols-rounded" style="font-size:14px;">hourglass_empty</span> Loading...';
+
+    const storeId = currentItemStoreId || _getSeoStoreId();
+    const itemId = currentProductId;
+
+    if (!storeId) { showToast('Could not determine store', 'error'); btn.disabled = false; btn.innerHTML = '<span class="material-symbols-rounded" style="font-size:14px;">preview</span> Preview'; return; }
+
+    const body = { type: rec.type, store_id: parseInt(storeId), item_id: itemId };
+    if (rec.type === 'internal_linking') {
+        body.anchor_text = rec.anchor_text || '';
+        body.target_handle = rec.target_handle || '';
+        body.target_type = rec.target_type || currentItemType;
+    } else if (rec.type === 'image_alt_text') {
+        body.scope = rec.scope || (currentItemType === 'collection' ? 'collection_products' : 'single');
+        body.item_type = currentItemType;
+        body.text = rec.text || '';
+    } else if (rec.type === 'faq_schema') {
+        body.questions = rec.questions || [];
+        body.item_type = currentItemType;
+    }
+
+    try {
+        const preview = await apiRequest('/api/seo/actions/preview', { method: 'POST', body });
+        btn.innerHTML = '<span class="material-symbols-rounded" style="font-size:14px;">play_arrow</span> Preview';
+        btn.disabled = false;
+        showActionPreviewModal(rec.type, preview, body, index);
+    } catch (err) {
+        btn.innerHTML = '<span class="material-symbols-rounded" style="font-size:14px;">play_arrow</span> Preview';
+        btn.disabled = false;
+        showToast(`Preview failed: ${err.message}`, 'error');
+    }
+}
+
+function showActionPreviewModal(actionType, preview, applyBody, recIndex) {
+    const modal = document.getElementById("impact-modal");
+    const content = document.getElementById("impact-modal-content");
+    document.getElementById("impact-modal-title").textContent =
+        actionType === 'internal_linking' ? 'Internal Linking Preview' :
+        actionType === 'image_alt_text' ? 'Image Alt Text Preview' :
+        actionType === 'faq_schema' ? 'FAQ Schema Preview' : 'Action Preview';
+
+    let html = '';
+
+    if (actionType === 'internal_linking') {
+        const aiSelected = preview.preview || [];
+        const remaining = preview.remaining || [];
+        const alreadyLinked = preview.already_linked || [];
+        const totalAvailable = aiSelected.length + remaining.length;
+
+        if (totalAvailable === 0 && alreadyLinked.length > 0) {
+            html += `<div class="empty-state" style="padding:20px;"><span class="material-symbols-rounded">check_circle</span><p>All ${alreadyLinked.length} article(s) already link to this page.</p></div>`;
+        } else if (totalAvailable === 0) {
+            html += '<div class="empty-state" style="padding:20px;"><span class="material-symbols-rounded">info</span><p>No blog articles found. Sync blog articles first.</p></div>';
+        } else {
+            html += `<p style="margin-bottom:12px;">Add link to <code>${escapeHtml(preview.target_url)}</code> with anchor text "<strong>${escapeHtml(preview.anchor_text)}</strong>". Select which articles to update:</p>`;
+
+            if (alreadyLinked.length > 0) {
+                html += `<div style="font-size:12px;color:var(--on-surface-secondary);margin-bottom:10px;padding:6px 10px;background:var(--surface-dim);border-radius:6px;">${alreadyLinked.length} article(s) already linked: ${alreadyLinked.map(t => escapeHtml(t)).join(', ')}</div>`;
+            }
+
+            html += '<div style="margin-bottom:16px;max-height:400px;overflow-y:auto;">';
+
+            if (aiSelected.length > 0) {
+                html += '<div style="font-size:12px;font-weight:600;color:var(--primary);margin-bottom:6px;">AI Recommended</div>';
+                for (const item of aiSelected) {
+                    html += `<label style="display:flex;align-items:flex-start;gap:8px;padding:8px;border:1px solid var(--primary);border-radius:6px;margin-bottom:6px;cursor:pointer;background:var(--primary-light,#e8f0fe);">
+                        <input type="checkbox" class="action-preview-check" data-id="${item.article_id}" data-shopify-id="${item.article_shopify_id}" data-target-url="${escapeAttr(item.target_url)}" data-anchor="${escapeAttr(item.anchor_text)}" checked>
+                        <div><strong>${escapeHtml(item.article_title)}</strong></div>
+                    </label>`;
+                }
+            }
+
+            if (remaining.length > 0) {
+                html += `<div style="font-size:12px;font-weight:600;color:var(--on-surface-secondary);margin:${aiSelected.length > 0 ? '12px' : '0'} 0 6px;">Other Articles (select manually)</div>`;
+                for (const item of remaining) {
+                    html += `<label style="display:flex;align-items:flex-start;gap:8px;padding:8px;border:1px solid var(--outline);border-radius:6px;margin-bottom:6px;cursor:pointer;">
+                        <input type="checkbox" class="action-preview-check" data-id="${item.article_id}" data-shopify-id="${item.article_shopify_id}" data-target-url="${escapeAttr(item.target_url)}" data-anchor="${escapeAttr(item.anchor_text)}">
+                        <div><strong>${escapeHtml(item.article_title)}</strong>${item.snippet ? `<div style="font-size:11px;color:var(--on-surface-secondary);max-height:36px;overflow:hidden;">${escapeHtml(item.snippet)}</div>` : ''}</div>
+                    </label>`;
+                }
+            }
+
+            html += '</div>';
+            html += `<button class="btn btn-primary" onclick="confirmApplyAction('internal_linking', ${recIndex})"><span class="material-symbols-rounded" style="font-size:16px;">check</span> Confirm & Apply Selected</button>`;
+        }
+    } else if (actionType === 'image_alt_text') {
+        const items = preview.preview || [];
+        if (items.length === 0) {
+            html += '<div class="empty-state" style="padding:20px;"><span class="material-symbols-rounded">info</span><p>No product images found to update.</p></div>';
+        } else {
+            let totalImgs = items.reduce((s, p) => s + p.suggestions.length, 0);
+            html += `<p style="margin-bottom:12px;">Suggested alt text for <strong>${totalImgs}</strong> image(s) across <strong>${items.length}</strong> product(s). Review and edit:</p>`;
+            for (const prod of items) {
+                html += `<div style="margin-bottom:14px;padding:12px;border:1px solid var(--outline);border-radius:8px;">
+                    <strong>${escapeHtml(prod.product_title)}</strong>
+                    <div style="margin-top:8px;">`;
+                for (let i = 0; i < prod.suggestions.length; i++) {
+                    const s = prod.suggestions[i];
+                    const hasCurrentAlt = s.current_alt && s.current_alt.trim();
+                    const changed = hasCurrentAlt && s.current_alt.trim() !== s.suggested_alt.trim();
+                    html += `<div style="display:flex;align-items:flex-start;gap:8px;margin-bottom:8px;padding:6px;border-radius:6px;${changed ? 'background:var(--primary-light,#e8f0fe);' : ''}">
+                        ${s.image_url ? `<img src="${escapeAttr(s.image_url)}" style="width:48px;height:48px;object-fit:cover;border-radius:4px;flex-shrink:0;">` : ''}
+                        <div style="flex:1;min-width:0;">
+                            ${hasCurrentAlt ? `<div style="font-size:11px;color:var(--on-surface-secondary);margin-bottom:3px;">Current: <span style="text-decoration:line-through;">${escapeHtml(s.current_alt)}</span></div>` : '<div style="font-size:11px;color:var(--error);margin-bottom:3px;">No alt text</div>'}
+                            <input type="text" class="ai-field-editable alt-preview-input" data-product-id="${prod.product_id}" data-product-shopify-id="${prod.product_shopify_id}" data-media-id="${escapeAttr(s.media_id)}" value="${escapeAttr(s.suggested_alt)}" style="width:100%;font-size:13px;">
+                        </div>
+                    </div>`;
+                }
+                html += '</div></div>';
+            }
+            html += `<button class="btn btn-primary" onclick="confirmApplyAction('image_alt_text', ${recIndex})"><span class="material-symbols-rounded" style="font-size:16px;">check</span> Confirm & Apply All</button>`;
+        }
+    } else if (actionType === 'faq_schema') {
+        const faqs = preview.preview || [];
+        if (faqs.length === 0) {
+            html += '<div class="empty-state" style="padding:20px;"><span class="material-symbols-rounded">error</span><p>Failed to generate FAQ answers.</p></div>';
+        } else {
+            html += `<p style="margin-bottom:12px;">Generated <strong>${faqs.length}</strong> FAQ(s) for "${escapeHtml(preview.item_title)}". Edit as needed:</p>`;
+            for (let i = 0; i < faqs.length; i++) {
+                html += `<div style="margin-bottom:12px;padding:10px;border:1px solid var(--outline);border-radius:8px;">
+                    <div style="font-size:12px;color:var(--on-surface-secondary);margin-bottom:4px;">Question ${i+1}</div>
+                    <input type="text" class="ai-field-editable faq-q-input" data-index="${i}" value="${escapeAttr(faqs[i].question)}" style="width:100%;margin-bottom:6px;font-weight:600;">
+                    <div style="font-size:12px;color:var(--on-surface-secondary);margin-bottom:4px;">Answer</div>
+                    <textarea class="ai-field-editable faq-a-input" data-index="${i}" rows="2" style="width:100%;">${escapeHtml(faqs[i].answer)}</textarea>
+                </div>`;
+            }
+            _pendingPreviewData = { item_shopify_id: preview.item_shopify_id, item_type: preview.item_type };
+            html += `<button class="btn btn-primary" onclick="confirmApplyAction('faq_schema', ${recIndex})"><span class="material-symbols-rounded" style="font-size:16px;">check</span> Confirm & Push to Shopify</button>`;
+        }
+    }
+
+    content.innerHTML = html;
+    _pendingPreviewData = _pendingPreviewData || {};
+    _pendingPreviewData._applyBody = applyBody;
+    modal.classList.add("active");
+}
+
+async function confirmApplyAction(actionType, recIndex) {
+    const storeId = currentItemStoreId || _getSeoStoreId();
+    const body = { type: actionType, store_id: storeId };
+    let confirmBtn;
+
+    try {
+        if (actionType === 'internal_linking') {
+            const checks = document.querySelectorAll('.action-preview-check:checked');
+            const items = [];
+            checks.forEach(cb => {
+                items.push({
+                    article_id: parseInt(cb.dataset.id),
+                    article_shopify_id: cb.dataset.shopifyId,
+                    target_url: cb.dataset.targetUrl,
+                    anchor_text: cb.dataset.anchor,
+                });
+            });
+            if (!items.length) { showToast('Select at least one article', 'error'); return; }
+            body.items = items;
+            confirmBtn = document.querySelector('#impact-modal-content .btn-primary');
+        } else if (actionType === 'image_alt_text') {
+            const inputs = document.querySelectorAll('.alt-preview-input');
+            const byProduct = {};
+            inputs.forEach(inp => {
+                const pid = inp.dataset.productId;
+                if (!byProduct[pid]) byProduct[pid] = { product_id: parseInt(pid), product_shopify_id: inp.dataset.productShopifyId, updates: [] };
+                byProduct[pid].updates.push({ media_id: inp.dataset.mediaId, alt: inp.value });
+            });
+            body.items = Object.values(byProduct);
+            confirmBtn = document.querySelector('#impact-modal-content .btn-primary');
+        } else if (actionType === 'faq_schema') {
+            const qs = document.querySelectorAll('.faq-q-input');
+            const as_ = document.querySelectorAll('.faq-a-input');
+            const faqs = [];
+            qs.forEach((q, i) => { faqs.push({ question: q.value, answer: as_[i].value }); });
+            body.faqs = faqs;
+            body.item_id = (_pendingPreviewData._applyBody || {}).item_id;
+            body.item_shopify_id = _pendingPreviewData.item_shopify_id;
+            body.item_type = _pendingPreviewData.item_type;
+            confirmBtn = document.querySelector('#impact-modal-content .btn-primary');
+        }
+
+        if (confirmBtn) {
+            confirmBtn.disabled = true;
+            confirmBtn.innerHTML = '<span class="material-symbols-rounded" style="font-size:14px;">hourglass_empty</span> Applying...';
+        }
+
+        const result = await apiRequest('/api/seo/actions/apply', { method: 'POST', body });
+        showToast(result.message || 'Applied successfully', 'success');
+        closeImpactModal();
+
+        const recBtn = document.getElementById(`rec-apply-btn-${recIndex}`);
+        const recItem = document.getElementById(`rec-item-${recIndex}`);
+        if (recBtn) { recBtn.innerHTML = '<span class="material-symbols-rounded" style="font-size:14px;">check</span> Done'; recBtn.disabled = true; recBtn.classList.remove('btn-primary'); recBtn.classList.add('btn-secondary'); }
+        if (recItem) recItem.style.borderColor = 'var(--success)';
+    } catch (err) {
+        showToast(`Apply failed: ${err.message}`, 'error');
+        if (confirmBtn) { confirmBtn.disabled = false; confirmBtn.innerHTML = '<span class="material-symbols-rounded" style="font-size:16px;">check</span> Retry'; }
+    }
+}
+
+function toggleSchemaSettings() {
+    const body = document.getElementById("schema-settings-body");
+    const trigger = document.getElementById("schema-settings-trigger");
+    if (!body || !trigger) return;
+    body.classList.toggle("open");
+    trigger.classList.toggle("open");
 }
 
 function setupModalDismiss(overlayId, closeFn) {
@@ -64,7 +379,32 @@ document.addEventListener("DOMContentLoaded", () => {
     setupModalDismiss("product-modal", closeProductModal);
     setupModalDismiss("schema-modal", closeSchemaModal);
     setupModalDismiss("keyword-analysis-modal", closeKeywordAnalysisModal);
+    handleDeepLink();
 });
+
+function handleDeepLink() {
+    const params = new URLSearchParams(window.location.search);
+    const optimizeType = params.get("optimize");
+    const itemId = params.get("id");
+    const priorityAction = params.get("action");
+    if (!optimizeType || !itemId) return;
+
+    window.history.replaceState({}, "", "/seo");
+
+    setTimeout(async () => {
+        try {
+            if (optimizeType === "product") {
+                await viewProduct(parseInt(itemId));
+                analyzeProduct(parseInt(itemId), priorityAction);
+            } else if (optimizeType === "collection") {
+                await viewCollection(parseInt(itemId));
+                analyzeCollection(parseInt(itemId), priorityAction);
+            }
+        } catch (err) {
+            showToast(`Failed to open item: ${err.message}`, "error");
+        }
+    }, 500);
+}
 
 function initTabs() {
     const savedTab = loadFilter("seoTab", "products");
@@ -86,6 +426,7 @@ function initTabs() {
 
             if (tab.dataset.tab === "products") loadProducts();
             if (tab.dataset.tab === "collections") loadCollections();
+            if (tab.dataset.tab === "priorities") loadPriorities();
             if (tab.dataset.tab === "schema") loadSchemaTab();
         });
     });
@@ -116,6 +457,7 @@ function setStatusFilter(status) {
 
 function clearAllProductFilters() {
     currentStatusFilter = "";
+    productSearchTerm = "";
     saveFilter("productStatus", "");
     selectedProductIds.clear();
     lastClickedProductIndex = -1;
@@ -152,17 +494,35 @@ function renderProductsTable(container, products) {
     const draftCount = statusCounts.DRAFT || 0;
     const archivedCount = statusCounts.ARCHIVED || 0;
 
-    html += `<div class="status-filter-bar">
-        <button class="filter-chip ${currentStatusFilter === "" ? "active" : ""}" onclick="setStatusFilter('')">All (${total})</button>
-        <button class="filter-chip ${currentStatusFilter === "ACTIVE" ? "active" : ""}" onclick="setStatusFilter('ACTIVE')">Active (${activeCount})</button>
-        <button class="filter-chip ${currentStatusFilter === "DRAFT" ? "active" : ""}" onclick="setStatusFilter('DRAFT')">Draft (${draftCount})</button>
-        <button class="filter-chip ${currentStatusFilter === "ARCHIVED" ? "active" : ""}" onclick="setStatusFilter('ARCHIVED')">Archived (${archivedCount})</button>
+    html += `<div class="toolbar-row">
+        <div class="status-filter-bar">
+            <button class="filter-chip ${currentStatusFilter === "" ? "active" : ""}" onclick="setStatusFilter('')">All (${total})</button>
+            <button class="filter-chip ${currentStatusFilter === "ACTIVE" ? "active" : ""}" onclick="setStatusFilter('ACTIVE')">Active (${activeCount})</button>
+            <button class="filter-chip ${currentStatusFilter === "DRAFT" ? "active" : ""}" onclick="setStatusFilter('DRAFT')">Draft (${draftCount})</button>
+            <button class="filter-chip ${currentStatusFilter === "ARCHIVED" ? "active" : ""}" onclick="setStatusFilter('ARCHIVED')">Archived (${archivedCount})</button>
+        </div>
+        <button class="btn btn-secondary btn-sm" onclick="openKeywordAnalysisModal()" style="margin-left: auto; white-space: nowrap;">
+            <span class="material-symbols-rounded">label</span>
+            Keyword & Tag Analysis
+        </button>
     </div>`;
 
-    if (products.length === 0) {
+    html += `<div class="search-bar">
+        <span class="material-symbols-rounded">search</span>
+        <input class="search-input" type="text" placeholder="Search products by title..." value="${escapeAttr(productSearchTerm)}" oninput="onProductSearch(this.value)">
+        ${productSearchTerm ? '<button class="search-clear" onclick="onProductSearch(\'\')"><span class="material-symbols-rounded" style="font-size:18px;">close</span></button>' : ''}
+    </div>`;
+
+    let filtered = products;
+    if (productSearchTerm) {
+        const term = productSearchTerm.toLowerCase();
+        filtered = products.filter(p => (p.title || "").toLowerCase().includes(term));
+    }
+
+    if (filtered.length === 0 && (currentStatusFilter || productSearchTerm)) {
         html += `<div class="empty-state">
             <span class="material-symbols-rounded">filter_list_off</span>
-            <p>No products match the current filter.</p>
+            <p>No products match the current filter${productSearchTerm ? " or search" : ""}.</p>
             <button class="btn btn-secondary" onclick="clearAllProductFilters()">
                 <span class="material-symbols-rounded">clear_all</span>
                 Clear Filters
@@ -172,11 +532,19 @@ function renderProductsTable(container, products) {
         return;
     }
 
-    html += `<div style="display: flex; gap: 8px; align-items: center; margin-bottom: 12px;">
-        <button class="btn btn-secondary" onclick="openKeywordAnalysisModal()">
-            <span class="material-symbols-rounded">label</span>
-            Keyword & Tag Analysis
-        </button>
+    const avgScore = filtered.length > 0 ? Math.round(filtered.reduce((s, p) => s + (p.seo_score || 0), 0) / filtered.length) : 0;
+    const goodCount = filtered.filter(p => p.seo_score >= 80).length;
+    const fairCount = filtered.filter(p => p.seo_score >= 50 && p.seo_score < 80).length;
+    const poorCount = filtered.filter(p => p.seo_score < 50).length;
+
+    html += `<div class="summary-strip">
+        <span class="stat-item"><strong>${filtered.length}</strong> products</span>
+        <span class="stat-divider"></span>
+        <span class="stat-item">Avg score: <strong>${avgScore}</strong></span>
+        <span class="stat-divider"></span>
+        <span class="stat-item" style="color: var(--success);"><strong>${goodCount}</strong> good</span>
+        <span class="stat-item" style="color: var(--warning);"><strong>${fairCount}</strong> fair</span>
+        <span class="stat-item" style="color: var(--error);"><strong>${poorCount}</strong> poor</span>
     </div>`;
 
     if (selectedProductIds.size > 0) {
@@ -185,6 +553,10 @@ function renderProductsTable(container, products) {
             <button class="btn btn-sm btn-primary" onclick="startBulkOptimize()">
                 <span class="material-symbols-rounded">bolt</span>
                 Bulk Optimize & Apply
+            </button>
+            <button class="btn btn-sm btn-secondary" onclick="startBulkOptimizeTitles()">
+                <span class="material-symbols-rounded">title</span>
+                Optimize Titles Only
             </button>
         </div>`;
     }
@@ -198,6 +570,11 @@ function renderProductsTable(container, products) {
         { key: "store", label: "Store" },
         { key: "status", label: "Status" },
         { key: "seo_score", label: "SEO Score" },
+        { key: "gsc_clicks", label: "Clicks" },
+        { key: "gsc_impressions", label: "Impr." },
+        { key: "gsc_position", label: "Pos." },
+        { key: "semrush_volume", label: "Mo. Vol." },
+        { key: "semrush_position", label: "SR Pos." },
         { key: "last_optimized_at", label: "Last Optimized" },
     ];
 
@@ -210,30 +587,28 @@ function renderProductsTable(container, products) {
     html += "<th>Actions</th>";
     html += "</tr></thead><tbody>";
 
-    for (let idx = 0; idx < products.length; idx++) {
-        const p = products[idx];
-        const fillClass =
-            p.seo_score >= 80 ? "high" : p.seo_score >= 50 ? "medium" : "low";
+    for (let idx = 0; idx < filtered.length; idx++) {
+        const p = filtered[idx];
         const checked = selectedProductIds.has(p.id) ? "checked" : "";
         const rowClass = selectedProductIds.has(p.id) ? "row-selected" : "";
         html += `<tr class="${rowClass}">
             <td class="checkbox-col"><input type="checkbox" class="table-checkbox" data-product-id="${p.id}" data-index="${idx}" ${checked} onclick="toggleProductSelect(${p.id}, this, event)"></td>
             <td class="row-num-col">${idx + 1}</td>
-            <td><strong>${escapeHtml(p.title)}</strong><br><small style="color: var(--on-surface-secondary);">${escapeHtml(p.handle)}</small></td>
+            <td><strong>${escapeHtml(p.title)}</strong></td>
             <td>${escapeHtml(p.store_name)}</td>
             <td><span class="badge badge-info">${escapeHtml(p.status)}</span></td>
-            <td>
-                <div style="display: flex; align-items: center; gap: 8px;">
-                    ${getScoreBadge(p.seo_score)}
-                    <div class="score-bar" style="width: 80px;">
-                        <div class="score-bar-fill ${fillClass}" style="width: ${p.seo_score}%;"></div>
-                    </div>
-                </div>
-            </td>
+            <td>${renderScoreRing(p.seo_score, 44, p)}</td>
+            <td>${p.gsc_clicks != null ? Math.round(p.gsc_clicks).toLocaleString() : '<span style="color:var(--on-surface-secondary)">—</span>'}</td>
+            <td>${p.gsc_impressions != null ? Math.round(p.gsc_impressions).toLocaleString() : '<span style="color:var(--on-surface-secondary)">—</span>'}</td>
+            <td>${p.gsc_position != null ? renderPositionBadge(p.gsc_position) : '<span style="color:var(--on-surface-secondary)">—</span>'}</td>
+            <td>${p.semrush_volume != null ? p.semrush_volume.toLocaleString() : '<span style="color:var(--on-surface-secondary)">—</span>'}</td>
+            <td>${p.semrush_position != null ? renderPositionBadge(p.semrush_position) : '<span style="color:var(--on-surface-secondary)">—</span>'}</td>
             <td>${formatOptimizedDate(p.last_optimized_at)}</td>
             <td>
-                <button class="btn btn-sm btn-secondary" onclick="viewProduct(${p.id})">View</button>
-                <button class="btn btn-sm btn-primary" onclick="analyzeProduct(${p.id})">AI Analyze</button>
+                <div class="actions-cell">
+                    <button class="action-icon" title="View product details" onclick="viewProduct(${p.id})"><span class="material-symbols-rounded">visibility</span></button>
+                    <button class="action-icon action-icon-primary" title="AI Analyze" onclick="analyzeProduct(${p.id})"><span class="material-symbols-rounded">smart_toy</span></button>
+                </div>
             </td>
         </tr>`;
     }
@@ -243,8 +618,16 @@ function renderProductsTable(container, products) {
     const selectAllCb = document.getElementById("select-all-checkbox");
     if (selectAllCb) {
         selectAllCb.checked =
-            products.length > 0 && products.every((p) => selectedProductIds.has(p.id));
+            filtered.length > 0 && filtered.every((p) => selectedProductIds.has(p.id));
     }
+}
+
+function onProductSearch(value) {
+    clearTimeout(_productSearchTimer);
+    _productSearchTimer = setTimeout(() => {
+        productSearchTerm = value;
+        renderProductsTable(document.getElementById("products-container"), currentProducts);
+    }, 250);
 }
 
 function toggleSort(key) {
@@ -305,14 +688,18 @@ function startBulkOptimize() {
     document.getElementById("confirm-dialog-title").textContent = "Bulk Optimize & Apply";
     document.getElementById("confirm-dialog-message").innerHTML =
         `This will optimize ${selectedProductIds.size} product${selectedProductIds.size > 1 ? "s" : ""} using AI and push changes to Shopify.`
-        + `<div style="margin-top: 12px;"><label style="display: flex; align-items: center; gap: 8px; cursor: pointer; font-size: 14px;">`
+        + `<div style="margin-top: 12px; display: flex; flex-direction: column; gap: 8px;">`
+        + `<label style="display: flex; align-items: center; gap: 8px; cursor: pointer; font-size: 14px;">`
+        + `<input type="checkbox" id="bulk-skip-title-checkbox" checked> Keep original product titles (don't rename)</label>`
+        + `<label style="display: flex; align-items: center; gap: 8px; cursor: pointer; font-size: 14px;">`
         + `<input type="checkbox" id="bulk-include-tags-checkbox"> Include tag re-analysis (default: tags managed separately)</label></div>`;
 
     const okBtn = document.getElementById("confirm-dialog-ok");
     okBtn.onclick = () => {
         const includeTags = document.getElementById("bulk-include-tags-checkbox")?.checked || false;
+        const skipTitle = document.getElementById("bulk-skip-title-checkbox")?.checked || false;
         closeConfirmDialog();
-        executeBulkOptimize(!includeTags);
+        executeBulkOptimize(!includeTags, skipTitle);
     };
     _openConfirmDialog();
 }
@@ -335,7 +722,7 @@ function _openConfirmDialog() {
     document.getElementById("confirm-dialog-ok").focus();
 }
 
-async function executeBulkOptimize(skipTags = true) {
+async function executeBulkOptimize(skipTags = true, skipTitle = false) {
     const ids = Array.from(selectedProductIds);
 
     const overlay = document.getElementById("bulk-progress-overlay");
@@ -353,7 +740,7 @@ async function executeBulkOptimize(skipTags = true) {
     try {
         const resp = await apiRequest("/api/tasks/bulk", {
             method: "POST",
-            body: { product_ids: ids, auto_apply: true, skip_tags: skipTags },
+            body: { product_ids: ids, auto_apply: true, skip_tags: skipTags, skip_title: skipTitle },
         });
 
         const bulkTaskId = resp.bulk_task_id;
@@ -364,7 +751,7 @@ async function executeBulkOptimize(skipTags = true) {
     }
 }
 
-function pollBulkTask(bulkTaskId, total) {
+function pollBulkTask(bulkTaskId, total, subtitleText = "Optimizing products...") {
     const overlay = document.getElementById("bulk-progress-overlay");
     const bar = document.getElementById("bulk-progress-bar");
     const stats = document.getElementById("bulk-progress-stats");
@@ -379,7 +766,7 @@ function pollBulkTask(bulkTaskId, total) {
 
             bar.style.width = `${pct}%`;
             stats.textContent = `${done} / ${total} completed` + (task.failed > 0 ? ` (${task.failed} failed)` : "");
-            subtitle.textContent = "Optimizing products...";
+            subtitle.textContent = subtitleText;
 
             if (task.current_product_title) {
                 current.textContent = `Currently: ${task.current_product_title}`;
@@ -444,33 +831,395 @@ async function loadCollections() {
     }
 }
 
+let priorityTypeFilter = "product";
+let priorityViewMode = "needs_work"; // "needs_work" or "optimized"
+let optimizedSort = { by: "days_since", dir: "asc" };
+let _cachedOptimizedItems = [];
+
+let _cachedStoreId = null;
+
+function _getSeoStoreId() {
+    if (_cachedStoreId) return _cachedStoreId;
+    if (currentProducts.length > 0 && currentProducts[0].store_id) return currentProducts[0].store_id;
+    if (currentCollections.length > 0 && currentCollections[0].store_id) return currentCollections[0].store_id;
+    const storeSelect = document.getElementById("store-select");
+    if (storeSelect) return storeSelect.value;
+    return "";
+}
+
+async function _ensureStoreId() {
+    let sid = _getSeoStoreId();
+    if (sid) return sid;
+    try {
+        const stores = await apiRequest("/api/stores");
+        if (stores.length > 0) {
+            _cachedStoreId = stores[0].id;
+            return _cachedStoreId;
+        }
+    } catch {}
+    return "";
+}
+
+function _priorityToolbar() {
+    return `<div class="toolbar-row" style="gap:12px;flex-wrap:wrap;">
+        <div class="status-filter-bar">
+            <button class="filter-chip ${priorityViewMode === "needs_work" ? "active" : ""}" onclick="setPriorityView('needs_work')">Needs Work</button>
+            <button class="filter-chip ${priorityViewMode === "optimized" ? "active" : ""}" onclick="setPriorityView('optimized')">Recently Optimized</button>
+        </div>
+        <div class="status-filter-bar" style="margin-left:auto;">
+            <button class="filter-chip ${priorityTypeFilter === "product" ? "active" : ""}" onclick="setPriorityType('product')">Products</button>
+            <button class="filter-chip ${priorityTypeFilter === "collection" ? "active" : ""}" onclick="setPriorityType('collection')">Collections</button>
+        </div>
+    </div>`;
+}
+
+async function loadPriorities() {
+    const container = document.getElementById("priorities-container");
+
+    const storeId = await _ensureStoreId();
+    if (!storeId) {
+        container.innerHTML = '<div class="empty-state"><span class="material-symbols-rounded">store</span><p>No stores found. Add a store first.</p></div>';
+        return;
+    }
+
+    const typeLabel = priorityTypeFilter === "product" ? "products" : "collections";
+    container.innerHTML = _priorityToolbar() + `
+        <div class="loading-spinner" style="padding: 60px 0;">
+            <div class="spinner"></div>
+            <p>${priorityViewMode === "optimized" ? "Loading recently optimized items..." : `Analyzing ${typeLabel} — scoring SEO, search performance & opportunities...`}</p>
+            <p style="font-size: 12px; color: var(--on-surface-secondary); margin-top: 4px;">This may take a moment for large catalogs</p>
+        </div>`;
+
+    try {
+        if (priorityViewMode === "optimized") {
+            const items = await apiRequest(`/api/seo/optimized?store_id=${storeId}&limit=30`);
+            renderOptimizedTable(container, items);
+        } else {
+            const items = await apiRequest(`/api/seo/priorities?store_id=${storeId}&type=${priorityTypeFilter}&limit=50`);
+            renderPrioritiesTable(container, items);
+        }
+    } catch (err) {
+        container.innerHTML = _priorityToolbar() +
+            `<div class="empty-state"><span class="material-symbols-rounded">error</span><p>${escapeHtml(err.message)}</p></div>`;
+    }
+}
+
+function setPriorityView(mode) {
+    priorityViewMode = mode;
+    loadPriorities();
+}
+
+function setPriorityType(type) {
+    priorityTypeFilter = type;
+    loadPriorities();
+}
+
+function toggleOptimizedSort(key) {
+    if (optimizedSort.by === key) {
+        optimizedSort.dir = optimizedSort.dir === "asc" ? "desc" : "asc";
+    } else {
+        optimizedSort.by = key;
+        optimizedSort.dir = key === "title" ? "asc" : "desc";
+    }
+    const sorted = _sortOptimizedItems([..._cachedOptimizedItems]);
+    renderOptimizedTable(document.getElementById("priorities-container"), sorted, true);
+}
+
+function _sortOptimizedItems(items) {
+    const key = optimizedSort.by;
+    const dir = optimizedSort.dir === "asc" ? 1 : -1;
+    return items.sort((a, b) => {
+        let va = a[key], vb = b[key];
+        if (va == null) va = key === "title" ? "" : -Infinity;
+        if (vb == null) vb = key === "title" ? "" : -Infinity;
+        if (typeof va === "string") return dir * va.localeCompare(vb);
+        return dir * (va - vb);
+    });
+}
+
+function renderOptimizedTable(container, items, skipCache) {
+    if (!skipCache) _cachedOptimizedItems = items;
+    let html = _priorityToolbar();
+
+    if (items.length === 0) {
+        html += '<div class="empty-state" style="padding:40px 0;"><span class="material-symbols-rounded">check_circle</span><p>No optimizations recorded yet. Optimize items from the "Needs Work" tab to track their progress here.</p></div>';
+        container.innerHTML = html;
+        return;
+    }
+
+    const mature = items.filter(i => i.days_since >= 28);
+    const pending = items.filter(i => i.days_since < 28);
+    const onPageImproved = items.filter(i => i.score_change > 0).length;
+    const matureImproved = mature.filter(i => i.score_change > 5).length;
+    const matureDeclined = mature.filter(i => i.score_change < -5).length;
+
+    html += `<div class="summary-strip">
+        <span class="stat-item"><strong>${items.length}</strong> optimized items</span>
+        <span class="stat-divider"></span>
+        <span class="stat-item" style="color:var(--success);"><strong>${onPageImproved}</strong> on-page improved</span>
+        ${mature.length > 0 ? `<span class="stat-divider"></span>
+        <span class="stat-item"><strong>${mature.length}</strong> mature (28d+)</span>
+        <span class="stat-item" style="color:var(--success);"><strong>${matureImproved}</strong> search improved</span>
+        ${matureDeclined > 0 ? `<span class="stat-item" style="color:var(--error);"><strong>${matureDeclined}</strong> needs review</span>` : ''}` : ''}
+        ${pending.length > 0 ? `<span class="stat-divider"></span><span class="stat-item" style="color:var(--on-surface-secondary);"><strong>${pending.length}</strong> awaiting Google</span>` : ''}
+    </div>`;
+
+    html += `<div style="padding:10px 14px;margin-bottom:12px;background:var(--surface-dim);border-radius:8px;border:1px solid var(--outline);font-size:12px;line-height:1.6;color:var(--on-surface-secondary);">
+        <strong style="color:var(--on-surface);">How to read this table:</strong>
+        <strong>On-Page Δ</strong> reflects immediate content quality changes (meta title, description, alt text).
+        <strong>Search traffic impact</strong> (clicks, impressions, position) takes <strong>2-4 weeks</strong> for Google to reflect.
+        Click the <strong>trend icon</strong> on any row to see the full before/after GSC comparison once enough data is available.
+    </div>`;
+
+    const oCols = [
+        { key: "title", label: "Title" },
+        { key: "item_type", label: "Type" },
+        { key: "days_since", label: "Optimized" },
+        { key: "score_before", label: "Before", title: "Composite score at time of optimization" },
+        { key: "score_now", label: "Now", title: "Composite score now" },
+        { key: "score_change", label: "On-Page Δ", title: "On-page score change (instant)" },
+        { key: null, label: "Status" },
+        { key: "gsc_clicks", label: "Clicks", title: "Current 28-day GSC" },
+        { key: "gsc_impressions", label: "Impr." },
+        { key: "gsc_position", label: "Position" },
+    ];
+    html += '<div class="table-container"><table><thead><tr>';
+    html += '<th class="row-num-col">#</th>';
+    for (const col of oCols) {
+        if (col.key) {
+            const isActive = optimizedSort.by === col.key;
+            const dirClass = isActive ? optimizedSort.dir : "";
+            html += `<th class="sortable-header ${dirClass}" onclick="toggleOptimizedSort('${col.key}')"${col.title ? ` title="${col.title}"` : ''}>${col.label}</th>`;
+        } else {
+            html += `<th>${col.label}</th>`;
+        }
+    }
+    html += '<th>Actions</th>';
+    html += '</tr></thead><tbody>';
+
+    for (let i = 0; i < items.length; i++) {
+        const item = items[i];
+        const changeColor = item.score_change > 0 ? 'var(--success)' : item.score_change < 0 ? 'var(--error)' : 'var(--on-surface-secondary)';
+        const changeIcon = item.score_change > 0 ? 'trending_up' : item.score_change < 0 ? 'trending_down' : 'trending_flat';
+        const changeStr = item.score_change > 0 ? `+${item.score_change}` : String(item.score_change);
+        const daysAgo = item.days_since === 0 ? 'Today' : item.days_since === 1 ? 'Yesterday' : `${item.days_since}d ago`;
+        const typeBadge = item.item_type === 'product' ? '<span class="badge badge-info" style="font-size:10px;">Product</span>' : '<span class="badge badge-warning" style="font-size:10px;">Collection</span>';
+
+        let statusLabel, statusColor;
+        if (item.days_since < 14) {
+            statusLabel = 'Awaiting Google';
+            statusColor = 'var(--on-surface-secondary)';
+        } else if (item.days_since < 28) {
+            statusLabel = 'Measuring...';
+            statusColor = 'var(--warning)';
+        } else {
+            if (item.score_change > 5) { statusLabel = 'Improved'; statusColor = 'var(--success)'; }
+            else if (item.score_change < -5) { statusLabel = 'Check needed'; statusColor = 'var(--error)'; }
+            else { statusLabel = 'Stable'; statusColor = 'var(--on-surface-secondary)'; }
+        }
+
+        html += `<tr>
+            <td class="row-num-col">${i + 1}</td>
+            <td><strong>${escapeHtml(item.title)}</strong></td>
+            <td>${typeBadge}</td>
+            <td style="white-space:nowrap;font-size:12px;">${daysAgo}</td>
+            <td>${renderScoreRing(item.score_before, 32)}</td>
+            <td>${renderScoreRing(item.score_now, 32)}</td>
+            <td style="color:${changeColor};font-weight:700;font-size:13px;">
+                <span class="material-symbols-rounded" style="font-size:16px;vertical-align:middle;">${changeIcon}</span>
+                ${changeStr}
+            </td>
+            <td><span style="font-size:11px;color:${statusColor};font-weight:600;">${statusLabel}</span></td>
+            <td>${item.gsc_clicks != null ? Math.round(item.gsc_clicks).toLocaleString() : '—'}</td>
+            <td>${item.gsc_impressions != null ? Math.round(item.gsc_impressions).toLocaleString() : '—'}</td>
+            <td>${item.gsc_position != null ? renderPositionBadge(item.gsc_position) : '—'}</td>
+            <td>
+                <div class="actions-cell">
+                    <button class="action-icon" title="View details" onclick="${item.item_type === 'product' ? 'viewProduct' : 'viewCollection'}(${item.id})"><span class="material-symbols-rounded">visibility</span></button>
+                    <button class="action-icon" title="View before/after impact" onclick="viewImpact(${item.id}, '${item.item_type}')"><span class="material-symbols-rounded">trending_up</span></button>
+                    <button class="action-icon action-icon-primary" title="Re-optimize" onclick="${item.item_type === 'product' ? 'analyzeProduct' : 'analyzeCollection'}(${item.id})"><span class="material-symbols-rounded">smart_toy</span></button>
+                </div>
+            </td>
+        </tr>`;
+    }
+    html += '</tbody></table></div>';
+    container.innerHTML = html;
+}
+
+function renderPrioritiesTable(container, items) {
+    let html = _priorityToolbar();
+
+    if (items.length === 0) {
+        html += '<div class="empty-state"><span class="material-symbols-rounded">check_circle</span><p>No priority items found. Connect GSC or import Semrush data to see SEO priorities.</p></div>';
+        container.innerHTML = html;
+        return;
+    }
+
+    const cannibalCount = items.filter(i => i.cannibalization_warning).length;
+    html += `<div class="summary-strip">
+        <span class="stat-item"><strong>${items.length}</strong> items with opportunities</span>
+        <span class="stat-divider"></span>
+        <span class="stat-item" style="color:var(--error);"><strong>${items.filter(i => i.priority_score >= 80).length}</strong> high priority</span>
+        <span class="stat-item" style="color:var(--warning);"><strong>${items.filter(i => i.priority_score >= 60 && i.priority_score < 80).length}</strong> medium</span>
+        <span class="stat-item" style="color:var(--on-surface-secondary);"><strong>${items.filter(i => i.priority_score < 60).length}</strong> low</span>
+        ${cannibalCount > 0 ? `<span class="stat-divider"></span><span class="stat-item" style="color:var(--error);"><span class="material-symbols-rounded" style="font-size:14px;vertical-align:middle;">warning</span> <strong>${cannibalCount}</strong> cannibalization risk${cannibalCount > 1 ? 's' : ''}</span>` : ''}
+    </div>`;
+
+    html += '<div class="table-container"><table><thead><tr>';
+    html += '<th class="row-num-col">#</th>';
+    html += '<th>Title</th>';
+    html += '<th>Priority</th>';
+    html += '<th>SEO Score</th>';
+    html += '<th>Impressions</th>';
+    html += '<th>CTR</th>';
+    html += '<th>Position</th>';
+    html += '<th>Top Opportunity</th>';
+    html += '<th>Potential Clicks</th>';
+    html += '<th>Actions</th>';
+    html += '</tr></thead><tbody>';
+
+    for (let i = 0; i < items.length; i++) {
+        const item = items[i];
+        const optimizedLabel = item.last_optimized_at ? `<div style="font-size:10px;color:var(--on-surface-secondary);margin-top:2px;">Optimized ${new Date(item.last_optimized_at).toLocaleDateString('en-US', {month:'short',day:'numeric'})}</div>` : '';
+        const recommendedAction = item.recommended_action ? escapeAttr(item.recommended_action) : 'Optimize';
+        html += `<tr>
+            <td class="row-num-col">${i + 1}</td>
+            <td><strong>${escapeHtml(item.title)}</strong>${optimizedLabel}</td>
+            <td>${renderPriorityBadge(item.priority_score)}</td>
+            <td>${renderScoreRing(item.seo_score, 36, item)}</td>
+            <td>${item.gsc_impressions != null ? Math.round(item.gsc_impressions).toLocaleString() : '—'}</td>
+            <td>${item.gsc_ctr != null ? (item.gsc_ctr * 100).toFixed(1) + '%' : '—'}</td>
+            <td>${item.gsc_position != null ? renderPositionBadge(item.gsc_position) : '—'}</td>
+            <td style="max-width:220px;font-size:12px;">${item.top_opportunity ? escapeHtml(item.top_opportunity) : '<span style="color:var(--on-surface-secondary)">—</span>'}${item.cannibalization_warning ? `<div style="margin-top:3px;font-size:11px;color:var(--error);display:flex;align-items:center;gap:3px;" title="${escapeAttr(item.cannibalization_warning)}"><span class="material-symbols-rounded" style="font-size:14px;">warning</span>Cannibalization risk</div>` : ''}</td>
+            <td>${item.potential_clicks_gain > 0 ? '+' + item.potential_clicks_gain.toLocaleString() : '—'}</td>
+            <td>
+                <div class="actions-cell">
+                    <button class="btn btn-sm btn-primary" onclick="${item.item_type === 'product' ? 'analyzeProduct' : 'analyzeCollection'}(${item.id})" title="${recommendedAction}">
+                        <span class="material-symbols-rounded" style="font-size:16px;">bolt</span>
+                    </button>
+                    ${item.last_optimized_at ? `<button class="action-icon" title="View optimization impact" onclick="viewImpact(${item.id}, '${item.item_type}')"><span class="material-symbols-rounded">trending_up</span></button>` : ''}
+                </div>
+            </td>
+        </tr>`;
+    }
+    html += '</tbody></table></div>';
+    container.innerHTML = html;
+}
+
+function closeImpactModal() {
+    document.getElementById("impact-modal").classList.remove("active");
+}
+
+async function viewImpact(itemId, itemType) {
+    const modal = document.getElementById("impact-modal");
+    const content = document.getElementById("impact-modal-content");
+    content.innerHTML = '<div class="loading-spinner"><div class="spinner"></div><p>Loading impact data...</p></div>';
+    modal.classList.add("active");
+
+    const storeId = _getSeoStoreId();
+    try {
+        const data = await apiRequest(`/api/seo/impact?store_id=${storeId}&item_id=${itemId}&item_type=${itemType}`);
+
+        let html = '';
+        document.getElementById("impact-modal-title").textContent = `Impact: ${data.item_title}`;
+
+        const statusColors = { improving: 'var(--success)', declining: 'var(--error)', stable: 'var(--on-surface-secondary)', too_early: 'var(--warning)', no_gsc_data: 'var(--on-surface-secondary)' };
+        const statusLabels = { improving: 'Improving', declining: 'Declining', stable: 'Stable', too_early: 'Too Early to Tell', no_gsc_data: 'No GSC Data' };
+        const statusIcons = { improving: 'trending_up', declining: 'trending_down', stable: 'trending_flat', too_early: 'schedule', no_gsc_data: 'link_off' };
+
+        html += `<div style="text-align:center;margin-bottom:20px;">
+            <span class="material-symbols-rounded" style="font-size:40px;color:${statusColors[data.status] || 'var(--primary)'};">${statusIcons[data.status] || 'help'}</span>
+            <div style="font-size:18px;font-weight:700;margin-top:4px;color:${statusColors[data.status] || 'var(--primary)'};">${statusLabels[data.status] || data.status}</div>
+            <div style="font-size:12px;color:var(--on-surface-secondary);">Optimized ${new Date(data.optimization_date).toLocaleDateString('en-US', {month: 'short', day: 'numeric', year: 'numeric'})} (${data.days_since} days ago)</div>
+        </div>`;
+
+        if (data.scores_before) {
+            html += `<div style="margin-bottom:16px;padding:12px;background:var(--surface-dim);border-radius:8px;border:1px solid var(--outline);">
+                <div style="font-size:12px;font-weight:600;margin-bottom:8px;color:var(--on-surface-secondary);">Scores Before Optimization</div>
+                <div style="display:flex;gap:16px;">
+                    <div><span style="font-size:11px;color:var(--on-surface-secondary);">On-Page</span><div style="font-size:20px;font-weight:700;">${data.scores_before.on_page != null ? data.scores_before.on_page : '—'}</div></div>
+                    <div><span style="font-size:11px;color:var(--on-surface-secondary);">Search</span><div style="font-size:20px;font-weight:700;">${data.scores_before.search != null ? data.scores_before.search : '—'}</div></div>
+                    <div><span style="font-size:11px;color:var(--on-surface-secondary);">Composite</span><div style="font-size:20px;font-weight:700;">${data.scores_before.composite != null ? data.scores_before.composite : '—'}</div></div>
+                </div>
+            </div>`;
+        }
+
+        if (data.before && data.after) {
+            const metrics = [
+                { label: 'Clicks', before: data.before.clicks, after: data.after.clicks, delta: data.delta.clicks, better: d => d > 0 },
+                { label: 'Impressions', before: data.before.impressions, after: data.after.impressions, delta: data.delta.impressions, better: d => d > 0 },
+                { label: 'CTR', before: (data.before.ctr * 100).toFixed(1) + '%', after: (data.after.ctr * 100).toFixed(1) + '%', delta: data.delta.ctr, fmt: d => (d > 0 ? '+' : '') + (d * 100).toFixed(2) + '%', better: d => d > 0 },
+                { label: 'Avg Position', before: data.before.position.toFixed(1), after: data.after.position.toFixed(1), delta: data.delta.position, fmt: d => (d > 0 ? '+' : '') + d.toFixed(1), better: d => d > 0 },
+            ];
+
+            html += '<table style="width:100%;font-size:13px;"><thead><tr><th style="text-align:left;">Metric</th><th>Before</th><th>After</th><th>Change</th></tr></thead><tbody>';
+            for (const m of metrics) {
+                const deltaVal = m.delta;
+                const isPositive = m.better(deltaVal);
+                const deltaStr = m.fmt ? m.fmt(deltaVal) : (deltaVal > 0 ? '+' : '') + deltaVal.toLocaleString();
+                const deltaColor = deltaVal === 0 ? 'var(--on-surface-secondary)' : isPositive ? 'var(--success)' : 'var(--error)';
+                html += `<tr>
+                    <td style="font-weight:600;">${m.label}</td>
+                    <td style="text-align:center;">${typeof m.before === 'number' ? m.before.toLocaleString() : m.before}</td>
+                    <td style="text-align:center;">${typeof m.after === 'number' ? m.after.toLocaleString() : m.after}</td>
+                    <td style="text-align:center;color:${deltaColor};font-weight:600;">${deltaStr}</td>
+                </tr>`;
+            }
+            html += '</tbody></table>';
+        }
+
+        if (data.status === 'too_early') {
+            html += `<div style="margin-top:16px;padding:12px;background:var(--warning-container,#fff3cd);border-radius:8px;font-size:12px;color:var(--on-surface);">
+                <strong>Note:</strong> It typically takes 2-4 weeks for Google to reflect SEO changes. Check back later for more accurate impact data.
+            </div>`;
+        }
+
+        content.innerHTML = html;
+    } catch (err) {
+        content.innerHTML = `<div class="empty-state" style="padding:24px;"><span class="material-symbols-rounded">info</span><p>${err.message || 'No impact data available. This item may not have been optimized yet.'}</p></div>`;
+    }
+}
+
+document.addEventListener("DOMContentLoaded", () => {
+    if (typeof setupModalDismiss === "function") setupModalDismiss("impact-modal", closeImpactModal);
+});
+
 function renderCollectionsTable(container, collections) {
     let html = "";
 
-    html += `<div style="display: flex; gap: 8px; align-items: center; margin-bottom: 16px;">
-        <button class="btn btn-primary" onclick="openGenerateCollectionsModal()">
+    const storeNames = new Set(collections.map(c => c.store_name));
+    const singleStore = storeNames.size <= 1;
+
+    html += `<div class="toolbar-row">
+        <button class="btn btn-secondary btn-sm" onclick="openGenerateCollectionsModal()">
             <span class="material-symbols-rounded">auto_awesome</span>
-            Generate Collections from Tags
+            Generate from Tags
         </button>
-        <span style="margin-left: auto; font-size: 14px; color: var(--on-surface-secondary); font-weight: 500;">${collections.length} collection${collections.length !== 1 ? "s" : ""}</span>
+        <span style="margin-left: auto; font-size: 13px; color: var(--on-surface-secondary); font-weight: 500;">${collections.length} collection${collections.length !== 1 ? "s" : ""}</span>
     </div>`;
 
-    html += `<div class="status-filter-bar" style="gap: 6px;">
-        <span style="font-size: 13px; color: var(--on-surface-secondary); font-weight: 500; margin-right: 4px;">Type:</span>
-        <button class="filter-chip ${collectionFilters.type === "" ? "active" : ""}" onclick="setCollectionFilter('type','')">All</button>
-        <button class="filter-chip ${collectionFilters.type === "smart" ? "active" : ""}" onclick="setCollectionFilter('type','smart')">Smart</button>
-        <button class="filter-chip ${collectionFilters.type === "manual" ? "active" : ""}" onclick="setCollectionFilter('type','manual')">Manual</button>
-
-        <span style="font-size: 13px; color: var(--on-surface-secondary); font-weight: 500; margin-left: 12px; margin-right: 4px;">Status:</span>
-        <button class="filter-chip ${collectionFilters.published === "" ? "active" : ""}" onclick="setCollectionFilter('published','')">All</button>
-        <button class="filter-chip ${collectionFilters.published === "true" ? "active" : ""}" onclick="setCollectionFilter('published','true')">Published</button>
-        <button class="filter-chip ${collectionFilters.published === "false" ? "active" : ""}" onclick="setCollectionFilter('published','false')">Draft</button>
-
-        <span style="font-size: 13px; color: var(--on-surface-secondary); font-weight: 500; margin-left: 12px; margin-right: 4px;">SEO:</span>
-        <button class="filter-chip ${collectionFilters.seo === "" ? "active" : ""}" onclick="setCollectionFilter('seo','')">All</button>
-        <button class="filter-chip ${collectionFilters.seo === "high" ? "active" : ""}" onclick="setCollectionFilter('seo','high')">Good (80+)</button>
-        <button class="filter-chip ${collectionFilters.seo === "medium" ? "active" : ""}" onclick="setCollectionFilter('seo','medium')">Fair (50-79)</button>
-        <button class="filter-chip ${collectionFilters.seo === "low" ? "active" : ""}" onclick="setCollectionFilter('seo','low')">Poor (&lt;50)</button>
+    html += `<div class="filter-groups">
+        <div class="filter-group">
+            <span class="filter-group-label">Type</span>
+            <button class="filter-chip ${collectionFilters.type === "" ? "active" : ""}" onclick="setCollectionFilter('type','')">All</button>
+            <button class="filter-chip ${collectionFilters.type === "smart" ? "active" : ""}" onclick="setCollectionFilter('type','smart')">Smart</button>
+            <button class="filter-chip ${collectionFilters.type === "manual" ? "active" : ""}" onclick="setCollectionFilter('type','manual')">Manual</button>
+        </div>
+        <div class="filter-group-divider"></div>
+        <div class="filter-group">
+            <span class="filter-group-label">Status</span>
+            <button class="filter-chip ${collectionFilters.published === "" ? "active" : ""}" onclick="setCollectionFilter('published','')">All</button>
+            <button class="filter-chip ${collectionFilters.published === "true" ? "active" : ""}" onclick="setCollectionFilter('published','true')">Published</button>
+            <button class="filter-chip ${collectionFilters.published === "false" ? "active" : ""}" onclick="setCollectionFilter('published','false')">Draft</button>
+        </div>
+        <div class="filter-group-divider"></div>
+        <div class="filter-group">
+            <span class="filter-group-label">SEO</span>
+            <button class="filter-chip ${collectionFilters.seo === "" ? "active" : ""}" onclick="setCollectionFilter('seo','')">All</button>
+            <button class="filter-chip ${collectionFilters.seo === "high" ? "active" : ""}" onclick="setCollectionFilter('seo','high')">Good</button>
+            <button class="filter-chip ${collectionFilters.seo === "medium" ? "active" : ""}" onclick="setCollectionFilter('seo','medium')">Fair</button>
+            <button class="filter-chip ${collectionFilters.seo === "low" ? "active" : ""}" onclick="setCollectionFilter('seo','low')">Poor</button>
+        </div>
     </div>`;
 
     if (collections.length === 0) {
@@ -493,6 +1242,14 @@ function renderCollectionsTable(container, collections) {
                 <span class="material-symbols-rounded">bolt</span>
                 Bulk Optimize & Apply
             </button>
+            <button class="btn btn-sm btn-secondary" onclick="startBulkOptimizeCollectionTitles()">
+                <span class="material-symbols-rounded">title</span>
+                Optimize Titles Only
+            </button>
+            <button class="btn btn-sm btn-secondary" onclick="startBulkGenerateCollectionImages()">
+                <span class="material-symbols-rounded">image</span>
+                Generate Images
+            </button>
             <button class="btn btn-sm btn-success" onclick="startBulkPublishCollections()">
                 <span class="material-symbols-rounded">publish</span>
                 Publish Selected
@@ -510,13 +1267,20 @@ function renderCollectionsTable(container, collections) {
 
     const columns = [
         { key: "title", label: "Collection" },
-        { key: "store", label: "Store" },
-        { key: "collection_type", label: "Type" },
-        { key: "published", label: "Published" },
+    ];
+    if (!singleStore) columns.push({ key: "store", label: "Store" });
+    columns.push(
+        { key: "collection_type", label: "Status" },
+        { key: "image_url", label: "Img" },
         { key: "products_count", label: "Products" },
         { key: "seo_score", label: "SEO Score" },
+        { key: "gsc_clicks", label: "Clicks" },
+        { key: "gsc_impressions", label: "Impr." },
+        { key: "gsc_position", label: "Pos." },
+        { key: "semrush_volume", label: "Mo. Vol." },
+        { key: "semrush_position", label: "SR Pos." },
         { key: "last_optimized_at", label: "Last Optimized" },
-    ];
+    );
 
     for (const col of columns) {
         const isActive = collectionSort.by === col.key;
@@ -529,35 +1293,34 @@ function renderCollectionsTable(container, collections) {
 
     for (let idx = 0; idx < collections.length; idx++) {
         const c = collections[idx];
-        const fillClass =
-            c.seo_score >= 80
-                ? "high"
-                : c.seo_score >= 50
-                  ? "medium"
-                  : "low";
         const checked = selectedCollectionIds.has(c.id) ? "checked" : "";
         const rowClass = selectedCollectionIds.has(c.id) ? "row-selected" : "";
+        const typeBadge = `<span class="badge ${c.collection_type === "smart" ? "badge-info" : "badge-warning"}" style="font-size:10px;padding:2px 6px;">${c.collection_type === "smart" ? "Smart" : "Manual"}</span>`;
+        const pubBadge = `<span class="badge ${c.published ? "badge-success" : "badge-error"}" style="font-size:10px;padding:2px 6px;">${c.published ? "Published" : "Draft"}</span>`;
+        const imgIcon = c.image_url
+            ? '<span style="color: var(--success); font-size: 18px;" class="material-symbols-rounded">check_circle</span>'
+            : '<span style="color: var(--on-surface-secondary); opacity: 0.4; font-size: 18px;" class="material-symbols-rounded">hide_image</span>';
+
         html += `<tr class="${rowClass}">
             <td class="checkbox-col"><input type="checkbox" class="table-checkbox" data-collection-id="${c.id}" data-index="${idx}" ${checked} onclick="toggleCollectionSelect(${c.id}, this, event)"></td>
             <td class="row-num-col">${idx + 1}</td>
-            <td><strong>${escapeHtml(c.title)}</strong><br><small style="color: var(--on-surface-secondary);">${escapeHtml(c.handle)}</small></td>
-            <td>${escapeHtml(c.store_name)}</td>
-            <td><span class="badge ${c.collection_type === "smart" ? "badge-info" : "badge-warning"}">${c.collection_type === "smart" ? "Smart" : "Manual"}</span></td>
-            <td><span class="badge ${c.published ? "badge-success" : "badge-error"}">${c.published ? "Published" : "Draft"}</span></td>
+            <td><strong class="editable-title" ondblclick="startInlineEditCollectionTitle(this, ${c.id})" style="cursor: default;">${escapeHtml(c.title)}</strong></td>`;
+        if (!singleStore) html += `<td>${escapeHtml(c.store_name)}</td>`;
+        html += `<td><div style="display:flex;flex-direction:column;gap:3px;">${typeBadge}${pubBadge}</div></td>
+            <td style="text-align:center;">${imgIcon}</td>
             <td>${c.products_count}</td>
-            <td>
-                <div style="display: flex; align-items: center; gap: 8px;">
-                    ${getScoreBadge(c.seo_score)}
-                    <div class="score-bar" style="width: 80px;">
-                        <div class="score-bar-fill ${fillClass}" style="width: ${c.seo_score}%;"></div>
-                    </div>
-                </div>
-            </td>
+            <td>${renderScoreRing(c.seo_score, 44, c)}</td>
+            <td>${c.gsc_clicks != null ? Math.round(c.gsc_clicks).toLocaleString() : '<span style="color:var(--on-surface-secondary)">—</span>'}</td>
+            <td>${c.gsc_impressions != null ? Math.round(c.gsc_impressions).toLocaleString() : '<span style="color:var(--on-surface-secondary)">—</span>'}</td>
+            <td>${c.gsc_position != null ? renderPositionBadge(c.gsc_position) : '<span style="color:var(--on-surface-secondary)">—</span>'}</td>
+            <td>${c.semrush_volume != null ? c.semrush_volume.toLocaleString() : '<span style="color:var(--on-surface-secondary)">—</span>'}</td>
+            <td>${c.semrush_position != null ? renderPositionBadge(c.semrush_position) : '<span style="color:var(--on-surface-secondary)">—</span>'}</td>
             <td>${formatOptimizedDate(c.last_optimized_at)}</td>
-            <td style="white-space: nowrap;">
-                <button class="btn btn-sm btn-secondary" onclick="viewCollection(${c.id})">View</button>
-                <button class="btn btn-sm btn-primary" onclick="analyzeCollection(${c.id})">AI Analyze</button>
-                <button class="btn btn-sm btn-danger" onclick="confirmDeleteCollection(${c.id}, '${escapeAttr(c.title)}')">Delete</button>
+            <td>
+                <div class="actions-cell">
+                    <button class="action-icon" title="View collection details" onclick="viewCollection(${c.id})"><span class="material-symbols-rounded">visibility</span></button>
+                    <button class="action-icon action-icon-primary" title="AI Analyze" onclick="analyzeCollection(${c.id})"><span class="material-symbols-rounded">smart_toy</span></button>
+                </div>
             </td>
         </tr>`;
     }
@@ -568,6 +1331,60 @@ function renderCollectionsTable(container, collections) {
     if (selectAllCb) {
         selectAllCb.checked =
             collections.length > 0 && collections.every((c) => selectedCollectionIds.has(c.id));
+    }
+}
+
+function startInlineEditCollectionTitle(el, collectionId) {
+    const originalTitle = el.textContent;
+    const input = document.createElement("input");
+    input.type = "text";
+    input.value = originalTitle;
+    input.style.cssText = "font-weight:700;font-size:inherit;font-family:inherit;border:none;outline:2px solid var(--primary);border-radius:4px;padding:2px 4px;width:100%;background:var(--surface);color:var(--on-surface);";
+    el.textContent = "";
+    el.appendChild(input);
+    input.select();
+
+    let saved = false;
+    input.addEventListener("blur", function () {
+        if (!saved) {
+            saved = true;
+            saveInlineCollectionTitle(el, input, collectionId, originalTitle);
+        }
+    });
+    input.addEventListener("keydown", function (e) {
+        if (e.key === "Enter") {
+            e.preventDefault();
+            input.blur();
+        } else if (e.key === "Escape") {
+            saved = true;
+            el.textContent = originalTitle;
+        }
+    });
+}
+
+async function saveInlineCollectionTitle(el, input, collectionId, originalTitle) {
+    const newTitle = input.value.trim();
+    if (!newTitle || newTitle === originalTitle) {
+        el.textContent = originalTitle;
+        return;
+    }
+    el.textContent = newTitle;
+    try {
+        const resp = await apiRequest(`/api/seo/collections/${collectionId}/apply`, {
+            method: "POST",
+            body: { title: newTitle },
+        });
+        if (resp.ok) {
+            const col = currentCollections.find((c) => c.id === collectionId);
+            if (col) col.title = newTitle;
+            showToast("Collection title updated", "success");
+        } else {
+            el.textContent = originalTitle;
+            showToast(`Failed to update title: ${resp.error || "Unknown error"}`, "error");
+        }
+    } catch (err) {
+        el.textContent = originalTitle;
+        showToast("Failed to update title", "error");
     }
 }
 
@@ -644,18 +1461,21 @@ function startBulkOptimizeCollections() {
 
     const overlay = document.getElementById("confirm-dialog-overlay");
     document.getElementById("confirm-dialog-title").textContent = "Bulk Optimize & Apply";
-    document.getElementById("confirm-dialog-message").textContent =
-        `This will optimize ${selectedCollectionIds.size} collection${selectedCollectionIds.size > 1 ? "s" : ""} using AI and push changes to Shopify. Continue?`;
+    document.getElementById("confirm-dialog-message").innerHTML =
+        `This will optimize ${selectedCollectionIds.size} collection${selectedCollectionIds.size > 1 ? "s" : ""} using AI and push changes to Shopify.`
+        + `<div style="margin-top: 12px;"><label style="display: flex; align-items: center; gap: 8px; cursor: pointer; font-size: 14px;">`
+        + `<input type="checkbox" id="bulk-collection-skip-title-checkbox" checked> Keep original collection titles (don't rename)</label></div>`;
 
     const okBtn = document.getElementById("confirm-dialog-ok");
     okBtn.onclick = () => {
+        const skipTitle = document.getElementById("bulk-collection-skip-title-checkbox")?.checked || false;
         closeConfirmDialog();
-        executeBulkOptimizeCollections();
+        executeBulkOptimizeCollections(skipTitle);
     };
     _openConfirmDialog();
 }
 
-async function executeBulkOptimizeCollections() {
+async function executeBulkOptimizeCollections(skipTitle = false) {
     const ids = Array.from(selectedCollectionIds);
 
     const overlay = document.getElementById("bulk-progress-overlay");
@@ -673,7 +1493,7 @@ async function executeBulkOptimizeCollections() {
     try {
         const resp = await apiRequest("/api/tasks/bulk-collections", {
             method: "POST",
-            body: { collection_ids: ids, auto_apply: true },
+            body: { collection_ids: ids, auto_apply: true, skip_title: skipTitle },
         });
 
         const bulkTaskId = resp.bulk_task_id;
@@ -684,7 +1504,7 @@ async function executeBulkOptimizeCollections() {
     }
 }
 
-function pollBulkCollectionTask(bulkTaskId, total) {
+function pollBulkCollectionTask(bulkTaskId, total, subtitleText = "Optimizing collections...") {
     const overlay = document.getElementById("bulk-progress-overlay");
     const bar = document.getElementById("bulk-progress-bar");
     const stats = document.getElementById("bulk-progress-stats");
@@ -699,7 +1519,7 @@ function pollBulkCollectionTask(bulkTaskId, total) {
 
             bar.style.width = `${pct}%`;
             stats.textContent = `${done} / ${total} completed` + (task.failed > 0 ? ` (${task.failed} failed)` : "");
-            subtitle.textContent = "Optimizing collections...";
+            subtitle.textContent = subtitleText;
 
             if (task.current_item_title) {
                 current.textContent = `Currently: ${task.current_item_title}`;
@@ -833,6 +1653,8 @@ async function viewProduct(id) {
     try {
         const p = await apiRequest(`/api/seo/products/${id}`);
         currentProductId = p.id;
+        currentItemStoreId = p.store_id;
+        currentItemType = "product";
         document.getElementById("product-modal-title").textContent = p.title;
 
         let html = "";
@@ -841,58 +1663,31 @@ async function viewProduct(id) {
             ? '<span class="badge badge-success">Active</span>'
             : `<span class="badge badge-warning">${escapeHtml(p.status || "Unknown")}</span>`;
 
-        html += `<div class="preview-info-grid">
-            <div class="info-item"><span class="info-label">Status</span><span class="info-value">${statusBadge}</span></div>
-            <div class="info-item"><span class="info-label">Vendor</span><span class="info-value">${escapeHtml(p.vendor || "—")}</span></div>
-            <div class="info-item"><span class="info-label">Type</span><span class="info-value">${escapeHtml(p.product_type || "—")}</span></div>
-            <div class="info-item"><span class="info-label">Handle</span><span class="info-value mono">${escapeHtml(p.handle || "—")}</span></div>
-            <div class="info-item"><span class="info-label">Store</span><span class="info-value">${escapeHtml(p.store_name || "—")}</span></div>
+        html += '<div class="modal-two-col">';
+
+        // ── Left Column (Main) ──
+        html += '<div class="modal-col-main">';
+
+        // SERP Preview
+        const serpUrl = p.handle ? `https://example.com/products/${p.handle}` : "https://example.com/products/...";
+        html += `<div class="serp-preview">
+            <span class="serp-preview-title">${escapeHtml(p.meta_title || p.title)}</span>
+            <span class="serp-preview-url">${escapeHtml(serpUrl)}</span>
+            <span class="serp-preview-desc">${escapeHtml(p.meta_description || "No meta description set.")}</span>
         </div>`;
 
-        if (p.tags) {
-            const tagList = p.tags.split(",").map(t => t.trim()).filter(Boolean);
-            if (tagList.length > 0) {
-                html += '<div class="preview-tags">';
-                for (const tag of tagList) {
-                    html += `<span class="chip-display">${escapeHtml(tag)}</span>`;
-                }
-                html += '</div>';
-            }
-        }
-
-        html += '<div class="preview-section">';
-        html += '<div class="preview-section-title"><span class="material-symbols-rounded">analytics</span> SEO Score Breakdown</div>';
-        for (const [key, info] of Object.entries(p.seo_breakdown)) {
-            const fillClass =
-                info.score >= 80
-                    ? "high"
-                    : info.score >= 50
-                      ? "medium"
-                      : "low";
-            html += `<div class="score-row">
-                <span class="score-label">${escapeHtml(key.replace("_", " "))}</span>
-                <div class="score-bar"><div class="score-bar-fill ${fillClass}" style="width: ${info.score}%;"></div></div>
-                <span class="score-value">${info.score}</span>
-            </div>`;
-        }
-        html += "</div>";
-
-        html += `
-            <div class="form-group">
-                <label>Meta Title</label>
-                <div class="form-control" style="background: var(--surface-dim);">${escapeHtml(p.meta_title) || "<em>Not set</em>"}</div>
-            </div>
-            <div class="form-group">
-                <label>Meta Description</label>
-                <div class="form-control" style="background: var(--surface-dim); min-height: 60px;">${escapeHtml(p.meta_description) || "<em>Not set</em>"}</div>
-            </div>
-        `;
-
+        // Description
         html += '<div class="preview-section">';
         html += '<div class="preview-section-title"><span class="material-symbols-rounded">description</span> Product Description</div>';
-        html += `<div class="description-preview">${p.description || ""}</div>`;
+        const descContent = p.description || "";
+        const needsCollapse = descContent.length > 300;
+        html += `<div class="description-preview${needsCollapse ? " collapsed" : ""}" id="desc-preview">${descContent}</div>`;
+        if (needsCollapse) {
+            html += `<button class="description-toggle" id="desc-toggle-btn" onclick="toggleDescription()">Show more</button>`;
+        }
         html += '</div>';
 
+        // Images
         if (p.images && p.images.length > 0) {
             html += '<div class="preview-section">';
             html += `<div class="preview-section-title"><span class="material-symbols-rounded">image</span> Images (${p.images.length})</div>`;
@@ -908,6 +1703,95 @@ async function viewProduct(id) {
             html += '</div></div>';
         }
 
+        // Schema Markup
+        html += '<div id="product-schema-preview" style="margin-top: 24px; border-top: 1px solid var(--outline); padding-top: 16px;">';
+        html += '<h4 style="margin-bottom: 12px;"><span class="material-symbols-rounded" style="vertical-align: middle;">code</span> Schema Markup</h4>';
+        html += '<div id="product-schema-content"><div class="loading-spinner"><div class="spinner"></div><p>Generating schema preview...</p></div></div>';
+        html += '</div>';
+
+        html += '</div>'; // end modal-col-main
+
+        // ── Right Column (Aside) ──
+        html += '<div class="modal-col-aside">';
+
+        // Info grid
+        html += `<div class="preview-info-grid">
+            <div class="info-item"><span class="info-label">Status</span><span class="info-value">${statusBadge}</span></div>
+            <div class="info-item"><span class="info-label">Vendor</span><span class="info-value">${escapeHtml(p.vendor || "—")}</span></div>
+            <div class="info-item"><span class="info-label">Type</span><span class="info-value">${escapeHtml(p.product_type || "—")}</span></div>
+            <div class="info-item"><span class="info-label">Handle</span><span class="info-value mono">${escapeHtml(p.handle || "—")}</span></div>
+            <div class="info-item"><span class="info-label">Store</span><span class="info-value">${escapeHtml(p.store_name || "—")}</span></div>
+        </div>`;
+
+        // GSC Metrics
+        if (p.gsc_impressions != null) {
+            html += `<div class="card" style="padding: 16px; margin-bottom: 16px; background: var(--surface-dim); border: 1px solid var(--outline);">
+                <h4 style="font-size: 13px; margin-bottom: 10px;"><span class="material-symbols-rounded" style="vertical-align: middle; font-size: 16px;">monitoring</span> Search Console (28d)</h4>
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px;">
+                    <div><span style="font-size: 11px; color: var(--on-surface-secondary);">Clicks</span><div style="font-size: 18px; font-weight: 700;">${Math.round(p.gsc_clicks).toLocaleString()}</div></div>
+                    <div><span style="font-size: 11px; color: var(--on-surface-secondary);">Impressions</span><div style="font-size: 18px; font-weight: 700;">${Math.round(p.gsc_impressions).toLocaleString()}</div></div>
+                    <div><span style="font-size: 11px; color: var(--on-surface-secondary);">CTR</span><div style="font-size: 18px; font-weight: 700;">${(p.gsc_ctr * 100).toFixed(1)}%</div></div>
+                    <div><span style="font-size: 11px; color: var(--on-surface-secondary);">Avg Position</span><div style="font-size: 18px; font-weight: 700;">${renderPositionBadge(p.gsc_position)}</div></div>
+                </div>
+            </div>`;
+        }
+
+        // Semrush Data
+        if (p.semrush_volume != null) {
+            html += `<div class="card" style="padding: 16px; margin-bottom: 16px; background: var(--surface-dim); border: 1px solid var(--outline);">
+                <h4 style="font-size: 13px; margin-bottom: 10px;"><span class="material-symbols-rounded" style="vertical-align: middle; font-size: 16px;">query_stats</span> Semrush Data</h4>
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px;">
+                    <div><span style="font-size: 11px; color: var(--on-surface-secondary);">Monthly Volume</span><div style="font-size: 18px; font-weight: 700;">${p.semrush_volume.toLocaleString()}</div></div>
+                    <div><span style="font-size: 11px; color: var(--on-surface-secondary);">Best Position</span><div style="font-size: 18px; font-weight: 700;">${p.semrush_position != null ? renderPositionBadge(p.semrush_position) : '—'}</div></div>
+                    ${p.semrush_keyword_count ? `<div><span style="font-size: 11px; color: var(--on-surface-secondary);">Keywords</span><div style="font-size: 18px; font-weight: 700;">${p.semrush_keyword_count}</div></div>` : ''}
+                </div>
+            </div>`;
+        }
+
+        // Tags
+        if (p.tags) {
+            const tagList = p.tags.split(",").map(t => t.trim()).filter(Boolean);
+            if (tagList.length > 0) {
+                html += '<div class="preview-tags">';
+                for (const tag of tagList) {
+                    html += `<span class="chip-display">${escapeHtml(tag)}</span>`;
+                }
+                html += '</div>';
+            }
+        }
+
+        // SEO Score Card
+        html += '<div class="score-card">';
+        html += '<div class="score-card-title"><span class="material-symbols-rounded" style="font-size:16px;">analytics</span> SEO Score</div>';
+        const overallScore = p.seo_score || 0;
+        html += renderScoreRing(overallScore, 80, p);
+
+        // On-Page Quality
+        html += '<div style="font-size:12px;font-weight:600;margin:12px 0 6px;color:var(--on-surface-secondary);">On-Page Quality' + (p.on_page_score != null ? ` (${p.on_page_score})` : '') + '</div>';
+        for (const [key, info] of Object.entries(p.seo_breakdown)) {
+            const fillCls = info.score >= 80 ? "high" : info.score >= 50 ? "medium" : "low";
+            html += `<div class="score-item">
+                <span class="score-item-label">${escapeHtml(key.replace(/_/g, " "))}</span>
+                <div class="score-item-bar"><div class="score-item-bar-fill ${fillCls}" style="width: ${info.score}%;"></div></div>
+                <span class="score-item-num">${info.score}</span>
+            </div>`;
+        }
+
+        // Search Performance
+        if (p.search_breakdown) {
+            html += '<div style="font-size:12px;font-weight:600;margin:12px 0 6px;color:var(--on-surface-secondary);">Search Performance' + (p.search_score != null ? ` (${p.search_score})` : '') + '</div>';
+            for (const [key, info] of Object.entries(p.search_breakdown)) {
+                const fillCls = info.score >= 80 ? "high" : info.score >= 50 ? "medium" : "low";
+                html += `<div class="score-item">
+                    <span class="score-item-label">${escapeHtml(key.replace(/_/g, " "))}</span>
+                    <div class="score-item-bar"><div class="score-item-bar-fill ${fillCls}" style="width: ${info.score}%;"></div></div>
+                    <span class="score-item-num">${info.score}</span>
+                </div>`;
+            }
+        }
+        html += '</div>';
+
+        // Variants
         let variants = [];
         if (p.variants) {
             try {
@@ -938,19 +1822,26 @@ async function viewProduct(id) {
             html += '</tbody></table></div></div>';
         }
 
-        html += `<div style="margin-top: 20px; display: flex; gap: 8px;">
+        html += '</div>'; // end modal-col-aside
+        html += '</div>'; // end modal-two-col
+
+        html += '<div id="ai-results-container"></div>';
+
+        // Sticky footer with action buttons
+        html += `<div class="modal-sticky-footer">
             <button class="btn btn-primary" onclick="analyzeProduct(${p.id})">
                 <span class="material-symbols-rounded">smart_toy</span>
                 Get AI Recommendations
             </button>
+            <button class="btn btn-secondary" onclick="optimizeProductTitle(${p.id})">
+                <span class="material-symbols-rounded">title</span>
+                Optimize Title Only
+            </button>
+            ${p.last_optimized_at ? `<button class="btn btn-secondary" onclick="viewImpact(${p.id}, 'product')">
+                <span class="material-symbols-rounded">trending_up</span>
+                View Impact
+            </button>` : ''}
         </div>`;
-
-        html += '<div id="ai-results-container"></div>';
-
-        html += '<div id="product-schema-preview" style="margin-top: 24px; border-top: 1px solid var(--outline); padding-top: 16px;">';
-        html += '<h4 style="margin-bottom: 12px;"><span class="material-symbols-rounded" style="vertical-align: middle;">code</span> Schema Markup</h4>';
-        html += '<div id="product-schema-content"><div class="loading-spinner"><div class="spinner"></div><p>Generating schema preview...</p></div></div>';
-        html += '</div>';
 
         content.innerHTML = html;
 
@@ -969,7 +1860,17 @@ function closeProductModal() {
     currentProductId = null;
 }
 
-async function analyzeProduct(productId) {
+function reoptimizeWithKeyword(itemId, keyword) {
+    const itemType = currentItemType || "product";
+    const context = `Re-optimize targeting primary keyword: "${keyword}". Build the meta title, description, and content around this keyword.`;
+    if (itemType === "product") {
+        analyzeProduct(itemId, context);
+    } else {
+        analyzeCollection(itemId, context);
+    }
+}
+
+async function analyzeProduct(productId, priorityContext) {
     const modal = document.getElementById("product-modal");
     if (!modal.classList.contains("active")) {
         await viewProduct(productId);
@@ -978,18 +1879,23 @@ async function analyzeProduct(productId) {
     const resultsContainer = document.getElementById("ai-results-container");
     if (!resultsContainer) return;
 
+    const contextNote = priorityContext ? `<div style="font-size:12px;color:var(--on-surface-secondary);margin-top:8px;padding:6px 10px;background:var(--surface-dim);border-radius:6px;"><strong>Priority focus:</strong> ${escapeHtml(priorityContext)}</div>` : '';
     resultsContainer.innerHTML = `
         <div class="ai-panel" style="margin-top: 20px;">
             <h4><span class="material-symbols-rounded">smart_toy</span> AI Analysis</h4>
+            ${contextNote}
             <div class="loading-spinner"><div class="spinner"></div><p>AI is analyzing this product...</p></div>
         </div>`;
+
+    const taskInput = { product_id: productId };
+    if (priorityContext) taskInput.priority_context = priorityContext;
 
     try {
         const taskResp = await apiRequest("/api/tasks", {
             method: "POST",
             body: {
                 task_type: "product_seo",
-                input: { product_id: productId },
+                input: taskInput,
             },
         });
 
@@ -1005,7 +1911,32 @@ async function analyzeProduct(productId) {
 }
 
 function pollTaskResult(taskId, container, productId) {
+    const startTime = Date.now();
+    const maxWait = 180000; // 3 minutes
+    let pollCount = 0;
+
     const interval = setInterval(async () => {
+        pollCount++;
+        const elapsed = Date.now() - startTime;
+
+        if (elapsed > maxWait) {
+            clearInterval(interval);
+            container.innerHTML = `
+                <div class="ai-panel" style="margin-top: 20px;">
+                    <h4><span class="material-symbols-rounded">smart_toy</span> AI Analysis</h4>
+                    <p style="color: var(--warning);">The AI is taking longer than expected. The task is still running in the background — refresh the page later to check results.</p>
+                    <p style="font-size: 12px; color: var(--on-surface-secondary);">Task ID: ${taskId}</p>
+                </div>`;
+            return;
+        }
+
+        // Update the spinner text with elapsed time
+        if (pollCount % 5 === 0) {
+            const secs = Math.round(elapsed / 1000);
+            const spinnerP = container.querySelector(".loading-spinner p");
+            if (spinnerP) spinnerP.textContent = `AI is analyzing... (${secs}s)`;
+        }
+
         try {
             const task = await apiRequest(`/api/tasks/${taskId}`);
             if (task.status === "completed") {
@@ -1037,6 +1968,10 @@ function renderAIResults(container, result, productId) {
                 <span class="material-symbols-rounded">check_circle</span>
                 Optimization complete!
             </div>`;
+
+    html += `<div style="margin-bottom: 12px;"><label style="display: flex; align-items: center; gap: 8px; cursor: pointer; font-size: 14px;">
+        <input type="checkbox" id="ai-keep-title-checkbox" onchange="document.getElementById('ai-h1-tag').disabled = this.checked; document.getElementById('ai-h1-tag').style.opacity = this.checked ? '0.5' : '1';">
+        Keep original title (don't rename)</label></div>`;
 
     html += '<div class="side-by-side">';
     html += `<div class="form-group">
@@ -1088,6 +2023,29 @@ function renderAIResults(container, result, productId) {
 
     html += '</div>';
 
+    if (result.target_keywords) {
+        const tk = result.target_keywords;
+        const allKws = [];
+        if (tk.primary) allKws.push({kw: String(tk.primary), isPrimary: true});
+        for (const kw of (tk.secondary || [])) allKws.push({kw: String(kw), isPrimary: false});
+
+        html += '<div class="form-group">';
+        html += '<label><span class="material-symbols-rounded" style="font-size:16px;vertical-align:middle;">target</span> Target Keywords <span style="font-size:11px;color:var(--on-surface-secondary);">(click any keyword to re-optimize with it as primary)</span></label>';
+        html += '<div style="display: flex; flex-wrap: wrap; gap: 6px;">';
+        for (const item of allKws) {
+            const kwName = item.kw.replace(/\s*\(.*?\)\s*$/, '').trim();
+            if (item.isPrimary) {
+                html += `<span class="chip-display" style="background:var(--primary-light,#e8f0fe);border:1px solid var(--primary);font-weight:600;cursor:pointer;" title="Currently primary" onclick="reoptimizeWithKeyword(${productId}, '${escapeAttr(kwName)}')">Primary: ${escapeHtml(item.kw)}</span>`;
+            } else {
+                html += `<span class="chip-display" style="cursor:pointer;" title="Click to re-optimize with this as primary" onclick="reoptimizeWithKeyword(${productId}, '${escapeAttr(kwName)}')">${escapeHtml(item.kw)}</span>`;
+            }
+        }
+        if (allKws.length === 0) {
+            html += '<span style="font-size: 13px; color: var(--on-surface-secondary);">No search data available</span>';
+        }
+        html += '</div></div>';
+    }
+
     if (result.competitor_insights) {
         html += `<div class="form-group">
             <label>Competitor Insights</label>
@@ -1112,15 +2070,7 @@ function renderAIResults(container, result, productId) {
         html += '</div>';
     }
 
-    if (result.additional_recommendations && result.additional_recommendations.length > 0) {
-        html += `<div class="form-group">
-            <label>Additional Recommendations</label>
-            <ul style="padding-left: 20px; margin: 8px 0;">`;
-        for (const rec of result.additional_recommendations) {
-            html += `<li style="margin-bottom: 6px; font-size: 14px;">${escapeHtml(rec)}</li>`;
-        }
-        html += `</ul></div>`;
-    }
+    html += renderActionableRecommendations(result);
 
     if (result.summary) {
         html += `<div class="form-group">
@@ -1181,6 +2131,7 @@ function getTagsFromContainer() {
 }
 
 async function applyChanges(productId) {
+    const keepTitle = document.getElementById("ai-keep-title-checkbox")?.checked || false;
     const title = document.getElementById("ai-h1-tag")?.value?.trim() || "";
     const metaTitle = document.getElementById("ai-meta-title")?.value?.trim() || "";
     const metaDescription = document.getElementById("ai-meta-description")?.value?.trim() || "";
@@ -1197,7 +2148,7 @@ async function applyChanges(productId) {
     });
 
     const payload = {};
-    if (title) payload.title = title;
+    if (!keepTitle && title) payload.title = title;
     if (description) payload.description_html = description;
     if (metaTitle) payload.meta_title = metaTitle;
     if (metaDescription) payload.meta_description = metaDescription;
@@ -1245,6 +2196,9 @@ async function applyChanges(productId) {
 async function viewCollection(id) {
     try {
         const c = await apiRequest(`/api/seo/collections/${id}`);
+        currentProductId = c.id;
+        currentItemStoreId = c.store_id;
+        currentItemType = "collection";
         const modal = document.getElementById("product-modal");
         const content = document.getElementById("product-detail-content");
         document.getElementById("product-modal-title").textContent = c.title;
@@ -1266,22 +2220,58 @@ async function viewCollection(id) {
             <div class="info-item"><span class="info-label">Store</span><span class="info-value">${escapeHtml(c.store_name || "—")}</span></div>
         </div>`;
 
-        html += '<div class="preview-section">';
-        html += '<div class="preview-section-title"><span class="material-symbols-rounded">analytics</span> SEO Score Breakdown</div>';
-        for (const [key, info] of Object.entries(c.seo_breakdown)) {
-            const fillClass =
-                info.score >= 80
-                    ? "high"
-                    : info.score >= 50
-                      ? "medium"
-                      : "low";
-            html += `<div class="score-row">
-                <span class="score-label">${escapeHtml(key.replace("_", " "))}</span>
-                <div class="score-bar"><div class="score-bar-fill ${fillClass}" style="width: ${info.score}%;"></div></div>
-                <span class="score-value">${info.score}</span>
+        // GSC Metrics
+        if (c.gsc_impressions != null) {
+            html += `<div class="card" style="padding: 16px; margin-bottom: 16px; background: var(--surface-dim); border: 1px solid var(--outline);">
+                <h4 style="font-size: 13px; margin-bottom: 10px;"><span class="material-symbols-rounded" style="vertical-align: middle; font-size: 16px;">monitoring</span> Search Console (28d)</h4>
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px;">
+                    <div><span style="font-size: 11px; color: var(--on-surface-secondary);">Clicks</span><div style="font-size: 18px; font-weight: 700;">${Math.round(c.gsc_clicks).toLocaleString()}</div></div>
+                    <div><span style="font-size: 11px; color: var(--on-surface-secondary);">Impressions</span><div style="font-size: 18px; font-weight: 700;">${Math.round(c.gsc_impressions).toLocaleString()}</div></div>
+                    <div><span style="font-size: 11px; color: var(--on-surface-secondary);">CTR</span><div style="font-size: 18px; font-weight: 700;">${(c.gsc_ctr * 100).toFixed(1)}%</div></div>
+                    <div><span style="font-size: 11px; color: var(--on-surface-secondary);">Avg Position</span><div style="font-size: 18px; font-weight: 700;">${renderPositionBadge(c.gsc_position)}</div></div>
+                </div>
             </div>`;
         }
-        html += "</div>";
+
+        // Semrush Data
+        if (c.semrush_volume != null) {
+            html += `<div class="card" style="padding: 16px; margin-bottom: 16px; background: var(--surface-dim); border: 1px solid var(--outline);">
+                <h4 style="font-size: 13px; margin-bottom: 10px;"><span class="material-symbols-rounded" style="vertical-align: middle; font-size: 16px;">query_stats</span> Semrush Data</h4>
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px;">
+                    <div><span style="font-size: 11px; color: var(--on-surface-secondary);">Monthly Volume</span><div style="font-size: 18px; font-weight: 700;">${c.semrush_volume.toLocaleString()}</div></div>
+                    <div><span style="font-size: 11px; color: var(--on-surface-secondary);">Best Position</span><div style="font-size: 18px; font-weight: 700;">${c.semrush_position != null ? renderPositionBadge(c.semrush_position) : '—'}</div></div>
+                    ${c.semrush_keyword_count ? `<div><span style="font-size: 11px; color: var(--on-surface-secondary);">Keywords</span><div style="font-size: 18px; font-weight: 700;">${c.semrush_keyword_count}</div></div>` : ''}
+                </div>
+            </div>`;
+        }
+
+        // SEO Score Card (composite)
+        html += '<div class="score-card">';
+        html += '<div class="score-card-title"><span class="material-symbols-rounded" style="font-size:16px;">analytics</span> SEO Score</div>';
+        html += renderScoreRing(c.seo_score || 0, 80, c);
+
+        html += '<div style="font-size:12px;font-weight:600;margin:12px 0 6px;color:var(--on-surface-secondary);">On-Page Quality' + (c.on_page_score != null ? ` (${c.on_page_score})` : '') + '</div>';
+        for (const [key, info] of Object.entries(c.seo_breakdown)) {
+            const fillClass = info.score >= 80 ? "high" : info.score >= 50 ? "medium" : "low";
+            html += `<div class="score-item">
+                <span class="score-item-label">${escapeHtml(key.replace(/_/g, " "))}</span>
+                <div class="score-item-bar"><div class="score-item-bar-fill ${fillClass}" style="width: ${info.score}%;"></div></div>
+                <span class="score-item-num">${info.score}</span>
+            </div>`;
+        }
+
+        if (c.search_breakdown) {
+            html += '<div style="font-size:12px;font-weight:600;margin:12px 0 6px;color:var(--on-surface-secondary);">Search Performance' + (c.search_score != null ? ` (${c.search_score})` : '') + '</div>';
+            for (const [key, info] of Object.entries(c.search_breakdown)) {
+                const fillClass = info.score >= 80 ? "high" : info.score >= 50 ? "medium" : "low";
+                html += `<div class="score-item">
+                    <span class="score-item-label">${escapeHtml(key.replace(/_/g, " "))}</span>
+                    <div class="score-item-bar"><div class="score-item-bar-fill ${fillClass}" style="width: ${info.score}%;"></div></div>
+                    <span class="score-item-num">${info.score}</span>
+                </div>`;
+            }
+        }
+        html += '</div>';
 
         html += `
             <div class="form-group">
@@ -1298,20 +2288,36 @@ async function viewCollection(id) {
         html += `<div class="description-preview">${c.description || ""}</div>`;
         html += '</div>';
 
+        html += '<div class="preview-section">';
+        html += '<div class="preview-section-title"><span class="material-symbols-rounded">image</span> Collection Image</div>';
         if (c.image_url) {
-            html += '<div class="preview-section">';
-            html += '<div class="preview-section-title"><span class="material-symbols-rounded">image</span> Collection Image</div>';
             html += `<div class="collection-image-preview" data-src="${escapeAttr(c.image_url)}">
                 <img src="${escapeAttr(c.image_url)}" alt="${escapeAttr(c.title || "")}">
             </div>`;
-            html += '</div>';
+        } else {
+            html += `<p style="color: var(--on-surface-secondary); font-size: 14px;">No collection image set.</p>`;
         }
+        html += `<div id="collection-image-gen-area" style="margin-top: 12px;">
+            <button class="btn ${c.image_url ? "btn-secondary" : "btn-primary"}" onclick="generateCollectionImage(${c.id})">
+                <span class="material-symbols-rounded">auto_awesome</span>
+                ${c.image_url ? "Regenerate Image" : "Generate Collection Image"}
+            </button>
+        </div>`;
+        html += '</div>';
 
-        html += `<div style="margin-top: 20px;">
+        html += `<div style="margin-top: 20px; display: flex; gap: 8px; flex-wrap: wrap;">
             <button class="btn btn-primary" onclick="analyzeCollection(${c.id})">
                 <span class="material-symbols-rounded">smart_toy</span>
                 Get AI Recommendations
             </button>
+            <button class="btn btn-secondary" onclick="optimizeCollectionTitle(${c.id})">
+                <span class="material-symbols-rounded">title</span>
+                Optimize Title Only
+            </button>
+            ${c.last_optimized_at ? `<button class="btn btn-secondary" onclick="viewImpact(${c.id}, 'collection')">
+                <span class="material-symbols-rounded">trending_up</span>
+                View Impact
+            </button>` : ''}
         </div>`;
 
         html += '<div id="ai-collection-results-container"></div>';
@@ -1329,7 +2335,7 @@ async function viewCollection(id) {
     }
 }
 
-async function analyzeCollection(collectionId) {
+async function analyzeCollection(collectionId, priorityContext) {
     const modal = document.getElementById("product-modal");
     if (!modal.classList.contains("active")) {
         await viewCollection(collectionId);
@@ -1338,18 +2344,23 @@ async function analyzeCollection(collectionId) {
     const resultsContainer = document.getElementById("ai-collection-results-container");
     if (!resultsContainer) return;
 
+    const contextNote = priorityContext ? `<div style="font-size:12px;color:var(--on-surface-secondary);margin-top:8px;padding:6px 10px;background:var(--surface-dim);border-radius:6px;"><strong>Priority focus:</strong> ${escapeHtml(priorityContext)}</div>` : '';
     resultsContainer.innerHTML = `
         <div class="ai-panel" style="margin-top: 20px;">
             <h4><span class="material-symbols-rounded">smart_toy</span> AI Analysis</h4>
+            ${contextNote}
             <div class="loading-spinner"><div class="spinner"></div><p>AI is analyzing this collection...</p></div>
         </div>`;
+
+    const taskInput = { collection_id: collectionId };
+    if (priorityContext) taskInput.priority_context = priorityContext;
 
     try {
         const taskResp = await apiRequest("/api/tasks", {
             method: "POST",
             body: {
                 task_type: "collection_seo",
-                input: { collection_id: collectionId },
+                input: taskInput,
             },
         });
 
@@ -1398,6 +2409,10 @@ function renderCollectionAIResults(container, result, collectionId) {
                 Optimization complete!
             </div>`;
 
+    html += `<div style="margin-bottom: 12px;"><label style="display: flex; align-items: center; gap: 8px; cursor: pointer; font-size: 14px;">
+        <input type="checkbox" id="ai-collection-keep-title-checkbox" onchange="document.getElementById('ai-collection-h1-tag').disabled = this.checked; document.getElementById('ai-collection-h1-tag').style.opacity = this.checked ? '0.5' : '1';">
+        Keep original title (don't rename)</label></div>`;
+
     html += '<div class="side-by-side">';
     html += `<div class="form-group">
         <label>Optimized Title (H1 Tag)</label>
@@ -1440,15 +2455,7 @@ function renderCollectionAIResults(container, result, collectionId) {
         </div>`;
     }
 
-    if (result.additional_recommendations && result.additional_recommendations.length > 0) {
-        html += `<div class="form-group">
-            <label>Additional Recommendations</label>
-            <ul style="padding-left: 20px; margin: 8px 0;">`;
-        for (const rec of result.additional_recommendations) {
-            html += `<li style="margin-bottom: 6px; font-size: 14px;">${escapeHtml(rec)}</li>`;
-        }
-        html += `</ul></div>`;
-    }
+    html += renderActionableRecommendations(result);
 
     if (result.summary) {
         html += `<div class="form-group">
@@ -1477,13 +2484,14 @@ function renderCollectionAIResults(container, result, collectionId) {
 }
 
 async function applyCollectionChanges(collectionId) {
+    const keepTitle = document.getElementById("ai-collection-keep-title-checkbox")?.checked || false;
     const title = document.getElementById("ai-collection-h1-tag")?.value?.trim() || "";
     const metaTitle = document.getElementById("ai-collection-meta-title")?.value?.trim() || "";
     const metaDescription = document.getElementById("ai-collection-meta-description")?.value?.trim() || "";
     const description = document.getElementById("ai-collection-description")?.value?.trim() || "";
 
     const payload = {};
-    if (title) payload.title = title;
+    if (!keepTitle && title) payload.title = title;
     if (description) payload.description_html = description;
     if (metaTitle) payload.meta_title = metaTitle;
     if (metaDescription) payload.meta_description = metaDescription;
@@ -1527,6 +2535,325 @@ async function applyCollectionChanges(collectionId) {
 }
 
 
+// ========== Title-Only Optimization ==========
+
+function startBulkOptimizeTitles() {
+    if (selectedProductIds.size === 0) return;
+
+    document.getElementById("confirm-dialog-title").textContent = "Optimize Titles Only";
+    document.getElementById("confirm-dialog-message").innerHTML =
+        `This will optimize titles for ${selectedProductIds.size} product${selectedProductIds.size > 1 ? "s" : ""} using AI and push only the new titles to Shopify. No other fields will be changed.`;
+
+    const okBtn = document.getElementById("confirm-dialog-ok");
+    okBtn.onclick = () => {
+        closeConfirmDialog();
+        executeBulkOptimizeTitles();
+    };
+    _openConfirmDialog();
+}
+
+async function executeBulkOptimizeTitles() {
+    const ids = Array.from(selectedProductIds);
+
+    const overlay = document.getElementById("bulk-progress-overlay");
+    const bar = document.getElementById("bulk-progress-bar");
+    const stats = document.getElementById("bulk-progress-stats");
+    const current = document.getElementById("bulk-progress-current");
+    const subtitle = document.getElementById("bulk-progress-subtitle");
+
+    bar.style.width = "0%";
+    stats.textContent = `0 / ${ids.length} completed`;
+    current.textContent = "";
+    subtitle.textContent = "Starting title optimization...";
+    overlay.classList.add("active");
+
+    try {
+        const resp = await apiRequest("/api/tasks/bulk-titles", {
+            method: "POST",
+            body: { product_ids: ids },
+        });
+
+        const bulkTaskId = resp.bulk_task_id;
+        pollBulkTask(bulkTaskId, ids.length, "Optimizing titles...");
+    } catch (err) {
+        overlay.classList.remove("active");
+        showToast(`Bulk title optimization failed: ${err.message}`, "error");
+    }
+}
+
+function startBulkOptimizeCollectionTitles() {
+    if (selectedCollectionIds.size === 0) return;
+
+    document.getElementById("confirm-dialog-title").textContent = "Optimize Titles Only";
+    document.getElementById("confirm-dialog-message").innerHTML =
+        `This will optimize titles for ${selectedCollectionIds.size} collection${selectedCollectionIds.size > 1 ? "s" : ""} using AI and push only the new titles to Shopify. No other fields will be changed.`;
+
+    const okBtn = document.getElementById("confirm-dialog-ok");
+    okBtn.onclick = () => {
+        closeConfirmDialog();
+        executeBulkOptimizeCollectionTitles();
+    };
+    _openConfirmDialog();
+}
+
+async function executeBulkOptimizeCollectionTitles() {
+    const ids = Array.from(selectedCollectionIds);
+
+    const overlay = document.getElementById("bulk-progress-overlay");
+    const bar = document.getElementById("bulk-progress-bar");
+    const stats = document.getElementById("bulk-progress-stats");
+    const current = document.getElementById("bulk-progress-current");
+    const subtitle = document.getElementById("bulk-progress-subtitle");
+
+    bar.style.width = "0%";
+    stats.textContent = `0 / ${ids.length} completed`;
+    current.textContent = "";
+    subtitle.textContent = "Starting title optimization...";
+    overlay.classList.add("active");
+
+    try {
+        const resp = await apiRequest("/api/tasks/bulk-collection-titles", {
+            method: "POST",
+            body: { collection_ids: ids },
+        });
+
+        const bulkTaskId = resp.bulk_task_id;
+        pollBulkCollectionTask(bulkTaskId, ids.length, "Optimizing titles...");
+    } catch (err) {
+        overlay.classList.remove("active");
+        showToast(`Bulk title optimization failed: ${err.message}`, "error");
+    }
+}
+
+async function optimizeProductTitle(productId) {
+    const modal = document.getElementById("product-modal");
+    if (!modal.classList.contains("active")) {
+        await viewProduct(productId);
+    }
+
+    const resultsContainer = document.getElementById("ai-results-container");
+    if (!resultsContainer) return;
+
+    resultsContainer.innerHTML = `
+        <div class="ai-panel" style="margin-top: 20px;">
+            <h4><span class="material-symbols-rounded">title</span> Title Optimization</h4>
+            <div class="loading-spinner"><div class="spinner"></div><p>AI is optimizing the title...</p></div>
+        </div>`;
+
+    try {
+        const taskResp = await apiRequest("/api/tasks", {
+            method: "POST",
+            body: {
+                task_type: "product_title_seo",
+                input: { product_id: productId },
+            },
+        });
+
+        pollTitleTaskResult(taskResp.task_id, resultsContainer, productId, "product");
+    } catch (err) {
+        resultsContainer.innerHTML = `
+            <div class="ai-panel" style="margin-top: 20px;">
+                <h4><span class="material-symbols-rounded">title</span> Title Optimization</h4>
+                <p style="color: var(--error);">Error: ${escapeHtml(err.message)}</p>
+            </div>`;
+    }
+}
+
+async function optimizeCollectionTitle(collectionId) {
+    const modal = document.getElementById("product-modal");
+    if (!modal.classList.contains("active")) {
+        await viewCollection(collectionId);
+    }
+
+    const resultsContainer = document.getElementById("ai-collection-results-container");
+    if (!resultsContainer) return;
+
+    resultsContainer.innerHTML = `
+        <div class="ai-panel" style="margin-top: 20px;">
+            <h4><span class="material-symbols-rounded">title</span> Title Optimization</h4>
+            <div class="loading-spinner"><div class="spinner"></div><p>AI is optimizing the title...</p></div>
+        </div>`;
+
+    try {
+        const taskResp = await apiRequest("/api/tasks", {
+            method: "POST",
+            body: {
+                task_type: "collection_title_seo",
+                input: { collection_id: collectionId },
+            },
+        });
+
+        pollTitleTaskResult(taskResp.task_id, resultsContainer, collectionId, "collection");
+    } catch (err) {
+        resultsContainer.innerHTML = `
+            <div class="ai-panel" style="margin-top: 20px;">
+                <h4><span class="material-symbols-rounded">title</span> Title Optimization</h4>
+                <p style="color: var(--error);">Error: ${escapeHtml(err.message)}</p>
+            </div>`;
+    }
+}
+
+function pollTitleTaskResult(taskId, container, itemId, itemType) {
+    const interval = setInterval(async () => {
+        try {
+            const task = await apiRequest(`/api/tasks/${taskId}`);
+            if (task.status === "completed") {
+                clearInterval(interval);
+                renderTitleResults(container, task.result, itemId, itemType);
+            } else if (task.status === "failed") {
+                clearInterval(interval);
+                container.innerHTML = `
+                    <div class="ai-panel" style="margin-top: 20px;">
+                        <h4><span class="material-symbols-rounded">title</span> Title Optimization</h4>
+                        <p style="color: var(--error);">Failed: ${escapeHtml(task.error || "Unknown error")}</p>
+                    </div>`;
+            }
+        } catch {
+            clearInterval(interval);
+        }
+    }, 2000);
+}
+
+function renderTitleResults(container, result, itemId, itemType) {
+    if (!result) {
+        container.innerHTML = "";
+        return;
+    }
+
+    if (result.raw_response) {
+        container.innerHTML = `
+            <div class="ai-panel" style="margin-top: 20px;">
+                <h4><span class="material-symbols-rounded">title</span> Title Optimization</h4>
+                <div class="form-group">
+                    <label>AI Response</label>
+                    <div class="ai-field-value" style="white-space: pre-wrap;"><code>${escapeHtml(result.raw_response)}</code></div>
+                </div>
+            </div>`;
+        return;
+    }
+
+    let html = `
+        <div class="ai-panel" style="margin-top: 20px;">
+            <div class="success-banner">
+                <span class="material-symbols-rounded">check_circle</span>
+                Title optimization complete!
+            </div>`;
+
+    html += `<div class="form-group">
+        <label>Optimized Title</label>
+        <input type="text" class="ai-field-editable" id="ai-title-only-input"
+            value="${escapeAttr(result.optimized_title || "")}">
+    </div>`;
+
+    if (result.reasoning) {
+        html += `<div class="form-group">
+            <label>Reasoning</label>
+            <p style="font-size: 14px; line-height: 1.6;">${escapeHtml(result.reasoning)}</p>
+        </div>`;
+    }
+
+    if (result.keywords_targeted && result.keywords_targeted.length > 0) {
+        html += '<div class="form-group"><label>Keywords Targeted</label>';
+        html += '<div style="display: flex; flex-wrap: wrap; gap: 6px;">';
+        for (const kw of result.keywords_targeted) {
+            html += `<span class="chip-display">${escapeHtml(kw)}</span>`;
+        }
+        html += '</div></div>';
+    }
+
+    const applyFn = itemType === "collection" ? "applyCollectionTitleOnly" : "applyProductTitleOnly";
+    html += `<div class="modal-footer">
+        <button class="btn btn-secondary" onclick="closeProductModal()">Cancel</button>
+        <button class="btn btn-primary" id="apply-title-only-btn" onclick="${applyFn}(${itemId})">
+            <span class="material-symbols-rounded">publish</span>
+            Apply Title
+        </button>
+    </div>`;
+
+    html += "</div>";
+    container.innerHTML = html;
+}
+
+async function applyProductTitleOnly(productId) {
+    const title = document.getElementById("ai-title-only-input")?.value?.trim() || "";
+    if (!title) {
+        showToast("No title to apply", "warning");
+        return;
+    }
+
+    try {
+        const btn = document.getElementById("apply-title-only-btn");
+        if (btn) {
+            btn.disabled = true;
+            btn.innerHTML = '<span class="material-symbols-rounded">sync</span> Applying...';
+        }
+
+        const resp = await apiRequest(`/api/seo/products/${productId}/apply`, {
+            method: "POST",
+            body: { title: title },
+        });
+
+        if (resp.ok) {
+            showToast("Title applied!", "success");
+            closeProductModal();
+            loadProducts();
+        } else {
+            showToast(`Failed to apply: ${resp.error || "Unknown error"}`, "error");
+            if (btn) {
+                btn.disabled = false;
+                btn.innerHTML = '<span class="material-symbols-rounded">publish</span> Apply Title';
+            }
+        }
+    } catch (err) {
+        showToast(`Error applying title: ${err.message}`, "error");
+        const btn = document.getElementById("apply-title-only-btn");
+        if (btn) {
+            btn.disabled = false;
+            btn.innerHTML = '<span class="material-symbols-rounded">publish</span> Apply Title';
+        }
+    }
+}
+
+async function applyCollectionTitleOnly(collectionId) {
+    const title = document.getElementById("ai-title-only-input")?.value?.trim() || "";
+    if (!title) {
+        showToast("No title to apply", "warning");
+        return;
+    }
+
+    try {
+        const btn = document.getElementById("apply-title-only-btn");
+        if (btn) {
+            btn.disabled = true;
+            btn.innerHTML = '<span class="material-symbols-rounded">sync</span> Applying...';
+        }
+
+        const resp = await apiRequest(`/api/seo/collections/${collectionId}/apply`, {
+            method: "POST",
+            body: { title: title },
+        });
+
+        if (resp.ok) {
+            showToast("Title applied!", "success");
+            closeProductModal();
+            loadCollections();
+        } else {
+            showToast(`Failed to apply: ${resp.error || "Unknown error"}`, "error");
+            if (btn) {
+                btn.disabled = false;
+                btn.innerHTML = '<span class="material-symbols-rounded">publish</span> Apply Title';
+            }
+        }
+    } catch (err) {
+        showToast(`Error applying title: ${err.message}`, "error");
+        const btn = document.getElementById("apply-title-only-btn");
+        if (btn) {
+            btn.disabled = false;
+            btn.innerHTML = '<span class="material-symbols-rounded">publish</span> Apply Title';
+        }
+    }
+}
+
 // ========== Schema Markup Tab ==========
 
 async function loadSchemaTab() {
@@ -1549,15 +2876,19 @@ function renderSchemaTab(container, stats, products, settings) {
     currentSchemaProducts = products;
     let html = "";
 
-    html += '<div class="stats-grid" style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-bottom: 24px;">';
-    html += renderStatCard("Total Products", stats.total_products, "inventory_2");
-    html += renderStatCard("Schemas Generated", stats.schemas_generated, "code");
-    html += renderStatCard("Valid", stats.schemas_valid, "check_circle");
-    html += renderStatCard("Pushed to Shopify", stats.schemas_pushed, "cloud_upload");
-    html += "</div>";
+    html += `<div class="schema-stats-bar">
+        <div class="schema-stat"><span class="material-symbols-rounded">inventory_2</span> <strong>${stats.total_products}</strong> Products</div>
+        <div class="schema-stat"><span class="material-symbols-rounded">code</span> <strong>${stats.schemas_generated}</strong> Generated</div>
+        <div class="schema-stat"><span class="material-symbols-rounded">check_circle</span> <strong>${stats.schemas_valid}</strong> Valid</div>
+        <div class="schema-stat"><span class="material-symbols-rounded">cloud_upload</span> <strong>${stats.schemas_pushed}</strong> Pushed</div>
+    </div>`;
 
-    html += '<div class="card" style="padding: 20px; margin-bottom: 24px;">';
-    html += '<h4 style="margin-bottom: 16px;">Organization Settings</h4>';
+    html += '<div class="collapsible-section">';
+    html += `<button class="collapsible-trigger" id="schema-settings-trigger" onclick="toggleSchemaSettings()">
+        <span>Organization Settings</span>
+        <span class="material-symbols-rounded">expand_more</span>
+    </button>`;
+    html += '<div class="collapsible-body" id="schema-settings-body">';
     html += '<div class="side-by-side">';
     html += `<div class="form-group">
         <label>Organization Name</label>
@@ -1581,32 +2912,39 @@ function renderSchemaTab(container, stats, products, settings) {
     html += `<button class="btn btn-primary" onclick="saveSchemaSettings()">
         <span class="material-symbols-rounded">save</span> Save Settings
     </button>`;
-    html += "</div>";
+    html += "</div></div>";
 
-    html += '<div style="display: flex; gap: 8px; margin-bottom: 16px;">';
-    html += `<button class="btn btn-primary" onclick="batchGenerateSchemas()">
-        <span class="material-symbols-rounded">code</span> Generate All
-    </button>`;
-    html += `<button class="btn btn-secondary" onclick="batchPushSchemas()">
-        <span class="material-symbols-rounded">cloud_upload</span> Push All to Shopify
-    </button>`;
-    html += "</div>";
-
-    html += `<div class="status-filter-bar" style="gap: 6px;">
-        <span style="font-size: 13px; color: var(--on-surface-secondary); font-weight: 500; margin-right: 4px;">Schema:</span>
-        <button class="filter-chip ${schemaFilter.generated === "" ? "active" : ""}" onclick="setSchemaFilter('generated','')">All</button>
-        <button class="filter-chip ${schemaFilter.generated === "yes" ? "active" : ""}" onclick="setSchemaFilter('generated','yes')">Generated</button>
-        <button class="filter-chip ${schemaFilter.generated === "no" ? "active" : ""}" onclick="setSchemaFilter('generated','no')">Not Generated</button>
-
-        <span style="font-size: 13px; color: var(--on-surface-secondary); font-weight: 500; margin-left: 12px; margin-right: 4px;">Valid:</span>
-        <button class="filter-chip ${schemaFilter.valid === "" ? "active" : ""}" onclick="setSchemaFilter('valid','')">All</button>
-        <button class="filter-chip ${schemaFilter.valid === "yes" ? "active" : ""}" onclick="setSchemaFilter('valid','yes')">Valid</button>
-        <button class="filter-chip ${schemaFilter.valid === "no" ? "active" : ""}" onclick="setSchemaFilter('valid','no')">Invalid</button>
-
-        <span style="font-size: 13px; color: var(--on-surface-secondary); font-weight: 500; margin-left: 12px; margin-right: 4px;">Pushed:</span>
-        <button class="filter-chip ${schemaFilter.pushed === "" ? "active" : ""}" onclick="setSchemaFilter('pushed','')">All</button>
-        <button class="filter-chip ${schemaFilter.pushed === "yes" ? "active" : ""}" onclick="setSchemaFilter('pushed','yes')">Pushed</button>
-        <button class="filter-chip ${schemaFilter.pushed === "no" ? "active" : ""}" onclick="setSchemaFilter('pushed','no')">Not Pushed</button>
+    html += `<div class="toolbar-row">
+        <div class="filter-groups" style="margin-bottom: 0;">
+            <div class="filter-group">
+                <span class="filter-group-label">Schema</span>
+                <button class="filter-chip ${schemaFilter.generated === "" ? "active" : ""}" onclick="setSchemaFilter('generated','')">All</button>
+                <button class="filter-chip ${schemaFilter.generated === "yes" ? "active" : ""}" onclick="setSchemaFilter('generated','yes')">Generated</button>
+                <button class="filter-chip ${schemaFilter.generated === "no" ? "active" : ""}" onclick="setSchemaFilter('generated','no')">None</button>
+            </div>
+            <div class="filter-group-divider"></div>
+            <div class="filter-group">
+                <span class="filter-group-label">Valid</span>
+                <button class="filter-chip ${schemaFilter.valid === "" ? "active" : ""}" onclick="setSchemaFilter('valid','')">All</button>
+                <button class="filter-chip ${schemaFilter.valid === "yes" ? "active" : ""}" onclick="setSchemaFilter('valid','yes')">Valid</button>
+                <button class="filter-chip ${schemaFilter.valid === "no" ? "active" : ""}" onclick="setSchemaFilter('valid','no')">Invalid</button>
+            </div>
+            <div class="filter-group-divider"></div>
+            <div class="filter-group">
+                <span class="filter-group-label">Pushed</span>
+                <button class="filter-chip ${schemaFilter.pushed === "" ? "active" : ""}" onclick="setSchemaFilter('pushed','')">All</button>
+                <button class="filter-chip ${schemaFilter.pushed === "yes" ? "active" : ""}" onclick="setSchemaFilter('pushed','yes')">Pushed</button>
+                <button class="filter-chip ${schemaFilter.pushed === "no" ? "active" : ""}" onclick="setSchemaFilter('pushed','no')">Not Pushed</button>
+            </div>
+        </div>
+        <div style="margin-left: auto; display: flex; gap: 6px; flex-shrink: 0;">
+            <button class="btn btn-sm btn-primary" onclick="batchGenerateSchemas()">
+                <span class="material-symbols-rounded">code</span> Generate All
+            </button>
+            <button class="btn btn-sm btn-secondary" onclick="batchPushSchemas()">
+                <span class="material-symbols-rounded">cloud_upload</span> Push All
+            </button>
+        </div>
     </div>`;
 
     let filtered = products.slice();
@@ -1674,15 +3012,17 @@ function renderSchemaTab(container, stats, products, settings) {
 
         html += `<tr>
             <td class="row-num-col">${idx + 1}</td>
-            <td><strong>${escapeHtml(p.title)}</strong><br><small style="color: var(--on-surface-secondary);">${escapeHtml(p.handle)}</small></td>
+            <td><strong>${escapeHtml(p.title)}</strong></td>
             <td><span class="badge badge-info">${escapeHtml(p.status)}</span></td>
             <td>${schemaStatus}</td>
             <td>${validStatus}</td>
             <td>${pushedStatus}</td>
-            <td style="white-space: nowrap;">
-                <button class="btn btn-sm btn-primary" onclick="generateSchema(${p.id})">Generate</button>
-                <button class="btn btn-sm btn-secondary" onclick="viewSchema(${p.id})" ${!p.schema_generated ? "disabled" : ""}>View</button>
-                <button class="btn btn-sm btn-secondary" onclick="pushSchema(${p.id})" ${!p.schema_generated ? "disabled" : ""}>Push</button>
+            <td>
+                <div class="actions-cell">
+                    <button class="action-icon action-icon-primary" title="Generate schema" onclick="generateSchema(${p.id})"><span class="material-symbols-rounded">code</span></button>
+                    <button class="action-icon" title="View schema" onclick="viewSchema(${p.id})" ${!p.schema_generated ? "disabled style=\"opacity:0.4;pointer-events:none;\"" : ""}><span class="material-symbols-rounded">visibility</span></button>
+                    <button class="action-icon" title="Push to Shopify" onclick="pushSchema(${p.id})" ${!p.schema_generated ? "disabled style=\"opacity:0.4;pointer-events:none;\"" : ""}><span class="material-symbols-rounded">cloud_upload</span></button>
+                </div>
             </td>
         </tr>`;
     }
@@ -1691,13 +3031,7 @@ function renderSchemaTab(container, stats, products, settings) {
     container.innerHTML = html;
 }
 
-function renderStatCard(label, value, icon) {
-    return `<div class="card" style="padding: 16px; text-align: center;">
-        <span class="material-symbols-rounded" style="font-size: 28px; color: var(--primary);">${icon}</span>
-        <div style="font-size: 28px; font-weight: 600; margin: 4px 0;">${value}</div>
-        <div style="font-size: 13px; color: var(--on-surface-secondary);">${label}</div>
-    </div>`;
-}
+// renderStatCard removed — replaced by schema-stats-bar inline rendering
 
 function toggleSchemaSort(key) {
     if (schemaSort.by === key) {
@@ -3040,5 +4374,124 @@ async function executeBulkApplyTags(storeId) {
     } catch (err) {
         overlay.classList.remove("active");
         showToast(`Bulk apply failed: ${err.message}`, "error");
+    }
+}
+
+async function generateCollectionImage(collectionId) {
+    const area = document.getElementById("collection-image-gen-area");
+    if (!area) return;
+
+    area.innerHTML = `<div class="loading-spinner" style="padding: 16px 0;"><div class="spinner"></div><p>Generating AI collection image... this may take 10-15 seconds</p></div>`;
+
+    try {
+        const resp = await apiRequest(`/api/seo/collections/${collectionId}/generate-image`, { method: "POST" });
+
+        area.innerHTML = `
+            <div style="margin-top: 8px;">
+                <img src="data:image/png;base64,${resp.image_base64}" alt="${escapeAttr(resp.alt_text)}"
+                    style="max-width: 100%; border-radius: 8px; border: 1px solid var(--outline); cursor: pointer;"
+                    onclick="openLightbox('data:image/png;base64,${resp.image_base64}')">
+                <p style="font-size: 13px; color: var(--on-surface-secondary); margin-top: 8px;">
+                    Preview generated from ${resp.product_count} product image${resp.product_count !== 1 ? "s" : ""}
+                </p>
+                <div style="display: flex; gap: 8px; margin-top: 12px;">
+                    <button class="btn btn-primary" onclick="applyCollectionImage(${collectionId})">
+                        <span class="material-symbols-rounded">check</span>
+                        Apply to Shopify
+                    </button>
+                    <button class="btn btn-secondary" onclick="generateCollectionImage(${collectionId})">
+                        <span class="material-symbols-rounded">refresh</span>
+                        Regenerate
+                    </button>
+                </div>
+            </div>`;
+
+        window._pendingCollectionImage = {
+            image_base64: resp.image_base64,
+            filename: resp.filename,
+            alt_text: resp.alt_text,
+        };
+    } catch (err) {
+        area.innerHTML = `
+            <p style="color: var(--error); font-size: 14px;">Failed to generate image: ${escapeHtml(err.message)}</p>
+            <button class="btn btn-secondary" style="margin-top: 8px;" onclick="generateCollectionImage(${collectionId})">
+                <span class="material-symbols-rounded">refresh</span>
+                Retry
+            </button>`;
+    }
+}
+
+async function applyCollectionImage(collectionId) {
+    const area = document.getElementById("collection-image-gen-area");
+    if (!area) return;
+
+    const imageData = window._pendingCollectionImage;
+    if (!imageData) {
+        showToast("No image to apply. Generate one first.", "error");
+        return;
+    }
+
+    area.innerHTML = `<div class="loading-spinner" style="padding: 16px 0;"><div class="spinner"></div><p>Applying image to Shopify...</p></div>`;
+
+    try {
+        await apiRequest(`/api/seo/collections/${collectionId}/apply-image`, {
+            method: "POST",
+            body: imageData,
+        });
+
+        window._pendingCollectionImage = null;
+        showToast("Collection image applied successfully!", "success");
+        viewCollection(collectionId);
+    } catch (err) {
+        area.innerHTML = `
+            <p style="color: var(--error); font-size: 14px;">Failed to apply image: ${escapeHtml(err.message)}</p>
+            <button class="btn btn-primary" style="margin-top: 8px;" onclick="applyCollectionImage(${collectionId})">
+                <span class="material-symbols-rounded">refresh</span>
+                Retry
+            </button>`;
+    }
+}
+
+function startBulkGenerateCollectionImages() {
+    if (selectedCollectionIds.size === 0) return;
+
+    document.getElementById("confirm-dialog-title").textContent = "Generate Collection Images";
+    document.getElementById("confirm-dialog-message").textContent =
+        `This will generate and apply promotional images for ${selectedCollectionIds.size} collection${selectedCollectionIds.size > 1 ? "s" : ""} using their top product images.`;
+
+    const okBtn = document.getElementById("confirm-dialog-ok");
+    okBtn.onclick = () => {
+        closeConfirmDialog();
+        executeBulkGenerateCollectionImages();
+    };
+    _openConfirmDialog();
+}
+
+async function executeBulkGenerateCollectionImages() {
+    const ids = Array.from(selectedCollectionIds);
+
+    const overlay = document.getElementById("bulk-progress-overlay");
+    const bar = document.getElementById("bulk-progress-bar");
+    const stats = document.getElementById("bulk-progress-stats");
+    const current = document.getElementById("bulk-progress-current");
+    const subtitle = document.getElementById("bulk-progress-subtitle");
+
+    bar.style.width = "0%";
+    stats.textContent = `0 / ${ids.length} completed`;
+    current.textContent = "";
+    subtitle.textContent = "Starting image generation...";
+    overlay.classList.add("active");
+
+    try {
+        const resp = await apiRequest("/api/seo/collections/bulk-generate-images", {
+            method: "POST",
+            body: { collection_ids: ids },
+        });
+
+        const bulkTaskId = resp.bulk_task_id;
+        pollBulkCollectionTask(bulkTaskId, ids.length, "Generating AI collection images...");
+    } catch (err) {
+        overlay.classList.remove("active");
+        showToast(`Bulk image generation failed: ${err.message}`, "error");
     }
 }

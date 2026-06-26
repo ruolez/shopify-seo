@@ -43,6 +43,44 @@
                     </div>
                 </div>
 
+                <!-- Insights from all data sources (shown if data available) -->
+                <div id="dash-insights" style="display: none; margin-bottom: 24px;"></div>
+
+                <!-- GSC Summary (shown if connected) -->
+                <div id="gsc-summary" class="card" style="display: none; margin-bottom: 24px;">
+                    <div class="card-header" style="display: flex; align-items: center; justify-content: space-between;">
+                        <h3>Search Console (Last 28 days)</h3>
+                        <a href="/gsc" class="btn btn-secondary btn-sm">View Details</a>
+                    </div>
+                    <div class="metric-cards" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px;">
+                        <div style="padding: 12px;">
+                            <div class="metric-label">Clicks</div>
+                            <div style="font-size: 22px; font-weight: 700;" id="dash-gsc-clicks">—</div>
+                        </div>
+                        <div style="padding: 12px;">
+                            <div class="metric-label">Impressions</div>
+                            <div style="font-size: 22px; font-weight: 700;" id="dash-gsc-impressions">—</div>
+                        </div>
+                        <div style="padding: 12px;">
+                            <div class="metric-label">Avg CTR</div>
+                            <div style="font-size: 22px; font-weight: 700;" id="dash-gsc-ctr">—</div>
+                        </div>
+                        <div style="padding: 12px;">
+                            <div class="metric-label">Avg Position</div>
+                            <div style="font-size: 22px; font-weight: 700;" id="dash-gsc-position">—</div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Top SEO Priorities (shown if data available) -->
+                <div class="card" style="display: none; margin-bottom: 24px;">
+                    <div class="card-header" style="display: flex; align-items: center; justify-content: space-between;">
+                        <h3><span class="material-symbols-rounded" style="vertical-align: middle; font-size: 20px;">priority_high</span> Top SEO Priorities</h3>
+                        <a href="/seo" class="btn btn-secondary btn-sm">View All</a>
+                    </div>
+                    <div id="dash-priorities" style="padding: 0 16px 12px;"></div>
+                </div>
+
                 <div class="card">
                     <div class="card-header">
                         <h3>Quick Actions</h3>
@@ -55,6 +93,10 @@
                         <a href="/seo" class="btn btn-secondary">
                             <span class="material-symbols-rounded">search</span>
                             View SEO Analysis
+                        </a>
+                        <a href="/gsc" class="btn btn-secondary">
+                            <span class="material-symbols-rounded">monitoring</span>
+                            Search Console
                         </a>
                         <a href="/settings" class="btn btn-secondary">
                             <span class="material-symbols-rounded">settings</span>

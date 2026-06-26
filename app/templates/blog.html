@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Blog Posts — SEO Platform</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+    <div class="app-layout">
+        {% include '_sidebar.html' %}
+        <div class="main-content">
+            <div class="topbar">
+                <div class="topbar-left">
+                    <button id="sidebar-toggle" class="icon-btn"><span class="material-symbols-rounded">menu</span></button>
+                    <h2>Blog Posts</h2>
+                </div>
+                <div class="topbar-right">
+                    <button id="theme-toggle" class="icon-btn"><span class="material-symbols-rounded">dark_mode</span></button>
+                </div>
+            </div>
+            <div class="page-content">
+                <div class="tabs">
+                    <button class="tab active" data-tab="articles">Articles</button>
+                    <button class="tab" data-tab="create">Create Post</button>
+                </div>
+
+                <div class="tab-panel active" id="tab-articles">
+                    <!-- Blog Toolbar -->
+                    <div class="blog-toolbar" id="blog-toolbar" style="display: none;">
+                        <div class="blog-toolbar-left">
+                            <span class="material-symbols-rounded" style="font-size: 20px; color: var(--primary);">rss_feed</span>
+                            <span class="blog-name" id="toolbar-blog-name">Blog</span>
+                            <button class="settings-gear-btn" id="settings-gear-btn" onclick="toggleBlogSettings()" title="Blog SEO Settings">
+                                <span class="material-symbols-rounded">settings</span>
+                            </button>
+                        </div>
+                        <div class="blog-toolbar-right">
+                            <span class="toolbar-chip" id="chip-landing" style="display: none;" onclick="generateLandingPage()">
+                                <span class="material-symbols-rounded">web</span>
+                                <span id="chip-landing-label">Landing Page</span>
+                            </span>
+                            <span class="toolbar-chip chip-warning" id="chip-empty-blogs" style="display: none;" onclick="cleanupEmptyBlogs()">
+                                <span class="material-symbols-rounded">warning</span>
+                                <span id="chip-empty-label">Empty Blogs</span>
+                            </span>
+                            <span class="toolbar-chip" id="chip-theme-seo" style="display: none;" onclick="pushSeoSnippet()">
+                                <span class="material-symbols-rounded">code</span>
+                                Theme SEO
+                                <span class="chip-dot" id="chip-seo-dot" style="display: none;"></span>
+                            </span>
+                            <button class="btn btn-secondary btn-sm" id="ai-suggest-btn" onclick="getAISuggestions()">
+                                <span class="material-symbols-rounded">auto_awesome</span>
+                                AI Suggest
+                            </button>
+                        </div>
+                    </div>
+
+                    <!-- Collapsible Settings Panel -->
+                    <div class="blog-settings-panel" id="blog-settings-panel">
+                        <div class="blog-settings-grid">
+                            <div class="blog-settings-section">
+                                <h5>Content</h5>
+                                <div class="form-group">
+                                    <label>Blog Title (H1)</label>
+                                    <div style="display: flex; gap: 8px; align-items: center;">
+                                        <input type="text" id="blog-rename-input" class="form-control" style="flex: 1; font-size: 13px;" placeholder="e.g., Tobacco News, Tips & Deals">
+                                        <button class="btn btn-primary btn-sm" onclick="renameBlog()" style="white-space: nowrap;">
+                                            <span class="material-symbols-rounded">save</span>
+                                            Save
+                                        </button>
+                                    </div>
+                                </div>
+                                <div id="ai-title-suggestion" style="display: none;"></div>
+                                <div class="form-group">
+                                    <label>Intro Paragraph</label>
+                                    <textarea id="landing-intro-text" class="form-control" rows="2" placeholder="Shown above articles on the landing page..." style="font-size: 13px;"></textarea>
+                                    <div style="margin-top: 6px;">
+                                        <button class="btn btn-primary btn-sm" onclick="saveIntroText()">
+                                            <span class="material-symbols-rounded">save</span>
+                                            Save Intro
+                                        </button>
+                                    </div>
+                                </div>
+                                <div id="ai-intro-suggestion" style="display: none;"></div>
+                            </div>
+                            <div class="blog-settings-section">
+                                <h5>Meta Tags</h5>
+                                <div class="form-group">
+                                    <label>Meta Title <span style="color: var(--on-surface-secondary); font-weight: normal;">(50-60 chars)</span></label>
+                                    <div style="display: flex; gap: 8px; align-items: center;">
+                                        <input type="text" id="blog-meta-title" class="form-control" style="flex: 1; font-size: 13px;" maxlength="70" placeholder="e.g., Tobacco Blog — Tips & Deals | Store">
+                                        <span id="blog-meta-title-count" style="font-size: 11px; color: var(--on-surface-secondary); white-space: nowrap;">0/60</span>
+                                    </div>
+                                </div>
+                                <div id="ai-meta-title-suggestion" style="display: none;"></div>
+                                <div class="form-group">
+                                    <label>Meta Description <span style="color: var(--on-surface-secondary); font-weight: normal;">(140-160 chars)</span></label>
+                                    <div style="display: flex; gap: 8px; align-items: flex-start;">
+                                        <textarea id="blog-meta-description" class="form-control" rows="2" maxlength="170" style="flex: 1; font-size: 13px;" placeholder="Browse expert tobacco tips, reviews..."></textarea>
+                                        <span id="blog-meta-desc-count" style="font-size: 11px; color: var(--on-surface-secondary); white-space: nowrap; margin-top: 8px;">0/160</span>
+                                    </div>
+                                </div>
+                                <div id="ai-meta-desc-suggestion" style="display: none;"></div>
+                                <button class="btn btn-primary btn-sm" onclick="saveBlogSeoMeta()">
+                                    <span class="material-symbols-rounded">save</span>
+                                    Save Meta Tags
+                                </button>
+                            </div>
+                        </div>
+                        <div class="blog-settings-row2">
+                            <div class="blog-settings-section">
+                                <h5>Hero Banner</h5>
+                                <div class="hero-preview-compact" id="hero-image-preview"></div>
+                                <div style="display: flex; gap: 8px; margin-top: 8px;">
+                                    <button class="btn btn-secondary btn-sm" id="generate-hero-btn" onclick="generateHeroImage()">
+                                        <span class="material-symbols-rounded">auto_awesome</span>
+                                        Generate Hero
+                                    </button>
+                                    <button class="btn btn-secondary btn-sm" id="remove-hero-btn" onclick="removeHeroImage()" style="display: none;">
+                                        <span class="material-symbols-rounded">delete</span>
+                                        Remove
+                                    </button>
+                                    <button class="btn btn-secondary btn-sm" onclick="refreshBlogImages()">
+                                        <span class="material-symbols-rounded">refresh</span>
+                                        Refresh Images
+                                    </button>
+                                </div>
+                            </div>
+                            <div class="blog-settings-section">
+                                <h5>URL Redirects</h5>
+                                <p style="font-size: 12px; color: var(--on-surface-secondary); margin: 0 0 8px;">Redirect old blog URLs to <code>/blogs/news</code></p>
+                                <button class="btn btn-secondary btn-sm" onclick="detectOldBlogs()" style="margin-bottom: 8px;">
+                                    <span class="material-symbols-rounded">search</span>
+                                    Detect Old URLs
+                                </button>
+                                <div id="redirects-list"></div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div id="blog-seo-card" style="display: none;" data-blog-id=""></div>
+
+                    <div id="articles-container" style="margin-top: 16px;">
+                        <div class="loading-spinner"><div class="spinner"></div><p>Loading articles...</p></div>
+                    </div>
+                </div>
+
+                <div class="tab-panel" id="tab-create">
+                    <div id="wizard-container">
+                        <div class="wizard-steps-enhanced">
+                            <div class="wizard-step-enhanced active" data-step="1">
+                                <span class="step-indicator">1</span>
+                                <span class="step-label">Topic</span>
+                            </div>
+                            <div class="wizard-connector" data-after="1"></div>
+                            <div class="wizard-step-enhanced" data-step="2">
+                                <span class="step-indicator">2</span>
+                                <span class="step-label">Research</span>
+                            </div>
+                            <div class="wizard-connector" data-after="2"></div>
+                            <div class="wizard-step-enhanced" data-step="3">
+                                <span class="step-indicator">3</span>
+                                <span class="step-label">Outline</span>
+                            </div>
+                            <div class="wizard-connector" data-after="3"></div>
+                            <div class="wizard-step-enhanced" data-step="4">
+                                <span class="step-indicator">4</span>
+                                <span class="step-label">Generate</span>
+                            </div>
+                            <div class="wizard-connector" data-after="4"></div>
+                            <div class="wizard-step-enhanced" data-step="5">
+                                <span class="step-indicator">5</span>
+                                <span class="step-label">Review</span>
+                            </div>
+                            <div class="wizard-connector" data-after="5"></div>
+                            <div class="wizard-step-enhanced" data-step="6">
+                                <span class="step-indicator">6</span>
+                                <span class="step-label">Publish</span>
+                            </div>
+                        </div>
+
+                        <!-- Step 1: Topic & Keywords -->
+                        <div class="wizard-panel active" id="wizard-step-1">
+                            <div class="card wizard-step-1-card" style="max-width: 700px; margin: 0 auto;">
+                                <h3>What do you want to write about?</h3>
+                                <div class="form-group">
+                                    <label>Topic / Article Title</label>
+                                    <input type="text" id="wizard-topic" class="form-control" placeholder="e.g., Best pipe tobacco for beginners in 2025">
+                                </div>
+                                <div class="form-group">
+                                    <label>Target Keywords <span style="color: var(--on-surface-secondary); font-weight: normal;">(one per line — first keyword is your primary)</span></label>
+                                    <textarea id="wizard-keywords" class="form-control" rows="4" placeholder="pipe tobacco (primary keyword)&#10;best pipe tobacco&#10;pipe tobacco for beginners"></textarea>
+                                </div>
+                                <p style="font-size: 13px; color: var(--on-surface-secondary); margin-top: 8px;">Articles are published to the <strong>News</strong> blog.</p>
+                                <button class="btn btn-primary" onclick="wizardStartResearch()" style="margin-top: 16px;">
+                                    <span class="material-symbols-rounded">science</span>
+                                    Start Research
+                                </button>
+                            </div>
+                        </div>
+
+                        <!-- Step 2: Research Results -->
+                        <div class="wizard-panel" id="wizard-step-2">
+                            <div id="research-content">
+                                <div class="loading-spinner"><div class="spinner"></div><p>Researching topic...</p></div>
+                            </div>
+                        </div>
+
+                        <!-- Step 3: Outline -->
+                        <div class="wizard-panel" id="wizard-step-3">
+                            <div id="outline-content">
+                                <div class="loading-spinner"><div class="spinner"></div><p>Generating outline...</p></div>
+                            </div>
+                        </div>
+
+                        <!-- Step 4: Generation -->
+                        <div class="wizard-panel" id="wizard-step-4">
+                            <div id="generate-content">
+                                <div class="loading-spinner"><div class="spinner"></div><p>Writing article...</p></div>
+                            </div>
+                        </div>
+
+                        <!-- Step 5: Review & Edit -->
+                        <div class="wizard-panel" id="wizard-step-5">
+                            <div id="review-content"></div>
+                        </div>
+
+                        <!-- Step 6: Publish -->
+                        <div class="wizard-panel" id="wizard-step-6">
+                            <div id="publish-content"></div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Article Detail Modal -->
+                <div class="modal-overlay" id="article-modal">
+                    <div class="modal modal-fullscreen">
+                        <div class="modal-header">
+                            <h3 id="article-modal-title">Article SEO</h3>
+                            <button class="icon-btn" onclick="closeArticleModal()"><span class="material-symbols-rounded">close</span></button>
+                        </div>
+                        <div class="modal-body" id="article-detail-content"></div>
+                    </div>
+                </div>
+
+                <!-- Bulk Progress Overlay -->
+                <div class="progress-overlay" id="blog-bulk-progress-overlay">
+                    <div class="progress-card">
+                        <span class="material-symbols-rounded" style="font-size: 40px; color: var(--primary); margin-bottom: 12px;">sync</span>
+                        <h3>Bulk Optimization</h3>
+                        <p class="progress-subtitle" id="blog-bulk-progress-subtitle">Optimizing articles...</p>
+                        <div class="progress-bar-container">
+                            <div class="progress-bar" id="blog-bulk-progress-bar"></div>
+                        </div>
+                        <div class="progress-stats" id="blog-bulk-progress-stats">0 / 0 completed</div>
+                        <div class="progress-current" id="blog-bulk-progress-current"></div>
+                    </div>
+                </div>
+
+                <!-- Confirm Dialog -->
+                <div class="confirm-overlay" id="blog-confirm-dialog-overlay">
+                    <div class="confirm-dialog">
+                        <h3 id="blog-confirm-dialog-title">Confirm</h3>
+                        <p id="blog-confirm-dialog-message">Are you sure?</p>
+                        <div class="confirm-actions">
+                            <button class="btn btn-secondary" onclick="closeBlogConfirmDialog()">Cancel</button>
+                            <button class="btn btn-primary" id="blog-confirm-dialog-ok">Continue</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/js/app.js"></script>
+    <script src="/static/js/blog.js"></script>
+</body>
+</html>

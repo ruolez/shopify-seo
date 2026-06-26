@@ -2,7 +2,9 @@ from flask import Blueprint, jsonify, render_template, request
 
 from app.auth import decrypt_value, encrypt_value
 from app.database import db
+from app.prompt_defaults import DEFAULTS
 from app.services.sync_service import sync_store_async
+from app.settings_manager import get_setting
 from app.shopify_client import ShopifyClient
 
 store_bp = Blueprint("stores", __name__)
@@ -17,7 +19,7 @@ def stores_page():
 def list_stores():
     with db.get_cursor() as cur:
         cur.execute(
-            "SELECT id, name, domain, api_version, is_active, last_synced_at, created_at FROM stores ORDER BY id"
+            "SELECT id, name, domain, api_version, is_active, last_synced_at, created_at, shop_name, primary_domain FROM stores ORDER BY id"
         )
         stores = cur.fetchall()
     result = []
@@ -31,6 +33,8 @@ def list_stores():
                 "is_active": s["is_active"],
                 "last_synced_at": s["last_synced_at"].isoformat() if s["last_synced_at"] else None,
                 "created_at": s["created_at"].isoformat() if s["created_at"] else None,
+                "shop_name": s.get("shop_name"),
+                "primary_domain": s.get("primary_domain"),
             }
         )
     return jsonify(result)
@@ -49,13 +53,23 @@ def create_store():
 
     token_enc = encrypt_value(access_token)
 
+    shop_name = None
+    primary_domain = None
+    try:
+        client = ShopifyClient(domain, access_token, api_version)
+        shop_info = client.test_connection()
+        shop_name = shop_info.get("name")
+        primary_domain = shop_info.get("primary_domain")
+    except Exception:
+        pass
+
     with db.get_cursor() as cur:
         cur.execute(
             """
-            INSERT INTO stores (name, domain, access_token_enc, api_version)
-            VALUES (%s, %s, %s, %s) RETURNING id
+            INSERT INTO stores (name, domain, access_token_enc, api_version, shop_name, primary_domain)
+            VALUES (%s, %s, %s, %s, %s, %s) RETURNING id
             """,
-            (name, domain, token_enc, api_version),
+            (name, domain, token_enc, api_version, shop_name, primary_domain),
         )
         store_id = cur.fetchone()["id"]
 
@@ -121,6 +135,22 @@ def sync_store_route(store_id):
         if not cur.fetchone():
             return jsonify({"error": "Store not found"}), 404
 
+        cur.execute(
+            "SELECT id, started_at FROM sync_jobs WHERE store_id = %s AND status = 'running' ORDER BY id DESC LIMIT 1",
+            (store_id,),
+        )
+        running_job = cur.fetchone()
+        if running_job:
+            from datetime import datetime, timezone
+            sync_timeout_minutes = get_setting("sync.timeout_minutes", 60)
+            age_minutes = (datetime.now(timezone.utc) - running_job["started_at"].replace(tzinfo=timezone.utc)).total_seconds() / 60
+            if age_minutes < sync_timeout_minutes:
+                return jsonify({"error": "A sync is already running for this store"}), 409
+            cur.execute(
+                "UPDATE sync_jobs SET status = 'failed', error = %s, current_phase = NULL, completed_at = NOW() WHERE id = %s",
+                (f"Stale job auto-recovered after {sync_timeout_minutes} minutes", running_job["id"]),
+            )
+
     sync_store_async(store_id)
     return jsonify({"ok": True, "message": "Sync started"})
 
@@ -149,5 +179,7 @@ def sync_status(store_id):
             "total_products": job.get("total_products", 0),
             "total_collections": job.get("total_collections", 0),
             "collections_mapped": job.get("collections_mapped", 0),
+            "blogs_synced": job.get("blogs_synced", 0),
+            "articles_synced": job.get("articles_synced", 0),
         }
     )

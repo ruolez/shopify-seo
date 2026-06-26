@@ -44,6 +44,11 @@ function escapeHtml(str) {
     return div.innerHTML;
 }
 
+function escapeAttr(str) {
+    if (!str) return "";
+    return String(str).replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/'/g, "&#39;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
 function showLoading(container) {
     if (typeof container === "string") {
         container = document.querySelector(container);
@@ -72,6 +77,37 @@ function getScoreBadge(score) {
     return `<span class="badge ${cls}">${score}</span>`;
 }
 
+function formatRelativeTime(isoStr) {
+    if (!isoStr) return "—";
+    const d = new Date(isoStr);
+    const now = new Date();
+    const diffMs = now - d;
+    const diffMin = Math.floor(diffMs / 60000);
+    const diffHr = Math.floor(diffMs / 3600000);
+    const diffDay = Math.floor(diffMs / 86400000);
+    if (diffMin < 1) return "Just now";
+    if (diffMin < 60) return `${diffMin}m ago`;
+    if (diffHr < 24) return `${diffHr}h ago`;
+    if (diffDay < 7) return `${diffDay}d ago`;
+    return d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+}
+
+function renderScoreRing(score, size = 44) {
+    const cls = score >= 80 ? "high" : score >= 50 ? "medium" : "low";
+    const r = (size - 8) / 2;
+    const circ = 2 * Math.PI * r;
+    const offset = circ - (score / 100) * circ;
+    const isLg = size > 60;
+    return `<div class="${isLg ? "score-ring-lg" : "score-ring"}" style="${isLg ? "" : "width:" + size + "px;height:" + size + "px;"}">
+        <svg width="${size}" height="${size}" viewBox="0 0 ${size} ${size}">
+            <circle class="score-ring-bg" cx="${size/2}" cy="${size/2}" r="${r}"/>
+            <circle class="score-ring-fill ${cls}" cx="${size/2}" cy="${size/2}" r="${r}"
+                stroke-dasharray="${circ}" stroke-dashoffset="${offset}"/>
+        </svg>
+        <span class="score-ring-value">${score}</span>
+    </div>`;
+}
+
 function initThemeToggle() {
     const saved = localStorage.getItem("theme");
     if (saved === "dark") {
@@ -85,11 +121,11 @@ function initThemeToggle() {
             const next = current === "dark" ? "light" : "dark";
             document.documentElement.setAttribute("data-theme", next);
             localStorage.setItem("theme", next);
-            btn.textContent = next === "dark" ? "light_mode" : "dark_mode";
+            btn.querySelector(".material-symbols-rounded").textContent = next === "dark" ? "light_mode" : "dark_mode";
         });
         const theme =
             document.documentElement.getAttribute("data-theme") || "light";
-        btn.textContent = theme === "dark" ? "light_mode" : "dark_mode";
+        btn.querySelector(".material-symbols-rounded").textContent = theme === "dark" ? "light_mode" : "dark_mode";
     }
 }
 

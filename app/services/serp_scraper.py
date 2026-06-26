@@ -85,6 +85,53 @@ def _set_cached(cache_key, data):
         )
 
 
+def _strip_store_identity(keyword, product):
+    """Remove store name, shop name, and domain fragments from a keyword."""
+    if not keyword:
+        return keyword
+
+    store_domain = (product.get("store_domain") or "").strip().lower()
+    store_name = (product.get("store_name") or "").strip()
+    shop_name = (product.get("shop_name") or "").strip()
+
+    # Also try to get names from DB if not on the product dict
+    if not store_name and not shop_name:
+        try:
+            store_id = product.get("store_id")
+            if store_id:
+                with db.get_cursor() as cur:
+                    cur.execute("SELECT name, shop_name, domain, primary_domain FROM stores WHERE id = %s", (store_id,))
+                    row = cur.fetchone()
+                if row:
+                    store_name = (row.get("name") or "").strip()
+                    shop_name = (row.get("shop_name") or "").strip()
+                    if not store_domain:
+                        store_domain = (row.get("primary_domain") or row.get("domain") or "").strip().lower()
+        except Exception:
+            pass
+
+    remove_terms = set()
+    for term in [store_name, shop_name]:
+        if term and len(term) > 2:
+            remove_terms.add(term)
+    if store_domain:
+        # Extract base name from domain: "a2ztobacco.com" -> "a2ztobacco", "tobacco-nation.myshopify.com" -> "tobacco-nation"
+        base = store_domain.split(".")[0].replace("-", " ")
+        if len(base) > 2:
+            remove_terms.add(base)
+
+    cleaned = keyword
+    for term in remove_terms:
+        cleaned = re.sub(re.escape(term), "", cleaned, flags=re.IGNORECASE)
+
+    # Clean up leftover separators and whitespace
+    cleaned = re.sub(r"\s*[-–—|:]\s*$", "", cleaned)
+    cleaned = re.sub(r"^\s*[-–—|:]\s*", "", cleaned)
+    cleaned = re.sub(r"\s{2,}", " ", cleaned).strip()
+
+    return cleaned if cleaned else keyword
+
+
 def determine_primary_keyword(product, target_keywords=None):
     """Pick the best keyword to search for SERP benchmarking."""
     if target_keywords and target_keywords[0].strip():
@@ -166,6 +213,12 @@ def determine_search_queries(product, target_keywords=None, entity_type="product
     if not keyword:
         return {"keyword": "", "product_query": None, "competitor_query": None}
 
+    # Strip store name/domain from the keyword to avoid self-referential searches
+    keyword = _strip_store_identity(keyword, product)
+
+    if not keyword:
+        return {"keyword": "", "product_query": None, "competitor_query": None}
+
     product_query = None
     if store_domain:
         competitor_query = f"{keyword} -site:{store_domain}"
@@ -243,7 +296,7 @@ def brave_search(query, count=10):
                     "safesearch": "off",
                     "result_filter": "web",
                 },
-                timeout=15,
+                timeout=30,
             )
 
             if resp.status_code == 429:
@@ -280,11 +333,214 @@ def brave_search(query, count=10):
 
             _set_cached(cache_key, results)
             return results
+        except requests.exceptions.Timeout:
+            logger.warning("Brave search timeout for query: %s (attempt %d/%d)", query, attempt + 1, BRAVE_MAX_RETRIES)
+            if attempt < BRAVE_MAX_RETRIES - 1:
+                time.sleep(2 ** attempt)
+                continue
+            return None
         except Exception:
             logger.exception("Brave search exception for query: %s", query)
             return None
 
     logger.error("Brave search exhausted %d retries for: %s", BRAVE_MAX_RETRIES, query)
+    return None
+
+
+GOOGLE_SEARCH_DELAY = 2.0
+_google_last_call = 0.0
+
+GOOGLE_USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:126.0) Gecko/20100101 Firefox/126.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15",
+]
+
+
+def google_search(query, count=20, gl="us", hl="en"):
+    """Fetch Google search results by scraping the HTML results page.
+
+    Returns a list of dicts: [{position, title, url, description, domain}, ...]
+    Uses caching and rate limiting to avoid being blocked.
+    """
+    import random
+
+    global _google_last_call
+
+    cache_key = hashlib.sha256(f"google:{query}:{count}:{gl}".encode()).hexdigest()
+    cached = _get_cached(cache_key)
+    if cached:
+        logger.info("Google search cache hit for: %s", query)
+        return cached
+
+    elapsed = time.time() - _google_last_call
+    if elapsed < GOOGLE_SEARCH_DELAY:
+        wait = GOOGLE_SEARCH_DELAY - elapsed + random.uniform(0.2, 1.0)
+        time.sleep(wait)
+
+    _google_last_call = time.time()
+
+    params = {
+        "q": query,
+        "num": min(count, 30),
+        "gl": gl,
+        "hl": hl,
+        "pws": "0",
+    }
+
+    headers = {
+        "User-Agent": random.choice(GOOGLE_USER_AGENTS),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept-Encoding": "gzip, deflate",
+        "DNT": "1",
+        "Referer": "https://www.google.com/",
+    }
+
+    try:
+        resp = requests.get(
+            "https://www.google.com/search",
+            params=params,
+            headers=headers,
+            timeout=15,
+        )
+
+        if resp.status_code == 429:
+            logger.warning("Google search rate limited (429) for: %s", query)
+            return None
+
+        if resp.status_code != 200:
+            logger.warning("Google search returned %s for: %s", resp.status_code, query)
+            return None
+
+        soup = BeautifulSoup(resp.text, "html.parser")
+        results = []
+        position = 0
+
+        for g in soup.select("div.g, div[data-sokoban-container]"):
+            link = g.select_one("a[href]")
+            if not link:
+                continue
+
+            href = link.get("href", "")
+            if not href.startswith("http") or "google.com" in href:
+                continue
+
+            position += 1
+
+            title_el = g.select_one("h3")
+            title = title_el.get_text(strip=True) if title_el else ""
+
+            desc_el = g.select_one("div[data-sncf], div.VwiC3b, span.aCOpRe")
+            description = desc_el.get_text(strip=True) if desc_el else ""
+
+            try:
+                domain = urlparse(href).hostname or ""
+                if domain.startswith("www."):
+                    domain = domain[4:]
+            except Exception:
+                domain = ""
+
+            results.append({
+                "position": position,
+                "title": title,
+                "url": href,
+                "description": description,
+                "domain": domain,
+            })
+
+            if position >= count:
+                break
+
+        logger.info("Google search parsed %d results for: %s", len(results), query)
+
+        if results:
+            _set_cached(cache_key, results)
+
+        return results if results else None
+
+    except requests.exceptions.Timeout:
+        logger.warning("Google search timeout for: %s", query)
+        return None
+    except Exception:
+        logger.exception("Google search failed for: %s", query)
+        return None
+
+
+def brave_image_search(query, count=5):
+    global _brave_last_call
+
+    api_key = _get_brave_api_key()
+    if not api_key:
+        logger.warning("Brave image search skipped — no API key configured")
+        return None
+
+    cache_key = hashlib.sha256(f"brave_img:{query}:{count}".encode()).hexdigest()
+    cached = _get_cached(cache_key)
+    if cached:
+        logger.info("Brave image search cache hit for query: %s", query)
+        return cached
+
+    for attempt in range(BRAVE_MAX_RETRIES):
+        try:
+            elapsed = time.time() - _brave_last_call
+            if elapsed < BRAVE_RATE_LIMIT_DELAY:
+                time.sleep(BRAVE_RATE_LIMIT_DELAY - elapsed)
+
+            logger.info("Brave image search API call for query: %s (attempt %d)", query, attempt + 1)
+            _brave_last_call = time.time()
+
+            resp = requests.get(
+                "https://api.search.brave.com/res/v1/images/search",
+                headers={
+                    "Accept": "application/json",
+                    "Accept-Encoding": "gzip",
+                    "X-Subscription-Token": api_key,
+                },
+                params={
+                    "q": query,
+                    "count": min(count, 20),
+                    "country": "us",
+                    "search_lang": "en",
+                    "safesearch": "off",
+                },
+                timeout=15,
+            )
+
+            if resp.status_code == 429:
+                backoff = max(2 ** attempt, 1)
+                logger.warning("Brave image 429 rate limited, retrying in %ds", backoff)
+                time.sleep(backoff)
+                continue
+
+            if resp.status_code != 200:
+                logger.error("Brave image search failed with status %s: %s", resp.status_code, resp.text[:200])
+                return None
+
+            data = resp.json()
+            results = []
+            for r in data.get("results", []):
+                props = r.get("properties", {})
+                results.append({
+                    "title": r.get("title", ""),
+                    "url": props.get("url") or r.get("url", ""),
+                    "thumbnail": r.get("thumbnail", {}).get("src", ""),
+                    "width": props.get("width") or r.get("width"),
+                    "height": props.get("height") or r.get("height"),
+                    "source": r.get("source", ""),
+                })
+
+            logger.info("Brave image search returned %d results for: %s", len(results), query)
+            if results:
+                _set_cached(cache_key, results)
+            return results
+        except Exception:
+            logger.exception("Brave image search exception for query: %s", query)
+            return None
+
+    logger.error("Brave image search exhausted %d retries for: %s", BRAVE_MAX_RETRIES, query)
     return None
 
 
@@ -596,6 +852,27 @@ def get_serp_benchmark(product, target_keywords=None, return_raw=False, entity_t
         product_page = None
 
         competitor_results = brave_search(queries["competitor_query"], count=10)
+
+        # Filter out own store from results (Brave -site: is unreliable)
+        store_domain = (product.get("store_domain") or "").strip().lower()
+        if competitor_results and store_domain:
+            own_domains = {store_domain}
+            # Also exclude the .myshopify.com variant
+            if not store_domain.endswith(".myshopify.com"):
+                own_domains.add(store_domain.replace("www.", ""))
+            with db.get_cursor() as cur:
+                cur.execute("SELECT domain FROM stores WHERE primary_domain = %s OR domain = %s", (store_domain, store_domain))
+                for row in cur.fetchall():
+                    own_domains.add((row["domain"] or "").lower().strip())
+            before_count = len(competitor_results)
+            competitor_results = [
+                r for r in competitor_results
+                if not any(d in (r.get("url") or "").lower() for d in own_domains if d)
+            ]
+            filtered_count = before_count - len(competitor_results)
+            if filtered_count > 0:
+                logger.info("Filtered %d own-store results from SERP", filtered_count)
+
         if not competitor_results and not product_page:
             logger.warning("SERP benchmark — no competitor results and no product page found")
             return ("", None) if return_raw else ""

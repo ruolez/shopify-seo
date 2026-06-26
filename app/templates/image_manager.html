@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Image Manager — SEO Platform</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+    <div class="app-layout">
+        {% include '_sidebar.html' %}
+        <div class="main-content">
+            <div class="topbar">
+                <div class="topbar-left">
+                    <button id="sidebar-toggle" class="icon-btn"><span class="material-symbols-rounded">menu</span></button>
+                    <h2>Image Manager</h2>
+                </div>
+                <div class="topbar-right">
+                    <button id="theme-toggle" class="icon-btn"><span class="material-symbols-rounded">dark_mode</span></button>
+                </div>
+            </div>
+            <div class="page-content">
+                <div id="img-manager-container">
+                    <div class="loading-spinner"><div class="spinner"></div><p>Loading stores...</p></div>
+                </div>
+
+                <!-- Preview Modal -->
+                <div class="modal-overlay" id="img-preview-modal">
+                    <div class="modal" style="max-width: 640px;">
+                        <div class="modal-header">
+                            <h3 id="img-preview-title">Placeholder Preview</h3>
+                            <button class="icon-btn" onclick="closeImgPreview()"><span class="material-symbols-rounded">close</span></button>
+                        </div>
+                        <div class="modal-body" id="img-preview-content">
+                            <div class="loading-spinner"><div class="spinner"></div><p>Generating preview...</p></div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Bulk Progress Overlay -->
+                <div class="progress-overlay" id="img-progress-overlay">
+                    <div class="progress-card">
+                        <span class="material-symbols-rounded" style="font-size: 40px; color: var(--primary); margin-bottom: 12px;">cloud_upload</span>
+                        <h3>Uploading Placeholders</h3>
+                        <p class="progress-subtitle" id="img-progress-subtitle">Processing...</p>
+                        <div class="progress-bar-container">
+                            <div class="progress-bar" id="img-progress-bar"></div>
+                        </div>
+                        <div class="progress-stats" id="img-progress-stats">0 / 0 completed</div>
+                        <div class="progress-current" id="img-progress-current"></div>
+                    </div>
+                </div>
+
+                <!-- Confirm Dialog -->
+                <div class="confirm-overlay" id="img-confirm-overlay">
+                    <div class="confirm-dialog">
+                        <h3 id="img-confirm-title">Confirm</h3>
+                        <p id="img-confirm-message">Are you sure?</p>
+                        <div class="confirm-actions">
+                            <button class="btn btn-secondary" onclick="closeImgConfirm()">Cancel</button>
+                            <button class="btn btn-primary" id="img-confirm-ok">Continue</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/js/app.js"></script>
+    <script src="/static/js/image_manager.js"></script>
+</body>
+</html>

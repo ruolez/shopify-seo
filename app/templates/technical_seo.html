@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Technical SEO — SEO Platform</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+    <div class="app-layout">
+        {% include '_sidebar.html' %}
+        <div class="main-content">
+            <div class="topbar">
+                <div class="topbar-left">
+                    <button id="sidebar-toggle" class="icon-btn"><span class="material-symbols-rounded">menu</span></button>
+                    <h2>Technical SEO</h2>
+                </div>
+                <div class="topbar-right">
+                    <button id="theme-toggle" class="icon-btn"><span class="material-symbols-rounded">dark_mode</span></button>
+                </div>
+            </div>
+            <div class="page-content">
+                <div class="tabs">
+                    <button class="tab active" data-tab="products">Products</button>
+                    <button class="tab" data-tab="collections">Collections</button>
+                </div>
+
+                <div class="tab-panel active" id="tab-products">
+                    <div id="tseo-products-container">
+                        <div class="loading-spinner"><div class="spinner"></div><p>Loading products...</p></div>
+                    </div>
+                </div>
+
+                <div class="tab-panel" id="tab-collections">
+                    <div id="tseo-collections-container">
+                        <div class="loading-spinner"><div class="spinner"></div><p>Loading collections...</p></div>
+                    </div>
+                </div>
+
+                <!-- Detail Modal -->
+                <div class="modal-overlay" id="tseo-detail-modal">
+                    <div class="modal modal-fullscreen">
+                        <div class="modal-header">
+                            <h3 id="tseo-detail-title">Technical SEO Analysis</h3>
+                            <button class="icon-btn" onclick="closeTseoModal()"><span class="material-symbols-rounded">close</span></button>
+                        </div>
+                        <div class="modal-body" id="tseo-detail-content"></div>
+                    </div>
+                </div>
+
+                <!-- Bulk Progress Overlay -->
+                <div class="progress-overlay" id="tseo-progress-overlay">
+                    <div class="progress-card">
+                        <span class="material-symbols-rounded" style="font-size: 40px; color: var(--primary); margin-bottom: 12px;">sync</span>
+                        <h3>Technical SEO</h3>
+                        <p class="progress-subtitle" id="tseo-progress-subtitle">Processing...</p>
+                        <div class="progress-bar-container">
+                            <div class="progress-bar" id="tseo-progress-bar"></div>
+                        </div>
+                        <div class="progress-stats" id="tseo-progress-stats">0 / 0 completed</div>
+                        <div class="progress-current" id="tseo-progress-current"></div>
+                    </div>
+                </div>
+
+                <!-- Confirm Dialog -->
+                <div class="confirm-overlay" id="tseo-confirm-overlay">
+                    <div class="confirm-dialog">
+                        <h3 id="tseo-confirm-title">Confirm</h3>
+                        <p id="tseo-confirm-message">Are you sure?</p>
+                        <div class="confirm-actions">
+                            <button class="btn btn-secondary" onclick="closeTseoConfirm()">Cancel</button>
+                            <button class="btn btn-primary" id="tseo-confirm-ok">Continue</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/js/app.js"></script>
+    <script src="/static/js/technical_seo.js"></script>
+</body>
+</html>
