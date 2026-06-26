@@ -39,6 +39,14 @@ def _format_date(dt):
     return dt.strftime("%B %d, %Y")
 
 
+def _pub_sort_key(a):
+    """Stable sort key for published_at that tolerates datetime, str, or None."""
+    pa = a.get("published_at")
+    if not pa:
+        return ""
+    return pa.isoformat() if hasattr(pa, "isoformat") else str(pa)
+
+
 def _excerpt(article):
     summary = (article.get("summary") or "").strip()
     if summary:
@@ -60,7 +68,7 @@ def _categories(articles):
 
 def generate_news_hub_html(articles, intro_text=None, hero_image_url=None, hero_image_alt=None, heading="News"):
     articles = [a for a in articles if a.get("is_published")]
-    articles.sort(key=lambda a: a.get("published_at") or "", reverse=True)
+    articles.sort(key=_pub_sort_key, reverse=True)
     articles = articles[:100]
 
     if not articles:

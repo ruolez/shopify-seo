@@ -329,8 +329,8 @@ def _sync_store_inner(store_id):
                             INSERT INTO synced_articles
                                 (store_id, blog_id, shopify_id, shopify_blog_id, title, handle,
                                  body, summary, tags, author, meta_title, meta_description,
-                                 image_url, image_alt, is_published, published_at, synced_at)
-                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+                                 image_url, image_alt, is_published, published_at, article_type, synced_at)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
                             ON CONFLICT (store_id, shopify_id) DO UPDATE SET
                                 blog_id = EXCLUDED.blog_id,
                                 shopify_blog_id = EXCLUDED.shopify_blog_id,
@@ -346,6 +346,7 @@ def _sync_store_inner(store_id):
                                 image_alt = EXCLUDED.image_alt,
                                 is_published = EXCLUDED.is_published,
                                 published_at = EXCLUDED.published_at,
+                                article_type = CASE WHEN EXCLUDED.article_type = 'news' THEN 'news' ELSE synced_articles.article_type END,
                                 synced_at = NOW()
                             """,
                             (
@@ -365,6 +366,7 @@ def _sync_store_inner(store_id):
                                 a["image_alt"],
                                 a["is_published"],
                                 a["published_at"],
+                                ("news" if (a.get("template_suffix") == "news" or "type:news" in (a.get("tags") or "")) else "blog"),
                             ),
                         )
                         articles_synced += 1
@@ -534,8 +536,8 @@ def sync_store_blogs(store_id):
                         INSERT INTO synced_articles
                             (store_id, blog_id, shopify_id, shopify_blog_id, title, handle,
                              body, summary, tags, author, meta_title, meta_description,
-                             image_url, image_alt, is_published, published_at, synced_at)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+                             image_url, image_alt, is_published, published_at, article_type, synced_at)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
                         ON CONFLICT (store_id, shopify_id) DO UPDATE SET
                             blog_id = EXCLUDED.blog_id,
                             shopify_blog_id = EXCLUDED.shopify_blog_id,
@@ -570,6 +572,7 @@ def sync_store_blogs(store_id):
                             a["image_alt"],
                             a["is_published"],
                             a["published_at"],
+                            ("news" if (a.get("template_suffix") == "news" or "type:news" in (a.get("tags") or "")) else "blog"),
                         ),
                     )
                     articles_synced += 1

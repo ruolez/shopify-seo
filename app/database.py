@@ -574,6 +574,18 @@ class Database:
                 EXCEPTION WHEN duplicate_column THEN NULL;
                 END $$
             """)
+            # Backfill: any article without an explicit type is a blog post.
+            cur.execute(
+                "UPDATE synced_articles SET article_type = 'blog' WHERE article_type IS NULL"
+            )
+            # Fail any orphaned tasks: background threads do not survive a restart,
+            # so a task left 'pending'/'running' at boot is dead. Failing them here
+            # stops the UI from polling a never-completing task forever.
+            cur.execute(
+                "UPDATE ai_tasks SET status = 'failed', "
+                "error = COALESCE(error, 'Interrupted — server restarted'), completed_at = NOW() "
+                "WHERE status IN ('pending', 'running')"
+            )
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS news_hub_pages (
                     store_id INTEGER PRIMARY KEY REFERENCES stores(id) ON DELETE CASCADE,

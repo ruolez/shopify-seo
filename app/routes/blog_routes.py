@@ -51,7 +51,7 @@ def _regen_landing_async(store_id, blog_id, client, store):
 
             with db.get_cursor() as cur:
                 cur.execute(
-                    "SELECT * FROM synced_articles WHERE store_id = %s AND blog_id = %s AND is_published = TRUE ORDER BY published_at DESC",
+                    "SELECT * FROM synced_articles WHERE store_id = %s AND blog_id = %s AND is_published = TRUE AND article_type = 'blog' ORDER BY published_at DESC",
                     (store_id, blog_id),
                 )
                 articles = [dict(a) for a in cur.fetchall()]
@@ -258,7 +258,7 @@ def list_articles():
         direction = "DESC" if sort_dir == "desc" else "ASC"
         order_clause = f"ORDER BY {valid_sql_sorts[sort_by]} {direction}"
 
-    conditions = []
+    conditions = ["sa.article_type = 'blog'"]
     params = []
     if store_id:
         conditions.append("sa.store_id = %s")
@@ -1074,6 +1074,7 @@ def generate_landing_page():
                 cur.execute(
                     """SELECT * FROM synced_articles
                     WHERE store_id = %s AND blog_id = %s AND is_published = TRUE
+                    AND article_type = 'blog'
                     ORDER BY published_at DESC""",
                     (store_id, blog_id),
                 )
@@ -1328,14 +1329,14 @@ def generate_hero_image():
 
             with db.get_cursor() as cur:
                 cur.execute(
-                    "SELECT title FROM synced_articles WHERE store_id = %s AND blog_id = %s AND is_published = TRUE ORDER BY published_at DESC LIMIT 5",
+                    "SELECT title FROM synced_articles WHERE store_id = %s AND blog_id = %s AND is_published = TRUE AND article_type = 'blog' ORDER BY published_at DESC LIMIT 5",
                     (store_id, blog_id),
                 )
                 article_titles = [r["title"] for r in cur.fetchall()]
 
             with db.get_cursor() as cur:
                 cur.execute(
-                    "SELECT tags FROM synced_articles WHERE store_id = %s AND blog_id = %s AND is_published = TRUE AND tags IS NOT NULL",
+                    "SELECT tags FROM synced_articles WHERE store_id = %s AND blog_id = %s AND is_published = TRUE AND tags IS NOT NULL AND article_type = 'blog'",
                     (store_id, blog_id),
                 )
                 from collections import Counter
@@ -1908,11 +1909,11 @@ def wizard_publish(session_id):
             """INSERT INTO synced_articles
                 (store_id, blog_id, shopify_id, shopify_blog_id, title, handle,
                  body, summary, tags, meta_title, meta_description,
-                 image_url, image_alt, is_published, synced_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+                 image_url, image_alt, is_published, article_type, synced_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'blog', NOW())
             ON CONFLICT (store_id, shopify_id) DO UPDATE SET
                 title = EXCLUDED.title, handle = EXCLUDED.handle,
-                body = EXCLUDED.body, synced_at = NOW()
+                body = EXCLUDED.body, article_type = 'blog', synced_at = NOW()
             RETURNING id""",
             (
                 session["store_id"],
@@ -2024,7 +2025,7 @@ def blog_ai_suggestions():
 
     with db.get_cursor() as cur:
         cur.execute(
-            "SELECT title, tags FROM synced_articles WHERE store_id = %s AND blog_id = %s AND is_published = TRUE ORDER BY published_at DESC LIMIT 30",
+            "SELECT title, tags FROM synced_articles WHERE store_id = %s AND blog_id = %s AND is_published = TRUE AND article_type = 'blog' ORDER BY published_at DESC LIMIT 30",
             (store_id, blog_id),
         )
         articles = cur.fetchall()
