@@ -1892,6 +1892,10 @@ def wizard_publish(session_id):
         "is_published": is_published,
     }
 
+    handle = (generated.get("handle") or "").strip()
+    if handle:
+        fields["handle"] = handle
+
     if session.get("featured_image_url"):
         fields["image_url"] = session["featured_image_url"]
         fields["image_alt"] = generated.get("title", session["topic"])

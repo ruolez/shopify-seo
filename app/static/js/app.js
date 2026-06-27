@@ -49,6 +49,15 @@ function escapeAttr(str) {
     return String(str).replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/'/g, "&#39;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
+// Mirror Shopify handle normalization: lowercase, non-alphanumeric runs -> "-", trim dashes.
+function slugify(str) {
+    return String(str || "")
+        .toLowerCase()
+        .trim()
+        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/^-+|-+$/g, "");
+}
+
 function showLoading(container) {
     if (typeof container === "string") {
         container = document.querySelector(container);

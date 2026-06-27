@@ -1018,6 +1018,8 @@ class ShopifyClient:
         }
         if "title" in fields:
             article_input["title"] = fields["title"]
+        if fields.get("handle"):
+            article_input["handle"] = fields["handle"]
         if "body" in fields:
             article_input["body"] = fields["body"]
         if "summary" in fields:

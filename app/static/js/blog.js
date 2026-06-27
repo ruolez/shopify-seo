@@ -1150,6 +1150,11 @@ async function renderReview(sessionId) {
                     <label>Tags (comma separated)</label>
                     <input type="text" class="form-control" id="review-tags" value="${escapeHtml((article.tags || []).join(", "))}">
                 </div>
+                <div class="form-group">
+                    <label>URL Slug (optional)</label>
+                    <input type="text" class="form-control" id="review-handle" value="${escapeHtml(article.handle || "")}" placeholder="auto-generated from title if blank">
+                    <small id="review-handle-preview" style="color: var(--on-surface-secondary);"></small>
+                </div>
             </div>
             <div class="card" style="margin-top: 16px;">
                 <h4>Preview</h4>
@@ -1179,6 +1184,18 @@ async function renderReview(sessionId) {
         bodyTextarea.addEventListener("input", () => {
             document.getElementById("review-preview").innerHTML = bodyTextarea.value;
         });
+    }
+
+    // Live URL slug preview
+    const handleInput = document.getElementById("review-handle");
+    const handlePreview = document.getElementById("review-handle-preview");
+    if (handleInput && handlePreview) {
+        const updateHandlePreview = () => {
+            const slug = slugify(handleInput.value);
+            handlePreview.textContent = `Will publish to: /blogs/news/${slug || "(auto from title)"}`;
+        };
+        handleInput.addEventListener("input", updateHandlePreview);
+        updateHandlePreview();
     }
 }
 
@@ -1265,6 +1282,7 @@ async function wizardPublish(isPublished) {
         meta_description: document.getElementById("review-meta-desc")?.value || "",
         summary: document.getElementById("review-summary")?.value || "",
         tags: (document.getElementById("review-tags")?.value || "").split(",").map((t) => t.trim()).filter(Boolean),
+        handle: slugify(document.getElementById("review-handle")?.value || ""),
     };
 
     await apiRequest(`/api/blog/wizard/${currentWizardSession}/review`, {
