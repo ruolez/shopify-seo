@@ -428,12 +428,18 @@ def _sync_store_inner(store_id):
             cur.execute("DELETE FROM interlinking_analysis WHERE store_id = %s", (store_id,))
 
         try:
-            from app.services.interlinking_analyzer import analyze_store_interlinking
+            from app.services.interlinking_analyzer import (
+                analyze_store_interlinking,
+                build_store_hosts,
+            )
             with db.get_cursor() as cur:
-                cur.execute("SELECT COALESCE(primary_domain, domain) as domain FROM stores WHERE id = %s", (store_id,))
+                cur.execute("SELECT domain, primary_domain FROM stores WHERE id = %s", (store_id,))
                 store_row = cur.fetchone()
-            store_domain = store_row["domain"] if store_row else None
-            analyze_store_interlinking(store_id, store_domain)
+            store_hosts = build_store_hosts(
+                store_row["domain"] if store_row else None,
+                store_row["primary_domain"] if store_row else None,
+            )
+            analyze_store_interlinking(store_id, store_hosts, client)
             logger.info("Interlinking analysis refreshed for store %s", store_id)
         except Exception:
             logger.exception("Interlinking re-analysis failed for store %s (non-fatal)", store_id)

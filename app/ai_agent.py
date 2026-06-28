@@ -2806,7 +2806,8 @@ def run_task(task_type, task_input, store_id=None):
             for c in analysis.get("collection_details", [])
         ]
 
-        existing_links = analysis.get("all_links", [])
+        existing_links = analysis.get("all_links", [])[:200]
+        non_canonical_links = analysis.get("non_canonical_links", [])[:data_limit]
 
         analysis_context = json.dumps({
             "summary": summary,
@@ -2818,6 +2819,7 @@ def run_task(task_type, task_input, store_id=None):
             "under_linked": under_linked,
             "missing_crosslinks": missing_crosslinks,
             "not_in_collection": not_in_collection,
+            "non_canonical_links": non_canonical_links,
             "existing_links": existing_links,
         }, indent=2)
 

@@ -8,6 +8,8 @@
     let appliedFixes = new Set();
     let brokenLinkGroups = [];
     let fixedBrokenGroups = new Set();
+    let nonCanonicalGroups = [];
+    let fixedNonCanonicalGroups = new Set();
     let availableTargets = null;
 
     async function init() {
@@ -92,6 +94,7 @@
         const notInCollectionCount = (data.not_in_collection || []).length;
         const crossLinksCount = (data.missing_crosslinks || []).length;
         const brokenLinksCount = (data.broken_links || []).length;
+        const nonCanonicalCount = (data.non_canonical_links || []).length;
         currentBrokenLinks = data.broken_links || [];
         fixedBrokenLinks = new Set();
 
@@ -125,6 +128,7 @@
             { id: 'not-in-collection', label: 'Not in Collection', count: notInCollectionCount },
             { id: 'cross-links', label: 'Cross-Links', count: crossLinksCount },
             { id: 'broken-links', label: 'Broken Links', count: brokenLinksCount },
+            { id: 'non-canonical', label: 'Non-Canonical', count: nonCanonicalCount },
             { id: 'ai-recs', label: 'AI Recs' },
         ];
 
@@ -144,6 +148,7 @@
         html += renderTabPanel('not-in-collection', renderNotInCollectionContent(data.not_in_collection));
         html += renderTabPanel('cross-links', renderMissingCrossLinksContent(data.missing_crosslinks));
         html += renderTabPanel('broken-links', renderBrokenLinksContent(data.broken_links));
+        html += renderTabPanel('non-canonical', renderNonCanonicalContent(data.non_canonical_links));
         html += renderAiRecsPanel();
 
         container.innerHTML = html;
@@ -196,6 +201,7 @@
             { label: 'Not in Collection', count: (data.not_in_collection || []).length, tab: 'not-in-collection', icon: 'inventory_2' },
             { label: 'Missing Cross-Links', count: (data.missing_crosslinks || []).length, tab: 'cross-links', icon: 'swap_horiz' },
             { label: 'Broken Links', count: (data.broken_links || []).length, tab: 'broken-links', icon: 'broken_image' },
+            { label: 'Non-Canonical Links', count: (data.non_canonical_links || []).length, tab: 'non-canonical', icon: 'alt_route' },
         ];
         issues.forEach(iss => {
             const badgeCls = iss.count === 0 ? 'badge-success' : 'badge-warning';
@@ -223,6 +229,7 @@
             { icon: 'inventory_2', color: 'orange', value: s.not_in_collection_count, label: 'Not in Any Collection', tab: 'not-in-collection' },
             { icon: 'swap_horiz', color: 'red', value: s.missing_crosslinks_count, label: 'Missing Cross-Links', tab: 'cross-links' },
             { icon: 'broken_image', color: 'red', value: s.broken_links_count || 0, label: 'Broken Links', tab: 'broken-links' },
+            { icon: 'alt_route', color: 'orange', value: s.non_canonical_count || 0, label: 'Non-Canonical Links', tab: 'non-canonical' },
             { icon: 'newspaper', color: 'blue', value: s.total_articles || 0, label: 'Total Articles' },
             { icon: 'checklist', color: 'green', value: s.score_distribution ? s.score_distribution.excellent : 0, label: 'Well-Linked Pages' },
         ];
@@ -491,6 +498,201 @@
                     </table>
                 </div>
             </div>`;
+    }
+
+    function groupNonCanonicalLinks(items) {
+        const groups = {};
+        (items || []).forEach(item => {
+            const key = item.to_href || `product:${item.to_handle}`;
+            if (!groups[key]) {
+                groups[key] = {
+                    to_type: 'product',
+                    to_handle: item.to_handle,
+                    to_href: item.to_href || '',
+                    replacement: { type: 'product', handle: item.to_handle, blog_handle: null },
+                    sources: [],
+                };
+            }
+            groups[key].sources.push({
+                from_type: item.from_type,
+                from_handle: item.from_handle,
+                from_title: item.from_title,
+                from_blog_handle: item.from_blog_handle || null,
+                anchor_text: item.anchor_text,
+            });
+        });
+        return Object.values(groups);
+    }
+
+    function renderNonCanonicalContent(items) {
+        nonCanonicalGroups = groupNonCanonicalLinks(items);
+        fixedNonCanonicalGroups = new Set();
+
+        if (nonCanonicalGroups.length === 0) {
+            return `
+                <div class="card">
+                    <div class="card-header">
+                        <h3>Non-Canonical Links</h3>
+                        <span class="badge badge-success">0 items</span>
+                    </div>
+                    <p style="color: var(--on-surface-secondary); font-size: 14px;">No non-canonical internal links detected.</p>
+                </div>`;
+        }
+
+        const totalLinks = (items || []).length;
+
+        let rows = nonCanonicalGroups.map((group, i) => {
+            const toHandle = escapeHtml(group.to_handle || '');
+            const fromUrl = escapeHtml(group.to_href || '');
+            const canonical = `/products/${toHandle}`;
+            const sourceCount = group.sources.length;
+            const sourceTypes = [...new Set(group.sources.map(s => s.from_type))].map(t => `<span class="badge badge-info">${escapeHtml(t)}</span>`).join(' ');
+            return `
+                <tr>
+                    <td><code>${fromUrl}</code></td>
+                    <td><span class="material-symbols-rounded" style="font-size: 16px; vertical-align: middle;">arrow_forward</span> <code>${canonical}</code></td>
+                    <td>${sourceCount}</td>
+                    <td>${sourceTypes}</td>
+                    <td>
+                        <button class="btn btn-primary btn-sm" id="fix-noncanon-btn-${i}" onclick="window._fixNonCanonicalGroup(${i})" style="font-size: 12px; padding: 4px 12px;">Canonicalize</button>
+                    </td>
+                </tr>`;
+        }).join('');
+
+        return `
+            <div class="card">
+                <div class="card-header">
+                    <h3>Non-Canonical Links</h3>
+                    <div style="display: flex; align-items: center; gap: 8px;">
+                        <span class="badge badge-warning">${nonCanonicalGroups.length} URL${nonCanonicalGroups.length !== 1 ? 's' : ''} (${totalLinks} link${totalLinks !== 1 ? 's' : ''})</span>
+                        <button class="btn btn-primary btn-sm" id="fix-all-noncanon-btn" onclick="window._fixAllNonCanonicalGroups()" style="font-size: 12px; padding: 4px 12px;">Fix All (${nonCanonicalGroups.length})</button>
+                    </div>
+                </div>
+                <p style="color: var(--on-surface-secondary); font-size: 13px; margin-bottom: 16px;">Internal links to <code>/collections/.../products/...</code> are non-canonical duplicates. Fixing rewrites them to the canonical <code>/products/handle</code> URL in all source pages.</p>
+                <div class="table-container">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Non-Canonical URL</th>
+                                <th>Canonical Target</th>
+                                <th>Sources</th>
+                                <th>Source Types</th>
+                                <th>Action</th>
+                            </tr>
+                        </thead>
+                        <tbody>${rows}</tbody>
+                    </table>
+                </div>
+            </div>`;
+    }
+
+    window._fixNonCanonicalGroup = async function (index) {
+        const group = nonCanonicalGroups[index];
+        if (!group || !currentStoreId) return;
+
+        const btn = document.getElementById(`fix-noncanon-btn-${index}`);
+        if (!btn || btn.disabled) return;
+        btn.disabled = true;
+
+        const total = group.sources.length;
+        let fixed = 0, skipped = 0, errors = 0;
+
+        for (let s = 0; s < total; s++) {
+            btn.textContent = `Fixing... (${s + 1}/${total})`;
+            try {
+                const resp = await _fixOneSource(group, group.sources[s]);
+                if (resp.status === 'fixed') fixed++;
+                else skipped++;
+            } catch (e) {
+                errors++;
+            }
+        }
+
+        fixedNonCanonicalGroups.add(index);
+        if (fixed > 0) {
+            btn.textContent = `Fixed ✓ (${fixed})`;
+            btn.style.background = 'var(--success)';
+            btn.style.borderColor = 'var(--success)';
+        } else {
+            btn.textContent = 'Skipped';
+            btn.style.background = 'var(--warning)';
+            btn.style.borderColor = 'var(--warning)';
+        }
+
+        showToast(`${group.to_handle}: canonicalized — ${fixed} fixed, ${skipped} skipped, ${errors} errors`, fixed > 0 ? 'success' : 'info');
+        _updateFixAllNonCanonBtn();
+    };
+
+    window._fixAllNonCanonicalGroups = async function () {
+        if (!currentStoreId || nonCanonicalGroups.length === 0) return;
+
+        const pendingIndices = nonCanonicalGroups.map((_, i) => i).filter(i => !fixedNonCanonicalGroups.has(i));
+        if (pendingIndices.length === 0) {
+            showToast('All non-canonical links already fixed', 'info');
+            return;
+        }
+
+        if (!confirm(`Canonicalize ${pendingIndices.length} non-canonical URL${pendingIndices.length !== 1 ? 's' : ''}? This will update all affected source pages.`)) return;
+
+        const masterBtn = document.getElementById('fix-all-noncanon-btn');
+        if (masterBtn) {
+            masterBtn.disabled = true;
+            masterBtn.textContent = `Fixing... (0/${pendingIndices.length})`;
+        }
+
+        let groupsDone = 0, groupErrors = 0;
+
+        for (const idx of pendingIndices) {
+            const group = nonCanonicalGroups[idx];
+            const fixBtn = document.getElementById(`fix-noncanon-btn-${idx}`);
+            if (fixBtn) fixBtn.disabled = true;
+
+            let fixed = 0;
+            for (let s = 0; s < group.sources.length; s++) {
+                if (fixBtn) fixBtn.textContent = `Fixing... (${s + 1}/${group.sources.length})`;
+                try {
+                    const resp = await _fixOneSource(group, group.sources[s]);
+                    if (resp.status === 'fixed') fixed++;
+                } catch (e) {
+                    // counted as not-fixed below
+                }
+            }
+
+            fixedNonCanonicalGroups.add(idx);
+            if (fixBtn) {
+                if (fixed > 0) {
+                    fixBtn.textContent = `Fixed ✓ (${fixed})`;
+                    fixBtn.style.background = 'var(--success)';
+                    fixBtn.style.borderColor = 'var(--success)';
+                } else {
+                    fixBtn.textContent = 'Skipped';
+                    fixBtn.style.background = 'var(--warning)';
+                    fixBtn.style.borderColor = 'var(--warning)';
+                }
+            }
+
+            if (fixed > 0) groupsDone++;
+            else groupErrors++;
+
+            if (masterBtn) masterBtn.textContent = `Fixing... (${groupsDone + groupErrors}/${pendingIndices.length})`;
+        }
+
+        showToast(`Done: ${groupsDone} URLs canonicalized, ${groupErrors} skipped/errors`, groupsDone > 0 ? 'success' : 'info');
+        _updateFixAllNonCanonBtn();
+    };
+
+    function _updateFixAllNonCanonBtn() {
+        const btn = document.getElementById('fix-all-noncanon-btn');
+        if (!btn) return;
+
+        const remaining = nonCanonicalGroups.filter((_, i) => !fixedNonCanonicalGroups.has(i)).length;
+        if (remaining === 0) {
+            btn.disabled = true;
+            btn.textContent = 'All Fixed ✓';
+        } else {
+            btn.disabled = false;
+            btn.textContent = `Fix All (${remaining})`;
+        }
     }
 
     function renderAiRecsPanel() {

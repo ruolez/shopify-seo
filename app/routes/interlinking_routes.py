@@ -22,14 +22,26 @@ _analysis_running = {}
 
 def _run_analysis(store_id):
     try:
-        from app.services.interlinking_analyzer import analyze_store_interlinking
+        from app.services.interlinking_analyzer import (
+            analyze_store_interlinking,
+            build_store_hosts,
+        )
 
         with db.get_cursor() as cur:
-            cur.execute("SELECT COALESCE(primary_domain, domain) as domain FROM stores WHERE id = %s", (store_id,))
+            cur.execute("SELECT domain, primary_domain FROM stores WHERE id = %s", (store_id,))
             row = cur.fetchone()
-        store_domain = row["domain"] if row else None
+        store_hosts = build_store_hosts(
+            row["domain"] if row else None,
+            row["primary_domain"] if row else None,
+        )
 
-        analyze_store_interlinking(store_id, store_domain)
+        try:
+            shopify_client = _get_shopify_client(store_id)
+        except Exception:
+            logger.warning("Could not build Shopify client for store %s; broken links unverified", store_id)
+            shopify_client = None
+
+        analyze_store_interlinking(store_id, store_hosts, shopify_client)
     except Exception:
         logger.exception("Interlinking analysis failed for store %s", store_id)
     finally:
@@ -95,7 +107,7 @@ def get_item_links(item_type, item_id):
     if item_type not in ("product", "collection", "article"):
         return jsonify({"error": "Invalid type"}), 400
 
-    from app.services.interlinking_analyzer import extract_links_from_html
+    from app.services.interlinking_analyzer import extract_links_from_html, build_store_hosts
 
     blog_handle = None
     if item_type == "article":
@@ -122,12 +134,15 @@ def get_item_links(item_type, item_id):
             return jsonify({"error": "Item not found"}), 404
 
     with db.get_cursor() as cur:
-        cur.execute("SELECT COALESCE(primary_domain, domain) as domain FROM stores WHERE id = %s", (item["store_id"],))
+        cur.execute("SELECT domain, primary_domain FROM stores WHERE id = %s", (item["store_id"],))
         store_row = cur.fetchone()
-    store_domain = store_row["domain"] if store_row else None
+    store_hosts = build_store_hosts(
+        store_row["domain"] if store_row else None,
+        store_row["primary_domain"] if store_row else None,
+    )
 
     html_field = "body" if item_type == "article" else "description"
-    outgoing = extract_links_from_html(item.get(html_field), store_domain)
+    outgoing = extract_links_from_html(item.get(html_field), store_hosts)
 
     target_handle = item.get("handle")
     incoming = []
@@ -168,7 +183,7 @@ def get_item_links(item_type, item_id):
         all_articles = cur.fetchall()
 
     for p in all_products:
-        for link in extract_links_from_html(p.get("description"), store_domain):
+        for link in extract_links_from_html(p.get("description"), store_hosts):
             if _matches_target(link):
                 incoming.append({
                     "from_type": "product",
@@ -178,7 +193,7 @@ def get_item_links(item_type, item_id):
                 })
 
     for c in all_collections:
-        for link in extract_links_from_html(c.get("description"), store_domain):
+        for link in extract_links_from_html(c.get("description"), store_hosts):
             if _matches_target(link):
                 incoming.append({
                     "from_type": "collection",
@@ -188,7 +203,7 @@ def get_item_links(item_type, item_id):
                 })
 
     for a in all_articles:
-        for link in extract_links_from_html(a.get("body"), store_domain):
+        for link in extract_links_from_html(a.get("body"), store_hosts):
             if _matches_target(link):
                 incoming.append({
                     "from_type": "article",

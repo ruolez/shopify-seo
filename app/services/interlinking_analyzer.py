@@ -1,6 +1,8 @@
 import json
 import logging
 import re
+from html.parser import HTMLParser
+from urllib.parse import urlparse
 
 from app.database import db
 from app.settings_manager import get_setting
@@ -8,59 +10,199 @@ from app.prompt_defaults import DEFAULTS
 
 logger = logging.getLogger(__name__)
 
-PRODUCT_PATH_RE = re.compile(r"/products/([\w\-]+)")
-COLLECTION_PATH_RE = re.compile(r"/collections/([\w\-]+)")
-ARTICLE_PATH_RE = re.compile(r"/blogs/([\w\-]+)/([\w\-]+)")
+# LINK_RE is retained only for the in-place HTML edit helpers in
+# interlinking_routes.py (_link_already_exists / _replace_href_in_html), which
+# operate on exact match spans. Link *extraction* uses the HTML parser below.
 LINK_RE = re.compile(r'<a\s+[^>]*href=["\']([^"\']*)["\'][^>]*>(.*?)</a>', re.IGNORECASE | re.DOTALL)
 
+# Optional Shopify locale/market path prefix, e.g. /en, /fr-ca, /en-us.
+_LOCALE_PREFIX_RE = re.compile(r"^/[a-z]{2}(?:-[a-z0-9]{2,})?(?=/)", re.IGNORECASE)
 
-def extract_links_from_html(html, store_domain=None):
+# Reserved storefront collection handles that always resolve (no synced row).
+_RESERVED_COLLECTION_HANDLES = {"all"}
+
+# Path segment charset for Shopify handles (lowercase alnum + hyphen) plus
+# percent-encoding and dots, defensively.
+_SEG = r"[\w\-.%]+"
+_COLLECTION_PRODUCT_RE = re.compile(rf"^/collections/{_SEG}/products/({_SEG})/?$")
+_PRODUCT_RE = re.compile(rf"^/products/({_SEG})/?$")
+_ARTICLE_RE = re.compile(rf"^/blogs/({_SEG})/({_SEG})/?$")
+_BLOG_INDEX_RE = re.compile(rf"^/blogs/({_SEG})/?$")
+_COLLECTION_RE = re.compile(rf"^/collections/({_SEG})/?$")
+_PAGE_RE = re.compile(rf"^/pages/({_SEG})/?$")
+
+# Link types whose target can be verified for existence (and thus flagged broken).
+CHECKABLE_TYPES = {"product", "collection", "article", "page", "blog_index"}
+# Link types that contribute to a tracked entity's incoming-link count.
+TRACKED_TARGET_TYPES = {"product", "collection", "article"}
+
+
+class _AnchorParser(HTMLParser):
+    """Collect (href, anchor_text) for every <a> tag, decoding HTML entities."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.links = []
+        self._open = False
+        self._href = None
+        self._text_parts = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag.lower() != "a":
+            return
+        if self._open:
+            self._flush()
+        href = None
+        for k, v in attrs:
+            if k.lower() == "href":
+                href = v
+                break
+        self._href = href
+        self._text_parts = []
+        self._open = True
+
+    def handle_data(self, data):
+        if self._open:
+            self._text_parts.append(data)
+
+    def handle_endtag(self, tag):
+        if tag.lower() == "a" and self._open:
+            self._flush()
+
+    def _flush(self):
+        if self._href is not None:
+            text = "".join(self._text_parts).strip()
+            self.links.append((self._href.strip(), text))
+        self._href = None
+        self._text_parts = []
+        self._open = False
+
+
+def build_store_hosts(*domains):
+    """Normalize one or more store domains into a set of bare hostnames
+    (with and without a www. prefix) used to recognize internal links."""
+    hosts = set()
+    for d in domains:
+        if not d:
+            continue
+        d = re.sub(r"^https?://", "", d.strip().lower()).rstrip("/").split("/")[0]
+        d = d.split("@")[-1].split(":")[0]
+        if not d:
+            continue
+        bare = d[4:] if d.startswith("www.") else d
+        hosts.add(bare)
+        hosts.add("www." + bare)
+    return hosts
+
+
+def _strip_locale(path):
+    stripped = _LOCALE_PREFIX_RE.sub("", path, count=1)
+    return stripped or "/"
+
+
+def classify_href(href, store_hosts):
+    """Classify an href as an internal Shopify link, or return None if it is
+    external, non-navigational, or unparseable.
+
+    Returns a dict with: link_type, handle, non_canonical, and (articles only)
+    blog_handle. link_type is one of: product, collection, article, page,
+    blog_index, home, other_internal.
+    """
+    if not href:
+        return None
+    href = href.strip()
+    if href.startswith(("#", "mailto:", "tel:", "javascript:", "data:", "sms:")):
+        return None
+
+    parsed = urlparse(href)
+    if parsed.scheme and parsed.scheme not in ("http", "https"):
+        return None
+
+    host = (parsed.netloc or "").lower()
+    if host:
+        host = host.split("@")[-1].split(":")[0]
+        if host not in store_hosts:
+            return None  # external link
+
+    path = parsed.path or "/"
+    if not path.startswith("/"):
+        path = "/" + path
+    path = _strip_locale(path)
+
+    m = _COLLECTION_PRODUCT_RE.match(path)
+    if m:
+        return {"link_type": "product", "handle": m.group(1), "non_canonical": True}
+
+    m = _PRODUCT_RE.match(path)
+    if m:
+        return {"link_type": "product", "handle": m.group(1), "non_canonical": False}
+
+    m = _ARTICLE_RE.match(path)
+    if m:
+        return {
+            "link_type": "article",
+            "handle": m.group(2),
+            "blog_handle": m.group(1),
+            "non_canonical": False,
+        }
+
+    m = _BLOG_INDEX_RE.match(path)
+    if m:
+        return {"link_type": "blog_index", "handle": m.group(1), "non_canonical": False}
+
+    m = _COLLECTION_RE.match(path)
+    if m:
+        return {"link_type": "collection", "handle": m.group(1), "non_canonical": False}
+
+    m = _PAGE_RE.match(path)
+    if m:
+        return {"link_type": "page", "handle": m.group(1), "non_canonical": False}
+
+    if path == "/":
+        return {"link_type": "home", "handle": "", "non_canonical": False}
+
+    return {"link_type": "other_internal", "handle": path, "non_canonical": False}
+
+
+def extract_links_from_html(html, store_hosts=None):
+    """Extract internal Shopify links from an HTML body.
+
+    store_hosts is a set produced by build_store_hosts(); absolute links to any
+    other host are treated as external and dropped.
+    """
     if not html:
         return []
+    store_hosts = store_hosts or set()
+
+    parser = _AnchorParser()
+    try:
+        parser.feed(html)
+        parser.close()
+    except Exception:
+        parser.links = [
+            (m.group(1), re.sub(r"<[^>]+>", "", m.group(2)))
+            for m in LINK_RE.finditer(html)
+        ]
 
     links = []
-    for match in LINK_RE.finditer(html):
-        href = match.group(1).strip()
-        anchor_text = re.sub(r"<[^>]+>", "", match.group(2)).strip()
-
-        if store_domain and href.startswith(("http://", "https://")):
-            domain_pattern = store_domain.replace(".", r"\.")
-            href = re.sub(
-                rf"https?://(?:www\.)?{domain_pattern}", "", href
-            )
-
-        link_type = None
-        handle = None
-
-        product_match = PRODUCT_PATH_RE.search(href)
-        collection_match = COLLECTION_PATH_RE.search(href)
-        article_match = ARTICLE_PATH_RE.search(href)
-
-        if product_match:
-            link_type = "product"
-            handle = product_match.group(1)
-        elif article_match:
-            link_type = "article"
-            handle = article_match.group(2)
-        elif collection_match:
-            link_type = "collection"
-            handle = collection_match.group(1)
-
-        if link_type and handle:
-            link_data = {
-                "href": href,
-                "handle": handle,
-                "anchor_text": anchor_text,
-                "link_type": link_type,
-            }
-            if link_type == "article":
-                link_data["blog_handle"] = article_match.group(1)
-            links.append(link_data)
-
+    for href, anchor_text in parser.links:
+        info = classify_href(href, store_hosts)
+        if not info:
+            continue
+        link = {
+            "href": href,
+            "anchor_text": anchor_text.strip(),
+            "link_type": info["link_type"],
+            "handle": info["handle"],
+            "non_canonical": info.get("non_canonical", False),
+        }
+        if info.get("blog_handle"):
+            link["blog_handle"] = info["blog_handle"]
+        links.append(link)
     return links
 
 
-def compute_interlinking_score(incoming_count, outgoing_count, in_collection):
+def compute_interlinking_score(incoming_count, in_collection):
     rules = get_setting("rules.interlinking", DEFAULTS["rules.interlinking"])
     t = rules.get("score_thresholds", {})
     if incoming_count >= t.get("incoming_good", 3):
@@ -75,7 +217,6 @@ def compute_interlinking_score(incoming_count, outgoing_count, in_collection):
 def find_missing_crosslinks(collections, products_by_collection, link_graph):
     suggestions = []
 
-    # Build inverted index: product -> set of collection shopify_ids (Fix #13)
     coll_by_sid = {}
     product_to_collections = {}
     for c in collections:
@@ -84,7 +225,6 @@ def find_missing_crosslinks(collections, products_by_collection, link_graph):
         for pid in products_by_collection.get(sid, set()):
             product_to_collections.setdefault(pid, set()).add(sid)
 
-    # Find candidate pairs sharing at least one product
     candidate_pairs = set()
     for pid, coll_sids in product_to_collections.items():
         coll_list = sorted(coll_sids)
@@ -130,8 +270,63 @@ def find_missing_crosslinks(collections, products_by_collection, link_graph):
     return suggestions
 
 
-def analyze_store_interlinking(store_id, store_domain=None):
+def _entry_target_key(entry):
+    t = entry["to_type"]
+    if t == "article":
+        return f"article:{entry.get('to_blog_handle', '')}/{entry['to_handle']}"
+    if t == "blog_index":
+        return f"blog:{entry['to_handle']}"
+    if t == "home":
+        return "home:"
+    if t == "other_internal":
+        return f"other:{entry['to_handle']}"
+    return f"{t}:{entry['to_handle']}"
+
+
+def _target_exists_live(entry, client):
+    """Confirm a suspected-broken target against Shopify (includes drafts).
+    Conservative: returns True (i.e. not broken) if the check cannot run."""
+    t = entry["to_type"]
+    h = entry["to_handle"]
+    try:
+        if t == "product":
+            return client.product_exists(h)
+        if t == "collection":
+            return client.collection_exists(h)
+        if t == "page":
+            return client.page_exists(h)
+        if t == "article":
+            return client.article_exists(entry.get("to_blog_handle", ""), h)
+        if t == "blog_index":
+            return client.blog_exists(h)
+    except Exception:
+        logger.warning("Live link verification failed for %s:%s", t, h)
+        return True
+    return True
+
+
+def _verify_broken_candidates(candidates, shopify_client):
+    """Drop candidates whose target actually exists on Shopify. Without a client
+    every candidate is reported (legacy behaviour)."""
+    if not candidates:
+        return []
+    if not shopify_client:
+        return candidates
+
+    confirmed = []
+    cache = {}
+    for entry in candidates:
+        key = _entry_target_key(entry)
+        if key not in cache:
+            cache[key] = _target_exists_live(entry, shopify_client)
+        if not cache[key]:
+            confirmed.append(entry)
+    return confirmed
+
+
+def analyze_store_interlinking(store_id, store_hosts=None, shopify_client=None):
     logger.info("Starting interlinking analysis for store %s", store_id)
+    store_hosts = store_hosts or set()
 
     with db.get_cursor() as cur:
         cur.execute(
@@ -175,10 +370,16 @@ def analyze_store_interlinking(store_id, store_domain=None):
         )
         articles = [dict(r) for r in cur.fetchall()]
 
-    product_by_handle = {p["handle"]: p for p in products}
-    collection_by_handle = {c["handle"]: c for c in collections}
+    with db.get_cursor() as cur:
+        cur.execute(
+            "SELECT DISTINCT handle FROM synced_blogs WHERE store_id = %s",
+            (store_id,),
+        )
+        blog_handles = {r["handle"] for r in cur.fetchall()}
 
-    # Build set of valid entity keys for broken link detection (Fix #10, #12)
+    # Build the set of valid link targets. Tracked entities come from synced
+    # data; pages and blog indexes are valid-but-untracked. Reserved storefront
+    # collections (e.g. /collections/all) always resolve.
     valid_keys = set()
     for p in products:
         valid_keys.add(f"product:{p['handle']}")
@@ -186,25 +387,30 @@ def analyze_store_interlinking(store_id, store_domain=None):
         valid_keys.add(f"collection:{c['handle']}")
     for a in articles:
         valid_keys.add(f"article:{a['blog_handle']}/{a['handle']}")
+    for h in blog_handles:
+        valid_keys.add(f"blog:{h}")
+    for h in _RESERVED_COLLECTION_HANDLES:
+        valid_keys.add(f"collection:{h}")
+
+    if shopify_client:
+        try:
+            for page in shopify_client.get_all_pages():
+                if page.get("handle"):
+                    valid_keys.add(f"page:{page['handle']}")
+        except Exception:
+            logger.warning("Could not fetch pages for store %s; page links unverified", store_id)
 
     link_graph = {}
     all_links = []
-    broken_links = []
+    non_canonical_links = []
+    broken_candidates = []
 
-    incoming_counts = {}
+    incoming_sources = {}
     outgoing_counts = {}
 
-    def _target_key_for_link(link):
-        if link["link_type"] == "article":
-            return f"article:{link.get('blog_handle', '')}/{link['handle']}"
-        return f"{link['link_type']}:{link['handle']}"
-
     def _process_links(entity_key, entity_type, entity_handle, entity_title, links, entity_blog_handle=None):
-        targets = set()
+        outgoing_targets = set()
         for link in links:
-            target_key = _target_key_for_link(link)
-            targets.add(target_key)
-            incoming_counts[target_key] = incoming_counts.get(target_key, 0) + 1
             link_entry = {
                 "from_type": entity_type,
                 "from_handle": entity_handle,
@@ -213,31 +419,51 @@ def analyze_store_interlinking(store_id, store_domain=None):
                 "to_handle": link["handle"],
                 "to_href": link.get("href", ""),
                 "anchor_text": link["anchor_text"],
+                "non_canonical": link.get("non_canonical", False),
             }
             if entity_type == "article" and entity_blog_handle:
                 link_entry["from_blog_handle"] = entity_blog_handle
             if link["link_type"] == "article":
                 link_entry["to_blog_handle"] = link.get("blog_handle", "")
+
+            target_key = _entry_target_key(link_entry)
+            if target_key == entity_key:
+                continue  # ignore self-links
+
+            outgoing_targets.add(target_key)
             all_links.append(link_entry)
-            if target_key not in valid_keys:
-                broken_links.append(link_entry)
-        link_graph[entity_key] = targets
-        outgoing_counts[entity_key] = len(links)
+
+            if link.get("non_canonical"):
+                non_canonical_links.append(link_entry)
+
+            if link["link_type"] in TRACKED_TARGET_TYPES:
+                incoming_sources.setdefault(target_key, set()).add(entity_key)
+
+            if link["link_type"] in CHECKABLE_TYPES and target_key not in valid_keys:
+                broken_candidates.append(link_entry)
+
+        link_graph[entity_key] = outgoing_targets
+        outgoing_counts[entity_key] = len(outgoing_targets)
 
     for p in products:
         key = f"product:{p['handle']}"
-        links = extract_links_from_html(p.get("description"), store_domain)
+        links = extract_links_from_html(p.get("description"), store_hosts)
         _process_links(key, "product", p["handle"], p["title"], links)
 
     for c in collections:
         key = f"collection:{c['handle']}"
-        links = extract_links_from_html(c.get("description"), store_domain)
+        links = extract_links_from_html(c.get("description"), store_hosts)
         _process_links(key, "collection", c["handle"], c["title"], links)
 
     for a in articles:
         key = f"article:{a['blog_handle']}/{a['handle']}"
-        links = extract_links_from_html(a.get("body"), store_domain)
+        links = extract_links_from_html(a.get("body"), store_hosts)
         _process_links(key, "article", a["handle"], a["title"], links, entity_blog_handle=a["blog_handle"])
+
+    broken_links = _verify_broken_candidates(broken_candidates, shopify_client)
+
+    def _incoming(key):
+        return len(incoming_sources.get(key, ()))
 
     orphan_products = []
     orphan_collections = []
@@ -249,10 +475,10 @@ def analyze_store_interlinking(store_id, store_domain=None):
 
     for p in products:
         key = f"product:{p['handle']}"
-        inc = incoming_counts.get(key, 0)
+        inc = _incoming(key)
         out = outgoing_counts.get(key, 0)
         in_collection = p["shopify_id"] in product_collections
-        score = compute_interlinking_score(inc, out, in_collection)
+        score = compute_interlinking_score(inc, in_collection)
 
         detail = {
             "id": p["id"],
@@ -271,7 +497,6 @@ def analyze_store_interlinking(store_id, store_domain=None):
         }
         product_details.append(detail)
 
-        # Fix #11: products with 0 incoming but in a collection are under-linked
         if inc == 0 and not in_collection:
             orphan_products.append(detail)
         elif inc == 0 and in_collection:
@@ -284,9 +509,9 @@ def analyze_store_interlinking(store_id, store_domain=None):
 
     for c in collections:
         key = f"collection:{c['handle']}"
-        inc = incoming_counts.get(key, 0)
+        inc = _incoming(key)
         out = outgoing_counts.get(key, 0)
-        score = compute_interlinking_score(inc, out, True)
+        score = compute_interlinking_score(inc, True)
 
         coll_product_sids = products_by_collection.get(c.get("shopify_id"), set())
         vendor_counts = {}
@@ -324,9 +549,9 @@ def analyze_store_interlinking(store_id, store_domain=None):
 
     for a in articles:
         key = f"article:{a['blog_handle']}/{a['handle']}"
-        inc = incoming_counts.get(key, 0)
+        inc = _incoming(key)
         out = outgoing_counts.get(key, 0)
-        score = compute_interlinking_score(inc, out, False)
+        score = compute_interlinking_score(inc, False)
 
         detail = {
             "id": a["id"],
@@ -403,6 +628,7 @@ def analyze_store_interlinking(store_id, store_domain=None):
             "score_distribution": score_distribution,
             "missing_crosslinks_count": len(missing_crosslinks),
             "broken_links_count": len(broken_links),
+            "non_canonical_count": len(non_canonical_links),
         },
         "orphan_products": orphan_products,
         "orphan_collections": orphan_collections,
@@ -411,7 +637,8 @@ def analyze_store_interlinking(store_id, store_domain=None):
         "not_in_collection": not_in_collection,
         "missing_crosslinks": missing_crosslinks,
         "broken_links": broken_links,
-        "all_links": all_links[:200],
+        "non_canonical_links": non_canonical_links,
+        "all_links": all_links,
         "product_details": product_details,
         "collection_details": collection_details,
         "article_details": article_details,
@@ -430,8 +657,9 @@ def analyze_store_interlinking(store_id, store_domain=None):
         )
 
     logger.info(
-        "Interlinking analysis complete for store %s: %d links, %d broken, %d orphan products, %d orphan collections, %d orphan articles",
-        store_id, total_links, len(broken_links), len(orphan_products), len(orphan_collections), len(orphan_articles),
+        "Interlinking analysis complete for store %s: %d links, %d broken, %d non-canonical, %d orphan products, %d orphan collections, %d orphan articles",
+        store_id, total_links, len(broken_links), len(non_canonical_links),
+        len(orphan_products), len(orphan_collections), len(orphan_articles),
     )
 
     return analysis

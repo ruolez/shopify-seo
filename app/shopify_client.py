@@ -63,6 +63,54 @@ class ShopifyClient:
             "primary_domain": primary.get("host"),
         }
 
+    def product_exists(self, handle):
+        """Return True if a product with this handle exists (any status, incl. drafts)."""
+        if not handle:
+            return False
+        query = "query($q: String!) { products(first: 1, query: $q) { edges { node { id } } } }"
+        data = self._graphql(query, {"q": f"handle:{handle}"})
+        return bool(data.get("products", {}).get("edges"))
+
+    def collection_exists(self, handle):
+        """Return True if a collection with this handle exists (smart or manual)."""
+        if not handle:
+            return False
+        query = "query($q: String!) { collections(first: 1, query: $q) { edges { node { id } } } }"
+        data = self._graphql(query, {"q": f"handle:{handle}"})
+        return bool(data.get("collections", {}).get("edges"))
+
+    def page_exists(self, handle):
+        """Return True if a page with this handle exists (published or not)."""
+        if not handle:
+            return False
+        query = "query($q: String!) { pages(first: 1, query: $q) { edges { node { id } } } }"
+        data = self._graphql(query, {"q": f"handle:{handle}"})
+        return bool(data.get("pages", {}).get("edges"))
+
+    def article_exists(self, blog_handle, handle):
+        """Return True if an article with this handle exists, optionally within blog_handle."""
+        if not handle:
+            return False
+        query = "query($q: String!) { articles(first: 10, query: $q) { edges { node { handle blog { handle } } } } }"
+        data = self._graphql(query, {"q": f"handle:{handle}"})
+        for edge in data.get("articles", {}).get("edges", []):
+            node = edge.get("node", {})
+            if node.get("handle") == handle:
+                if not blog_handle or (node.get("blog") or {}).get("handle") == blog_handle:
+                    return True
+        return False
+
+    def blog_exists(self, handle):
+        """Return True if a blog with this handle exists."""
+        if not handle:
+            return False
+        query = "{ blogs(first: 100) { edges { node { handle } } } }"
+        data = self._graphql(query)
+        return any(
+            edge["node"].get("handle") == handle
+            for edge in data.get("blogs", {}).get("edges", [])
+        )
+
     def get_products(self, limit=50, cursor=None, query_filter=None):
         after = f', after: "{cursor}"' if cursor else ""
         q_filter = f', query: "{query_filter}"' if query_filter else ""
