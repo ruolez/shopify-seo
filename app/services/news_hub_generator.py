@@ -7,7 +7,8 @@ Cards link to /blogs/news/{handle} so article URLs stay under /blogs/news/.
 
 import html
 import re
-from datetime import datetime
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 NEWS_BLOG_HANDLE = "news"
 
@@ -23,19 +24,36 @@ def _truncate(text, length=160):
     return text[:length].rsplit(" ", 1)[0] + "..."
 
 
-def _format_date(dt):
+def _format_date(dt, tz=None):
+    """Format a published_at value as "Month DD, YYYY".
+
+    Stored timestamps are UTC; Shopify's storefront renders them in the store's
+    local timezone, so we convert to `tz` (an IANA name) before extracting the
+    calendar day — otherwise the hub date can differ from Shopify by one day
+    near midnight UTC.
+    """
     if isinstance(dt, str):
-        for fmt in ("%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%dT%H:%M:%S%z", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
-            try:
-                parsed = datetime.strptime(dt.replace("+00:00", "Z").split(".")[0] + "Z", "%Y-%m-%dT%H:%M:%SZ")
-                dt = parsed
-                break
-            except ValueError:
-                continue
-        else:
-            return ""
+        s = dt.strip().replace("Z", "+00:00")
+        try:
+            dt = datetime.fromisoformat(s)
+        except ValueError:
+            for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+                try:
+                    dt = datetime.strptime(s.split("+")[0].split(".")[0].strip(), fmt)
+                    break
+                except ValueError:
+                    continue
+            else:
+                return ""
     if not isinstance(dt, datetime):
         return ""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    if tz:
+        try:
+            dt = dt.astimezone(ZoneInfo(tz))
+        except Exception:
+            pass
     return dt.strftime("%B %d, %Y")
 
 
@@ -66,7 +84,7 @@ def _categories(articles):
     return seen
 
 
-def generate_news_hub_html(articles, intro_text=None, hero_image_url=None, hero_image_alt=None, heading="News"):
+def generate_news_hub_html(articles, intro_text=None, hero_image_url=None, hero_image_alt=None, heading="News", tz=None):
     articles = [a for a in articles if a.get("is_published")]
     articles.sort(key=_pub_sort_key, reverse=True)
     articles = articles[:100]
@@ -91,7 +109,7 @@ def generate_news_hub_html(articles, intro_text=None, hero_image_url=None, hero_
         intro_html = f'<div class="news-hub__intro"><p>{html.escape(intro_text.strip())}</p></div>'
 
     chips_html = _build_chips(_categories(articles))
-    grid_html = _build_grid(articles)
+    grid_html = _build_grid(articles, tz=tz)
 
     return f"""<style>{css}</style>
 <div class="news-hub">
@@ -132,14 +150,14 @@ def _build_chips(categories):
     return f'<div class="news-hub__chips">{chips}</div>\n{script}'
 
 
-def _build_grid(articles):
+def _build_grid(articles, tz=None):
     cards = ""
     for a in articles:
         title = html.escape(a.get("title") or "Untitled")
         handle = html.escape(a.get("handle") or "")
         link = f"/blogs/{NEWS_BLOG_HANDLE}/{handle}"
         image_url = a.get("image_url") or ""
-        date = _format_date(a.get("published_at"))
+        date = _format_date(a.get("published_at"), tz=tz)
         excerpt = _excerpt(a)
         category = a.get("category") or ""
         cat_badge = f'<span class="news-hub__badge">{html.escape(category)}</span>' if category else ""

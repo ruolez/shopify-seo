@@ -63,6 +63,18 @@ class ShopifyClient:
             "primary_domain": primary.get("host"),
         }
 
+    def get_shop_timezone(self):
+        """Return the store's IANA timezone (e.g. 'America/Chicago'); 'UTC' on failure.
+
+        Used so dates rendered server-side match Shopify's storefront, which
+        displays timestamps in the store's local timezone.
+        """
+        try:
+            data = self._graphql("{ shop { ianaTimezone } }")
+            return (data.get("shop") or {}).get("ianaTimezone") or "UTC"
+        except Exception:
+            return "UTC"
+
     def product_exists(self, handle):
         """Return True if a product with this handle exists (any status, incl. drafts)."""
         if not handle:

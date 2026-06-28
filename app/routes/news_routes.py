@@ -91,8 +91,9 @@ def _regenerate_news_hub(store_id, client, store):
     intro = existing.get("intro_text") if existing else None
     hero_url = existing.get("hero_image_url") if existing else None
     hero_alt = existing.get("hero_image_alt") if existing else None
+    tz = client.get_shop_timezone()
     html_content = generate_news_hub_html(
-        articles, intro_text=intro, hero_image_url=hero_url, hero_image_alt=hero_alt, heading="News"
+        articles, intro_text=intro, hero_image_url=hero_url, hero_image_alt=hero_alt, heading="News", tz=tz
     )
 
     page_title = "News"
