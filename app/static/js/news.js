@@ -42,6 +42,79 @@ function resetSourceUrls() {
     addSourceUrl();
 }
 
+// ── Markdown import ──────────────────────────────────────────────
+
+// Splits a news .md file into the article body (everything before the
+// "## Sources" heading) and the list of source URLs found in that section.
+function parseNewsMarkdown(text) {
+    const normalized = (text || "").replace(/\r\n/g, "\n");
+    const lines = normalized.split("\n");
+    const sourcesIdx = lines.findIndex((l) => /^##\s+sources\s*$/i.test(l.trim()));
+
+    const articleLines = sourcesIdx === -1 ? lines : lines.slice(0, sourcesIdx);
+    const sourcesText = sourcesIdx === -1 ? "" : lines.slice(sourcesIdx + 1).join("\n");
+
+    // Drop a trailing "---" separator and surrounding blank lines left before the heading.
+    let article = articleLines.join("\n").replace(/\n+-{3,}\s*$/g, "").trimEnd();
+
+    const urls = [];
+    const seen = new Set();
+    const push = (u) => {
+        const url = (u || "").trim();
+        if (url && !seen.has(url)) {
+            seen.add(url);
+            urls.push(url);
+        }
+    };
+
+    const linkRe = /\[[^\]]*\]\(([^)\s]+)\)/g;
+    let m;
+    while ((m = linkRe.exec(sourcesText)) !== null) push(m[1]);
+
+    if (urls.length === 0) {
+        const bareRe = /(https?:\/\/[^\s)]+)/g;
+        while ((m = bareRe.exec(sourcesText)) !== null) push(m[1]);
+    }
+
+    return { article, urls };
+}
+
+function importNewsMarkdown(event) {
+    const input = event.target;
+    const file = input.files && input.files[0];
+    if (!file) return;
+
+    const status = document.getElementById("news-md-status");
+    const reader = new FileReader();
+    reader.onload = () => {
+        const { article, urls } = parseNewsMarkdown(String(reader.result || ""));
+        if (!article) {
+            showToast("Could not read any article text from that file.", "error");
+            input.value = "";
+            return;
+        }
+
+        document.getElementById("news-source").value = article;
+
+        resetSourceUrls();
+        if (urls.length) {
+            document.getElementById("source-urls").innerHTML = "";
+            urls.forEach((u) => addSourceUrl(u));
+        }
+
+        if (status) {
+            status.textContent = `Loaded “${file.name}” — article + ${urls.length} source${urls.length === 1 ? "" : "s"}.`;
+        }
+        showToast(`Imported article and ${urls.length} source${urls.length === 1 ? "" : "s"}.`, "success");
+        input.value = "";
+    };
+    reader.onerror = () => {
+        showToast("Failed to read the file.", "error");
+        input.value = "";
+    };
+    reader.readAsText(file);
+}
+
 async function resolveStoreId() {
     try {
         const stores = await apiRequest("/api/stores");

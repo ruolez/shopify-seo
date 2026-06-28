@@ -70,6 +70,16 @@
                                 SEO, images, tags, and internal links. Published to <strong>/blogs/news/</strong>.
                             </p>
                             <div class="form-group">
+                                <label>Import from file <span style="color: var(--on-surface-secondary); font-weight: normal;">(optional — upload a .md file to auto-fill the article and sources)</span></label>
+                                <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
+                                    <input type="file" id="news-md-file" accept=".md,.markdown,text/markdown,text/plain" style="display:none;" onchange="importNewsMarkdown(event)">
+                                    <button type="button" class="btn btn-secondary btn-sm" onclick="document.getElementById('news-md-file').click()">
+                                        <span class="material-symbols-rounded">upload_file</span> Upload .md file
+                                    </button>
+                                    <span id="news-md-status" style="font-size: 13px; color: var(--on-surface-secondary);"></span>
+                                </div>
+                            </div>
+                            <div class="form-group">
                                 <label>Article text</label>
                                 <textarea id="news-source" class="form-control" rows="14" placeholder="Paste the full news article here…"></textarea>
                             </div>
