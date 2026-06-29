@@ -217,6 +217,13 @@
                 <!-- Published -->
                 <div class="tab-panel" id="tab-published">
                     <div id="news-articles-container"><p style="color: var(--on-surface-secondary);">Loading…</p></div>
+                    <div id="news-manage" style="display:none;">
+                        <button type="button" class="btn btn-secondary btn-sm" onclick="closeManage()" style="margin-bottom:14px;">
+                            <span class="material-symbols-rounded">arrow_back</span> Back to list
+                        </button>
+                        <h3 id="news-manage-title" style="margin:0 0 12px;"></h3>
+                        <div id="news-manage-body"></div>
+                    </div>
                 </div>
 
             </div>

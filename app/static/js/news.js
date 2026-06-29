@@ -710,6 +710,7 @@ function resetCreate() {
 // ── Published list ───────────────────────────────────────────────
 
 async function loadNewsArticles() {
+    closeManage();
     const container = document.getElementById("news-articles-container");
     if (!storeId) { container.innerHTML = `<p>No store found.</p>`; return; }
     try {
@@ -719,7 +720,8 @@ async function loadNewsArticles() {
             container.innerHTML = `<div class="card"><p style="color:var(--on-surface-secondary);">No news published yet. Create your first article in the “Create News” tab.</p></div>`;
             return;
         }
-        const rows = articles.map((a) => {
+        publishedArticles = articles;
+        const rows = articles.map((a, i) => {
             const status = a.is_published
                 ? `<span class="news-badge news-badge--ok">Published</span>`
                 : `<span class="news-badge news-badge--pending">Draft</span>`;
@@ -729,7 +731,10 @@ async function loadNewsArticles() {
                 <td>${escapeHtml(a.category || "—")}</td>
                 <td>${status}</td>
                 <td>${a.published_at ? formatDate(a.published_at) : "—"}</td>
-                <td><a class="news-link" href="${escapeAttr(url)}" target="_blank" rel="noopener">View ↗</a></td>
+                <td style="white-space:nowrap;">
+                    <button class="btn btn-secondary btn-sm" onclick="openManage(${i})"><span class="material-symbols-rounded">image</span> Images</button>
+                    <a class="news-link" href="${escapeAttr(url)}" target="_blank" rel="noopener" style="margin-left:10px;">View ↗</a>
+                </td>
             </tr>`;
         }).join("");
         container.innerHTML = `<div class="table-container"><table class="data-table">
@@ -737,6 +742,129 @@ async function loadNewsArticles() {
             <tbody>${rows}</tbody></table></div>`;
     } catch (e) {
         container.innerHTML = `<p style="color:var(--error);">${escapeHtml(e.message)}</p>`;
+    }
+}
+
+// ── Manage images on a published article ─────────────────────────
+
+let publishedArticles = [];
+let manageShopifyId = null;
+
+function closeManage() {
+    show("news-manage", false);
+    show("news-articles-container", true);
+}
+
+async function openManage(index) {
+    const a = publishedArticles[index];
+    if (!a) return;
+    manageShopifyId = a.shopify_id;
+    show("news-articles-container", false);
+    show("news-manage", true);
+    document.getElementById("news-manage-title").textContent = a.title || "Untitled";
+    const body = document.getElementById("news-manage-body");
+    body.innerHTML = `<div class="spinner" style="width:24px;height:24px;"></div>`;
+    try {
+        const data = await apiRequest(`/api/news/article-images?shopify_id=${encodeURIComponent(a.shopify_id)}`);
+        renderManage(data);
+    } catch (e) {
+        body.innerHTML = `<p style="color:var(--error);">${escapeHtml(e.message)}</p>`;
+    }
+}
+
+function _imageCard(kind, idx, img) {
+    const thumb = img.image_url || img.cdn_url || "";
+    const thumbHtml = thumb
+        ? `<img id="manage-thumb-${kind}-${idx}" src="${escapeAttr(thumb)}" alt="" style="width:100%; max-width:320px; border-radius:8px; display:block;">`
+        : `<div id="manage-thumb-${kind}-${idx}" style="width:100%; max-width:320px; aspect-ratio:16/9; background:#f1f3f4; border:1px dashed #bbb; border-radius:8px; display:flex; align-items:center; justify-content:center; color:#888; font-size:13px;">No image</div>`;
+    const caption = kind === "inline" && img.caption ? `<p style="font-size:12px; color:var(--on-surface-secondary); margin:6px 0 0;">${escapeHtml(img.caption)}</p>` : "";
+    const label = kind === "hero" ? "Hero image" : `Inline image ${idx + 1}`;
+    const onclick = kind === "hero" ? "regenHero()" : `regenInline(${idx})`;
+    return `<div class="card" style="margin-bottom:16px;">
+        <h4 style="margin:0 0 10px;">${label}</h4>
+        ${thumbHtml}${caption}
+        <div class="form-group" style="margin-top:12px;">
+            <label style="font-size:13px;">Image prompt</label>
+            <textarea id="manage-prompt-${kind}-${idx}" class="form-control" rows="3">${escapeHtml(img.prompt || "")}</textarea>
+        </div>
+        <button class="btn btn-primary btn-sm" id="manage-btn-${kind}-${idx}" onclick="${onclick}">
+            <span class="material-symbols-rounded">refresh</span> Regenerate
+        </button>
+        <span id="manage-status-${kind}-${idx}" style="margin-left:10px; font-size:13px;"></span>
+    </div>`;
+}
+
+function renderManage(data) {
+    const body = document.getElementById("news-manage-body");
+    let html = _imageCard("hero", 0, data.hero || {});
+    if (data.inline && data.inline.length) {
+        html += `<h4 style="margin:20px 0 8px;">Inline images</h4>`;
+        html += data.inline.map((img) => _imageCard("inline", img.index, img)).join("");
+    } else if (!data.has_session) {
+        html += `<p style="font-size:13px; color:var(--on-surface-secondary);">Inline image prompts aren't available for this article (no source session), so only the hero can be regenerated.</p>`;
+    }
+    body.innerHTML = html;
+}
+
+function _regenStart(kind, idx) {
+    const btn = document.getElementById(`manage-btn-${kind}-${idx}`);
+    const status = document.getElementById(`manage-status-${kind}-${idx}`);
+    if (btn) btn.disabled = true;
+    if (status) status.innerHTML = `<span style="color:var(--on-surface-secondary);">Generating…</span>`;
+    return { btn, status };
+}
+
+function _regenDone(kind, idx, newUrl, ok, errMsg) {
+    const btn = document.getElementById(`manage-btn-${kind}-${idx}`);
+    const status = document.getElementById(`manage-status-${kind}-${idx}`);
+    if (btn) btn.disabled = false;
+    if (ok) {
+        const thumb = document.getElementById(`manage-thumb-${kind}-${idx}`);
+        if (thumb && newUrl) {
+            if (thumb.tagName === "IMG") {
+                thumb.src = newUrl;
+            } else {
+                thumb.outerHTML = `<img id="manage-thumb-${kind}-${idx}" src="${escapeAttr(newUrl)}" alt="" style="width:100%; max-width:320px; border-radius:8px; display:block;">`;
+            }
+        }
+        if (status) status.innerHTML = `<span style="color:var(--success);">✓ Updated</span>`;
+        showToast("Image regenerated and pushed to Shopify.", "success");
+    } else {
+        if (status) status.innerHTML = `<span style="color:var(--error);">${escapeHtml(errMsg || "Failed")}</span>`;
+    }
+}
+
+async function regenHero() {
+    if (!manageShopifyId) return;
+    const prompt = (document.getElementById("manage-prompt-hero-0")?.value || "").trim();
+    _regenStart("hero", 0);
+    try {
+        const res = await apiRequest("/api/news/regenerate-hero", {
+            method: "POST",
+            body: { shopify_id: manageShopifyId, prompt },
+        });
+        pollTask(res.task_id, (task) => {
+            _regenDone("hero", 0, task.result?.image_url, task.status === "completed", task.error);
+        });
+    } catch (e) {
+        _regenDone("hero", 0, null, false, e.message);
+    }
+}
+
+async function regenInline(index) {
+    if (!manageShopifyId) return;
+    const prompt = (document.getElementById(`manage-prompt-inline-${index}`)?.value || "").trim();
+    _regenStart("inline", index);
+    try {
+        const res = await apiRequest("/api/news/regenerate-inline", {
+            method: "POST",
+            body: { shopify_id: manageShopifyId, index, prompt },
+        });
+        pollTask(res.task_id, (task) => {
+            _regenDone("inline", index, task.result?.cdn_url, task.status === "completed", task.error);
+        });
+    } catch (e) {
+        _regenDone("inline", index, null, false, e.message);
     }
 }
 

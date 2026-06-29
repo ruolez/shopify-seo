@@ -227,6 +227,15 @@ def _step_hero(session, client):
     return resource_url
 
 
+def _upload_image_to_cdn(client, image_bytes, filename, alt_text):
+    """Stage, upload, and register an image as a Shopify File; return its final CDN url."""
+    mime = "image/webp" if filename.endswith(".webp") else "image/jpeg"
+    staged = client.staged_upload_create(filename, mime, len(image_bytes), resource="IMAGE")
+    resource_url = client.upload_staged_file(staged, image_bytes, content_type=mime)
+    file_obj = client.file_create(resource_url, filename=filename, alt_text=alt_text)
+    return client.file_get_url(file_obj.get("id"))
+
+
 def _step_inline(session, client):
     """Generate + upload each inline image and persist the inline_images list. Per-image best-effort."""
     from app.services.image_generator import generate_news_inline_image
@@ -248,11 +257,7 @@ def _step_inline(session, client):
             if not result:
                 raise Exception("no image returned")
             image_bytes, filename, alt_text, width, height = result
-            mime = "image/webp" if filename.endswith(".webp") else "image/jpeg"
-            staged = client.staged_upload_create(filename, mime, len(image_bytes), resource="IMAGE")
-            resource_url = client.upload_staged_file(staged, image_bytes, content_type=mime)
-            file_obj = client.file_create(resource_url, filename=filename, alt_text=alt_text)
-            cdn_url = client.file_get_url(file_obj.get("id"))
+            cdn_url = _upload_image_to_cdn(client, image_bytes, filename, alt_text)
             entry.update({"cdn_url": cdn_url, "width": width, "height": height, "status": "ready"})
         except Exception as e:
             logger.warning("Inline image failed for token %s: %s", spec.get("token"), e)
@@ -472,6 +477,226 @@ def list_news_articles():
         )
         articles = [dict(a) for a in cur.fetchall()]
     return jsonify({"articles": articles})
+
+
+# ── Regenerate images on a published article ────────────────────
+
+def _get_article(shopify_id):
+    with db.get_cursor() as cur:
+        cur.execute(
+            "SELECT * FROM synced_articles WHERE shopify_id = %s AND article_type = 'news' LIMIT 1",
+            (str(shopify_id),),
+        )
+        row = cur.fetchone()
+    return dict(row) if row else None
+
+
+def _session_for_article(shopify_id):
+    with db.get_cursor() as cur:
+        cur.execute(
+            "SELECT * FROM news_sessions WHERE shopify_article_id = %s ORDER BY id DESC LIMIT 1",
+            (str(shopify_id),),
+        )
+        row = cur.fetchone()
+    return dict(row) if row else None
+
+
+def _rebuild_article_body(session):
+    """Reproduce the published body: inline images inserted into the edited body, then Sources."""
+    edited = session.get("edited_result") or session.get("analyze_result") or {}
+    body_html = insert_inline_images(edited.get("body_html") or "", session.get("inline_images") or [])
+    sources_html = render_sources_html(session.get("source_urls") or [])
+    if sources_html:
+        body_html = f"{body_html}\n{sources_html}"
+    return body_html
+
+
+@news_bp.route("/api/news/article-images", methods=["GET"])
+def get_article_images():
+    shopify_id = request.args.get("shopify_id")
+    article = _get_article(shopify_id) if shopify_id else None
+    if not article:
+        return jsonify({"error": "Article not found"}), 404
+    session = _session_for_article(shopify_id)
+    edited = (session.get("edited_result") or session.get("analyze_result") or {}) if session else {}
+    hero = {
+        "image_url": article.get("image_url") or "",
+        "alt": article.get("image_alt") or edited.get("hero_image_alt") or article.get("title") or "",
+        "prompt": edited.get("hero_image_prompt") or "",
+    }
+    inline = []
+    specs = (session.get("inline_images") or []) if session else []
+    for i, spec in enumerate(specs):
+        inline.append({
+            "index": i,
+            "prompt": spec.get("prompt") or "",
+            "alt": spec.get("alt") or "",
+            "caption": spec.get("caption") or "",
+            "cdn_url": spec.get("cdn_url") or "",
+        })
+    return jsonify({
+        "has_session": bool(session),
+        "title": article.get("title") or "",
+        "hero": hero,
+        "inline": inline,
+    })
+
+
+@news_bp.route("/api/news/regenerate-hero", methods=["POST"])
+def regenerate_article_hero():
+    data = request.get_json() or {}
+    shopify_id = data.get("shopify_id")
+    prompt = (data.get("prompt") or "").strip()
+    article = _get_article(shopify_id) if shopify_id else None
+    if not article:
+        return jsonify({"error": "Article not found"}), 404
+    store_id = article["store_id"]
+    store, client = _get_store_client(store_id)
+    if not client:
+        return jsonify({"error": "Store not found"}), 404
+
+    with db.get_cursor() as cur:
+        cur.execute(
+            """INSERT INTO ai_tasks (store_id, task_type, status, input)
+               VALUES (%s, 'news_regen_hero', 'pending', %s) RETURNING id""",
+            (store_id, json.dumps({"shopify_id": shopify_id})),
+        )
+        task_id = cur.fetchone()["id"]
+
+    def _run():
+        try:
+            with db.get_cursor() as cur:
+                cur.execute("UPDATE ai_tasks SET status = 'running' WHERE id = %s", (task_id,))
+            from app.services.image_generator import generate_blog_image_ai
+
+            session = _session_for_article(shopify_id)
+            edited = (session.get("edited_result") or session.get("analyze_result") or {}) if session else {}
+            headline = edited.get("headline") or article.get("title") or "News"
+            hero_prompt = prompt or edited.get("hero_image_prompt") or ""
+            tags = edited.get("tags") or []
+            keywords = ([hero_prompt] if hero_prompt else []) + list(tags)[:4]
+            result = generate_blog_image_ai(headline, keywords=keywords)
+            if not result:
+                raise Exception("Hero image generation returned no result")
+            image_bytes, filename, alt_text, width, height = result
+            cdn_url = _upload_image_to_cdn(client, image_bytes, filename, alt_text)
+            new_alt = article.get("image_alt") or edited.get("hero_image_alt") or headline
+            client.update_article(shopify_id, {"image_url": cdn_url, "image_alt": new_alt})
+
+            with db.get_cursor() as cur:
+                cur.execute(
+                    "UPDATE synced_articles SET image_url = %s, image_alt = %s, synced_at = NOW() WHERE shopify_id = %s",
+                    (cdn_url, new_alt, str(shopify_id)),
+                )
+            if session:
+                new_edited = dict(edited)
+                if hero_prompt:
+                    new_edited["hero_image_prompt"] = hero_prompt
+                with db.get_cursor() as cur:
+                    cur.execute(
+                        "UPDATE news_sessions SET hero_image_url = %s, edited_result = %s, hero_image_prompt = %s, updated_at = NOW() WHERE id = %s",
+                        (cdn_url, json.dumps(new_edited), hero_prompt, session["id"]),
+                    )
+            _regen_news_hub_async(store_id, client, store)
+
+            with db.get_cursor() as cur:
+                cur.execute(
+                    "UPDATE ai_tasks SET status = 'completed', result = %s, completed_at = NOW() WHERE id = %s",
+                    (json.dumps({"image_url": cdn_url}), task_id),
+                )
+        except Exception as e:
+            logger.exception("regenerate hero failed: %s", e)
+            with db.get_cursor() as cur:
+                cur.execute(
+                    "UPDATE ai_tasks SET status = 'failed', error = %s, completed_at = NOW() WHERE id = %s",
+                    (str(e), task_id),
+                )
+
+    threading.Thread(target=_run, daemon=True).start()
+    return jsonify({"task_id": task_id})
+
+
+@news_bp.route("/api/news/regenerate-inline", methods=["POST"])
+def regenerate_article_inline():
+    data = request.get_json() or {}
+    shopify_id = data.get("shopify_id")
+    prompt = (data.get("prompt") or "").strip()
+    try:
+        index = int(data.get("index"))
+    except (TypeError, ValueError):
+        return jsonify({"error": "index is required"}), 400
+    article = _get_article(shopify_id) if shopify_id else None
+    if not article:
+        return jsonify({"error": "Article not found"}), 404
+    session = _session_for_article(shopify_id)
+    if not session:
+        return jsonify({"error": "No source session for this article — inline images can't be regenerated"}), 400
+    if index < 0 or index >= len(session.get("inline_images") or []):
+        return jsonify({"error": "Invalid image index"}), 400
+    store_id = article["store_id"]
+    store, client = _get_store_client(store_id)
+    if not client:
+        return jsonify({"error": "Store not found"}), 404
+
+    with db.get_cursor() as cur:
+        cur.execute(
+            """INSERT INTO ai_tasks (store_id, task_type, status, input)
+               VALUES (%s, 'news_regen_inline', 'pending', %s) RETURNING id""",
+            (store_id, json.dumps({"shopify_id": shopify_id, "index": index})),
+        )
+        task_id = cur.fetchone()["id"]
+
+    def _run():
+        try:
+            with db.get_cursor() as cur:
+                cur.execute("UPDATE ai_tasks SET status = 'running' WHERE id = %s", (task_id,))
+            from app.services.image_generator import generate_news_inline_image
+
+            sess = _session_for_article(shopify_id)
+            imgs = sess.get("inline_images") or []
+            spec = imgs[index]
+            use_prompt = prompt or spec.get("prompt") or ""
+            result = generate_news_inline_image(use_prompt, spec.get("alt"))
+            if not result:
+                raise Exception("Inline image generation returned no result")
+            image_bytes, filename, alt_text, width, height = result
+            cdn_url = _upload_image_to_cdn(client, image_bytes, filename, alt_text)
+            imgs[index] = {
+                **spec,
+                "prompt": use_prompt,
+                "cdn_url": cdn_url,
+                "width": width,
+                "height": height,
+                "status": "ready",
+            }
+            sess["inline_images"] = imgs
+            new_body = _rebuild_article_body(sess)
+            client.update_article(shopify_id, {"body": new_body})
+
+            with db.get_cursor() as cur:
+                cur.execute(
+                    "UPDATE news_sessions SET inline_images = %s, updated_at = NOW() WHERE id = %s",
+                    (json.dumps(imgs), sess["id"]),
+                )
+                cur.execute(
+                    "UPDATE synced_articles SET body = %s, synced_at = NOW() WHERE shopify_id = %s",
+                    (new_body, str(shopify_id)),
+                )
+            with db.get_cursor() as cur:
+                cur.execute(
+                    "UPDATE ai_tasks SET status = 'completed', result = %s, completed_at = NOW() WHERE id = %s",
+                    (json.dumps({"index": index, "cdn_url": cdn_url}), task_id),
+                )
+        except Exception as e:
+            logger.exception("regenerate inline failed: %s", e)
+            with db.get_cursor() as cur:
+                cur.execute(
+                    "UPDATE ai_tasks SET status = 'failed', error = %s, completed_at = NOW() WHERE id = %s",
+                    (str(e), task_id),
+                )
+
+    threading.Thread(target=_run, daemon=True).start()
+    return jsonify({"task_id": task_id})
 
 
 # ── Analyze (paste -> AI enhance) ───────────────────────────────
