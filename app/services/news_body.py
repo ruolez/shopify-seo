@@ -16,22 +16,32 @@ from urllib.parse import urlparse
 logger = logging.getLogger(__name__)
 
 
-def render_sources_html(urls):
-    """Render a 'Sources' section from a list of source URLs.
+def render_sources_html(sources):
+    """Render a 'Sources' section from a list of sources.
 
-    External links use rel="nofollow noopener" and open in a new tab. Anchor
-    text is the hostname for cleanliness. Returns '' when there are no URLs.
+    Each item is either a URL string (legacy) or a ``{"url", "title"}`` dict.
+    Anchor text is the descriptive title when present, otherwise the hostname.
+    External links use rel="nofollow noopener" and open in a new tab. Returns
+    '' when there are no usable sources.
     """
     items = []
-    for u in urls or []:
-        u = (u or "").strip()
+    for s in sources or []:
+        if isinstance(s, dict):
+            u = (s.get("url") or "").strip()
+            title = (s.get("title") or "").strip()
+        else:
+            u = (s or "").strip()
+            title = ""
         if not u:
             continue
         href = u if u.startswith(("http://", "https://")) else "https://" + u
-        try:
-            display = urlparse(href).netloc or u
-        except Exception:
-            display = u
+        if title:
+            display = title
+        else:
+            try:
+                display = urlparse(href).netloc or u
+            except Exception:
+                display = u
         items.append(
             f'<li><a href="{html.escape(href, quote=True)}" target="_blank" '
             f'rel="nofollow noopener">{html.escape(display)}</a></li>'

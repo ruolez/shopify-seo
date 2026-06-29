@@ -168,16 +168,14 @@ def _build_grid(articles, tz=None):
             img_html = '<div class="news-hub__card-image news-hub__card-image--placeholder"></div>'
 
         cards += f"""<div class="news-hub__card" data-cat="{html.escape(category)}">
-  <a href="{link}" class="news-hub__card-link">
-    {img_html}
-    <div class="news-hub__card-body">
-      <div class="news-hub__badges">{cat_badge}</div>
-      <h3 class="news-hub__card-title">{title}</h3>
-      <p class="news-hub__card-meta">{date}</p>
-      <p class="news-hub__card-excerpt">{excerpt}</p>
-      <span class="news-hub__read-more">Read more &rarr;</span>
-    </div>
-  </a>
+  {img_html}
+  <div class="news-hub__card-body">
+    <div class="news-hub__badges">{cat_badge}</div>
+    <h3 class="news-hub__card-title"><a href="{link}" class="news-hub__card-link">{title}</a></h3>
+    <p class="news-hub__card-meta">{date}</p>
+    <p class="news-hub__card-excerpt">{excerpt}</p>
+    <span class="news-hub__read-more" aria-hidden="true">Read more &rarr;</span>
+  </div>
 </div>"""
 
     return f'<div class="news-hub__grid">{cards}</div>'
@@ -198,9 +196,11 @@ def _build_css():
 .news-hub__chip:hover { border-color: #999 !important; color: #222 !important; }
 .news-hub__chip--active { background: #333 !important; color: #fff !important; border-color: #333 !important; }
 .news-hub__grid { display: grid !important; grid-template-columns: repeat(3, minmax(0, 1fr)) !important; gap: 20px !important; margin: 0 auto 40px !important; }
-.news-hub__card { border-radius: 10px !important; overflow: hidden !important; border: 1px solid #e5e5e5 !important; background: #fff !important; transition: transform 0.2s, box-shadow 0.2s !important; }
+.news-hub__card { position: relative !important; display: flex !important; flex-direction: column !important; border-radius: 10px !important; overflow: hidden !important; border: 1px solid #e5e5e5 !important; background: #fff !important; transition: transform 0.2s, box-shadow 0.2s !important; }
 .news-hub__card:hover { transform: translateY(-2px) !important; box-shadow: 0 6px 20px rgba(0,0,0,0.08) !important; }
-.news-hub__card-link { display: flex !important; flex-direction: column !important; text-decoration: none !important; color: inherit !important; height: 100% !important; }
+.news-hub__card-link { text-decoration: none !important; color: inherit !important; }
+.news-hub__card-link:hover { text-decoration: underline !important; }
+.news-hub__card-link::after { content: "" !important; position: absolute !important; inset: 0 !important; z-index: 1 !important; }
 .news-hub__card-image { width: 100% !important; aspect-ratio: 16/9 !important; overflow: hidden !important; }
 .news-hub__card-image img { width: 100% !important; height: 100% !important; object-fit: cover !important; display: block !important; }
 .news-hub__card-image--placeholder { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%) !important; }
