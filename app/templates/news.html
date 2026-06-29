@@ -70,14 +70,24 @@
                                 SEO, images, tags, and internal links. Published to <strong>/blogs/news/</strong>.
                             </p>
                             <div class="form-group">
-                                <label>Import from file <span style="color: var(--on-surface-secondary); font-weight: normal;">(optional — upload a .md file to auto-fill the article and sources)</span></label>
+                                <label>Import from file <span style="color: var(--on-surface-secondary); font-weight: normal;">(optional — upload one .md to fill the form, or several to batch auto-publish)</span></label>
                                 <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
-                                    <input type="file" id="news-md-file" accept=".md,.markdown,text/markdown,text/plain" style="display:none;" onchange="importNewsMarkdown(event)">
+                                    <input type="file" id="news-md-file" accept=".md,.markdown,text/markdown,text/plain" multiple style="display:none;" onchange="importNewsMarkdownFiles(event)">
                                     <button type="button" class="btn btn-secondary btn-sm" onclick="document.getElementById('news-md-file').click()">
-                                        <span class="material-symbols-rounded">upload_file</span> Upload .md file
+                                        <span class="material-symbols-rounded">upload_file</span> Upload .md file(s)
                                     </button>
                                     <span id="news-md-status" style="font-size: 13px; color: var(--on-surface-secondary);"></span>
                                 </div>
+                            </div>
+
+                            <!-- Batch auto-publish (shown when multiple files are selected) -->
+                            <div id="news-batch" class="form-group" style="display:none;">
+                                <label>Batch auto-publish <span style="color: var(--on-surface-secondary); font-weight: normal;">— each article is analyzed, illustrated, linked, and published automatically.</span></label>
+                                <div id="news-batch-list" style="margin: 6px 0;"></div>
+                                <button class="btn btn-primary" id="news-batch-btn" onclick="startBatch()">
+                                    <span class="material-symbols-rounded">auto_awesome</span> <span id="news-batch-label">Auto-Publish</span>
+                                </button>
+                                <div id="news-batch-status" style="margin-top: 12px;"></div>
                             </div>
                             <div class="form-group">
                                 <label>Article text</label>
@@ -86,12 +96,16 @@
                             <div class="form-group">
                                 <label>Source URLs <span style="color: var(--on-surface-secondary); font-weight: normal;">(optional — add one or more; shown as a “Sources” section)</span></label>
                                 <div id="source-urls"></div>
-                                <button type="button" class="btn btn-secondary btn-sm" onclick="addSourceUrl()" style="margin-top:6px;">
+                                <button type="button" class="btn btn-secondary btn-sm" onclick="addSource()" style="margin-top:6px;">
                                     <span class="material-symbols-rounded">add</span> Add source
                                 </button>
                             </div>
-                            <button class="btn btn-primary" onclick="analyzeNews()">
-                                <span class="material-symbols-rounded">auto_awesome</span> Analyze &amp; Enhance
+                            <label style="display:flex; align-items:center; gap:8px; margin: 4px 0 12px; font-size: 14px; cursor:pointer;">
+                                <input type="checkbox" id="news-auto" onchange="updateStartButton()">
+                                <span><strong>Auto mode</strong> — generate hero + inline images and internal links, then publish automatically.</span>
+                            </label>
+                            <button class="btn btn-primary" id="news-start-btn" onclick="startNews()">
+                                <span class="material-symbols-rounded">auto_awesome</span> <span id="news-start-label">Analyze &amp; Enhance</span>
                             </button>
                             <div id="news-analyze-status" style="margin-top: 12px;"></div>
                         </div>

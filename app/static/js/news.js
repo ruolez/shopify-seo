@@ -8,44 +8,51 @@ let newsCategories = [];
 
 document.addEventListener("DOMContentLoaded", async () => {
     initTabs();
-    addSourceUrl();
+    addSource();
     storeId = await resolveStoreId();
     await loadCategories();
     await checkTemplateStatus();
 });
 
-// ── Source URLs (multiple) ───────────────────────────────────────
+// ── Sources (multiple) ───────────────────────────────────────────
 
-function addSourceUrl(value = "") {
+function addSource(url = "", title = "") {
     const wrap = document.getElementById("source-urls");
     if (!wrap) return;
     const row = document.createElement("div");
     row.className = "source-url-row";
     row.style.cssText = "display:flex; gap:6px; margin-bottom:6px;";
     row.innerHTML = `
-        <input type="url" class="form-control source-url-input" placeholder="https://…" value="${escapeAttr(value)}" style="flex:1;">
+        <input type="text" class="form-control source-title-input" placeholder="Source title (optional)" value="${escapeAttr(title)}" style="flex:1;">
+        <input type="url" class="form-control source-url-input" placeholder="https://…" value="${escapeAttr(url)}" style="flex:1;">
         <button type="button" class="icon-btn" title="Remove" onclick="this.parentElement.remove()">
             <span class="material-symbols-rounded">close</span>
         </button>`;
     wrap.appendChild(row);
 }
 
-function collectSourceUrls() {
-    return [...document.querySelectorAll(".source-url-input")]
-        .map((el) => el.value.trim())
-        .filter(Boolean);
+// Returns [{url, title}] for rows that have a URL. The title is the descriptive
+// anchor text rendered in the published article's Sources section.
+function collectSources() {
+    return [...document.querySelectorAll(".source-url-row")]
+        .map((row) => ({
+            url: (row.querySelector(".source-url-input")?.value || "").trim(),
+            title: (row.querySelector(".source-title-input")?.value || "").trim(),
+        }))
+        .filter((s) => s.url);
 }
 
-function resetSourceUrls() {
+function resetSources() {
     const wrap = document.getElementById("source-urls");
     if (wrap) wrap.innerHTML = "";
-    addSourceUrl();
+    addSource();
 }
 
 // ── Markdown import ──────────────────────────────────────────────
 
 // Splits a news .md file into the article body (everything before the
-// "## Sources" heading) and the list of source URLs found in that section.
+// "## Sources" heading) and the list of sources ({url, title}) found in that
+// section. Markdown links "[Label](url)" yield title=Label for SEO anchor text.
 function parseNewsMarkdown(text) {
     const normalized = (text || "").replace(/\r\n/g, "\n");
     const lines = normalized.split("\n");
@@ -57,62 +64,202 @@ function parseNewsMarkdown(text) {
     // Drop a trailing "---" separator and surrounding blank lines left before the heading.
     let article = articleLines.join("\n").replace(/\n+-{3,}\s*$/g, "").trimEnd();
 
-    const urls = [];
+    const sources = [];
     const seen = new Set();
-    const push = (u) => {
-        const url = (u || "").trim();
+    const push = (url, title) => {
+        url = (url || "").trim();
         if (url && !seen.has(url)) {
             seen.add(url);
-            urls.push(url);
+            sources.push({ url, title: (title || "").trim() });
         }
     };
 
-    const linkRe = /\[[^\]]*\]\(([^)\s]+)\)/g;
+    const linkRe = /\[([^\]]*)\]\(([^)\s]+)\)/g;
     let m;
-    while ((m = linkRe.exec(sourcesText)) !== null) push(m[1]);
+    while ((m = linkRe.exec(sourcesText)) !== null) push(m[2], m[1]);
 
-    if (urls.length === 0) {
+    if (sources.length === 0) {
         const bareRe = /(https?:\/\/[^\s)]+)/g;
-        while ((m = bareRe.exec(sourcesText)) !== null) push(m[1]);
+        while ((m = bareRe.exec(sourcesText)) !== null) push(m[1], "");
     }
 
-    return { article, urls };
+    return { article, sources };
 }
 
-function importNewsMarkdown(event) {
-    const input = event.target;
-    const file = input.files && input.files[0];
-    if (!file) return;
+function readFileText(file) {
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result || ""));
+        reader.onerror = () => reject(new Error(`Failed to read ${file.name}`));
+        reader.readAsText(file);
+    });
+}
 
+// One file → fill the single-article form (manual or single auto flow).
+async function loadSingleMarkdown(file) {
     const status = document.getElementById("news-md-status");
-    const reader = new FileReader();
-    reader.onload = () => {
-        const { article, urls } = parseNewsMarkdown(String(reader.result || ""));
-        if (!article) {
-            showToast("Could not read any article text from that file.", "error");
-            input.value = "";
+    let text;
+    try {
+        text = await readFileText(file);
+    } catch (e) {
+        showToast(e.message, "error");
+        return;
+    }
+    const { article, sources } = parseNewsMarkdown(text);
+    if (!article) {
+        showToast("Could not read any article text from that file.", "error");
+        return;
+    }
+    document.getElementById("news-source").value = article;
+    resetSources();
+    if (sources.length) {
+        document.getElementById("source-urls").innerHTML = "";
+        sources.forEach((s) => addSource(s.url, s.title));
+    }
+    if (status) {
+        status.textContent = `Loaded “${file.name}” — article + ${sources.length} source${sources.length === 1 ? "" : "s"}.`;
+    }
+    showToast(`Imported article and ${sources.length} source${sources.length === 1 ? "" : "s"}.`, "success");
+}
+
+async function importNewsMarkdownFiles(event) {
+    const input = event.target;
+    const files = [...(input.files || [])];
+    input.value = ""; // allow re-selecting the same file(s)
+    if (!files.length) return;
+
+    if (files.length === 1) {
+        hideBatch();
+        await loadSingleMarkdown(files[0]);
+        return;
+    }
+
+    // Multiple files → batch auto-publish.
+    batchItems = [];
+    for (const file of files) {
+        let item = { name: file.name, source_text: "", sources: [], ok: false, error: "" };
+        try {
+            const { article, sources } = parseNewsMarkdown(await readFileText(file));
+            if (article) {
+                item.source_text = article;
+                item.sources = sources;
+                item.ok = true;
+            } else {
+                item.error = "no article text";
+            }
+        } catch (e) {
+            item.error = e.message;
+        }
+        batchItems.push(item);
+    }
+    renderBatchList();
+    show("news-batch", true);
+    const ready = batchItems.filter((i) => i.ok).length;
+    document.getElementById("news-md-status").textContent =
+        `${files.length} files — ${ready} ready, ${files.length - ready} skipped.`;
+}
+
+// ── Batch auto-publish ───────────────────────────────────────────
+
+let batchItems = [];
+
+function hideBatch() {
+    show("news-batch", false);
+    batchItems = [];
+}
+
+function batchChip(item) {
+    if (!item.ok) return `<span style="color:var(--on-surface-secondary);">Skipped — ${escapeHtml(item.error || "no article")}</span>`;
+    const s = item.status;
+    if (!s) return `<span style="color:var(--on-surface-secondary);">Ready</span>`;
+    if (s === "published") {
+        const url = `/blogs/news/${item.handle || ""}`;
+        return `<span style="color:var(--success);">✓ Published — <a href="${escapeAttr(url)}" target="_blank">view →</a></span>`;
+    }
+    if (s === "failed") return `<span style="color:var(--error);">Failed: ${escapeHtml(item.error || "error")}</span>`;
+    return `<span>${escapeHtml(AUTO_STAGES[s] || "Working…")}</span>`;
+}
+
+function renderBatchList() {
+    const list = document.getElementById("news-batch-list");
+    list.innerHTML = batchItems
+        .map(
+            (item, i) => `<div style="display:flex; justify-content:space-between; gap:12px; padding:8px 0; border-bottom:1px solid var(--outline);">
+                <span style="font-weight:500; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${escapeHtml(item.name)}</span>
+                <span id="batch-chip-${i}" style="font-size:13px; flex:none;">${batchChip(item)}</span>
+            </div>`,
+        )
+        .join("");
+    const ready = batchItems.filter((i) => i.ok).length;
+    const btn = document.getElementById("news-batch-btn");
+    btn.disabled = ready === 0;
+    btn.querySelector("#news-batch-label").textContent = `Auto-Publish ${ready} article${ready === 1 ? "" : "s"}`;
+}
+
+async function startBatch() {
+    if (!storeId) return showToast("No store found. Add a store first.", "error");
+    const ready = batchItems.filter((i) => i.ok);
+    if (!ready.length) return showToast("No valid articles to publish.", "error");
+
+    const btn = document.getElementById("news-batch-btn");
+    btn.disabled = true;
+    const status = document.getElementById("news-batch-status");
+    status.innerHTML = `<div class="spinner" style="width:20px;height:20px;border-width:2px;"></div> Queuing ${ready.length} articles…`;
+    try {
+        const res = await apiRequest("/api/news/auto-batch", {
+            method: "POST",
+            body: {
+                store_id: storeId,
+                articles: ready.map((i) => ({ source_text: i.source_text, source_urls: i.sources })),
+            },
+        });
+        // Map returned session ids back onto the ready items (same order).
+        (res.sessions || []).forEach((sid, idx) => {
+            if (ready[idx]) ready[idx].sessionId = sid;
+        });
+        pollBatch();
+    } catch (e) {
+        status.innerHTML = `<p style="color: var(--error);">${escapeHtml(e.message)}</p>`;
+        btn.disabled = false;
+    }
+}
+
+function pollBatch() {
+    const status = document.getElementById("news-batch-status");
+    const tracked = batchItems.filter((i) => i.sessionId);
+    const poll = async () => {
+        let rows;
+        try {
+            const res = await apiRequest("/api/news/session-status", {
+                method: "POST",
+                body: { ids: tracked.map((i) => i.sessionId) },
+            });
+            rows = res.sessions || [];
+        } catch (e) {
+            status.innerHTML = `<p style="color: var(--error);">${escapeHtml(e.message)}</p>`;
             return;
         }
-
-        document.getElementById("news-source").value = article;
-
-        resetSourceUrls();
-        if (urls.length) {
-            document.getElementById("source-urls").innerHTML = "";
-            urls.forEach((u) => addSourceUrl(u));
+        const byId = Object.fromEntries(rows.map((r) => [r.id, r]));
+        tracked.forEach((item) => {
+            const r = byId[item.sessionId];
+            if (!r) return;
+            item.status = r.status;
+            item.handle = r.article_handle;
+            item.error = r.error;
+            const chip = document.getElementById(`batch-chip-${batchItems.indexOf(item)}`);
+            if (chip) chip.innerHTML = batchChip(item);
+        });
+        const done = tracked.filter((i) => i.status === "published" || i.status === "failed").length;
+        const published = tracked.filter((i) => i.status === "published").length;
+        if (done >= tracked.length) {
+            status.innerHTML = `<p style="color: var(--success);">Done — ${published}/${tracked.length} published.</p>`;
+            loadNewsArticles();
+        } else {
+            status.innerHTML = `<div class="spinner" style="width:20px;height:20px;border-width:2px;"></div> ${done}/${tracked.length} done…`;
+            setTimeout(poll, 2000);
         }
-
-        if (status) {
-            status.textContent = `Loaded “${file.name}” — article + ${urls.length} source${urls.length === 1 ? "" : "s"}.`;
-        }
-        showToast(`Imported article and ${urls.length} source${urls.length === 1 ? "" : "s"}.`, "success");
-        input.value = "";
     };
-    reader.onerror = () => {
-        showToast("Failed to read the file.", "error");
-        input.value = "";
-    };
-    reader.readAsText(file);
+    poll();
 }
 
 async function resolveStoreId() {
@@ -226,11 +373,89 @@ async function regenerateHub() {
     }
 }
 
+// ── Start (dispatch to manual analyze or auto-publish) ───────────
+
+function startNews() {
+    const auto = document.getElementById("news-auto");
+    return auto && auto.checked ? autoPublish() : analyzeNews();
+}
+
+function updateStartButton() {
+    const auto = document.getElementById("news-auto");
+    const label = document.getElementById("news-start-label");
+    if (label) label.textContent = auto && auto.checked ? "Auto-Publish" : "Analyze & Enhance";
+}
+
+// ── Auto mode (analyze → images → links → publish) ───────────────
+
+const AUTO_STAGES = {
+    auto_queued: "Queued…",
+    auto_analyzing: "Analyzing & enhancing…",
+    auto_hero: "Generating hero image…",
+    auto_inline: "Generating images…",
+    auto_links: "Adding internal links…",
+    auto_publishing: "Publishing to Shopify…",
+};
+
+async function autoPublish() {
+    const source = document.getElementById("news-source").value.trim();
+    const sourceUrls = collectSources();
+    const status = document.getElementById("news-analyze-status");
+    if (!storeId) return showToast("No store found. Add a store first.", "error");
+    if (!source) return showToast("Paste or upload an article first", "error");
+
+    status.innerHTML = `<div class="spinner" style="width:20px;height:20px;border-width:2px;"></div> Starting auto-publish…`;
+    try {
+        const res = await apiRequest("/api/news/auto", {
+            method: "POST",
+            body: { store_id: storeId, source_text: source, source_urls: sourceUrls },
+        });
+        currentSessionId = res.session_id;
+        pollAutoSession(currentSessionId, status);
+    } catch (e) {
+        status.innerHTML = `<p style="color: var(--error);">${escapeHtml(e.message)}</p>`;
+    }
+}
+
+function pollAutoSession(sessionId, status) {
+    const poll = async () => {
+        let session;
+        try {
+            session = await apiRequest(`/api/news/session/${sessionId}`);
+        } catch (e) {
+            status.innerHTML = `<p style="color: var(--error);">${escapeHtml(e.message)}</p>`;
+            return;
+        }
+        if (session.status === "published") {
+            status.innerHTML = "";
+            const url = `/blogs/news/${session.article_handle || ""}`;
+            show("news-step-paste", false);
+            show("news-step-review", false);
+            show("news-step-done", true);
+            document.getElementById("done-msg").textContent = "Published!";
+            const link = document.getElementById("done-link");
+            link.textContent = window.location.origin.replace(/\/$/, "") + url;
+            link.href = url;
+            showToast("Article auto-published.", "success");
+            loadNewsArticles();
+            return;
+        }
+        if (session.status === "failed") {
+            status.innerHTML = `<p style="color: var(--error);">Auto-publish failed: ${escapeHtml(session.error || "Unknown error")}</p>`;
+            return;
+        }
+        const label = AUTO_STAGES[session.status] || "Working…";
+        status.innerHTML = `<div class="spinner" style="width:20px;height:20px;border-width:2px;"></div> ${escapeHtml(label)}`;
+        setTimeout(poll, 2000);
+    };
+    poll();
+}
+
 // ── Analyze ──────────────────────────────────────────────────────
 
 async function analyzeNews() {
     const source = document.getElementById("news-source").value.trim();
-    const sourceUrls = collectSourceUrls();
+    const sourceUrls = collectSources();
     const status = document.getElementById("news-analyze-status");
     if (!storeId) return showToast("No store found. Add a store first.", "error");
     if (!source) return showToast("Paste an article first", "error");
@@ -474,7 +699,7 @@ function resetCreate() {
     current = null;
     lastSession = null;
     document.getElementById("news-source").value = "";
-    resetSourceUrls();
+    resetSources();
     document.getElementById("news-analyze-status").innerHTML = "";
     show("news-step-done", false);
     show("news-step-review", false);
