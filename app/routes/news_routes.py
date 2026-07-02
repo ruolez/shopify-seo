@@ -141,6 +141,22 @@ def _regen_news_hub_async(store_id, client, store):
     threading.Thread(target=_run, daemon=True).start()
 
 
+def _regen_blog_landings_async(store_id, client, store):
+    """Keep each blog landing newest after a news publish.
+
+    News posts share the same Shopify blog as the blog-landing article, whose
+    first-article-only CSS means it must stay the newest article. A fresh news
+    post would otherwise take that slot, so re-bump each landing (mirrors what
+    every blog-content mutation already does)."""
+    from app.routes.blog_routes import _regen_landing_async  # lazy: avoids import cycle
+
+    with db.get_cursor() as cur:
+        cur.execute("SELECT DISTINCT blog_id FROM blog_landing_pages WHERE store_id = %s", (store_id,))
+        blog_ids = [r["blog_id"] for r in cur.fetchall()]
+    for bid in blog_ids:
+        _regen_landing_async(store_id, bid, client, store)
+
+
 # ── Pipeline steps (shared by manual routes + auto orchestrator) ─
 
 def _fetch_session(session_id):
@@ -395,6 +411,7 @@ def _step_publish(session, store, client, is_published=True, regen_hub=True):
 
     if is_published and regen_hub:
         _regen_news_hub_async(store_id, client, store)
+        _regen_blog_landings_async(store_id, client, store)
 
     return {
         "success": True,
@@ -1062,6 +1079,7 @@ def news_auto_batch():
                     )
         if published_any:
             _regen_news_hub_async(store_id, client, store)
+            _regen_blog_landings_async(store_id, client, store)
 
     threading.Thread(target=_run, daemon=True).start()
     return jsonify({"sessions": session_ids})
