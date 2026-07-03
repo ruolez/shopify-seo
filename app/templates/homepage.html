@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Home Page — SEO Platform</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+    <div class="app-layout">
+        {% include '_sidebar.html' %}
+        <div class="main-content">
+            <div class="topbar">
+                <div class="topbar-left">
+                    <button id="sidebar-toggle" class="icon-btn"><span class="material-symbols-rounded">menu</span></button>
+                    <h2>Home Page</h2>
+                </div>
+                <div class="topbar-right">
+                    <button id="theme-toggle" class="icon-btn"><span class="material-symbols-rounded">dark_mode</span></button>
+                </div>
+            </div>
+            <div class="page-content">
+
+                <div class="card" style="margin-bottom: 16px;">
+                    <div style="display: flex; align-items: center; gap: 12px; flex-wrap: wrap;">
+                        <select id="hp-store-select" class="form-control" style="max-width: 300px;"></select>
+                        <span id="hp-published-badge" class="badge badge-success" style="display: none;">Published to Home Page</span>
+                        <div style="flex: 1;"></div>
+                        <button class="btn btn-secondary btn-sm" onclick="HomePage.save()">
+                            <span class="material-symbols-rounded">save</span> Save
+                        </button>
+                        <button class="btn btn-secondary btn-sm" onclick="HomePage.refreshPreview()">
+                            <span class="material-symbols-rounded">visibility</span> Preview
+                        </button>
+                        <button class="btn btn-primary btn-sm" onclick="HomePage.publish()">
+                            <span class="material-symbols-rounded">publish</span> Publish to Home Page
+                        </button>
+                        <button class="btn btn-secondary btn-sm" onclick="HomePage.unpublish()">
+                            <span class="material-symbols-rounded">undo</span> Unpublish
+                        </button>
+                    </div>
+                </div>
+
+                <div id="hp-workspace" style="display: none;">
+                    <!-- AI Generate -->
+                    <div class="card" style="margin-bottom: 16px;">
+                        <h3 style="margin: 0 0 12px;">Generate with AI</h3>
+                        <div style="display: flex; gap: 12px; flex-wrap: wrap; align-items: flex-end;">
+                            <div class="form-group" style="flex: 2; min-width: 220px; margin: 0;">
+                                <label>Store theme / topic</label>
+                                <input id="hp-topic" class="form-control" placeholder="e.g. Premium organic skincare for sensitive skin">
+                            </div>
+                            <div class="form-group" style="flex: 2; min-width: 220px; margin: 0;">
+                                <label>Target keywords (comma-separated)</label>
+                                <input id="hp-keywords" class="form-control" placeholder="organic skincare, natural moisturizer">
+                            </div>
+                            <button class="btn btn-primary" onclick="HomePage.generate()">
+                                <span class="material-symbols-rounded">auto_awesome</span> Generate Carousel
+                            </button>
+                        </div>
+                        <p style="color: var(--on-surface-secondary); font-size: 13px; margin: 12px 0 0;">
+                            Generates 3–5 SEO-optimized slides plus home-page meta tags. Slide CTAs link only to your real collections.
+                        </p>
+                    </div>
+
+                    <!-- Meta / SEO -->
+                    <div class="card" style="margin-bottom: 16px;">
+                        <h3 style="margin: 0 0 12px;">Home Page SEO</h3>
+                        <div class="form-group">
+                            <label>Meta title <span id="hp-meta-title-counter" style="color: var(--on-surface-secondary); font-size: 12px;"></span></label>
+                            <input id="hp-meta-title" class="form-control" maxlength="120">
+                        </div>
+                        <div class="form-group">
+                            <label>Meta description <span id="hp-meta-desc-counter" style="color: var(--on-surface-secondary); font-size: 12px;"></span></label>
+                            <textarea id="hp-meta-desc" class="form-control" rows="2" maxlength="320"></textarea>
+                        </div>
+                    </div>
+
+                    <!-- Slides -->
+                    <div class="card" style="margin-bottom: 16px;">
+                        <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px;">
+                            <h3 style="margin: 0;">Carousel Slides</h3>
+                            <button class="btn btn-secondary btn-sm" onclick="HomePage.addSlide()">
+                                <span class="material-symbols-rounded">add</span> Add Slide
+                            </button>
+                        </div>
+                        <div id="hp-slides"></div>
+                    </div>
+
+                    <!-- Preview -->
+                    <div class="card" style="margin-bottom: 16px;">
+                        <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px;">
+                            <h3 style="margin: 0;">Live Preview</h3>
+                            <button class="btn btn-secondary btn-sm" onclick="HomePage.refreshPreview()">
+                                <span class="material-symbols-rounded">refresh</span> Refresh
+                            </button>
+                        </div>
+                        <iframe id="hp-preview" style="width: 100%; height: 480px; border: 1px solid var(--outline); border-radius: 8px; background: #111;"></iframe>
+                    </div>
+                </div>
+
+                <div id="hp-empty" class="empty-state">Select a store to build its home page carousel.</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Image picker modal -->
+    <div id="hp-image-modal" class="modal-overlay">
+        <div class="modal" style="max-width: 720px;">
+            <div class="modal-header">
+                <h3 id="hp-image-modal-title">Pick an image</h3>
+                <button class="icon-btn" onclick="HomePage.closeImageModal()"><span class="material-symbols-rounded">close</span></button>
+            </div>
+            <div class="modal-body">
+                <div id="hp-image-grid" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 10px; max-height: 60vh; overflow-y: auto;"></div>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/js/app.js"></script>
+    <script src="/static/js/homepage.js"></script>
+</body>
+</html>

@@ -692,6 +692,23 @@ class Database:
                 )
             """)
             cur.execute("""
+                CREATE TABLE IF NOT EXISTS home_pages (
+                    id SERIAL PRIMARY KEY,
+                    store_id INTEGER UNIQUE REFERENCES stores(id) ON DELETE CASCADE,
+                    meta_title VARCHAR(255),
+                    meta_description VARCHAR(500),
+                    slides JSONB DEFAULT '[]',
+                    seo_score INTEGER DEFAULT 0,
+                    seo_breakdown JSONB DEFAULT '{}',
+                    section_key VARCHAR(100) DEFAULT 'ai_home_carousel',
+                    index_json_backup TEXT,
+                    is_published BOOLEAN DEFAULT FALSE,
+                    last_published_at TIMESTAMP,
+                    created_at TIMESTAMP DEFAULT NOW(),
+                    updated_at TIMESTAMP DEFAULT NOW()
+                )
+            """)
+            cur.execute("""
                 DO $$ BEGIN
                     ALTER TABLE synced_pages ADD COLUMN theme_sections JSONB;
                 EXCEPTION WHEN duplicate_column THEN NULL;

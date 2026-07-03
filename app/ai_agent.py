@@ -2088,6 +2088,39 @@ def _validate_landing_page_generate(result):
     return result
 
 
+def _validate_home_page_generate(result):
+    """Clamp and sanitize the AI home-page carousel output."""
+    slides = result.get("slides")
+    if not slides or not isinstance(slides, list):
+        result["slides"] = []
+        return result
+
+    cleaned = []
+    for slide in slides[:5]:
+        if not isinstance(slide, dict):
+            continue
+        cleaned.append({
+            "headline": (slide.get("headline") or "").strip(),
+            "subheadline": (slide.get("subheadline") or "").strip(),
+            "image_prompt": (slide.get("image_prompt") or "").strip(),
+            "image_alt": (slide.get("image_alt") or slide.get("headline") or "").strip(),
+            "cta_text": (slide.get("cta_text") or "").strip(),
+            "cta_url": (slide.get("cta_url") or "/collections/all").strip(),
+            "image_url": "",
+            "source": "ai",
+        })
+    result["slides"] = [s for s in cleaned if s["headline"]]
+
+    meta_title = result.get("meta_title", "")
+    if meta_title and len(meta_title) > 70:
+        result["meta_title"] = meta_title[:60]
+    meta_desc = result.get("meta_description", "")
+    if meta_desc and len(meta_desc) > 200:
+        result["meta_description"] = meta_desc[:160]
+
+    return result
+
+
 def run_task(task_type, task_input, store_id=None):
     config = _get_ai_config()
 
@@ -3322,6 +3355,82 @@ def run_task(task_type, task_input, store_id=None):
                 result = json.loads(content[start:end])
                 result = _validate_landing_page_generate(result)
                 return result
+        except (json.JSONDecodeError, ValueError):
+            pass
+        return {"raw_response": content}
+
+    elif task_type == "home_page_generate":
+        topic = task_input.get("topic", "")
+        keywords = task_input.get("keywords", [])
+
+        system_prompt = get_setting("prompts.home_page_generate", DEFAULTS["prompts.home_page_generate"])
+
+        store_name = ""
+        store_domain = ""
+        if store_id:
+            with db.get_cursor() as cur:
+                cur.execute(
+                    "SELECT name, COALESCE(primary_domain, domain) AS store_domain FROM stores WHERE id = %s",
+                    (store_id,),
+                )
+                srow = cur.fetchone()
+            if srow:
+                store_name = srow.get("name") or ""
+                store_domain = srow.get("store_domain") or ""
+
+        collections_context = ""
+        if store_id:
+            with db.get_cursor() as cur:
+                cur.execute(
+                    "SELECT title, handle FROM synced_collections WHERE store_id = %s AND handle IS NOT NULL AND handle != '' ORDER BY title LIMIT 30",
+                    (store_id,),
+                )
+                collections = cur.fetchall()
+            if collections:
+                collections_context = "\nAVAILABLE COLLECTIONS (use for cta_url as /collections/handle):\n"
+                for c in collections:
+                    collections_context += f"- {c['title']} (/collections/{c['handle']})\n"
+
+        serp_context = ""
+        try:
+            from app.services.serp_scraper import get_serp_benchmark
+            primary_kw = keywords[0] if keywords else topic
+            if primary_kw:
+                serp_context = get_serp_benchmark(
+                    {"title": primary_kw, "store_domain": store_domain},
+                    target_keywords=keywords or [topic],
+                    entity_type="collection",
+                )
+        except Exception as e:
+            logger.warning("Home page SERP benchmark failed: %s", e)
+
+        kw_text = f"\nTarget keywords: {', '.join(keywords)}" if keywords else ""
+        serp_block = f"\n\nLIVE SERP BENCHMARK:\n{serp_context}" if serp_context else ""
+        user_prompt = (
+            f"Build the home page hero carousel for the store '{store_name or store_domain}'.\n"
+            f"Store theme / topic: {topic}\n"
+            f"{kw_text}"
+            f"{collections_context}"
+            f"{serp_block}"
+            "\n\nReturn the carousel and home-page meta as JSON."
+        )
+
+        response = client.chat.completions.create(
+            model=config["model"],
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.4,
+        )
+
+        content = response.choices[0].message.content or ""
+        try:
+            start = content.find("{")
+            end = content.rfind("}") + 1
+            if start >= 0 and end > start:
+                result = json.loads(content[start:end])
+                return _validate_home_page_generate(result)
         except (json.JSONDecodeError, ValueError):
             pass
         return {"raw_response": content}

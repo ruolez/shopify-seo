@@ -32,6 +32,7 @@ from app.routes.content_gap_routes import content_gap_bp
 from app.routes.competitor_routes import competitor_bp
 from app.routes.keyword_strategy_routes import keyword_strategy_bp
 from app.routes.news_routes import news_bp
+from app.routes.homepage_routes import homepage_bp
 
 app = Flask(__name__)
 app.secret_key = SECRET_KEY
@@ -56,6 +57,7 @@ app.register_blueprint(content_gap_bp)
 app.register_blueprint(competitor_bp)
 app.register_blueprint(keyword_strategy_bp)
 app.register_blueprint(news_bp)
+app.register_blueprint(homepage_bp)
 
 PUBLIC_PATHS = {"/login", "/api/login", "/health", "/static", "/api/gsc/auth/callback"}
 
