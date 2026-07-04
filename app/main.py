@@ -33,6 +33,7 @@ from app.routes.competitor_routes import competitor_bp
 from app.routes.keyword_strategy_routes import keyword_strategy_bp
 from app.routes.news_routes import news_bp
 from app.routes.homepage_routes import homepage_bp
+from app.routes.ai_seo_routes import ai_seo_bp
 
 app = Flask(__name__)
 app.secret_key = SECRET_KEY
@@ -58,6 +59,7 @@ app.register_blueprint(competitor_bp)
 app.register_blueprint(keyword_strategy_bp)
 app.register_blueprint(news_bp)
 app.register_blueprint(homepage_bp)
+app.register_blueprint(ai_seo_bp)
 
 PUBLIC_PATHS = {"/login", "/api/login", "/health", "/static", "/api/gsc/auth/callback"}
 
@@ -111,6 +113,8 @@ with app.app_context():
     init_scheduler()
     from app.services.competitor_service import init_scheduler as init_competitor_scheduler
     init_competitor_scheduler()
+    from app.services.ai_visibility_tracker import init_tracking_scheduler
+    init_tracking_scheduler()
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=True)

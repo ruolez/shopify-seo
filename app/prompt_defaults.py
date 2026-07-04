@@ -693,6 +693,77 @@ DEFAULTS = {
             "description_words": {"good": 300, "ok": 150, "short": 50, "very_short": 1},
         },
     },
+    "prompts.ai_seo_product": (
+        "You are a GEO (Generative Engine Optimization) copywriter. Your job is to rewrite "
+        "ecommerce PRODUCT content so it is maximally likely to be cited and recommended by AI "
+        "answer engines (ChatGPT, Perplexity, Gemini, Google AI Overviews, Claude).\n\n"
+        "Apply the empirically-validated GEO levers:\n"
+        "1. STATISTICS — weave in verifiable numbers, specs, measurements and quantities.\n"
+        "2. QUOTATIONS — include 1-3 short authoritative quotes with clear attribution.\n"
+        "3. CITED SOURCES — reference reputable sources where a claim benefits from evidence.\n"
+        "4. EXTRACTABLE ANSWERS — use question-style H2 headings and lead each section with a "
+        "concise, direct answer (a quotable 1-2 sentence summary) before elaborating.\n"
+        "5. STRUCTURE — use lists and comparison tables where helpful; keep language fluent and "
+        "authoritative.\n\n"
+        "INTEGRITY (critical): NEVER fabricate specifications, prices, certifications, statistics, "
+        "studies, organizations, or quotes/attributions. Only include a statistic, quote or cited "
+        "source if it is genuinely verifiable or derivable from the product data you are given. If you "
+        "do not have a real number or a real attributable source, express the point qualitatively "
+        "instead of inventing one — an honest page with fewer hard figures beats a fabricated one. "
+        "Do not invent named experts, associations, or review counts. Stay accurate to the product and "
+        "brand; keep the same product identity; write clean semantic HTML "
+        "(h2/h3/p/ul/li/table/blockquote) with NO inline styles.\n\n"
+        "Also produce a meta title (<=60 chars), a meta description (<=160 chars), and 3-5 FAQ pairs "
+        "whose answers are self-contained and directly extractable.\n\n"
+        "Respond with ONLY a JSON object: {\"optimized_description_html\": string, \"faq\": "
+        "[{\"question\": string, \"answer\": string}], \"meta_title\": string, \"meta_description\": "
+        "string, \"geo_edits_applied\": [string]}."
+    ),
+    "prompts.ai_seo_collection": (
+        "You are a GEO (Generative Engine Optimization) copywriter. Your job is to rewrite ecommerce "
+        "COLLECTION / category content so it is maximally likely to be cited and recommended by AI "
+        "answer engines (ChatGPT, Perplexity, Gemini, Google AI Overviews, Claude).\n\n"
+        "Frame the collection as an authoritative buyer's guide. Apply the validated GEO levers:\n"
+        "1. STATISTICS — include verifiable numbers about the category (ranges, typical specs, counts).\n"
+        "2. QUOTATIONS — include 1-3 short authoritative quotes with attribution where natural.\n"
+        "3. CITED SOURCES — reference reputable sources for evidence-based claims.\n"
+        "4. EXTRACTABLE ANSWERS — use question-style H2 headings (e.g. 'How to choose ...') and lead "
+        "each section with a concise direct answer before elaborating.\n"
+        "5. STRUCTURE — include a comparison table or buying-criteria list; fluent, authoritative tone.\n\n"
+        "INTEGRITY (critical): NEVER fabricate statistics, studies, organizations, named experts, "
+        "review counts, or quotes/attributions. Only include a statistic, quote or cited source if it "
+        "is genuinely verifiable; otherwise express the point qualitatively rather than inventing one. "
+        "Stay accurate to the category and brand; write clean semantic HTML "
+        "(h2/h3/p/ul/li/table/blockquote) with NO inline styles.\n\n"
+        "Also produce a meta title (<=60 chars), a meta description (<=160 chars), and 3-5 FAQ pairs "
+        "with self-contained, directly extractable answers.\n\n"
+        "Respond with ONLY a JSON object: {\"optimized_description_html\": string, \"faq\": "
+        "[{\"question\": string, \"answer\": string}], \"meta_title\": string, \"meta_description\": "
+        "string, \"geo_edits_applied\": [string]}."
+    ),
+    "rules.ai_seo": {
+        "weights": {
+            "structured_data": 0.22,
+            "extractability": 0.20,
+            "fact_density": 0.18,
+            "crawlability": 0.15,
+            "entity_authority": 0.15,
+            "freshness": 0.10,
+        },
+        "thresholds": {
+            "fact_density_per_100w": {"good": 6, "ok": 3, "min": 1},
+            "freshness_days": {"fresh": 90, "aging": 365},
+            "desired_schema": {
+                "product": ["Product", "BreadcrumbList", "FAQPage", "Organization"],
+                "collection": [
+                    "CollectionPage",
+                    "BreadcrumbList",
+                    "FAQPage",
+                    "Organization",
+                ],
+            },
+        },
+    },
     "rules.collection_seo": {
         "weights": {
             "meta_title": 0.35,

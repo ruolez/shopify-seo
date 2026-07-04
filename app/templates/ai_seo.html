@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI SEO — SEO Platform</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+    <div class="app-layout">
+        {% include '_sidebar.html' %}
+        <div class="main-content">
+            <div class="topbar">
+                <div class="topbar-left">
+                    <button id="sidebar-toggle" class="icon-btn"><span class="material-symbols-rounded">menu</span></button>
+                    <h2>AI SEO <span style="font-size:13px;color:var(--on-surface-secondary);font-weight:400;">GEO · AEO · LLMO</span></h2>
+                </div>
+                <div class="topbar-right">
+                    <button id="theme-toggle" class="icon-btn"><span class="material-symbols-rounded">dark_mode</span></button>
+                </div>
+            </div>
+            <div class="page-content">
+                <div class="toolbar-row" style="margin-bottom:12px;">
+                    <select id="store-select" class="form-control" style="max-width:240px;"></select>
+                </div>
+                <div class="tabs">
+                    <button class="tab active" data-tab="score" onclick="switchTab('score')">AI Readiness</button>
+                    <button class="tab" data-tab="optimize" disabled title="Open any item in AI Readiness, then ‘Optimize for AI’">Optimize</button>
+                    <button class="tab" data-tab="visibility" onclick="switchTab('visibility')">Visibility</button>
+                    <button class="tab" data-tab="assets" onclick="switchTab('assets')">AEO Assets</button>
+                </div>
+
+                <div class="tab-panel active" id="tab-score">
+                    <div class="toolbar-row" style="gap:12px;flex-wrap:wrap;align-items:center;margin-bottom:16px;">
+                        <div class="status-filter-bar">
+                            <button class="filter-chip active" data-type="product" onclick="setScanType('product')">Products</button>
+                            <button class="filter-chip" data-type="collection" onclick="setScanType('collection')">Collections</button>
+                        </div>
+                        <button id="scan-btn" class="btn btn-primary" style="margin-left:auto;" onclick="runScan()">
+                            <span class="material-symbols-rounded">radar</span> Scan AI readiness
+                        </button>
+                    </div>
+
+                    <div id="overview-cards" class="stats-grid" style="margin-bottom:16px;"></div>
+
+                    <div id="items-container">
+                        <div class="empty-state">
+                            <span class="material-symbols-rounded">smart_toy</span>
+                            <p>Select a store and run a scan to score AI-answer-engine readiness.</p>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="tab-panel" id="tab-visibility">
+                    <div id="visibility-metrics" class="stats-grid" style="margin-bottom:16px;"></div>
+                    <div class="toolbar-row" style="gap:12px;flex-wrap:wrap;align-items:center;margin-bottom:12px;">
+                        <h3 style="margin:0;">Prompt set</h3>
+                        <button class="btn btn-secondary btn-sm" onclick="generatePrompts()">
+                            <span class="material-symbols-rounded">auto_awesome</span> Auto-generate
+                        </button>
+                        <button id="track-btn" class="btn btn-primary btn-sm" style="margin-left:auto;" onclick="runTracking()">
+                            <span class="material-symbols-rounded">travel_explore</span> Run tracking
+                        </button>
+                    </div>
+                    <p style="font-size:12px;color:var(--on-surface-secondary);margin:0 0 12px;">
+                        Probes GPT / Claude / Gemini via OpenRouter for brand mentions. Reflects AI model
+                        knowledge, not live Perplexity/AI-Overview citations.
+                    </p>
+                    <div id="prompts-container" style="margin-bottom:20px;"></div>
+                    <h3>Run history</h3>
+                    <div id="runs-container"></div>
+                </div>
+
+                <div class="tab-panel" id="tab-assets">
+                    <p style="font-size:12px;color:var(--on-surface-secondary);margin:0 0 16px;">
+                        Technical AEO signals published to your storefront. Each is preview-first; applying
+                        writes to your live theme / store.
+                    </p>
+                    <div id="aeo-container">
+                        <div class="loading-spinner" style="padding:24px 0;"><div class="spinner"></div><p>Loading…</p></div>
+                    </div>
+                </div>
+
+                <div class="modal-overlay" id="breakdown-modal">
+                    <div class="modal modal-fullscreen">
+                        <div class="modal-header">
+                            <h3 id="breakdown-title">AI Readiness Breakdown</h3>
+                            <button class="icon-btn" onclick="closeBreakdown()"><span class="material-symbols-rounded">close</span></button>
+                        </div>
+                        <div class="modal-body" id="breakdown-content"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    <script src="/static/js/app.js"></script>
+    <script src="/static/js/ai_seo.js"></script>
+</body>
+</html>

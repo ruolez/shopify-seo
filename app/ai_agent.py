@@ -1463,6 +1463,81 @@ def _sanitize_description(html: str) -> str:
     return html.strip()
 
 
+def _build_faqpage_jsonld(faq):
+    """Construct a valid schema.org FAQPage from question/answer pairs."""
+    entities = [
+        {
+            "@type": "Question",
+            "name": f.get("question", ""),
+            "acceptedAnswer": {"@type": "Answer", "text": f.get("answer", "")},
+        }
+        for f in faq
+        if f.get("question") and f.get("answer")
+    ]
+    if not entities:
+        return None
+    return {
+        "@context": "https://schema.org",
+        "@type": "FAQPage",
+        "mainEntity": entities,
+    }
+
+
+def _generate_geo_content(client, config, item, entity_type, weak_signals=None):
+    """Single structured LLM call to GEO-optimize a product/collection.
+
+    Returns a review-ready dict (no writes): optimized description HTML, FAQ pairs,
+    a FAQPage JSON-LD, meta title/description, and the GEO levers applied.
+    """
+    system_prompt = get_setting(
+        f"prompts.ai_seo_{entity_type}", DEFAULTS[f"prompts.ai_seo_{entity_type}"]
+    )
+    weak_block = ""
+    if weak_signals:
+        weak_block = (
+            "\n\nThe current page scores weakest on these AI-readiness signals — "
+            "prioritise fixing them:\n" + "\n".join(f"- {s}" for s in weak_signals)
+        )
+    user_prompt = (
+        f"{entity_type.capitalize()} title: {item.get('title') or ''}\n"
+        f"Brand/Vendor: {item.get('vendor') or 'n/a'}\n"
+        f"Type: {item.get('product_type') or item.get('collection_type') or 'n/a'}\n\n"
+        f"Current description HTML:\n{item.get('description') or '(none)'}"
+        f"{weak_block}"
+    )
+    resp = client.chat.completions.create(
+        model=config["model"],
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        temperature=0.4,
+    )
+    content = resp.choices[0].message.content or ""
+    start, end = content.find("{"), content.rfind("}") + 1
+    data = {}
+    if start >= 0 and end > start:
+        try:
+            data = json.loads(content[start:end])
+        except (json.JSONDecodeError, ValueError):
+            data = {}
+    if not data:
+        return {"error": "AI did not return valid GEO content"}
+
+    faq = data.get("faq") or []
+    description = _sanitize_description(
+        data.get("optimized_description_html") or data.get("description_html") or ""
+    )
+    return {
+        "optimized_description_html": description,
+        "faq": faq,
+        "faqpage_jsonld": _build_faqpage_jsonld(faq),
+        "meta_title": (data.get("meta_title") or "").strip(),
+        "meta_description": (data.get("meta_description") or "").strip(),
+        "geo_edits_applied": data.get("geo_edits_applied") or [],
+    }
+
+
 def _generate_description(client, config, main_result, serp_context, serp_benchmark, product_id):
     """Dedicated AI call to generate an SEO-optimized product description.
 
@@ -4241,6 +4316,28 @@ def run_task(task_type, task_input, store_id=None):
             "internal_links_count": internal_links_count,
             "keywords_used": keywords_found,
         }
+
+    elif task_type == "ai_seo_product":
+        product_id = task_input.get("product_id")
+        with db.get_cursor() as cur:
+            cur.execute("SELECT * FROM synced_products WHERE id = %s", (product_id,))
+            item = cur.fetchone()
+        if not item:
+            return {"error": "Product not found"}
+        return _generate_geo_content(
+            client, config, dict(item), "product", task_input.get("weak_signals")
+        )
+
+    elif task_type == "ai_seo_collection":
+        collection_id = task_input.get("collection_id")
+        with db.get_cursor() as cur:
+            cur.execute("SELECT * FROM synced_collections WHERE id = %s", (collection_id,))
+            item = cur.fetchone()
+        if not item:
+            return {"error": "Collection not found"}
+        return _generate_geo_content(
+            client, config, dict(item), "collection", task_input.get("weak_signals")
+        )
 
     elif task_type == "store_audit":
         system_prompt = get_setting("prompts.store_audit", DEFAULTS["prompts.store_audit"])

@@ -1083,6 +1083,98 @@ class Database:
             """)
             cur.execute("CREATE INDEX IF NOT EXISTS idx_ksc_store ON keyword_strategy_changes(store_id)")
 
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS ai_seo_scores (
+                    id SERIAL PRIMARY KEY,
+                    store_id INTEGER REFERENCES stores(id) ON DELETE CASCADE,
+                    resource_type VARCHAR(50) NOT NULL,
+                    resource_id INTEGER NOT NULL,
+                    score INTEGER DEFAULT 0,
+                    breakdown JSONB DEFAULT '{}',
+                    live_crawl JSONB,
+                    created_at TIMESTAMP DEFAULT NOW(),
+                    UNIQUE(store_id, resource_type, resource_id)
+                )
+            """)
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_seo_scores_store ON ai_seo_scores(store_id, resource_type)")
+
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS ai_prompts (
+                    id SERIAL PRIMARY KEY,
+                    store_id INTEGER REFERENCES stores(id) ON DELETE CASCADE,
+                    prompt TEXT NOT NULL,
+                    intent VARCHAR(50) DEFAULT 'buyer',
+                    is_active BOOLEAN DEFAULT TRUE,
+                    created_at TIMESTAMP DEFAULT NOW()
+                )
+            """)
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_prompts_store ON ai_prompts(store_id)")
+
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS ai_tracking_runs (
+                    id SERIAL PRIMARY KEY,
+                    store_id INTEGER REFERENCES stores(id) ON DELETE CASCADE,
+                    status VARCHAR(50) DEFAULT 'pending',
+                    models JSONB DEFAULT '[]',
+                    prompt_count INTEGER DEFAULT 0,
+                    brand_mention_rate NUMERIC(5,2),
+                    citation_rate NUMERIC(5,2),
+                    share_of_voice NUMERIC(5,2),
+                    avg_rank NUMERIC(6,2),
+                    cost_estimate NUMERIC(10,4) DEFAULT 0,
+                    summary JSONB DEFAULT '{}',
+                    error TEXT,
+                    started_at TIMESTAMP DEFAULT NOW(),
+                    completed_at TIMESTAMP
+                )
+            """)
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_tracking_runs_store ON ai_tracking_runs(store_id, started_at)")
+
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS ai_mention_results (
+                    id SERIAL PRIMARY KEY,
+                    run_id INTEGER REFERENCES ai_tracking_runs(id) ON DELETE CASCADE,
+                    prompt_id INTEGER REFERENCES ai_prompts(id) ON DELETE SET NULL,
+                    model VARCHAR(100) NOT NULL,
+                    prompt TEXT,
+                    response_text TEXT,
+                    brand_mentioned BOOLEAN DEFAULT FALSE,
+                    domain_cited BOOLEAN DEFAULT FALSE,
+                    brand_rank INTEGER,
+                    products_mentioned JSONB DEFAULT '[]',
+                    competitors_mentioned JSONB DEFAULT '[]',
+                    tokens_used INTEGER DEFAULT 0,
+                    created_at TIMESTAMP DEFAULT NOW()
+                )
+            """)
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_mention_results_run ON ai_mention_results(run_id)")
+
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS aeo_assets (
+                    id SERIAL PRIMARY KEY,
+                    store_id INTEGER REFERENCES stores(id) ON DELETE CASCADE,
+                    asset_type VARCHAR(50) NOT NULL,
+                    content TEXT,
+                    status VARCHAR(50) DEFAULT 'draft',
+                    published_at TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT NOW(),
+                    UNIQUE(store_id, asset_type)
+                )
+            """)
+
+            cur.execute("""
+                DO $$ BEGIN
+                    ALTER TABLE ai_config ADD COLUMN tracking_models JSONB DEFAULT '["openai/gpt-4o-mini","anthropic/claude-haiku-4.5","google/gemini-3-flash-preview"]';
+                EXCEPTION WHEN duplicate_column THEN NULL;
+                END $$
+            """)
+            cur.execute("""
+                DO $$ BEGIN
+                    ALTER TABLE ai_config ADD COLUMN tracking_interval_hours INTEGER DEFAULT 168;
+                EXCEPTION WHEN duplicate_column THEN NULL;
+                END $$
+            """)
+
             cur.execute("SELECT pg_advisory_unlock(1)")
 
 
