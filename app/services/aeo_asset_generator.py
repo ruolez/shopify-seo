@@ -175,6 +175,39 @@ _BREADCRUMB_LIQUID = """{%- capture _crumbs -%}
 {%- endif -%}"""
 
 
+def generate_a11y_snippet():
+    """Theme snippet: labels links/buttons that lack discernible text so the
+    accessibility tree is well-formed for screen readers AND AI browsing agents
+    (fixes 'Links must have discernible text' — e.g. the Powered-by-Shopify link)."""
+    return (
+        "{%- comment -%} AI SEO: accessibility helper — labels controls lacking discernible text (managed) {%- endcomment -%}\n"
+        "{% raw %}\n"
+        "<script>\n"
+        "(function(){\n"
+        "  function labelize(){\n"
+        "    var els = document.querySelectorAll('a[href], button, [role=\"button\"], [role=\"link\"]');\n"
+        "    for (var i=0;i<els.length;i++){\n"
+        "      var el = els[i];\n"
+        "      if ((el.textContent||'').replace(/\\s+/g,'').length) continue;\n"
+        "      if (el.getAttribute('aria-label') || el.getAttribute('aria-labelledby') || el.getAttribute('title')) continue;\n"
+        "      var label='';\n"
+        "      var img = el.querySelector('img[alt]');\n"
+        "      if (img && (img.getAttribute('alt')||'').trim()) { label = img.getAttribute('alt').trim(); }\n"
+        "      if (!label){ var st = el.querySelector('svg title'); if (st && (st.textContent||'').trim()) label = st.textContent.trim(); }\n"
+        "      if (!label){ var inner = el.querySelector('[aria-label]'); if (inner) label = inner.getAttribute('aria-label'); }\n"
+        "      if (!label && el.tagName==='A' && el.href){ try{ var h=new URL(el.href).hostname.replace(/^www\\./,''); var b=(h.split('.')[0]||''); if(b) label=b.charAt(0).toUpperCase()+b.slice(1); }catch(e){} }\n"
+        "      if (label) el.setAttribute('aria-label', label);\n"
+        "    }\n"
+        "  }\n"
+        "  function run(){ try{ labelize(); }catch(e){} }\n"
+        "  if (document.readyState!=='loading') run(); else document.addEventListener('DOMContentLoaded', run);\n"
+        "  setTimeout(run, 2000);\n"
+        "})();\n"
+        "</script>\n"
+        "{% endraw %}"
+    )
+
+
 def generate_site_schema_snippet(store_id):
     """Build the ai-seo-schema.liquid snippet: static Organization + WebSite JSON-LD
     followed by a dynamic per-page BreadcrumbList."""

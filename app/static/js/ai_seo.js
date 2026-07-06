@@ -524,7 +524,8 @@ async function loadAeo() {
         container.innerHTML =
             robotsCard(a.robots) +
             llmsCard(a.llms, a.base_url) +
-            siteSchemaCard(a.site_schema);
+            siteSchemaCard(a.site_schema) +
+            a11yCard(a.a11y);
     } catch (err) {
         container.innerHTML = `<div class="empty-state"><span class="material-symbols-rounded">error</span><p>${escapeHtml(err.message)}</p></div>`;
     }
@@ -711,9 +712,50 @@ async function unpublishSchema(btn) {
     loadAeo();
 }
 
+function a11yCard(x) {
+    const published = x && x.published_status === "published";
+    return `<div class="card" style="padding:16px;margin-bottom:16px;">
+        <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
+            <h3 style="margin:0;flex:1;">Storefront Accessibility</h3>
+            ${statusPill(x && x.published_status)}
+            <button class="btn btn-secondary btn-sm" onclick="downloadAeo('a11y')"><span class="material-symbols-rounded">download</span></button>
+            ${published ? `<button class="btn btn-secondary btn-sm" onclick="unpublishA11y(this)"><span class="material-symbols-rounded">undo</span> Unpublish</button>` : ""}
+            <button class="btn btn-primary btn-sm" onclick="publishA11y(this)"><span class="material-symbols-rounded">cloud_upload</span> ${published ? "Re-publish" : "Publish to theme"}</button>
+        </div>
+        <p style="font-size:12px;color:var(--on-surface-secondary);margin:6px 0 8px;">Publishes a small theme script that gives an accessible name (aria-label) to links/buttons that have none — e.g. the icon-only "Powered by Shopify" footer link. Fixes the "Links must have discernible text" audit and hardens the accessibility tree for screen readers and AI browsing agents. Reversible.</p>
+        ${aeoImpact("<b>Targets agentic browsing / accessibility.</b> AI shopping agents navigate the accessibility tree — unlabeled controls make it malformed. This labels them site-wide.", "")}
+        ${aeoDetails("View theme snippet (ai-seo-a11y.liquid)", (x && x.proposed) || "")}
+    </div>`;
+}
+
+async function publishA11y(btn) {
+    if (!confirm("Publish the accessibility helper to your live theme? (reversible)")) return;
+    btn.disabled = true;
+    btn.innerHTML = '<span class="material-symbols-rounded">hourglass_empty</span> Publishing…';
+    try {
+        const res = await apiRequest("/api/ai-seo/aeo/a11y/apply", { method: "POST", body: { store_id: parseInt(getStoreId()) } });
+        showToast(res.message || "Published", "success");
+    } catch (err) {
+        showToast(`Publish failed: ${err.message}`, "error");
+    }
+    loadAeo();
+}
+
+async function unpublishA11y(btn) {
+    if (!confirm("Remove the accessibility helper from your theme?")) return;
+    btn.disabled = true;
+    try {
+        const res = await apiRequest("/api/ai-seo/aeo/a11y/unpublish", { method: "POST", body: { store_id: parseInt(getStoreId()) } });
+        showToast(res.message || "Removed", "success");
+    } catch (err) {
+        showToast(`Unpublish failed: ${err.message}`, "error");
+    }
+    loadAeo();
+}
+
 function downloadAeo(key) {
-    const map = { robots: window._aeo.robots.proposed, llms: window._aeo.llms.proposed, schema: window._aeo.site_schema.proposed_snippet };
-    const names = { robots: "robots.txt.liquid", llms: "llms.txt", schema: "ai-seo-schema.liquid" };
+    const map = { robots: window._aeo.robots.proposed, llms: window._aeo.llms.proposed, schema: window._aeo.site_schema.proposed_snippet, a11y: window._aeo.a11y.proposed };
+    const names = { robots: "robots.txt.liquid", llms: "llms.txt", schema: "ai-seo-schema.liquid", a11y: "ai-seo-a11y.liquid" };
     const blob = new Blob([map[key] || ""], { type: "text/plain" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");

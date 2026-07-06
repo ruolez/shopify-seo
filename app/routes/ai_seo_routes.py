@@ -1088,6 +1088,10 @@ def aeo_preview():
                 "impact": {"signal": "Structured data", "current_avg": sd_avg, "adds": ["Organization", "BreadcrumbList"]},
                 "entity_authority_avg": ea_avg,
             },
+            "a11y": {
+                "proposed": gen.generate_a11y_snippet(),
+                "published_status": published.get("a11y"),
+            },
         }
     )
 
@@ -1153,16 +1157,24 @@ def aeo_llms_apply():
 _SCHEMA_SNIPPET_KEY = "snippets/ai-seo-schema.liquid"
 _SCHEMA_RENDER_TAG = "{% render 'ai-seo-schema' %}"
 _SITE_SCHEMA_TYPES = ["Organization", "BreadcrumbList", "WebSite"]
+_A11Y_SNIPPET_KEY = "snippets/ai-seo-a11y.liquid"
+_A11Y_RENDER_TAG = "{% render 'ai-seo-a11y' %}"
 
 
-def _inject_render_into_layout(layout, render_tag):
-    """Idempotently add the render tag to layout/theme.liquid <head>."""
+def _inject_render_into_layout(layout, render_tag, anchor="</head>"):
+    """Idempotently add the render tag to layout/theme.liquid before an anchor."""
     if not layout or render_tag in layout:
         return layout, False
-    if "</head>" in layout:
-        return layout.replace("</head>", f"  {render_tag}\n</head>", 1), True
-    # No </head> (unusual) — prepend so it still renders.
+    if anchor in layout:
+        return layout.replace(anchor, f"  {render_tag}\n{anchor}", 1), True
+    # Anchor missing (unusual) — prepend so it still renders.
     return render_tag + "\n" + layout, True
+
+
+def _remove_render_from_layout(layout, render_tag):
+    if not layout:
+        return layout
+    return layout.replace(f"  {render_tag}\n", "").replace(render_tag, "")
 
 
 @ai_seo_bp.route("/api/ai-seo/aeo/schema/apply", methods=["POST"])
@@ -1222,6 +1234,57 @@ def aeo_schema_unpublish():
         logger.exception("Site schema unpublish failed: %s", e)
         return jsonify({"error": str(e)}), 502
     return jsonify({"ok": True, "message": "Site-wide schema removed from theme and restored."})
+
+
+@ai_seo_bp.route("/api/ai-seo/aeo/a11y/apply", methods=["POST"])
+def aeo_a11y_apply():
+    from app.services import aeo_asset_generator as gen
+
+    data = request.get_json() or {}
+    store_id = data.get("store_id")
+    if not store_id:
+        return jsonify({"error": "store_id is required"}), 400
+    client, store = _client_for_store(store_id)
+    if not client:
+        return jsonify({"error": "Store not found"}), 404
+    snippet = gen.generate_a11y_snippet()
+    try:
+        theme_id = client.get_main_theme_id()
+        if not theme_id:
+            return jsonify({"error": "No main theme found"}), 502
+        client.upsert_theme_asset(theme_id, _A11Y_SNIPPET_KEY, snippet)
+        layout = client.get_theme_asset(theme_id, "layout/theme.liquid")
+        new_layout, changed = _inject_render_into_layout(layout, _A11Y_RENDER_TAG, anchor="</body>")
+        if changed:
+            client.upsert_theme_asset(theme_id, "layout/theme.liquid", new_layout)
+        _save_aeo_asset(int(store_id), "a11y", snippet, "published")
+    except Exception as e:
+        logger.exception("Accessibility helper apply failed: %s", e)
+        return jsonify({"error": str(e)}), 502
+    return jsonify({"ok": True, "message": "Accessibility helper published to your theme — links without discernible text are now labeled."})
+
+
+@ai_seo_bp.route("/api/ai-seo/aeo/a11y/unpublish", methods=["POST"])
+def aeo_a11y_unpublish():
+    data = request.get_json() or {}
+    store_id = data.get("store_id")
+    if not store_id:
+        return jsonify({"error": "store_id is required"}), 400
+    client, store = _client_for_store(store_id)
+    if not client:
+        return jsonify({"error": "Store not found"}), 404
+    try:
+        theme_id = client.get_main_theme_id()
+        if theme_id:
+            layout = client.get_theme_asset(theme_id, "layout/theme.liquid")
+            if layout and _A11Y_RENDER_TAG in layout:
+                client.upsert_theme_asset(theme_id, "layout/theme.liquid", _remove_render_from_layout(layout, _A11Y_RENDER_TAG))
+            client.delete_theme_asset(theme_id, _A11Y_SNIPPET_KEY)
+        _save_aeo_asset(int(store_id), "a11y", "", "draft")
+    except Exception as e:
+        logger.exception("Accessibility helper unpublish failed: %s", e)
+        return jsonify({"error": str(e)}), 502
+    return jsonify({"ok": True, "message": "Accessibility helper removed from theme."})
 
 
 @ai_seo_bp.route("/api/ai-seo/aeo/org-settings", methods=["GET", "POST"])
