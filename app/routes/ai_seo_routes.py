@@ -107,9 +107,26 @@ def _pushed_schema(store_id):
     return out
 
 
+def _published_site_schema_types(store_id):
+    """Schema types published site-wide via the theme (Organization/BreadcrumbList/WebSite)."""
+    with db.get_cursor() as cur:
+        cur.execute(
+            "SELECT content FROM aeo_assets WHERE store_id = %s AND asset_type = 'site_schema' AND status = 'published'",
+            (store_id,),
+        )
+        row = cur.fetchone()
+    if not row or not row.get("content"):
+        return []
+    try:
+        return json.loads(row["content"]) or []
+    except (json.JSONDecodeError, ValueError, TypeError):
+        return []
+
+
 def _score_items(store_id, resource_type, items, base_url, crawlability, store_domain):
     """Crawl (in bounded batches) + score every item; upsert into ai_seo_scores."""
     schema_map = _pushed_schema(store_id)
+    site_types = _published_site_schema_types(store_id)
     scored = 0
     it_iter = iter(items)
     while True:
@@ -129,6 +146,7 @@ def _score_items(store_id, resource_type, items, base_url, crawlability, store_d
                 schema_markup=markup,
                 crawlability=crawlability,
                 store_domain=store_domain,
+                site_schema_types=site_types,
             )
             with db.get_cursor() as cur:
                 cur.execute(
@@ -351,6 +369,7 @@ def _rescore_item(store_id, resource_type, item, live, crawlability, store_domai
         schema_markup=markup,
         crawlability=crawlability,
         store_domain=store_domain,
+        site_schema_types=_published_site_schema_types(store_id),
     )
     with db.get_cursor() as cur:
         cur.execute(
@@ -1012,14 +1031,25 @@ def aeo_preview():
     crawl_after_robots = _crawl_score(total, total, True, llms_present)  # proposed: all allowed + sensitive blocked
     crawl_after_llms = _crawl_score(cur_allowed, total, cur_sensitive, True)  # proposed: llms.txt present
 
-    # Entity-authority signal: current store average from scanned items.
+    # Entity-authority + structured-data averages from scanned items.
     with db.get_cursor() as cur:
         cur.execute(
-            "SELECT AVG((breakdown->'entity_authority'->>'score')::numeric) a FROM ai_seo_scores WHERE store_id = %s",
+            """SELECT AVG((breakdown->'entity_authority'->>'score')::numeric) ea,
+                      AVG((breakdown->'structured_data'->>'score')::numeric) sd
+               FROM ai_seo_scores WHERE store_id = %s""",
             (store_id,),
         )
         row = cur.fetchone()
-    ea_avg = round(float(row["a"])) if row and row["a"] is not None else None
+        ea_avg = round(float(row["ea"])) if row and row["ea"] is not None else None
+        sd_avg = round(float(row["sd"])) if row and row["sd"] is not None else None
+        # Detect schema already on the live storefront (from a scanned product's crawl).
+        cur.execute(
+            "SELECT live_crawl FROM ai_seo_scores WHERE store_id = %s AND resource_type='product' AND live_crawl IS NOT NULL ORDER BY created_at DESC LIMIT 1",
+            (store_id,),
+        )
+        lc = cur.fetchone()
+    live_types = ((lc["live_crawl"] or {}).get("schema_types") if lc and lc["live_crawl"] else []) or []
+    s = settings or {}
 
     return jsonify(
         {
@@ -1036,16 +1066,27 @@ def aeo_preview():
                 "published_status": published.get("llms_txt"),
                 "impact": {"signal": "AI crawlability", "current": crawl_current, "projected": crawl_after_llms},
             },
-            "organization": {
-                "proposed": org,
-                "current": {
-                    "name": (settings and settings.get("organization_name")) or "",
-                    "url": (settings and settings.get("organization_url")) or "",
-                    "logo": (settings and settings.get("organization_logo_url")) or "",
+            "site_schema": {
+                "proposed_org": org,
+                "proposed_snippet": gen.generate_site_schema_snippet(store_id),
+                "org": {
+                    "name": s.get("organization_name") or "",
+                    "logo_url": s.get("organization_logo_url") or "",
+                    "url": s.get("organization_url") or "",
+                    "description": s.get("organization_description") or "",
+                    "email": s.get("organization_email") or "",
+                    "phone": s.get("organization_phone") or "",
+                    "same_as": s.get("organization_same_as") or [],
+                    "knows_about": s.get("organization_knows_about") or [],
                     "configured": org_configured,
                 },
-                "published_status": published.get("org_schema"),
-                "impact": {"signal": "Entity authority", "current_avg": ea_avg, "uplift": 30},
+                "published_status": published.get("site_schema"),
+                "current_live": {
+                    "organization": "Organization" in live_types,
+                    "breadcrumb": "BreadcrumbList" in live_types,
+                },
+                "impact": {"signal": "Structured data", "current_avg": sd_avg, "adds": ["Organization", "BreadcrumbList"]},
+                "entity_authority_avg": ea_avg,
             },
         }
     )
@@ -1109,6 +1150,21 @@ def aeo_llms_apply():
     )
 
 
+_SCHEMA_SNIPPET_KEY = "snippets/ai-seo-schema.liquid"
+_SCHEMA_RENDER_TAG = "{% render 'ai-seo-schema' %}"
+_SITE_SCHEMA_TYPES = ["Organization", "BreadcrumbList", "WebSite"]
+
+
+def _inject_render_into_layout(layout, render_tag):
+    """Idempotently add the render tag to layout/theme.liquid <head>."""
+    if not layout or render_tag in layout:
+        return layout, False
+    if "</head>" in layout:
+        return layout.replace("</head>", f"  {render_tag}\n</head>", 1), True
+    # No </head> (unusual) — prepend so it still renders.
+    return render_tag + "\n" + layout, True
+
+
 @ai_seo_bp.route("/api/ai-seo/aeo/schema/apply", methods=["POST"])
 def aeo_schema_apply():
     from app.services import aeo_asset_generator as gen
@@ -1117,15 +1173,111 @@ def aeo_schema_apply():
     store_id = data.get("store_id")
     if not store_id:
         return jsonify({"error": "store_id is required"}), 400
-    org = gen.generate_organization_jsonld(int(store_id))
-    if not org:
-        return jsonify({"error": "Configure Organization details in Schema settings first"}), 400
-    _save_aeo_asset(int(store_id), "org_schema", json.dumps(org), "draft")
+    client, store = _client_for_store(store_id)
+    if not client:
+        return jsonify({"error": "Store not found"}), 404
+
+    snippet = gen.generate_site_schema_snippet(int(store_id))
+    try:
+        theme_id = client.get_main_theme_id()
+        if not theme_id:
+            return jsonify({"error": "No main theme found"}), 502
+        client.upsert_theme_asset(theme_id, _SCHEMA_SNIPPET_KEY, snippet)
+        layout = client.get_theme_asset(theme_id, "layout/theme.liquid")
+        new_layout, changed = _inject_render_into_layout(layout, _SCHEMA_RENDER_TAG)
+        if changed:
+            client.upsert_theme_asset(theme_id, "layout/theme.liquid", new_layout)
+        _save_aeo_asset(int(store_id), "site_schema", json.dumps(_SITE_SCHEMA_TYPES), "published")
+    except Exception as e:
+        logger.exception("Site schema apply failed: %s", e)
+        return jsonify({"error": str(e)}), 502
     return jsonify(
         {
             "ok": True,
-            "organization_jsonld": org,
-            "message": "Organization JSON-LD generated. Add it site-wide via a theme snippet "
-            "(layout/theme.liquid) — copy the snippet below into your theme.",
+            "message": "Site-wide Organization + WebSite schema and dynamic BreadcrumbList "
+            "published to your theme. Re-scan to reflect it in scores.",
         }
     )
+
+
+@ai_seo_bp.route("/api/ai-seo/aeo/schema/unpublish", methods=["POST"])
+def aeo_schema_unpublish():
+    data = request.get_json() or {}
+    store_id = data.get("store_id")
+    if not store_id:
+        return jsonify({"error": "store_id is required"}), 400
+    client, store = _client_for_store(store_id)
+    if not client:
+        return jsonify({"error": "Store not found"}), 404
+    try:
+        theme_id = client.get_main_theme_id()
+        if theme_id:
+            layout = client.get_theme_asset(theme_id, "layout/theme.liquid")
+            if layout and _SCHEMA_RENDER_TAG in layout:
+                cleaned = layout.replace(f"  {_SCHEMA_RENDER_TAG}\n", "").replace(_SCHEMA_RENDER_TAG, "")
+                client.upsert_theme_asset(theme_id, "layout/theme.liquid", cleaned)
+            client.delete_theme_asset(theme_id, _SCHEMA_SNIPPET_KEY)
+        _save_aeo_asset(int(store_id), "site_schema", "[]", "draft")
+    except Exception as e:
+        logger.exception("Site schema unpublish failed: %s", e)
+        return jsonify({"error": str(e)}), 502
+    return jsonify({"ok": True, "message": "Site-wide schema removed from theme and restored."})
+
+
+@ai_seo_bp.route("/api/ai-seo/aeo/org-settings", methods=["GET", "POST"])
+def aeo_org_settings():
+    store_id = request.args.get("store_id") or (request.get_json(silent=True) or {}).get("store_id")
+    if not store_id:
+        return jsonify({"error": "store_id is required"}), 400
+    store_id = int(store_id)
+
+    if request.method == "GET":
+        with db.get_cursor() as cur:
+            cur.execute("SELECT * FROM schema_settings WHERE store_id = %s", (store_id,))
+            s = cur.fetchone()
+        return jsonify(
+            {
+                "name": (s and s.get("organization_name")) or "",
+                "logo_url": (s and s.get("organization_logo_url")) or "",
+                "url": (s and s.get("organization_url")) or "",
+                "description": (s and s.get("organization_description")) or "",
+                "email": (s and s.get("organization_email")) or "",
+                "phone": (s and s.get("organization_phone")) or "",
+                "same_as": (s and s.get("organization_same_as")) or [],
+                "knows_about": (s and s.get("organization_knows_about")) or [],
+            }
+        )
+
+    data = request.get_json() or {}
+    same_as = [u.strip() for u in (data.get("same_as") or []) if isinstance(u, str) and u.strip()]
+    knows = [k.strip() for k in (data.get("knows_about") or []) if isinstance(k, str) and k.strip()]
+    with db.get_cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO schema_settings
+                (store_id, organization_name, organization_logo_url, organization_url,
+                 organization_description, organization_email, organization_phone,
+                 organization_same_as, organization_knows_about, updated_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+            ON CONFLICT (store_id) DO UPDATE SET
+                organization_name = EXCLUDED.organization_name,
+                organization_logo_url = EXCLUDED.organization_logo_url,
+                organization_url = EXCLUDED.organization_url,
+                organization_description = EXCLUDED.organization_description,
+                organization_email = EXCLUDED.organization_email,
+                organization_phone = EXCLUDED.organization_phone,
+                organization_same_as = EXCLUDED.organization_same_as,
+                organization_knows_about = EXCLUDED.organization_knows_about,
+                updated_at = NOW()
+            """,
+            (
+                store_id, (data.get("name") or "").strip() or None,
+                (data.get("logo_url") or "").strip() or None,
+                (data.get("url") or "").strip() or None,
+                (data.get("description") or "").strip() or None,
+                (data.get("email") or "").strip() or None,
+                (data.get("phone") or "").strip() or None,
+                json.dumps(same_as), json.dumps(knows),
+            ),
+        )
+    return jsonify({"ok": True})

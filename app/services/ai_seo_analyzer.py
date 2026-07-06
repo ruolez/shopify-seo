@@ -277,6 +277,7 @@ def analyze_ai_visibility(
     schema_markup=None,
     crawlability=None,
     store_domain=None,
+    site_schema_types=None,
 ):
     """Score a product/collection's AI-answer-engine readiness.
 
@@ -285,6 +286,8 @@ def analyze_ai_visibility(
     schema_markup: list of pushed schema_markup rows (each with 'schema_type').
     crawlability: precomputed (score, detail) from analyze_store_crawlability,
         or None when the store hasn't been crawled.
+    site_schema_types: schema types published site-wide via the theme (e.g.
+        Organization, BreadcrumbList) — credited to every item.
     Returns {"score", "breakdown"}; degrades gracefully when live is None.
     """
     rules = get_setting("rules.ai_seo", DEFAULTS["rules.ai_seo"])
@@ -297,10 +300,10 @@ def analyze_ai_visibility(
     h2s = (live or {}).get("h2s")
 
     pushed_types = [r["schema_type"] for r in (schema_markup or []) if r.get("schema_type")]
-    if live is not None:
-        schema_types = list(dict.fromkeys((live.get("schema_types") or []) + pushed_types))
-    elif pushed_types:
-        schema_types = pushed_types
+    site_types = list(site_schema_types or [])
+    if live is not None or pushed_types or site_types:
+        base_types = (live.get("schema_types") if live is not None else []) or []
+        schema_types = list(dict.fromkeys(base_types + pushed_types + site_types))
     else:
         schema_types = None
 

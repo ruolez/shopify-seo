@@ -209,6 +209,16 @@ class Database:
                     updated_at TIMESTAMP DEFAULT NOW()
                 )
             """)
+            for _ddl in [
+                "ALTER TABLE schema_settings ADD COLUMN organization_description TEXT",
+                "ALTER TABLE schema_settings ADD COLUMN organization_email VARCHAR(255)",
+                "ALTER TABLE schema_settings ADD COLUMN organization_phone VARCHAR(50)",
+                "ALTER TABLE schema_settings ADD COLUMN organization_same_as JSONB DEFAULT '[]'",
+                "ALTER TABLE schema_settings ADD COLUMN organization_knows_about JSONB DEFAULT '[]'",
+            ]:
+                cur.execute(
+                    f"DO $$ BEGIN {_ddl}; EXCEPTION WHEN duplicate_column THEN NULL; END $$"
+                )
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS generated_collections (
                     id SERIAL PRIMARY KEY,

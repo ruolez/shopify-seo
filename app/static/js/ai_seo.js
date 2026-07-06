@@ -524,7 +524,7 @@ async function loadAeo() {
         container.innerHTML =
             robotsCard(a.robots) +
             llmsCard(a.llms, a.base_url) +
-            orgCard(a.organization);
+            siteSchemaCard(a.site_schema);
     } catch (err) {
         container.innerHTML = `<div class="empty-state"><span class="material-symbols-rounded">error</span><p>${escapeHtml(err.message)}</p></div>`;
     }
@@ -614,26 +614,106 @@ function llmsCard(l) {
         "llms", "Publish /pages/llms", statusPill(l.published_status), current, l.proposed);
 }
 
-function orgCard(o) {
-    const c = o.current || {};
-    const current = c.configured
-        ? `<div style="font-size:13px;">Name: <b>${escapeHtml(c.name || "—")}</b>${c.url ? ` · URL: ${escapeHtml(c.url)}` : ""}${c.logo ? " · logo set" : " · <span style='color:var(--warning)'>no logo</span>"}</div>`
-        : `<div style="color:var(--on-surface-secondary);font-size:13px;">Organization details not configured (set them in Schema settings).</div>`;
+function _inp(id, label, value, ph) {
+    return `<div style="margin-bottom:8px;"><label style="font-size:12px;color:var(--on-surface-secondary);display:block;margin-bottom:2px;">${label}</label>
+        <input id="${id}" class="form-control" style="width:100%;" value="${escapeHtml(value || "")}" placeholder="${ph || ""}"></div>`;
+}
+
+function siteSchemaCard(o) {
+    const org = o.org || {};
+    const published = o.published_status === "published";
     const im = o.impact || {};
-    const orgImprove = im.current_avg != null
-        ? `<b>Improves Entity authority:</b> your pages average ${im.current_avg}/100 now — adding site-wide Organization schema lifts pages missing it by +${im.uplift}.`
-        : `<b>Improves Entity authority:</b> adds a site-wide brand entity signal (+${im.uplift || 30} on pages that lack it).`;
-    return aeoShell("Organization JSON-LD",
-        "Site-wide brand entity schema. Generates a snippet to paste into your theme (layout/theme.liquid).",
-        "<b>Targets the entity-authority signal.</b> Helps AI models recognise your brand as a known entity (name, URL, logo) — a trust signal that influences which sources get cited.",
-        orgImprove,
-        "schema", "Generate snippet", statusPill(o.published_status), current,
-        JSON.stringify(o.proposed, null, 2));
+    const live = o.current_live || {};
+    const improve = im.current_avg != null
+        ? `<b>Improves Structured data:</b> your pages average ${im.current_avg}/100 — publishing adds <b>Organization</b> + <b>BreadcrumbList</b> to every page (2 of the 4 desired schema types), lifting per-page structured-data toward ~90+.`
+        : `<b>Improves Structured data:</b> adds Organization + BreadcrumbList site-wide.`;
+    const liveNote = (live.organization || live.breadcrumb)
+        ? `<div style="font-size:12px;color:var(--on-surface-secondary);">Detected on storefront: ${live.organization ? "Organization ✓" : ""} ${live.breadcrumb ? "BreadcrumbList ✓" : ""} — publishing will reinforce/replace with a complete version.</div>`
+        : `<div style="font-size:12px;color:var(--on-surface-secondary);">No Organization/BreadcrumbList detected on your storefront yet.</div>`;
+
+    const form = `
+        <div style="font-weight:600;font-size:13px;margin:6px 0;">Brand details (for the Organization entity)</div>
+        ${_inp("org-name", "Business name", org.name)}
+        ${_inp("org-url", "Website URL", org.url, "https://a2ztobacco.com")}
+        ${_inp("org-logo", "Logo URL", org.logo_url, "https://…/logo.png")}
+        ${_inp("org-desc", "Short description", org.description, "What your brand sells, in one line")}
+        <div style="display:flex;gap:8px;">${_inp("org-email", "Contact email", org.email)}${_inp("org-phone", "Contact phone", org.phone)}</div>
+        <div style="margin-bottom:8px;"><label style="font-size:12px;color:var(--on-surface-secondary);display:block;margin-bottom:2px;">Social / profile URLs — <b>sameAs</b> (one per line; strongest AI entity signal)</label>
+            <textarea id="org-sameas" class="form-control" style="width:100%;height:70px;" placeholder="https://www.facebook.com/yourbrand&#10;https://www.instagram.com/yourbrand">${escapeHtml((org.same_as || []).join("\n"))}</textarea></div>
+        ${_inp("org-knows", "Topics you're known for — knowsAbout (comma-separated)", (org.knows_about || []).join(", "))}
+        <button class="btn btn-secondary btn-sm" onclick="saveOrgSettings(this)"><span class="material-symbols-rounded">save</span> Save brand details</button>
+    `;
+
+    return `<div class="card" style="padding:16px;margin-bottom:16px;">
+        <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
+            <h3 style="margin:0;flex:1;">Site-wide Schema — Organization + Breadcrumbs</h3>
+            ${statusPill(o.published_status)}
+            <button class="btn btn-secondary btn-sm" onclick="downloadAeo('schema')"><span class="material-symbols-rounded">download</span></button>
+            ${published
+                ? `<button class="btn btn-secondary btn-sm" onclick="unpublishSchema(this)"><span class="material-symbols-rounded">undo</span> Unpublish</button>`
+                : ""}
+            <button class="btn btn-primary btn-sm" onclick="publishSchema(this)"><span class="material-symbols-rounded">cloud_upload</span> ${published ? "Re-publish" : "Publish to theme"}</button>
+        </div>
+        <p style="font-size:12px;color:var(--on-surface-secondary);margin:6px 0 8px;">Publishes a theme snippet: static <b>Organization</b> + <b>WebSite</b> JSON-LD, plus a <b>BreadcrumbList</b> that renders dynamically (Home → Collection → Product) on every product, collection and blog page. Reversible.</p>
+        ${aeoImpact("<b>Targets structured-data</b> — the two site-wide schema types (BreadcrumbList, Organization) the per-product optimizer can't add.", improve)}
+        ${liveNote}
+        ${form}
+        ${aeoDetails("View generated Organization JSON-LD", JSON.stringify(o.proposed_org, null, 2))}
+        ${aeoDetails("View theme snippet (ai-seo-schema.liquid)", o.proposed_snippet)}
+    </div>`;
+}
+
+async function saveOrgSettings(btn) {
+    btn.disabled = true;
+    const body = {
+        store_id: parseInt(getStoreId()),
+        name: document.getElementById("org-name").value,
+        url: document.getElementById("org-url").value,
+        logo_url: document.getElementById("org-logo").value,
+        description: document.getElementById("org-desc").value,
+        email: document.getElementById("org-email").value,
+        phone: document.getElementById("org-phone").value,
+        same_as: document.getElementById("org-sameas").value.split("\n").map((s) => s.trim()).filter(Boolean),
+        knows_about: document.getElementById("org-knows").value.split(",").map((s) => s.trim()).filter(Boolean),
+    };
+    try {
+        await apiRequest("/api/ai-seo/aeo/org-settings", { method: "POST", body });
+        showToast("Brand details saved", "success");
+        loadAeo();
+    } catch (err) {
+        showToast(`Save failed: ${err.message}`, "error");
+        btn.disabled = false;
+    }
+}
+
+async function publishSchema(btn) {
+    if (!confirm("Publish Organization + BreadcrumbList schema to your live theme? (reversible)")) return;
+    btn.disabled = true;
+    btn.innerHTML = '<span class="material-symbols-rounded">hourglass_empty</span> Publishing…';
+    try {
+        const res = await apiRequest("/api/ai-seo/aeo/schema/apply", { method: "POST", body: { store_id: parseInt(getStoreId()) } });
+        showToast(res.message || "Published", "success");
+    } catch (err) {
+        showToast(`Publish failed: ${err.message}`, "error");
+    }
+    loadAeo();
+}
+
+async function unpublishSchema(btn) {
+    if (!confirm("Remove the site-wide schema from your theme?")) return;
+    btn.disabled = true;
+    try {
+        const res = await apiRequest("/api/ai-seo/aeo/schema/unpublish", { method: "POST", body: { store_id: parseInt(getStoreId()) } });
+        showToast(res.message || "Removed", "success");
+    } catch (err) {
+        showToast(`Unpublish failed: ${err.message}`, "error");
+    }
+    loadAeo();
 }
 
 function downloadAeo(key) {
-    const map = { robots: window._aeo.robots.proposed, llms: window._aeo.llms.proposed, schema: JSON.stringify(window._aeo.organization.proposed, null, 2) };
-    const names = { robots: "robots.txt.liquid", llms: "llms.txt", schema: "organization.jsonld" };
+    const map = { robots: window._aeo.robots.proposed, llms: window._aeo.llms.proposed, schema: window._aeo.site_schema.proposed_snippet };
+    const names = { robots: "robots.txt.liquid", llms: "llms.txt", schema: "ai-seo-schema.liquid" };
     const blob = new Blob([map[key] || ""], { type: "text/plain" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
