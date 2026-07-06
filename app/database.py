@@ -586,6 +586,22 @@ class Database:
                 "error = COALESCE(error, 'Interrupted — server restarted'), completed_at = NOW() "
                 "WHERE status IN ('pending', 'running')"
             )
+            # Same recovery for batch tasks and tracking runs — their daemon threads die
+            # on restart too, otherwise the row is stuck 'running' forever (as old March
+            # bulk_tasks were). Guarded in case a table isn't created yet on a fresh DB.
+            cur.execute(
+                "DO $$ BEGIN "
+                "UPDATE bulk_tasks SET status = 'failed', completed_at = NOW() "
+                "WHERE status IN ('pending', 'running'); "
+                "EXCEPTION WHEN undefined_table THEN NULL; END $$"
+            )
+            cur.execute(
+                "DO $$ BEGIN "
+                "UPDATE ai_tracking_runs SET status = 'failed', "
+                "error = COALESCE(error, 'Interrupted — server restarted'), completed_at = NOW() "
+                "WHERE status IN ('pending', 'running'); "
+                "EXCEPTION WHEN undefined_table THEN NULL; END $$"
+            )
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS news_hub_pages (
                     store_id INTEGER PRIMARY KEY REFERENCES stores(id) ON DELETE CASCADE,
@@ -1148,6 +1164,33 @@ class Database:
                 )
             """)
             cur.execute("CREATE INDEX IF NOT EXISTS idx_ai_mention_results_run ON ai_mention_results(run_id)")
+
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS ai_excluded_brands (
+                    id SERIAL PRIMARY KEY,
+                    store_id INTEGER REFERENCES stores(id) ON DELETE CASCADE,
+                    brand_key VARCHAR(120) NOT NULL,
+                    name VARCHAR(255),
+                    created_at TIMESTAMP DEFAULT NOW(),
+                    UNIQUE(store_id, brand_key)
+                )
+            """)
+
+            for _col, _ddl in [
+                ("runs_per_prompt", "ALTER TABLE ai_config ADD COLUMN runs_per_prompt INTEGER DEFAULT 3"),
+            ]:
+                cur.execute(
+                    f"DO $$ BEGIN {_ddl}; EXCEPTION WHEN duplicate_column THEN NULL; END $$"
+                )
+            for _ddl in [
+                "ALTER TABLE ai_mention_results ADD COLUMN recommended_brands JSONB DEFAULT '[]'",
+                "ALTER TABLE ai_mention_results ADD COLUMN brand_known BOOLEAN",
+                "ALTER TABLE ai_mention_results ADD COLUMN run_index INTEGER DEFAULT 0",
+                "ALTER TABLE ai_tracking_runs ADD COLUMN gap_analysis JSONB",
+            ]:
+                cur.execute(
+                    f"DO $$ BEGIN {_ddl}; EXCEPTION WHEN duplicate_column THEN NULL; END $$"
+                )
 
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS aeo_assets (

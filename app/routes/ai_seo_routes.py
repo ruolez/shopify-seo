@@ -412,11 +412,15 @@ def optimize_preview():
     if geo.get("error"):
         return jsonify({"error": geo["error"]}), 502
 
-    # Honest projection: reuse the real crawl schema, add the FAQPage we'd push.
+    # Honest projection: reuse the real crawl schema, add the schema we'd push (FAQPage
+    # plus the enriched Product/CollectionPage JSON-LD applied alongside the content).
     live_after = dict((stored or {}).get("live_crawl") or {}) if stored else {}
     schema_after = list(live_after.get("schema_types") or [])
     if geo.get("faqpage_jsonld") and "FAQPage" not in schema_after:
         schema_after.append("FAQPage")
+    pushed_type = "CollectionPage" if resource_type == "collection" else "Product"
+    if pushed_type not in schema_after:
+        schema_after.append(pushed_type)
     live_after["schema_types"] = schema_after
     # Crawlability is store-level (robots.txt/llms.txt) — carry it over unchanged so
     # content optimization never shows a spurious crawlability delta.
@@ -488,6 +492,33 @@ def _push_and_rescore(store, resource_type, item, description_html, meta_title, 
 
     stored = _stored_score(store_id, resource_type, resource_id)
     updated_item = {**item, "description": description_html or item.get("description"), "meta_title": meta_title, "meta_description": meta_description}
+
+    # Also generate & push enriched Product / CollectionPage JSON-LD (seo.schema_json_ld) —
+    # the structured-data signal AI answer engines reward. Best-effort: a schema failure
+    # must not undo the content/meta/FAQ that already applied successfully.
+    try:
+        base = store["domain"] if store["domain"].endswith(".myshopify.com") else f"{store['domain']}.myshopify.com"
+        if resource_type == "collection":
+            from app.routes.schema_routes import _get_org_settings
+            from app.services.schema_generator import generate_collection_schema
+            col_schema = generate_collection_schema(updated_item, base, _get_org_settings(store_id))
+            client.set_product_metafield(shopify_id, "seo", "schema_json_ld", json.dumps(col_schema), "json")
+            with db.get_cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO schema_markup (store_id, resource_id, resource_type, schema_type, schema_json, is_valid, pushed_to_shopify, pushed_at)
+                    VALUES (%s, %s, 'collection', 'CollectionPage', %s, TRUE, TRUE, NOW())
+                    ON CONFLICT (store_id, resource_id, schema_type) DO UPDATE
+                    SET schema_json = EXCLUDED.schema_json, pushed_to_shopify = TRUE, pushed_at = NOW()
+                    """,
+                    (store_id, str(shopify_id), json.dumps(col_schema)),
+                )
+        else:
+            from app.routes.schema_routes import generate_and_push_product_schema
+            generate_and_push_product_schema(resource_id, client)
+    except Exception as e:
+        logger.warning("Schema JSON-LD push failed for %s %s: %s", resource_type, resource_id, e)
+
     return _rescore_item(
         store_id,
         resource_type,
@@ -575,8 +606,15 @@ def _execute_ai_seo_batch(batch_id, store_id, resource_type, resource_ids):
             completed += 1
             with db.get_cursor() as cur:
                 cur.execute(
-                    f"UPDATE bulk_task_items SET status = 'completed', completed_at = NOW() WHERE bulk_task_id = %s AND {item_col} = %s",
-                    (batch_id, rid),
+                    f"UPDATE bulk_task_items SET status = 'completed', ai_result = %s, completed_at = NOW() WHERE bulk_task_id = %s AND {item_col} = %s",
+                    (
+                        json.dumps({
+                            "geo_edits_applied": geo.get("geo_edits_applied", []),
+                            "preserved_keywords": geo.get("preserved_keywords", []),
+                            "dropped_keywords": geo.get("dropped_keywords", []),
+                        }),
+                        batch_id, rid,
+                    ),
                 )
         except Exception as e:
             failed += 1
@@ -593,8 +631,30 @@ def _execute_ai_seo_batch(batch_id, store_id, resource_type, resource_ids):
         cur.execute("UPDATE bulk_tasks SET status = 'completed', completed_at = NOW(), current_product_title = NULL WHERE id = %s", (batch_id,))
 
 
+def _sweep_stale_jobs():
+    """Fail any background job that's been 'running' far longer than possible —
+    catches daemons killed without a clean restart. Runs cheaply on job start/poll."""
+    try:
+        with db.get_cursor() as cur:
+            cur.execute(
+                "UPDATE bulk_tasks SET status='failed', completed_at=NOW() "
+                "WHERE status IN ('pending','running') AND created_at < NOW() - INTERVAL '6 hours'"
+            )
+            cur.execute(
+                "UPDATE ai_tracking_runs SET status='failed', error=COALESCE(error,'Timed out'), completed_at=NOW() "
+                "WHERE status IN ('pending','running') AND started_at < NOW() - INTERVAL '2 hours'"
+            )
+            cur.execute(
+                "UPDATE ai_tasks SET status='failed', error=COALESCE(error,'Timed out'), completed_at=NOW() "
+                "WHERE status IN ('pending','running') AND created_at < NOW() - INTERVAL '2 hours'"
+            )
+    except Exception:
+        pass
+
+
 @ai_seo_bp.route("/api/ai-seo/optimize/batch", methods=["POST"])
 def optimize_batch():
+    _sweep_stale_jobs()
     data = request.get_json() or {}
     store_id = data.get("store_id")
     resource_type = data.get("type", "product")
@@ -712,6 +772,7 @@ def manage_prompts():
 def tracking_run():
     from app.services.ai_visibility_tracker import start_tracking_run
 
+    _sweep_stale_jobs()
     data = request.get_json() or {}
     store_id = data.get("store_id")
     if not store_id:
@@ -766,18 +827,88 @@ def tracking_detail(run_id):
             (run_id,),
         )
         results = [dict(r) for r in cur.fetchall()]
+    # Compute live so excluded brands drop out immediately (stored summary is a snapshot).
+    from app.services.ai_visibility_tracker import compute_share_of_voice
+    agg = compute_share_of_voice(run_id)
     return jsonify(
         {
             "id": run["id"],
             "status": run["status"],
-            "share_of_voice": run["share_of_voice"],
-            "brand_mention_rate": run["brand_mention_rate"],
-            "citation_rate": run["citation_rate"],
-            "avg_rank": run["avg_rank"],
-            "summary": run["summary"],
+            "share_of_voice": agg["share_of_voice"],
+            "brand_mention_rate": agg["brand_mention_rate"],
+            "citation_rate": agg["citation_rate"],
+            "avg_rank": agg["avg_rank"],
+            "brand_known_rate": agg["brand_known_rate"],
+            "competitors": agg["competitors"],
+            "gap_analysis": run["gap_analysis"],
             "results": results,
         }
     )
+
+
+@ai_seo_bp.route("/api/ai-seo/tracking/competitor", methods=["POST"])
+def add_competitor_from_results():
+    """Add an AI-recommended brand to the store's competitor list."""
+    import re as _re
+
+    data = request.get_json() or {}
+    store_id = data.get("store_id")
+    name = (data.get("name") or "").strip()
+    domain_in = (data.get("domain") or "").strip().lower()
+    if not store_id or not name:
+        return jsonify({"error": "store_id and name are required"}), 400
+    # Prefer the real domain when we have one; else use the name if it's a domain, else slugify.
+    if domain_in:
+        domain, display = domain_in, name
+    elif _re.match(r"^(?:[a-z0-9-]+\.)+[a-z]{2,}$", name, _re.I):
+        domain, display = name.lower(), name
+    else:
+        domain = _re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-") or name.lower()
+        display = name
+    try:
+        with db.get_cursor() as cur:
+            cur.execute(
+                """INSERT INTO competitors (store_id, domain, name, notes)
+                   VALUES (%s, %s, %s, 'Added from AI visibility results')
+                   ON CONFLICT (store_id, domain) DO NOTHING""",
+                (int(store_id), domain, display),
+            )
+    except Exception as e:
+        logger.exception("Add competitor failed: %s", e)
+        return jsonify({"error": str(e)}), 500
+    return jsonify({"ok": True, "domain": domain, "name": display})
+
+
+@ai_seo_bp.route("/api/ai-seo/tracking/exclude", methods=["POST"])
+def exclude_brand_from_results():
+    """Exclude an AI-recommended brand (by canonical key) from future results."""
+    from app.services.ai_visibility_tracker import _canonical_brand_key
+
+    data = request.get_json() or {}
+    store_id = data.get("store_id")
+    name = (data.get("name") or "").strip()
+    key = (data.get("key") or "").strip() or _canonical_brand_key(data.get("domain") or name)
+    if not store_id or not key:
+        return jsonify({"error": "store_id and key/name are required"}), 400
+    with db.get_cursor() as cur:
+        cur.execute(
+            """INSERT INTO ai_excluded_brands (store_id, brand_key, name)
+               VALUES (%s, %s, %s) ON CONFLICT (store_id, brand_key) DO NOTHING""",
+            (int(store_id), key, name or key),
+        )
+    return jsonify({"ok": True, "key": key})
+
+
+@ai_seo_bp.route("/api/ai-seo/tracking/<int:run_id>/gap-analysis", methods=["POST"])
+def tracking_gap_analysis(run_id):
+    from app.services.ai_visibility_tracker import analyze_competitive_gap
+
+    try:
+        analysis = analyze_competitive_gap(run_id)
+    except Exception as e:
+        logger.exception("Gap analysis failed: %s", e)
+        return jsonify({"error": str(e)}), 502
+    return jsonify({"ok": True, "gap_analysis": analysis})
 
 
 # ── Phase 4: storefront AEO assets ──────────────────────────────────────

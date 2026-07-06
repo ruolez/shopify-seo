@@ -810,6 +810,22 @@ class ShopifyClient:
         product = data.get("product") or {}
         return product.get("metafield")
 
+    def get_product_metafields(self, product_shopify_id, first=40):
+        """List a product's metafields (namespace/key/value/type) for spec extraction."""
+        query = """
+        query ($id: ID!, $first: Int!) {
+          product(id: $id) {
+            metafields(first: $first) {
+              edges { node { namespace key value type } }
+            }
+          }
+        }
+        """
+        data = self._graphql(query, {"id": product_shopify_id, "first": first})
+        product = data.get("product") or {}
+        edges = (product.get("metafields") or {}).get("edges", [])
+        return [e["node"] for e in edges if e.get("node")]
+
     def get_collection_products_with_images(self, collection_shopify_id, limit=4):
         query = """
         query ($id: ID!, $first: Int!) {

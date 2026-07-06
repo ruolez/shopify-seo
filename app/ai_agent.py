@@ -1483,11 +1483,207 @@ def _build_faqpage_jsonld(faq):
     }
 
 
+_GEO_STOPWORDS = {
+    "the", "and", "for", "with", "pack", "packs", "box", "count", "from", "your", "our",
+    "best", "buy", "shop", "online", "sale", "new", "pre", "priced", "kit", "set", "free",
+    "shipping", "great", "quality", "premium", "product", "products", "item", "items", "this",
+    "that", "these", "those", "each", "per", "you", "are", "was", "will", "can", "more",
+}
+
+
+def _geo_significant_terms(text):
+    """Distinctive single words worth preserving from a title/meta field."""
+    out = []
+    for w in re.findall(r"[a-z0-9][a-z0-9&'-]{2,}", (text or "").lower()):
+        if len(w) >= 4 and w not in _GEO_STOPWORDS and w not in out:
+            out.append(w)
+    return out
+
+
+def _ranking_keywords_for_item(item_type, item_id, store_id, limit=12):
+    """Top GSC queries + URL-matched Semrush keywords for a product/collection — the
+    phrases the page already ranks for, which must survive optimization."""
+    from urllib.parse import urlparse as _urlparse
+
+    kws = []
+    try:
+        table = "synced_products" if item_type == "product" else "synced_collections"
+        with db.get_cursor() as cur:
+            cur.execute(f"SELECT handle, store_id FROM {table} WHERE id = %s", (item_id,))
+            row = cur.fetchone()
+            if not row or not row.get("handle"):
+                return []
+            sid = store_id or row["store_id"]
+            cur.execute("SELECT gsc_property FROM gsc_credentials WHERE store_id = %s", (sid,))
+            cred = cur.fetchone()
+        base = (cred["gsc_property"].rstrip("/") if cred and cred.get("gsc_property") else "")
+        path = f"{'products' if item_type == 'product' else 'collections'}/{row['handle']}"
+        page_url = f"{base}/{path}" if base else ""
+        if page_url:
+            with db.get_cursor() as cur:
+                cur.execute(
+                    """SELECT query FROM gsc_daily_metrics
+                       WHERE store_id = %s AND page = %s AND date >= (CURRENT_DATE - INTERVAL '30 days')
+                       GROUP BY query ORDER BY SUM(impressions) DESC LIMIT %s""",
+                    (sid, page_url, limit),
+                )
+                kws += [r["query"] for r in cur.fetchall() if r["query"]]
+        with db.get_cursor() as cur:
+            cur.execute(
+                """SELECT keyword, url FROM semrush_keywords
+                   WHERE store_id = %s AND url IS NOT NULL AND url <> ''
+                   ORDER BY search_volume DESC NULLS LAST LIMIT 500""",
+                (sid,),
+            )
+            for r in cur.fetchall():
+                u = r["url"] or ""
+                p = (u.replace(base, "").strip("/") if base else "") or _urlparse(u).path.strip("/")
+                if p == path and r["keyword"]:
+                    kws.append(r["keyword"])
+                if len(kws) >= limit * 2:
+                    break
+    except Exception as e:
+        logger.warning("Ranking-keyword lookup failed for %s %s: %s", item_type, item_id, e)
+        return []
+
+    seen, out = set(), []
+    for k in kws:
+        kl = (k or "").strip().lower()
+        if kl and kl not in seen:
+            seen.add(kl)
+            out.append(k.strip())
+    return out[:limit]
+
+
+def _geo_preserve_keywords(item, entity_type):
+    """Build the MUST-PRESERVE keyword list: existing meta/title terms + ranking phrases."""
+    terms = _ranking_keywords_for_item(entity_type, item.get("id"), item.get("store_id"))
+    lower = {t.lower() for t in terms}
+    for src in (item.get("meta_title"), item.get("title"), item.get("vendor"), item.get("product_type")):
+        for t in _geo_significant_terms(src):
+            if t not in lower:
+                terms.append(t)
+                lower.add(t)
+    return terms[:25]
+
+
+_PACK_RE = re.compile(
+    r"\b\d+\s*(?:ct|count|pack|packs|pk|pouch(?:es)?|cigarillos?|cigars?|pieces?|pcs|ml|mg|oz|g|lb)\b[^,;–—-]{0,20}",
+    re.I,
+)
+# Variant titles that are pricing/promo tiers, not real product options.
+_VARIANT_PROMO_RE = re.compile(r"^\s*\$?\d|save|\bbuy\b|\bdeal\b|%|\beach\b|\bpack of\b|\bcents?\b|c\s*$|/", re.I)
+_SPEC_NAMESPACES = {"specs", "spec", "specification", "specifications", "custom", "details", "attributes", "facts"}
+_SPEC_SKIP_NS = {"seo", "reviews", "judgeme", "loox", "yotpo", "global", "descriptors", "shopify"}
+_SPEC_TYPES = {"single_line_text_field", "number_integer", "number_decimal", "boolean", "rating", "dimension", "weight", "volume"}
+_SPEC_SKIP_KEYS = {"schema_json_ld", "faq_schema_json_ld"}
+
+
+def _geo_fetch_metafield_specs(store_id, shopify_id):
+    """Best-effort: pull spec-like metafields (namespace/type filtered) as {Label: value}."""
+    from app.shopify_client import ShopifyClient
+
+    with db.get_cursor() as cur:
+        cur.execute("SELECT domain, access_token_enc, api_version FROM stores WHERE id = %s", (store_id,))
+        s = cur.fetchone()
+    if not s:
+        return {}
+    client = ShopifyClient(s["domain"], decrypt_value(s["access_token_enc"]), s["api_version"])
+    out = {}
+    for mf in client.get_product_metafields(shopify_id):
+        ns = (mf.get("namespace") or "").lower()
+        key = mf.get("key") or ""
+        typ = mf.get("type") or ""
+        val = (mf.get("value") or "").strip()
+        if key in _SPEC_SKIP_KEYS or ns in _SPEC_SKIP_NS or ns not in _SPEC_NAMESPACES:
+            continue
+        if typ not in _SPEC_TYPES or not val or len(val) > 80 or val[:1] in "[{":
+            continue
+        out[key.replace("_", " ").replace("-", " ").strip().title()] = val
+        if len(out) >= 15:
+            break
+    return out
+
+
+def _geo_product_facts(item, entity_type):
+    """Verified facts (from store data) the model may safely state and tabulate."""
+    facts = {}
+    if item.get("vendor"):
+        facts["Brand"] = item["vendor"].strip()
+    ptype = (item.get("product_type") or item.get("collection_type") or "").strip()
+    if ptype:
+        facts["Type"] = ptype
+    packs = _PACK_RE.findall(item.get("title") or "")
+    if packs:
+        facts["Pack / size"] = "; ".join(dict.fromkeys(p.strip() for p in packs))[:120]
+
+    variants = item.get("variants") or []
+    if isinstance(variants, str):
+        try:
+            variants = json.loads(variants)
+        except (json.JSONDecodeError, ValueError):
+            variants = []
+    if variants:
+        opts = list(dict.fromkeys(
+            v.get("title") for v in variants
+            if v.get("title") and v.get("title") != "Default Title" and not _VARIANT_PROMO_RE.search(v["title"])
+        ))
+        if len(opts) > 1:
+            facts["Options / flavors"] = ", ".join(opts[:12])
+        prices = []
+        for v in variants:
+            try:
+                prices.append(float(v.get("price")))
+            except (ValueError, TypeError):
+                pass
+        if prices:
+            lo, hi = min(prices), max(prices)
+            facts["Price"] = f"${lo:.2f}" if lo == hi else f"${lo:.2f}–${hi:.2f}"
+        facts["Availability"] = "In stock" if any(v.get("available", True) for v in variants) else "Out of stock"
+        if variants[0].get("sku"):
+            facts["SKU"] = variants[0]["sku"]
+        if variants[0].get("barcode"):
+            facts["Barcode / GTIN"] = variants[0]["barcode"]
+
+    if entity_type == "product" and item.get("shopify_id") and item.get("store_id"):
+        try:
+            facts.update(_geo_fetch_metafield_specs(item["store_id"], item["shopify_id"]))
+        except Exception as e:
+            logger.warning("Metafield spec fetch failed for %s: %s", item.get("id"), e)
+    return facts
+
+
+def _geo_research(item):
+    """Best-effort Brave web research for real product facts. Rate-limit-safe and cached
+    (serp_scraper.brave_search sleeps between calls and backs off on 429)."""
+    try:
+        from app.services.serp_scraper import brave_search
+
+        brand = (item.get("vendor") or "").strip()
+        title = (item.get("title") or "").strip()
+        base = title if (brand and brand.lower() in title.lower()) or not brand else f"{brand} {title}"
+        results = brave_search(f"{base} specifications review".strip(), count=5)
+        if not results:
+            return ""
+        lines = []
+        for r in results[:4]:
+            desc = (r.get("description") or "").strip()
+            if desc:
+                lines.append(f"- {r.get('domain', '')}: {desc[:220]}")
+        return "\n".join(lines)
+    except Exception as e:
+        logger.warning("GEO Brave research failed: %s", e)
+        return ""
+
+
 def _generate_geo_content(client, config, item, entity_type, weak_signals=None):
     """Single structured LLM call to GEO-optimize a product/collection.
 
-    Returns a review-ready dict (no writes): optimized description HTML, FAQ pairs,
-    a FAQPage JSON-LD, meta title/description, and the GEO levers applied.
+    Enhances existing content (never wholesale-replaces): the current meta and
+    description are given to the model with a MUST-PRESERVE keyword list, verified
+    product facts (for a Specifications table + Expert Verdict), and best-effort web
+    research. A deterministic check reports any existing keyword dropped from the
+    result. Returns a review-ready dict (no writes).
     """
     system_prompt = get_setting(
         f"prompts.ai_seo_{entity_type}", DEFAULTS[f"prompts.ai_seo_{entity_type}"]
@@ -1498,11 +1694,41 @@ def _generate_geo_content(client, config, item, entity_type, weak_signals=None):
             "\n\nThe current page scores weakest on these AI-readiness signals — "
             "prioritise fixing them:\n" + "\n".join(f"- {s}" for s in weak_signals)
         )
+    preserve = _geo_preserve_keywords(item, entity_type)
+    preserve_block = ""
+    if preserve:
+        preserve_block = (
+            "\n\nMUST-PRESERVE KEYWORDS — keep EVERY one of these appearing verbatim in the "
+            "optimized content (meta and/or body); they carry existing SEO value and ranking:\n"
+            + ", ".join(preserve)
+        )
+
+    facts = _geo_product_facts(item, entity_type)
+    facts_block = ""
+    if facts:
+        facts_block = (
+            "\n\nVERIFIED PRODUCT FACTS (from the store's own data — safe to state and to render as a "
+            "Specifications table; use ONLY these values, do not invent others):\n"
+            + "\n".join(f"- {k}: {v}" for k, v in facts.items())
+        )
+    research = _geo_research(item)
+    research_block = ""
+    if research:
+        research_block = (
+            "\n\nWEB RESEARCH CONTEXT (background only — include a detail ONLY if it clearly refers to "
+            "THIS exact product and you are confident it is accurate; otherwise ignore it):\n" + research
+        )
+
     user_prompt = (
         f"{entity_type.capitalize()} title: {item.get('title') or ''}\n"
         f"Brand/Vendor: {item.get('vendor') or 'n/a'}\n"
-        f"Type: {item.get('product_type') or item.get('collection_type') or 'n/a'}\n\n"
+        f"Type: {item.get('product_type') or item.get('collection_type') or 'n/a'}\n"
+        f"Current meta title: {item.get('meta_title') or '(none)'}\n"
+        f"Current meta description: {item.get('meta_description') or '(none)'}\n\n"
         f"Current description HTML:\n{item.get('description') or '(none)'}"
+        f"{facts_block}"
+        f"{research_block}"
+        f"{preserve_block}"
         f"{weak_block}"
     )
     resp = client.chat.completions.create(
@@ -1528,13 +1754,27 @@ def _generate_geo_content(client, config, item, entity_type, weak_signals=None):
     description = _sanitize_description(
         data.get("optimized_description_html") or data.get("description_html") or ""
     )
+    meta_title = (data.get("meta_title") or "").strip()
+    meta_description = (data.get("meta_description") or "").strip()
+
+    # Deterministic keyword-preservation check across the new meta + body.
+    new_text = (
+        re.sub(r"<[^>]+>", " ", description) + " " + meta_title + " " + meta_description
+    ).lower()
+    preserved_keywords = [k for k in preserve if k.lower() in new_text]
+    dropped_keywords = [k for k in preserve if k.lower() not in new_text]
+
     return {
         "optimized_description_html": description,
         "faq": faq,
         "faqpage_jsonld": _build_faqpage_jsonld(faq),
-        "meta_title": (data.get("meta_title") or "").strip(),
-        "meta_description": (data.get("meta_description") or "").strip(),
+        "meta_title": meta_title,
+        "meta_description": meta_description,
         "geo_edits_applied": data.get("geo_edits_applied") or [],
+        "preserved_keywords": preserved_keywords,
+        "dropped_keywords": dropped_keywords,
+        "expert_verdict": (data.get("expert_verdict") or "").strip(),
+        "product_facts": facts,
     }
 
 

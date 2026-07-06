@@ -363,6 +363,17 @@ function renderOptimizePreview(res) {
                .join("")}`
         : "";
 
+    const pk = p.preserved_keywords || [];
+    const dk = p.dropped_keywords || [];
+    let kwHtml = "";
+    if (pk.length || dk.length) {
+        kwHtml = `<div style="margin:4px 0 12px;">
+            <div style="font-weight:600;font-size:13px;margin-bottom:4px;">Keyword preservation</div>
+            ${pk.length ? `<div style="font-size:13px;color:var(--success);"><span class="material-symbols-rounded" style="font-size:15px;vertical-align:middle;">check_circle</span> ${pk.length} existing keyword${pk.length > 1 ? "s" : ""} kept</div>` : ""}
+            ${dk.length ? `<div style="font-size:13px;color:var(--error);margin-top:4px;"><span class="material-symbols-rounded" style="font-size:15px;vertical-align:middle;">warning</span> Missing from new content — review before applying: ${dk.map(escapeHtml).join(", ")}</div>` : ""}
+        </div>`;
+    }
+
     window._optimizePayload = {
         store_id: parseInt(getStoreId()),
         type: scanType,
@@ -384,16 +395,26 @@ function renderOptimizePreview(res) {
                 </button>
             </div>
             <div style="margin-bottom:12px;">${signalsHtml}</div>
+            ${kwHtml}
             <div style="font-weight:600;font-size:13px;margin:4px 0 6px;">GEO levers applied</div>
             <div style="margin-bottom:12px;">${edits || '<span style="color:var(--on-surface-secondary);font-size:13px;">—</span>'}</div>
             <h4 style="margin:12px 0 6px;">Meta title</h4>
             <div style="font-size:13px;">${escapeHtml(p.meta_title || "")}</div>
             <h4 style="margin:12px 0 6px;">Meta description</h4>
             <div style="font-size:13px;">${escapeHtml(p.meta_description || "")}</div>
+            ${p.expert_verdict ? `<h4 style="margin:12px 0 6px;">Expert Verdict</h4>
+                <div style="font-size:13px;font-style:italic;border-left:3px solid var(--primary);padding-left:10px;">${escapeHtml(p.expert_verdict)}</div>` : ""}
+            ${p.product_facts && Object.keys(p.product_facts).length ? `<div style="font-size:12px;color:var(--on-surface-secondary);margin-top:8px;"><b>Specifications table sourced from your data:</b> ${Object.keys(p.product_facts).map(escapeHtml).join(", ")}</div>` : ""}
             <h4 style="margin:12px 0 6px;">Optimized description</h4>
             <div style="border:1px solid var(--outline);border-radius:8px;padding:12px;max-height:340px;overflow:auto;">${p.optimized_description_html || ""}</div>
             <h4 style="margin:16px 0 6px;">FAQ (FAQPage schema)</h4>
             ${faqHtml || '<div style="color:var(--on-surface-secondary);">No FAQ generated</div>'}
+            <div style="margin-top:14px;padding:8px 12px;background:var(--surface-dim);border-radius:8px;font-size:12px;color:var(--on-surface-secondary);">
+                <span class="material-symbols-rounded" style="font-size:15px;vertical-align:middle;color:var(--primary);">data_object</span>
+                On apply, structured data (JSON-LD) is also pushed: <b>FAQPage</b> + enriched
+                <b>${scanType === "collection" ? "CollectionPage" : "Product"}</b> schema
+                ${scanType === "collection" ? "" : "(brand, offers, price, availability, GTIN/MPN, condition)"} — the structured-data signal AI engines reward.
+            </div>
         </div>`;
 }
 
@@ -723,6 +744,8 @@ function pollRun(runId, btn) {
     }, 3000);
 }
 
+let latestRunId = null;
+
 async function loadRuns() {
     const storeId = getStoreId();
     const metrics = document.getElementById("visibility-metrics");
@@ -730,12 +753,18 @@ async function loadRuns() {
     try {
         const runs = await apiRequest(`/api/ai-seo/tracking/runs?store_id=${storeId}`);
         const latest = runs.find((r) => r.status === "completed" || r.status === "budget_capped");
+        const brandKnown = latest?.summary?.brand_known_rate;
         metrics.innerHTML = latest
             ? `<div class="stat-card">${renderScoreRing(Math.round(latest.share_of_voice || 0), 56)}<div class="stat-label" style="margin-top:8px;">Share of voice</div></div>
                <div class="stat-card"><div class="stat-value">${latest.brand_mention_rate ?? 0}%</div><div class="stat-label">Brand mention rate</div></div>
-               <div class="stat-card"><div class="stat-value">${latest.citation_rate ?? 0}%</div><div class="stat-label">Domain citation rate</div></div>
+               <div class="stat-card"><div class="stat-value">${brandKnown != null ? brandKnown + "%" : "—"}</div><div class="stat-label">Brand knowledge (do models know you)</div></div>
                <div class="stat-card"><div class="stat-value">${latest.avg_rank ?? "—"}</div><div class="stat-label">Avg rank when listed</div></div>`
             : `<div class="empty-state" style="grid-column:1/-1;"><span class="material-symbols-rounded">travel_explore</span><p>No tracking runs yet.</p></div>`;
+
+        latestRunId = latest ? latest.id : null;
+        document.getElementById("competitors-panel").innerHTML = "";
+        document.getElementById("gap-panel").innerHTML = "";
+        if (latestRunId) loadRunDetail(latestRunId);
 
         if (!runs.length) {
             container.innerHTML = "";
@@ -759,6 +788,129 @@ async function loadRuns() {
     } catch (err) {
         showToast(`Failed to load runs: ${err.message}`, "error");
     }
+}
+
+async function loadRunDetail(runId) {
+    try {
+        const d = await apiRequest(`/api/ai-seo/tracking/${runId}`);
+        renderCompetitors(d.competitors || []);
+        renderGap(d.gap_analysis);
+    } catch (err) {
+        /* non-fatal */
+    }
+}
+
+function renderCompetitors(comps) {
+    const panel = document.getElementById("competitors-panel");
+    window._competitors = comps;
+    if (!comps.length) {
+        panel.innerHTML = "";
+        return;
+    }
+    const rows = comps
+        .map((c, i) => {
+            const site = c.domain && c.domain.toLowerCase() !== (c.name || "").toLowerCase()
+                ? `<a href="https://${escapeHtml(c.domain)}" target="_blank" rel="noopener" style="font-size:11px;color:var(--on-surface-secondary);margin-left:8px;text-decoration:none;">${escapeHtml(c.domain)} ↗</a>`
+                : "";
+            return `<div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--outline);">
+                <div style="flex:1;min-width:0;"><span style="font-size:13px;font-weight:500;">${escapeHtml(c.name)}</span>${site}</div>
+                <span class="badge badge-warning">${c.count}× recommended</span>
+                ${c.is_configured
+                    ? '<span class="badge badge-success">tracked</span>'
+                    : `<button class="btn btn-secondary btn-sm" onclick="addCompetitor(${i}, this)"><span class="material-symbols-rounded">add</span> Add</button>`}
+                <button class="icon-btn" title="Exclude from future results" onclick="excludeCompetitor(${i})"><span class="material-symbols-rounded">block</span></button>
+            </div>`;
+        })
+        .join("");
+    panel.innerHTML = `<div class="card" style="padding:16px;">
+        <h3 style="margin:0 0 4px;">Who the AI recommends instead</h3>
+        <p style="font-size:12px;color:var(--on-surface-secondary);margin:0 0 10px;">Brands/retailers surfaced in AI answers to your buyer queries — this is where your share of voice is going. Add any to your competitor list, or exclude ones that aren't real competitors (e.g. product brands you sell).</p>
+        ${rows}
+        <button class="btn btn-primary btn-sm" style="margin-top:12px;" onclick="runGapAnalysis(this)"><span class="material-symbols-rounded">analytics</span> Analyze competitive gap</button>
+    </div>`;
+}
+
+async function addCompetitor(index, btn) {
+    const c = window._competitors?.[index];
+    if (!c) return;
+    btn.disabled = true;
+    try {
+        await apiRequest("/api/ai-seo/tracking/competitor", {
+            method: "POST",
+            body: { store_id: parseInt(getStoreId()), name: c.name, domain: c.domain },
+        });
+        showToast(`Added ${c.name} to competitors`, "success");
+        btn.outerHTML = '<span class="badge badge-success">tracked</span>';
+    } catch (err) {
+        showToast(`Add failed: ${err.message}`, "error");
+        btn.disabled = false;
+    }
+}
+
+async function excludeCompetitor(index) {
+    const c = window._competitors?.[index];
+    if (!c) return;
+    try {
+        await apiRequest("/api/ai-seo/tracking/exclude", {
+            method: "POST",
+            body: { store_id: parseInt(getStoreId()), key: c.key, name: c.name, domain: c.domain },
+        });
+        showToast(`Excluded "${c.name}" from future results`, "success");
+        if (latestRunId) loadRunDetail(latestRunId);
+    } catch (err) {
+        showToast(`Exclude failed: ${err.message}`, "error");
+    }
+}
+
+async function runGapAnalysis(btn) {
+    if (!latestRunId) return;
+    btn.disabled = true;
+    btn.innerHTML = '<span class="material-symbols-rounded">hourglass_empty</span> Analyzing…';
+    const gap = document.getElementById("gap-panel");
+    gap.innerHTML = `<div class="loading-spinner" style="padding:24px 0;"><div class="spinner"></div><p>Crawling the competitor sites and analyzing the gap… (up to ~30s)</p></div>`;
+    try {
+        const res = await apiRequest(`/api/ai-seo/tracking/${latestRunId}/gap-analysis`, { method: "POST", body: {} });
+        renderGap(res.gap_analysis);
+        showToast("Gap analysis ready", "success");
+    } catch (err) {
+        gap.innerHTML = `<div class="empty-state"><span class="material-symbols-rounded">error</span><p>${escapeHtml(err.message)}</p></div>`;
+    }
+    btn.disabled = false;
+    btn.innerHTML = '<span class="material-symbols-rounded">analytics</span> Analyze competitive gap';
+}
+
+function renderGap(gap) {
+    const panel = document.getElementById("gap-panel");
+    if (!gap) {
+        panel.innerHTML = "";
+        return;
+    }
+    const chip = "background:var(--surface-dim);color:var(--on-surface);";
+    const pageRecs = (gap.page_improvements || gap.recommendations || [])
+        .map((r) => {
+            const pc = r.priority === "high" ? "badge-error" : r.priority === "medium" ? "badge-warning" : "badge-success";
+            const applies = r.applies_to ? `<span class="badge" style="${chip}">${escapeHtml(r.applies_to)}</span>` : "";
+            return `<div style="padding:10px 0;border-bottom:1px solid var(--outline);">
+                <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;"><span class="badge ${pc}">${escapeHtml(r.priority || "")}</span>${applies}<b>${escapeHtml(r.title || "")}</b></div>
+                <div style="font-size:13px;color:var(--on-surface-secondary);margin:4px 0;"><b>Why:</b> ${escapeHtml(r.why || "")}</div>
+                <div style="font-size:13px;"><b>Do this:</b> ${escapeHtml(r.action || "")}</div>
+            </div>`;
+        })
+        .join("");
+    const contentRecs = (gap.content_ideas || [])
+        .map((r) => `<div style="padding:10px 0;border-bottom:1px solid var(--outline);">
+            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">${r.format ? `<span class="badge" style="${chip}">${escapeHtml(r.format)}</span>` : ""}<b>${escapeHtml(r.title || "")}</b></div>
+            ${r.target_query ? `<div style="font-size:12px;color:var(--on-surface-secondary);margin:3px 0;">Targets query: “${escapeHtml(r.target_query)}”</div>` : ""}
+            <div style="font-size:13px;">${escapeHtml(r.why || "")}</div>
+        </div>`)
+        .join("");
+    panel.innerHTML = `<div class="card" style="padding:16px;">
+        <h3 style="margin:0 0 6px;">Competitive gap analysis</h3>
+        <p style="font-size:13px;margin:0 0 10px;">${escapeHtml(gap.summary || "")}</p>
+        ${gap.competitors_analyzed?.length ? `<p style="font-size:11px;color:var(--on-surface-secondary);margin:0 0 12px;">Crawled: ${gap.competitors_analyzed.map(escapeHtml).join(", ")}</p>` : ""}
+        ${pageRecs ? `<h4 style="margin:12px 0 4px;">Improve your product &amp; collection pages</h4>${pageRecs}` : ""}
+        ${contentRecs ? `<h4 style="margin:16px 0 4px;">Content to create to compete</h4>${contentRecs}` : ""}
+    </div>`;
 }
 
 document.addEventListener("DOMContentLoaded", async () => {

@@ -1,5 +1,16 @@
 import json
 import re
+from datetime import datetime, timedelta, timezone
+
+
+def _price_valid_until():
+    return (datetime.now(timezone.utc) + timedelta(days=365)).date().isoformat()
+
+
+def _gtin_field(barcode):
+    """Map a barcode to the correct GTIN property by length (UPC-12, EAN-13, etc.)."""
+    digits = re.sub(r"\D", "", barcode or "")
+    return {8: "gtin8", 12: "gtin12", 13: "gtin13", 14: "gtin14"}.get(len(digits), "gtin")
 
 
 def generate_product_schema(product, store_domain, org_settings=None):
@@ -50,12 +61,14 @@ def generate_product_schema(product, store_domain, org_settings=None):
                 "availability": "https://schema.org/InStock"
                 if variant.get("available", True)
                 else "https://schema.org/OutOfStock",
+                "itemCondition": "https://schema.org/NewCondition",
+                "priceValidUntil": _price_valid_until(),
             }
 
             if variant.get("sku"):
                 offer["sku"] = variant["sku"]
             if variant.get("barcode"):
-                offer["gtin"] = variant["barcode"]
+                offer[_gtin_field(variant["barcode"])] = variant["barcode"]
 
             offers.append(offer)
 
@@ -84,14 +97,60 @@ def generate_product_schema(product, store_domain, org_settings=None):
             "priceCurrency": currency,
             "price": "0",
             "availability": "https://schema.org/InStock",
+            "itemCondition": "https://schema.org/NewCondition",
+            "priceValidUntil": _price_valid_until(),
         }
 
     first_variant = variants[0] if variants else {}
     if first_variant.get("sku"):
         schema["sku"] = first_variant["sku"]
+        schema["mpn"] = first_variant["sku"]
     if first_variant.get("barcode"):
-        schema["gtin"] = first_variant["barcode"]
+        schema[_gtin_field(first_variant["barcode"])] = first_variant["barcode"]
 
+    # Entity anchors help AI engines resolve this as a distinct product entity.
+    product_url = f"https://{store_domain}/products/{product.get('handle', '')}"
+    schema["@id"] = f"{product_url}#product"
+    schema["mainEntityOfPage"] = product_url
+
+    # Real ratings only — never fabricate. Populated when review data is available.
+    rating_value = product.get("rating_value") or product.get("rating")
+    rating_count = product.get("rating_count") or product.get("reviews_count")
+    try:
+        if rating_value and rating_count and float(rating_count) > 0:
+            schema["aggregateRating"] = {
+                "@type": "AggregateRating",
+                "ratingValue": str(rating_value),
+                "reviewCount": str(int(float(rating_count))),
+                "bestRating": "5",
+                "worstRating": "1",
+            }
+    except (ValueError, TypeError):
+        pass
+
+    return schema
+
+
+def generate_collection_schema(collection, store_domain, org_settings=None):
+    """CollectionPage schema for a collection/category page (AEO structured data)."""
+    url = f"https://{store_domain}/collections/{collection.get('handle', '')}"
+    schema = {
+        "@context": "https://schema.org",
+        "@type": "CollectionPage",
+        "@id": f"{url}#collection",
+        "name": collection.get("meta_title") or collection.get("title", ""),
+        "description": _strip_html(collection.get("meta_description") or collection.get("description", "")),
+        "url": url,
+        "mainEntityOfPage": url,
+    }
+    if collection.get("image_url"):
+        schema["image"] = collection["image_url"]
+    if org_settings and org_settings.get("organization_name"):
+        schema["isPartOf"] = {
+            "@type": "WebSite",
+            "name": org_settings["organization_name"],
+            "url": f"https://{store_domain}",
+        }
     return schema
 
 
