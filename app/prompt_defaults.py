@@ -792,6 +792,10 @@ DEFAULTS = {
                     "Organization",
                 ],
             },
+            "schema_richness": {
+                "product": ["offers", "brand", "image", "identifier", "aggregateRating"],
+                "collection": ["description", "image", "isPartOf"],
+            },
         },
     },
     "rules.collection_seo": {

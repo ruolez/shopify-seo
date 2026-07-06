@@ -95,11 +95,11 @@ def _load_items(store_id, resource_type):
 
 
 def _pushed_schema(store_id):
-    """Map shopify resource_id -> list of pushed schema_markup rows."""
+    """Map shopify resource_id -> list of pushed schema_markup rows (with JSON for richness)."""
     out = {}
     with db.get_cursor() as cur:
         cur.execute(
-            "SELECT resource_id, schema_type FROM schema_markup WHERE store_id = %s",
+            "SELECT resource_id, schema_type, schema_json FROM schema_markup WHERE store_id = %s",
             (store_id,),
         )
         for row in cur.fetchall():

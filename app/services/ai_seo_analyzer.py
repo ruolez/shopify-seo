@@ -13,6 +13,7 @@ adding statistics, quotations and cited sources measurably lifts AI-citation
 rate, and LLMs reward fact density, entity authority and extractable answers.
 """
 
+import json
 import re
 from datetime import datetime, timezone
 
@@ -133,21 +134,51 @@ def _extractability(text, html, h2s=None):
     return score, detail
 
 
-def _structured_data_score(schema_types, resource_type, thresholds):
-    if schema_types is None:
+def _schema_has_field(schema, field):
+    """Presence check for a rich-schema field (handles GTIN variants + identifiers)."""
+    if field == "identifier":
+        return bool(
+            schema.get("sku")
+            or schema.get("mpn")
+            or any(k for k in schema if k.startswith("gtin"))
+        )
+    return bool(schema.get(field))
+
+
+def _structured_data_score(schema_types, resource_type, thresholds, primary_schema=None):
+    """Reward both schema TYPE presence and, when we have the primary schema JSON,
+    its RICHNESS (offers, brand, identifiers, ratings) — so an enriched Product
+    schema scores above a thin theme default."""
+    present = set(schema_types or [])
+    primary_type = "CollectionPage" if resource_type == "collection" else "Product"
+    if primary_schema:
+        present.add(primary_type)
+
+    if schema_types is None and not primary_schema:
         return 50, "Schema not crawled yet"
-    if not schema_types:
+    if not present:
         return 0, "No JSON-LD schema detected (as seen by AI crawlers)"
+
     desired = thresholds["desired_schema"].get(
         resource_type, thresholds["desired_schema"]["product"]
     )
-    present = set(schema_types)
     have = [d for d in desired if d in present]
-    score = round(len(have) / len(desired) * 100)
-    detail = (
-        f"{len(have)}/{len(desired)} key types present"
-        + (f": {', '.join(have)}" if have else " — none of the key types found")
-    )
+    type_ratio = len(have) / len(desired)
+    detail = f"{len(have)}/{len(desired)} key types"
+
+    if primary_schema:
+        fields = thresholds.get("schema_richness", {}).get(
+            resource_type, thresholds.get("schema_richness", {}).get("product", [])
+        )
+        rich = [f for f in fields if _schema_has_field(primary_schema, f)]
+        rich_ratio = (len(rich) / len(fields)) if fields else 0
+        score = round((0.65 * type_ratio + 0.35 * rich_ratio) * 100)
+        detail += f"; {primary_type} schema {len(rich)}/{len(fields)} rich fields"
+        if resource_type == "product" and not _schema_has_field(primary_schema, "aggregateRating"):
+            detail += " (add product reviews for ratings)"
+    else:
+        score = round(type_ratio * 100)
+        detail += (f": {', '.join(have)}" if have else " — none of the key types found")
     return score, detail
 
 
@@ -273,11 +304,26 @@ def analyze_ai_visibility(
     else:
         schema_types = None
 
+    # Pull the pushed primary schema JSON (if any) so richness can be scored.
+    primary_type = "CollectionPage" if resource_type == "collection" else "Product"
+    primary_schema = None
+    for r in (schema_markup or []):
+        if r.get("schema_type") == primary_type and r.get("schema_json"):
+            pj = r["schema_json"]
+            if isinstance(pj, str):
+                try:
+                    pj = json.loads(pj)
+                except (json.JSONDecodeError, ValueError):
+                    pj = None
+            if isinstance(pj, dict):
+                primary_schema = pj
+            break
+
     scores = {}
     details = {}
 
     scores["structured_data"], details["structured_data"] = _structured_data_score(
-        schema_types, resource_type, thresholds
+        schema_types, resource_type, thresholds, primary_schema
     )
     scores["extractability"], details["extractability"] = _extractability(text, html, h2s)
     scores["fact_density"], details["fact_density"] = _fact_density(text, thresholds)
