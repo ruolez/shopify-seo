@@ -1605,8 +1605,13 @@ def _geo_fetch_metafield_specs(store_id, shopify_id):
     return out
 
 
-def _geo_product_facts(item, entity_type):
-    """Verified facts (from store data) the model may safely state and tabulate."""
+def _geo_product_facts(item, entity_type, include_metafields=True):
+    """Verified facts (from store data) the model may safely state and tabulate.
+
+    include_metafields=False skips the per-product Shopify metafield lookup — used
+    by the synchronous bulk schema generate so a full-catalog run stays within the
+    request timeout (variant/title-derived facts still populate).
+    """
     facts = {}
     if item.get("vendor"):
         facts["Brand"] = item["vendor"].strip()
@@ -1645,7 +1650,7 @@ def _geo_product_facts(item, entity_type):
         if variants[0].get("barcode"):
             facts["Barcode / GTIN"] = variants[0]["barcode"]
 
-    if entity_type == "product" and item.get("shopify_id") and item.get("store_id"):
+    if include_metafields and entity_type == "product" and item.get("shopify_id") and item.get("store_id"):
         try:
             facts.update(_geo_fetch_metafield_specs(item["store_id"], item["shopify_id"]))
         except Exception as e:
