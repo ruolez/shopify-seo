@@ -151,8 +151,13 @@ def _competitor_terms(store_id):
     out = []
     for r in rows:
         label = r["name"] or r["domain"]
+        # terms → substring match against answer TEXT (mention detection).
         terms = {t for t in {_host(r["domain"]), _host(r["domain"]).split(".")[0], (r["name"] or "").lower()} if len(t) >= 3}
-        out.append({"label": label, "terms": terms})
+        # keys → exact canonical-key match against a run's brand key (tracked badge).
+        # Include both the name- and domain-derived keys: a brand recommended by name
+        # is keyed off its name, but may be tracked by a different domain.
+        keys = {k for k in (_canonical_brand_key(r["name"]), _canonical_brand_key(r["domain"])) if k}
+        out.append({"label": label, "terms": terms, "keys": keys})
     return out
 
 
@@ -322,8 +327,9 @@ def compute_share_of_voice(run_id):
     sov = (brand_hits / (brand_hits + competitor_total) * 100) if (brand_hits + competitor_total) else 0
 
     configured = _competitor_terms(run["store_id"]) if run else []
+    configured_keys = set().union(*(c["keys"] for c in configured)) if configured else set()
     def _is_configured(key):
-        return any(any(t in key or key in t for t in c["terms"]) for c in configured)
+        return key in configured_keys
 
     competitors = sorted(
         ({"key": k, "name": display[k], "domain": domains.get(k) or domain_cache.get(k),
