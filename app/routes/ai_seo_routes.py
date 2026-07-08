@@ -1208,6 +1208,8 @@ def add_competitor_from_results():
     domain_in = (data.get("domain") or "").strip().lower()
     if not store_id or not name:
         return jsonify({"error": "store_id and name are required"}), 400
+    from app.services.ai_visibility_tracker import _canonical_brand_key
+
     # Prefer the real domain when we have one; else use the name if it's a domain, else slugify.
     if domain_in:
         domain, display = domain_in, name
@@ -1216,7 +1218,17 @@ def add_competitor_from_results():
     else:
         domain = _re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-") or name.lower()
         display = name
+
+    # The domain resolver maps several generic brand names to the same retailer site,
+    # so UNIQUE(store_id, domain) would silently drop this distinct brand (ON CONFLICT
+    # DO NOTHING) and leave it un-tracked. If the domain is already tracked under a
+    # different brand, key this one off its name so it still gets its own tracked row.
     try:
+        with db.get_cursor() as cur:
+            cur.execute("SELECT name FROM competitors WHERE store_id = %s AND domain = %s", (int(store_id), domain))
+            clash = cur.fetchone()
+        if clash and _canonical_brand_key(clash["name"]) != _canonical_brand_key(display):
+            domain = _re.sub(r"[^a-z0-9]+", "-", display.lower()).strip("-") or domain
         with db.get_cursor() as cur:
             cur.execute(
                 """INSERT INTO competitors (store_id, domain, name, notes)
