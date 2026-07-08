@@ -723,6 +723,7 @@ async function loadAeo() {
         const a = await apiRequest(`/api/ai-seo/aeo/preview?store_id=${storeId}`);
         window._aeo = a;
         container.innerHTML =
+            aeoOverview(a) +
             robotsCard(a.robots) +
             llmsCard(a.llms, a.base_url) +
             siteSchemaCard(a.site_schema) +
@@ -756,32 +757,52 @@ function improveLine(signal, current, projected) {
     return `<b>Improves ${signal}:</b> ${current} <span class="material-symbols-rounded" style="font-size:14px;vertical-align:middle;color:${col};">${up ? "arrow_upward" : "arrow_downward"}</span> <span style="color:${col};font-weight:600;">${projected}</span>`;
 }
 
-function aeoImpact(targetText, improveHtml) {
-    return `<div style="display:flex;gap:8px;align-items:flex-start;background:var(--primary-light,rgba(59,130,246,.1));border-left:3px solid var(--primary);border-radius:6px;padding:8px 12px;margin:6px 0 12px;">
-        <span class="material-symbols-rounded" style="color:var(--primary);font-size:18px;">target</span>
-        <div style="font-size:12px;color:var(--on-surface);">
-            <div>${targetText}</div>
-            ${improveHtml ? `<div style="margin-top:4px;">${improveHtml}</div>` : ""}
-        </div>
+function aeoOverview(a) {
+    const items = [
+        ["dns", "robots.txt", a.robots && a.robots.published_status],
+        ["description", "llms.txt", a.llms && a.llms.published_status],
+        ["schema", "Site schema", a.site_schema && a.site_schema.published_status],
+        ["accessibility_new", "Accessibility", a.a11y && a.a11y.published_status],
+    ];
+    return `<div class="card" style="padding:12px 16px;margin-bottom:16px;display:flex;gap:20px;flex-wrap:wrap;">
+        ${items.map(([icon, label, s]) => {
+            const pub = s === "published";
+            return `<div style="display:flex;align-items:center;gap:6px;font-size:13px;">
+                <span class="material-symbols-rounded" style="font-size:17px;color:${pub ? "var(--success)" : "var(--on-surface-secondary)"};">${pub ? "check_circle" : "radio_button_unchecked"}</span>
+                <span>${label}</span>
+                <span style="font-size:11px;color:${pub ? "var(--success)" : "var(--on-surface-secondary)"};">${pub ? "live" : "off"}</span>
+            </div>`;
+        }).join("")}
     </div>`;
 }
 
-function aeoShell(title, desc, targetText, improveHtml, key, applyLabel, statusHtml, currentHtml, proposed) {
-    return `<div class="card" style="margin-bottom:16px;padding:16px;">
-        <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
-            <h3 style="margin:0;flex:1;">${title}</h3>
-            ${statusHtml}
-            <button class="btn btn-secondary btn-sm" onclick="downloadAeo('${key}')"><span class="material-symbols-rounded">download</span></button>
-            <button class="btn btn-primary btn-sm" onclick="applyAeo('${key}', this)"><span class="material-symbols-rounded">cloud_upload</span> ${applyLabel}</button>
+function aeoDownloadBtn(key) {
+    return `<button class="btn btn-secondary btn-sm" onclick="downloadAeo('${key}')" title="Download file"><span class="material-symbols-rounded">download</span></button>`;
+}
+
+function aeoProposed(label, text) {
+    return aeoDetails(label, text || "");
+}
+
+// Compact asset card: header (icon/title/status) + one-line desc + concise target
+// + visible actions, with all verbose detail folded into a "Details & preview" panel.
+function aeoCard({ icon, title, status, desc, target, actions, details }) {
+    return `<div class="card" style="padding:0;margin-bottom:12px;">
+        <div style="padding:14px 16px;">
+            <div style="display:flex;align-items:center;gap:10px;">
+                <span class="material-symbols-rounded" style="color:var(--primary);">${icon}</span>
+                <h3 style="margin:0;font-size:15px;flex:1;">${title}</h3>
+                ${status || ""}
+            </div>
+            <p style="font-size:12.5px;color:var(--on-surface-secondary);margin:8px 0 0;line-height:1.5;">${desc}</p>
+            ${target ? `<div style="font-size:12px;color:var(--on-surface);margin-top:8px;display:flex;gap:6px;align-items:flex-start;">
+                <span class="material-symbols-rounded" style="font-size:15px;color:var(--primary);">target</span><span>${target}</span></div>` : ""}
+            <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px;align-items:center;">${actions || ""}</div>
         </div>
-        <p style="font-size:12px;color:var(--on-surface-secondary);margin:6px 0 8px;">${desc}</p>
-        ${aeoImpact(targetText, improveHtml)}
-        <div style="font-weight:600;font-size:13px;margin-bottom:6px;">Current on your store</div>
-        ${currentHtml}
-        <details style="margin-top:12px;">
-            <summary style="cursor:pointer;font-weight:600;font-size:13px;">Proposed content</summary>
-            <pre style="${AEO_PRE}">${escapeHtml(proposed || "")}</pre>
-        </details>
+        ${details ? `<details style="border-top:1px solid var(--outline);">
+            <summary style="padding:10px 16px;cursor:pointer;font-size:12px;color:var(--on-surface-secondary);">Details &amp; preview</summary>
+            <div style="padding:0 16px 16px;">${details}</div>
+        </details>` : ""}
     </div>`;
 }
 
@@ -797,11 +818,18 @@ function robotsCard(r) {
             <div>${c.ai_bots_allowed.map(okChip).join("")}${c.ai_bots_blocked.map(noChip).join("")}</div>
             ${aeoDetails("View current robots.txt", c.raw)}`;
     }
-    return aeoShell("robots.txt AI rules",
-        "Explicit Allow rules for GPTBot, ClaudeBot, PerplexityBot, Google-Extended and more; blocks cart/checkout. Publishing writes templates/robots.txt.liquid to your theme.",
-        "<b>Targets the AI crawlability signal.</b> If answer engines can't fetch your pages, they can't cite you — this guarantees GPTBot, ClaudeBot, PerplexityBot & Google-Extended are allowed while keeping cart/checkout private.",
-        improveLine((r.impact || {}).signal, (r.impact || {}).current, (r.impact || {}).projected),
-        "robots", "Publish to theme", statusPill(r.published_status), current, r.proposed);
+    const details = `<div style="font-weight:600;font-size:12px;margin:12px 0 6px;">Current on your store</div>${current}
+        <div style="font-size:12px;margin-top:10px;">${improveLine((r.impact || {}).signal, (r.impact || {}).current, (r.impact || {}).projected)}</div>
+        ${aeoProposed("View proposed robots.txt", r.proposed)}`;
+    return aeoCard({
+        icon: "smart_toy",
+        title: "robots.txt AI rules",
+        status: statusPill(r.published_status),
+        desc: "Explicitly allows GPTBot, ClaudeBot, PerplexityBot, Google-Extended and more, while keeping cart/checkout private. Publishes <code>templates/robots.txt.liquid</code> to your theme.",
+        target: "Targets <b>AI crawlability</b> — if answer engines can't fetch your pages, they can't cite you.",
+        actions: `${aeoDownloadBtn("robots")}<button class="btn btn-primary btn-sm" onclick="applyAeo('robots', this)"><span class="material-symbols-rounded">cloud_upload</span> Publish to theme</button>`,
+        details,
+    });
 }
 
 function llmsCard(l) {
@@ -809,11 +837,18 @@ function llmsCard(l) {
     const current = c.present
         ? `<div style="font-size:13px;">Present at <a href="${c.url}" target="_blank">${escapeHtml(c.url)}</a> (${c.location})</div>${aeoDetails("View current llms.txt", c.raw)}`
         : `<div style="color:var(--on-surface-secondary);font-size:13px;">No llms.txt found on your store yet.</div>`;
-    return aeoShell("llms.txt index",
-        "A Markdown index of your collections & products for AI crawlers. Shopify can't serve /llms.txt at the domain root, so this publishes a /pages/llms page (download to self-host at root).",
-        "<b>Targets discoverability & structured-data coverage.</b> Gives AI crawlers a clean map of your key collections and products so they index the right pages faster and pull accurate product facts into answers.",
-        improveLine((l.impact || {}).signal, (l.impact || {}).current, (l.impact || {}).projected),
-        "llms", "Publish /pages/llms", statusPill(l.published_status), current, l.proposed);
+    const details = `<div style="font-weight:600;font-size:12px;margin:12px 0 6px;">Current on your store</div>${current}
+        <div style="font-size:12px;margin-top:10px;">${improveLine((l.impact || {}).signal, (l.impact || {}).current, (l.impact || {}).projected)}</div>
+        ${aeoProposed("View proposed llms.txt", l.proposed)}`;
+    return aeoCard({
+        icon: "description",
+        title: "llms.txt index",
+        status: statusPill(l.published_status),
+        desc: "A Markdown map of your key collections & products for AI crawlers. Shopify can't serve <code>/llms.txt</code> at the root, so this publishes a <code>/pages/llms</code> page (download to self-host at root).",
+        target: "Targets <b>discoverability</b> — helps crawlers index the right pages and pull accurate product facts.",
+        actions: `${aeoDownloadBtn("llms")}<button class="btn btn-primary btn-sm" onclick="applyAeo('llms', this)"><span class="material-symbols-rounded">cloud_upload</span> Publish /pages/llms</button>`,
+        details,
+    });
 }
 
 function _inp(id, label, value, ph) {
@@ -846,23 +881,28 @@ function siteSchemaCard(o) {
         <button class="btn btn-secondary btn-sm" onclick="saveOrgSettings(this)"><span class="material-symbols-rounded">save</span> Save brand details</button>
     `;
 
-    return `<div class="card" style="padding:16px;margin-bottom:16px;">
-        <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
-            <h3 style="margin:0;flex:1;">Site-wide Schema — Organization + Breadcrumbs</h3>
-            ${statusPill(o.published_status)}
-            <button class="btn btn-secondary btn-sm" onclick="downloadAeo('schema')"><span class="material-symbols-rounded">download</span></button>
-            ${published
-                ? `<button class="btn btn-secondary btn-sm" onclick="unpublishSchema(this)"><span class="material-symbols-rounded">undo</span> Unpublish</button>`
-                : ""}
-            <button class="btn btn-primary btn-sm" onclick="publishSchema(this)"><span class="material-symbols-rounded">cloud_upload</span> ${published ? "Re-publish" : "Publish to theme"}</button>
-        </div>
-        <p style="font-size:12px;color:var(--on-surface-secondary);margin:6px 0 8px;">Publishes a theme snippet: static <b>Organization</b> + <b>WebSite</b> JSON-LD, plus a <b>BreadcrumbList</b> that renders dynamically (Home → Collection → Product) on every product, collection and blog page. Reversible.</p>
-        ${aeoImpact("<b>Targets structured-data</b> — the two site-wide schema types (BreadcrumbList, Organization) the per-product optimizer can't add.", improve)}
-        ${liveNote}
-        ${form}
+    const hasBrand = !!(org.name && org.name.trim());
+    const actions = `${aeoDownloadBtn("schema")}
+        ${published ? `<button class="btn btn-secondary btn-sm" onclick="unpublishSchema(this)"><span class="material-symbols-rounded">undo</span> Unpublish</button>` : ""}
+        <button class="btn btn-primary btn-sm" onclick="publishSchema(this)"><span class="material-symbols-rounded">cloud_upload</span> ${published ? "Re-publish" : "Publish to theme"}</button>`;
+    const details = `
+        <details style="margin-top:12px;" ${hasBrand ? "" : "open"}>
+            <summary style="cursor:pointer;font-weight:600;font-size:12px;">Brand details${hasBrand ? "" : ' — <span style="color:var(--warning,#f9ab00);">set these before publishing</span>'}</summary>
+            <div style="margin-top:8px;">${form}</div>
+        </details>
+        <div style="font-size:12px;margin:12px 0 6px;">${improve}</div>
+        <div style="margin-bottom:6px;">${liveNote}</div>
         ${aeoDetails("View generated Organization JSON-LD", JSON.stringify(o.proposed_org, null, 2))}
-        ${aeoDetails("View theme snippet (ai-seo-schema.liquid)", o.proposed_snippet)}
-    </div>`;
+        ${aeoDetails("View theme snippet (ai-seo-schema.liquid)", o.proposed_snippet)}`;
+    return aeoCard({
+        icon: "schema",
+        title: "Site-wide Schema — Organization + Breadcrumbs",
+        status: statusPill(o.published_status),
+        desc: "A theme snippet with static <b>Organization</b> + <b>WebSite</b> JSON-LD plus a <b>BreadcrumbList</b> that renders on every product, collection and blog page. Reversible." + (hasBrand ? "" : " <b>Add your brand details</b> below first."),
+        target: "Targets <b>structured data</b> — the two site-wide schema types the per-product optimizer can't add.",
+        actions,
+        details,
+    });
 }
 
 async function saveOrgSettings(btn) {
@@ -915,18 +955,18 @@ async function unpublishSchema(btn) {
 
 function a11yCard(x) {
     const published = x && x.published_status === "published";
-    return `<div class="card" style="padding:16px;margin-bottom:16px;">
-        <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
-            <h3 style="margin:0;flex:1;">Storefront Accessibility</h3>
-            ${statusPill(x && x.published_status)}
-            <button class="btn btn-secondary btn-sm" onclick="downloadAeo('a11y')"><span class="material-symbols-rounded">download</span></button>
-            ${published ? `<button class="btn btn-secondary btn-sm" onclick="unpublishA11y(this)"><span class="material-symbols-rounded">undo</span> Unpublish</button>` : ""}
-            <button class="btn btn-primary btn-sm" onclick="publishA11y(this)"><span class="material-symbols-rounded">cloud_upload</span> ${published ? "Re-publish" : "Publish to theme"}</button>
-        </div>
-        <p style="font-size:12px;color:var(--on-surface-secondary);margin:6px 0 8px;">Publishes a small theme script that gives an accessible name (aria-label) to links/buttons that have none — e.g. the icon-only "Powered by Shopify" footer link. Fixes the "Links must have discernible text" audit and hardens the accessibility tree for screen readers and AI browsing agents. Reversible.</p>
-        ${aeoImpact("<b>Targets agentic browsing / accessibility.</b> AI shopping agents navigate the accessibility tree — unlabeled controls make it malformed. This labels them site-wide.", "")}
-        ${aeoDetails("View theme snippet (ai-seo-a11y.liquid)", (x && x.proposed) || "")}
-    </div>`;
+    const actions = `${aeoDownloadBtn("a11y")}
+        ${published ? `<button class="btn btn-secondary btn-sm" onclick="unpublishA11y(this)"><span class="material-symbols-rounded">undo</span> Unpublish</button>` : ""}
+        <button class="btn btn-primary btn-sm" onclick="publishA11y(this)"><span class="material-symbols-rounded">cloud_upload</span> ${published ? "Re-publish" : "Publish to theme"}</button>`;
+    return aeoCard({
+        icon: "accessibility_new",
+        title: "Storefront Accessibility",
+        status: statusPill(x && x.published_status),
+        desc: 'A small theme script that gives an accessible name to unlabeled links/buttons — e.g. the icon-only "Powered by Shopify" footer link. Fixes the "Links must have discernible text" audit. Reversible.',
+        target: "Targets <b>agentic browsing</b> — AI shopping agents navigate the accessibility tree; unlabeled controls make it malformed.",
+        actions,
+        details: aeoProposed("View theme snippet (ai-seo-a11y.liquid)", (x && x.proposed) || ""),
+    });
 }
 
 async function publishA11y(btn) {
