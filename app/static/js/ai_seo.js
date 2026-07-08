@@ -655,16 +655,57 @@ function batchCard(b) {
         stats = `<span class="badge badge-success">${b.completed} optimized</span>${b.dropped_kw_items ? ` <span class="badge badge-error">${b.dropped_kw_items} w/ dropped keywords</span>` : ""}`;
     }
     if (b.failed) stats += ` <span class="badge badge-error">${b.failed} failed</span>`;
+    const clearBtn = running
+        ? ""
+        : `<button class="icon-btn" title="Clear from activity" onclick="clearBatch(${b.id})" style="padding:2px;margin-left:4px;"><span class="material-symbols-rounded" style="font-size:18px;">close</span></button>`;
+    const retryBtn = (!running && b.failed)
+        ? `<div style="margin-top:10px;"><button class="btn btn-secondary btn-sm" onclick="retryBatch(${b.id}, this)"><span class="material-symbols-rounded">refresh</span> Retry ${b.failed} failed</button></div>`
+        : "";
     return `<div class="card" style="padding:14px;margin-bottom:12px;">
         <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
             <b>${kind}</b><span style="color:var(--on-surface-secondary);font-size:13px;">${b.resource_type === "collection" ? "collections" : "products"}</span>
             ${statusBadge}
             <span style="margin-left:auto;font-size:12px;color:var(--on-surface-secondary);">${formatRelativeTime(b.created_at)}</span>
+            ${clearBtn}
         </div>
         ${bar}
         <div style="font-size:13px;color:var(--on-surface-secondary);">${done}/${b.total} processed${running && b.current ? " · " + escapeHtml(b.current) : ""}</div>
         <div style="margin-top:8px;display:flex;gap:4px;flex-wrap:wrap;">${stats}</div>
+        ${retryBtn}
     </div>`;
+}
+
+async function retryBatch(id, btn) {
+    btn.disabled = true;
+    btn.innerHTML = '<span class="material-symbols-rounded">hourglass_empty</span> Starting…';
+    try {
+        const res = await apiRequest(`/api/ai-seo/batches/${id}/retry`, { method: "POST", body: {} });
+        showToast(`Retrying ${res.total} failed item${res.total > 1 ? "s" : ""}…`, "info");
+        loadActivity();
+    } catch (err) {
+        showToast(`Retry failed: ${err.message}`, "error");
+        btn.disabled = false;
+        btn.innerHTML = '<span class="material-symbols-rounded">refresh</span> Retry failed';
+    }
+}
+
+async function clearBatch(id) {
+    try {
+        await apiRequest(`/api/ai-seo/batches/${id}`, { method: "DELETE" });
+        loadActivity();
+    } catch (err) {
+        showToast(`Clear failed: ${err.message}`, "error");
+    }
+}
+
+async function clearFinishedBatches() {
+    try {
+        const res = await apiRequest("/api/ai-seo/batches/clear", { method: "POST", body: { store_id: parseInt(getStoreId()) } });
+        showToast(res.cleared ? `Cleared ${res.cleared} finished job${res.cleared > 1 ? "s" : ""}` : "Nothing to clear", "success");
+        loadActivity();
+    } catch (err) {
+        showToast(`Clear failed: ${err.message}`, "error");
+    }
 }
 
 // ── AEO assets ──────────────────────────────────────────────────

@@ -983,6 +983,85 @@ def list_batches():
     )
 
 
+def _spawn_ai_seo_batch(store_id, kind, resource_type, ids):
+    """Create a bulk_task + items for the given resource ids and start the matching
+    background runner. Shared by the batch creators' retry path."""
+    item_col = "collection_id" if resource_type == "collection" else "product_id"
+    ids = [int(i) for i in ids]
+    with db.get_cursor() as cur:
+        cur.execute(
+            "INSERT INTO bulk_tasks (status, total, auto_apply, store_id, kind, resource_type) "
+            "VALUES ('pending', %s, TRUE, %s, %s, %s) RETURNING id",
+            (len(ids), int(store_id), kind, resource_type),
+        )
+        batch_id = cur.fetchone()["id"]
+        for rid in ids:
+            cur.execute(f"INSERT INTO bulk_task_items (bulk_task_id, {item_col}) VALUES (%s, %s)", (batch_id, rid))
+    runner = _execute_fact_batch if kind == "fact_boost" else _execute_ai_seo_batch
+    threading.Thread(target=runner, args=(batch_id, int(store_id), resource_type, ids), daemon=True).start()
+    return batch_id
+
+
+@ai_seo_bp.route("/api/ai-seo/batches/<int:batch_id>/retry", methods=["POST"])
+def retry_batch(batch_id):
+    """Re-run only the failed items of a finished batch as a new batch."""
+    _sweep_stale_jobs()
+    with db.get_cursor() as cur:
+        cur.execute("SELECT store_id, kind, resource_type, status FROM bulk_tasks WHERE id = %s", (batch_id,))
+        b = cur.fetchone()
+    if not b:
+        return jsonify({"error": "Batch not found"}), 404
+    if b["status"] in ("pending", "running"):
+        return jsonify({"error": "Batch is still running"}), 409
+    resource_type = b["resource_type"] or "product"
+    item_col = "collection_id" if resource_type == "collection" else "product_id"
+    with db.get_cursor() as cur:
+        cur.execute(
+            f"SELECT {item_col} AS rid FROM bulk_task_items WHERE bulk_task_id = %s AND status = 'failed'",
+            (batch_id,),
+        )
+        ids = [r["rid"] for r in cur.fetchall() if r["rid"] is not None]
+    if not ids:
+        return jsonify({"error": "No failed items to retry"}), 400
+    new_id = _spawn_ai_seo_batch(b["store_id"], b["kind"], resource_type, ids)
+    return jsonify({"ok": True, "batch_id": new_id, "total": len(ids)}), 201
+
+
+@ai_seo_bp.route("/api/ai-seo/batches/clear", methods=["POST"])
+def clear_batches():
+    """Remove all finished AI SEO batches for a store (keeps running ones)."""
+    data = request.get_json() or {}
+    store_id = data.get("store_id")
+    if not store_id:
+        return jsonify({"error": "store_id is required"}), 400
+    with db.get_cursor() as cur:
+        cur.execute(
+            "SELECT id FROM bulk_tasks WHERE store_id = %s AND kind IS NOT NULL "
+            "AND status NOT IN ('pending','running')",
+            (int(store_id),),
+        )
+        ids = [r["id"] for r in cur.fetchall()]
+        if ids:
+            cur.execute("DELETE FROM bulk_task_items WHERE bulk_task_id = ANY(%s)", (ids,))
+            cur.execute("DELETE FROM bulk_tasks WHERE id = ANY(%s)", (ids,))
+    return jsonify({"ok": True, "cleared": len(ids)})
+
+
+@ai_seo_bp.route("/api/ai-seo/batches/<int:batch_id>", methods=["DELETE"])
+def delete_batch(batch_id):
+    """Clear a single finished batch from the activity list."""
+    with db.get_cursor() as cur:
+        cur.execute("SELECT status FROM bulk_tasks WHERE id = %s", (batch_id,))
+        b = cur.fetchone()
+        if not b:
+            return jsonify({"error": "Batch not found"}), 404
+        if b["status"] in ("pending", "running"):
+            return jsonify({"error": "Can't clear a running job"}), 409
+        cur.execute("DELETE FROM bulk_task_items WHERE bulk_task_id = %s", (batch_id,))
+        cur.execute("DELETE FROM bulk_tasks WHERE id = %s", (batch_id,))
+    return jsonify({"ok": True})
+
+
 # ── Phase 3: AI visibility tracking ─────────────────────────────────────
 
 
