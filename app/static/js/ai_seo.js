@@ -661,11 +661,17 @@ function batchCard(b) {
     const retryBtn = (!running && b.failed)
         ? `<div style="margin-top:10px;"><button class="btn btn-secondary btn-sm" onclick="retryBatch(${b.id}, this)"><span class="material-symbols-rounded">refresh</span> Retry ${b.failed} failed</button></div>`
         : "";
+    const finishedLine = b.completed_at ? ` · finished ${formatDate(b.completed_at)}` : "";
+    const timeTitle = `Started ${formatDate(b.created_at)}${finishedLine}`;
+    const timeBlock = `<div style="margin-left:auto;text-align:right;line-height:1.25;" title="${escapeHtml(timeTitle)}">
+            <div style="font-size:12px;color:var(--on-surface-secondary);">${formatRelativeTime(b.created_at)}</div>
+            <div style="font-size:11px;color:var(--on-surface-secondary);opacity:.7;">${formatDate(b.created_at)}</div>
+        </div>`;
     return `<div class="card" style="padding:14px;margin-bottom:12px;">
         <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
             <b>${kind}</b><span style="color:var(--on-surface-secondary);font-size:13px;">${b.resource_type === "collection" ? "collections" : "products"}</span>
             ${statusBadge}
-            <span style="margin-left:auto;font-size:12px;color:var(--on-surface-secondary);">${formatRelativeTime(b.created_at)}</span>
+            ${timeBlock}
             ${clearBtn}
         </div>
         ${bar}
