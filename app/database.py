@@ -168,6 +168,12 @@ class Database:
                     completed_at TIMESTAMP
                 )
             """)
+            for _ddl in [
+                "ALTER TABLE bulk_tasks ADD COLUMN store_id INTEGER",
+                "ALTER TABLE bulk_tasks ADD COLUMN kind VARCHAR(50)",
+                "ALTER TABLE bulk_tasks ADD COLUMN resource_type VARCHAR(20)",
+            ]:
+                cur.execute(f"DO $$ BEGIN {_ddl}; EXCEPTION WHEN duplicate_column THEN NULL; END $$")
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS bulk_task_items (
                     id SERIAL PRIMARY KEY,
@@ -1182,6 +1188,21 @@ class Database:
                     brand_key VARCHAR(120) NOT NULL,
                     name VARCHAR(255),
                     created_at TIMESTAMP DEFAULT NOW(),
+                    UNIQUE(store_id, brand_key)
+                )
+            """)
+
+            # Cache of resolved official websites for AI-recommended brands so we
+            # only pay the Brave lookup once per brand (empty domain = looked-up,
+            # none found — avoids re-querying on every panel load).
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS brand_domains (
+                    id SERIAL PRIMARY KEY,
+                    store_id INTEGER REFERENCES stores(id) ON DELETE CASCADE,
+                    brand_key VARCHAR(120) NOT NULL,
+                    name VARCHAR(255),
+                    domain VARCHAR(255),
+                    resolved_at TIMESTAMP DEFAULT NOW(),
                     UNIQUE(store_id, brand_key)
                 )
             """)

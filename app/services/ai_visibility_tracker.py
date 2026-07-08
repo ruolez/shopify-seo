@@ -277,9 +277,15 @@ def compute_share_of_voice(run_id):
         cur.execute("SELECT store_id FROM ai_tracking_runs WHERE id = %s", (run_id,))
         run = cur.fetchone()
         excluded = set()
+        domain_cache = {}
         if run:
             cur.execute("SELECT brand_key FROM ai_excluded_brands WHERE store_id = %s", (run["store_id"],))
             excluded = {r["brand_key"] for r in cur.fetchall()}
+            cur.execute(
+                "SELECT brand_key, domain FROM brand_domains WHERE store_id = %s AND domain <> ''",
+                (run["store_id"],),
+            )
+            domain_cache = {r["brand_key"]: r["domain"] for r in cur.fetchall()}
         cur.execute(
             """SELECT m.*, p.intent FROM ai_mention_results m
                LEFT JOIN ai_prompts p ON p.id = m.prompt_id WHERE m.run_id = %s""",
@@ -320,7 +326,8 @@ def compute_share_of_voice(run_id):
         return any(any(t in key or key in t for t in c["terms"]) for c in configured)
 
     competitors = sorted(
-        ({"key": k, "name": display[k], "domain": domains.get(k), "count": v, "is_configured": _is_configured(k)} for k, v in counts.items()),
+        ({"key": k, "name": display[k], "domain": domains.get(k) or domain_cache.get(k),
+          "count": v, "is_configured": _is_configured(k)} for k, v in counts.items()),
         key=lambda c: -c["count"],
     )[:25]
 
@@ -337,6 +344,64 @@ def compute_share_of_voice(run_id):
         "brand_known_rate": brand_known_rate,
         "competitors": competitors,
     }
+
+
+def _lookup_official_domain(name, store_host):
+    """Find a brand's official website via a Brave search (cached in serp_cache).
+
+    Returns a bare hostname (e.g. "dutchmasters.com") or None. Skips social/reference
+    sites and our own store. Best-effort — any failure yields None.
+    """
+    from app.services.serp_scraper import brave_search
+
+    try:
+        results = brave_search(f"{name} official website", count=5) or []
+    except Exception:
+        return None
+    for r in results:
+        dom = _host(r.get("domain") or "")
+        if not dom or dom in _DOMAIN_STOPLIST:
+            continue
+        if store_host and (dom == store_host or dom.endswith("." + store_host)):
+            continue
+        return dom
+    return None
+
+
+def resolve_brand_domains(store_id, run_id, limit=25):
+    """Fill missing official websites for a run's recommended brands.
+
+    Persists every attempt to brand_domains (empty domain = looked-up, none found)
+    so each brand is only ever queried once. Bounded by `limit` per call to cap
+    Brave usage. Returns the number of brands resolved to a real domain.
+    """
+    agg = compute_share_of_voice(run_id)
+    missing = [c for c in agg["competitors"] if not c.get("domain")]
+    if not missing:
+        return 0
+
+    with db.get_cursor() as cur:
+        cur.execute("SELECT primary_domain, domain FROM stores WHERE id = %s", (store_id,))
+        store = cur.fetchone() or {}
+        cur.execute("SELECT brand_key FROM brand_domains WHERE store_id = %s", (store_id,))
+        already = {r["brand_key"] for r in cur.fetchall()}
+    store_host = _host(store.get("primary_domain") or store.get("domain"))
+
+    todo = [c for c in missing if c["key"] not in already][:limit]
+    resolved = 0
+    for c in todo:
+        dom = _lookup_official_domain(c["name"], store_host) or ""
+        if dom:
+            resolved += 1
+        with db.get_cursor() as cur:
+            cur.execute(
+                """INSERT INTO brand_domains (store_id, brand_key, name, domain)
+                   VALUES (%s, %s, %s, %s)
+                   ON CONFLICT (store_id, brand_key)
+                   DO UPDATE SET domain = EXCLUDED.domain, name = EXCLUDED.name, resolved_at = NOW()""",
+                (store_id, c["key"], c["name"], dom),
+            )
+    return resolved
 
 
 def run_tracking(run_id):
@@ -422,6 +487,13 @@ def run_tracking(run_id):
                     json.dumps({"competitors": agg["competitors"], "brand_known_rate": agg["brand_known_rate"]}), run_id,
                 ),
             )
+        # Resolve official websites for the recommended brands so the competitor
+        # panel shows real domains immediately. Best-effort — never fails the run.
+        try:
+            if agg["competitors"]:
+                resolve_brand_domains(run["store_id"], run_id)
+        except Exception as e:
+            logger.warning("Brand-domain resolution failed for run %s: %s", run_id, e)
         # Auto-generate the competitive gap recommendations so they appear without
         # an extra click. Best-effort — a crawl/LLM hiccup must not fail the run.
         try:

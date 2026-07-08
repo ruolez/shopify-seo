@@ -838,6 +838,25 @@ tbody tr:hover { background: rgba(13,148,136,0.04); }
     margin-bottom: 12px;
 }
 
+.spinner-sm {
+    width: 14px;
+    height: 14px;
+    border-width: 2px;
+    margin-bottom: 0;
+}
+
+.comp-site {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    font-size: 11.5px;
+    color: var(--on-surface-secondary);
+    text-decoration: none;
+}
+.comp-site:hover {
+    color: var(--primary);
+}
+
 .loading-overlay {
     position: fixed;
     inset: 0;

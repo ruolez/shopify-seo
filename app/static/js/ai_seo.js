@@ -168,6 +168,9 @@ function renderItems() {
             <button class="btn btn-secondary btn-sm" onclick="batchOptimize('all')">
                 <span class="material-symbols-rounded">bolt</span> Optimize all (${currentItems.length})
             </button>
+            <button class="btn btn-secondary btn-sm" onclick="boostFactsBatch()" title="Research-driven fact-density pass; only changes items where verifiable facts raise the score">
+                <span class="material-symbols-rounded">insights</span> Boost fact density
+            </button>
             <div id="batch-progress" style="margin-left:auto;font-size:13px;color:var(--on-surface-secondary);"></div>
         </div>
         <p style="font-size:11px;color:var(--on-surface-secondary);margin:0 0 8px;">Tip: click a checkbox, then Shift-click another to select the whole range.</p>
@@ -252,6 +255,31 @@ async function batchOptimize(mode) {
     }
 }
 
+async function boostFactsBatch() {
+    const storeId = getStoreId();
+    let ids, label;
+    if (selectedIds.size) {
+        ids = [...selectedIds];
+        label = `${ids.length} selected ${scanType}(s)`;
+    } else {
+        ids = "low";
+        label = `all low-fact-density ${scanType}s (score < 50)`;
+    }
+    if (!confirm(`Boost fact density on ${label}? It researches verifiable facts and only changes items where the fact-density score actually rises — everything else is left alone. Applies live to Shopify.`)) return;
+    const prog = document.getElementById("batch-progress");
+    if (prog) prog.textContent = "Starting…";
+    try {
+        const res = await apiRequest("/api/ai-seo/facts/batch", {
+            method: "POST",
+            body: { store_id: parseInt(storeId), type: scanType, ids },
+        });
+        pollBatch(res.batch_id);
+    } catch (err) {
+        showToast(`Fact boost failed to start: ${err.message}`, "error");
+        if (prog) prog.textContent = "";
+    }
+}
+
 function pollBatch(batchId) {
     if (batchPollTimer) clearInterval(batchPollTimer);
     batchPollTimer = setInterval(async () => {
@@ -309,6 +337,9 @@ function openBreakdown(index) {
                 <div style="font-size:15px;font-weight:600;">Overall AI readiness</div>
                 <div style="font-size:13px;color:var(--on-surface-secondary);">Higher = more likely to be cited by AI answer engines</div>
             </div>
+            <button class="btn btn-secondary" onclick="boostFactsPreview()" title="Research-driven pass that adds verifiable facts (or leaves the item alone)">
+                <span class="material-symbols-rounded">insights</span> Boost fact density
+            </button>
             <button class="btn btn-primary" onclick="optimizePreview()">
                 <span class="material-symbols-rounded">auto_fix_high</span> Optimize for AI
             </button>
@@ -332,6 +363,70 @@ async function optimizePreview() {
         renderOptimizePreview(res);
     } catch (err) {
         box.innerHTML = `<div class="empty-state"><span class="material-symbols-rounded">error</span><p>${escapeHtml(err.message)}</p></div>`;
+    }
+}
+
+async function boostFactsPreview() {
+    const it = currentOptimizeItem;
+    if (!it) return;
+    const box = document.getElementById("optimize-result");
+    box.innerHTML = `<div class="loading-spinner" style="padding:24px 0;"><div class="spinner"></div><p>Researching verifiable facts…</p></div>`;
+    try {
+        const res = await apiRequest("/api/ai-seo/facts/preview", {
+            method: "POST",
+            body: { store_id: parseInt(getStoreId()), type: scanType, id: it.resource_id },
+        });
+        if (res.no_change) {
+            box.innerHTML = `<div style="border-top:2px solid var(--outline);margin-top:20px;padding-top:16px;">
+                <div style="font-size:14px;"><span class="material-symbols-rounded" style="vertical-align:middle;color:var(--warning);">info</span>
+                No verifiable, relevant facts found — left unchanged.</div>
+                <div style="font-size:13px;color:var(--on-surface-secondary);margin-top:4px;">${escapeHtml(res.reason || "")}</div></div>`;
+            return;
+        }
+        renderFactsPreview(res);
+    } catch (err) {
+        box.innerHTML = `<div class="empty-state"><span class="material-symbols-rounded">error</span><p>${escapeHtml(err.message)}</p></div>`;
+    }
+}
+
+function renderFactsPreview(res) {
+    const p = res.preview || {};
+    const gain = res.after_fact_density - res.before_fact_density;
+    const col = gain > 0 ? "var(--success)" : "var(--on-surface-secondary)";
+    const facts = (p.facts_added || []).map((f) => `<li style="font-size:13px;">${escapeHtml(f)}</li>`).join("");
+    const sources = (p.sources || []).map((s) => escapeHtml(s)).join(", ");
+    window._factsPayload = { store_id: parseInt(getStoreId()), type: scanType, id: res.item.id, description_html: p.optimized_description_html };
+    document.getElementById("optimize-result").innerHTML = `
+        <div style="border-top:2px solid var(--outline);margin-top:20px;padding-top:16px;">
+            <div style="display:flex;align-items:center;gap:16px;margin-bottom:12px;">
+                <div style="font-size:14px;">Fact density: <b>${res.before_fact_density}</b> →
+                    <b style="color:${col};">${res.after_fact_density}</b> <span style="color:${col};">(${gain >= 0 ? "+" : ""}${gain})</span></div>
+                <button class="btn btn-primary" style="margin-left:auto;" ${gain > 0 ? "" : "disabled title='No measurable gain'"} onclick="applyFacts(this)">
+                    <span class="material-symbols-rounded">cloud_upload</span> Apply to Shopify
+                </button>
+            </div>
+            <h4 style="margin:8px 0 6px;">Facts added</h4>
+            <ul style="margin:0 0 8px;padding-left:20px;">${facts || '<li style="color:var(--on-surface-secondary);">—</li>'}</ul>
+            ${sources ? `<div style="font-size:12px;color:var(--on-surface-secondary);">Sources: ${sources}</div>` : ""}
+            <h4 style="margin:12px 0 6px;">Enriched description</h4>
+            <div style="border:1px solid var(--outline);border-radius:8px;padding:12px;max-height:320px;overflow:auto;">${p.optimized_description_html || ""}</div>
+        </div>`;
+}
+
+async function applyFacts(btn) {
+    if (!window._factsPayload) return;
+    btn.disabled = true;
+    btn.innerHTML = '<span class="material-symbols-rounded">hourglass_empty</span> Applying…';
+    try {
+        const res = await apiRequest("/api/ai-seo/facts/apply", { method: "POST", body: window._factsPayload });
+        showToast(`Applied — new score ${res.new_score}`, "success");
+        closeBreakdown();
+        loadItems();
+        loadOverview();
+    } catch (err) {
+        showToast(`Apply failed: ${err.message}`, "error");
+        btn.disabled = false;
+        btn.innerHTML = '<span class="material-symbols-rounded">cloud_upload</span> Apply to Shopify';
     }
 }
 
@@ -511,6 +606,65 @@ function switchTab(tab) {
         loadRuns();
     }
     if (tab === "assets") loadAeo();
+    if (tab === "activity") loadActivity();
+    else if (activityTimer) { clearInterval(activityTimer); activityTimer = null; }
+}
+
+let activityTimer = null;
+const BATCH_KIND = { geo_optimize: "GEO optimize", fact_boost: "Fact-density boost" };
+
+async function loadActivity() {
+    const storeId = getStoreId();
+    const container = document.getElementById("activity-container");
+    try {
+        const batches = await apiRequest(`/api/ai-seo/batches?store_id=${storeId}`);
+        if (!batches.length) {
+            container.innerHTML = `<div class="empty-state"><span class="material-symbols-rounded">history</span><p>No batch jobs yet. Run "Optimize all" or "Boost fact density" from AI Readiness.</p></div>`;
+        } else {
+            container.innerHTML = batches.map(batchCard).join("");
+        }
+        // Auto-refresh while anything is running.
+        const anyRunning = batches.some((b) => b.status === "running" || b.status === "pending");
+        if (anyRunning && !activityTimer) {
+            activityTimer = setInterval(() => { if (document.querySelector(".tab.active")?.dataset.tab === "activity") loadActivity(); }, 5000);
+        } else if (!anyRunning && activityTimer) {
+            clearInterval(activityTimer);
+            activityTimer = null;
+        }
+    } catch (err) {
+        showToast(`Failed to load activity: ${err.message}`, "error");
+    }
+}
+
+function batchCard(b) {
+    const running = b.status === "running" || b.status === "pending";
+    const done = b.completed + b.failed;
+    const pct = b.total ? Math.round((done / b.total) * 100) : 0;
+    const kind = BATCH_KIND[b.kind] || b.kind;
+    const statusBadge = running
+        ? `<span class="badge badge-warning">running</span>`
+        : b.status === "failed" ? `<span class="badge badge-error">failed</span>` : `<span class="badge badge-success">done</span>`;
+    const bar = `<div style="background:var(--surface-dim);border-radius:6px;height:8px;overflow:hidden;margin:8px 0;">
+        <div style="background:var(--primary);height:100%;width:${pct}%;transition:width .3s;"></div></div>`;
+    let stats = "";
+    if (b.kind === "fact_boost") {
+        stats = `<span class="badge badge-success">${b.enriched} enriched</span>
+                 <span class="badge" style="background:var(--surface-dim);color:var(--on-surface);">${b.skipped} left unchanged</span>
+                 <span class="badge badge-warning">${b.facts_added} facts added</span>`;
+    } else {
+        stats = `<span class="badge badge-success">${b.completed} optimized</span>${b.dropped_kw_items ? ` <span class="badge badge-error">${b.dropped_kw_items} w/ dropped keywords</span>` : ""}`;
+    }
+    if (b.failed) stats += ` <span class="badge badge-error">${b.failed} failed</span>`;
+    return `<div class="card" style="padding:14px;margin-bottom:12px;">
+        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+            <b>${kind}</b><span style="color:var(--on-surface-secondary);font-size:13px;">${b.resource_type === "collection" ? "collections" : "products"}</span>
+            ${statusBadge}
+            <span style="margin-left:auto;font-size:12px;color:var(--on-surface-secondary);">${formatRelativeTime(b.created_at)}</span>
+        </div>
+        ${bar}
+        <div style="font-size:13px;color:var(--on-surface-secondary);">${done}/${b.total} processed${running && b.current ? " · " + escapeHtml(b.current) : ""}</div>
+        <div style="margin-top:8px;display:flex;gap:4px;flex-wrap:wrap;">${stats}</div>
+    </div>`;
 }
 
 // ── AEO assets ──────────────────────────────────────────────────
@@ -881,7 +1035,7 @@ async function loadRuns() {
                <div class="stat-card"><div class="stat-value">${latest.brand_mention_rate ?? 0}%</div><div class="stat-label">Brand mention rate</div></div>
                <div class="stat-card"><div class="stat-value">${brandKnown != null ? brandKnown + "%" : "—"}</div><div class="stat-label">Brand knowledge (do models know you)</div></div>
                <div class="stat-card"><div class="stat-value">${latest.avg_rank ?? "—"}</div><div class="stat-label">Avg rank when listed</div></div>`
-            : `<div class="empty-state" style="grid-column:1/-1;"><span class="material-symbols-rounded">travel_explore</span><p>No tracking runs yet.</p></div>`;
+            : `<div class="empty-state" style="grid-column:1/-1;"><span class="material-symbols-rounded">travel_explore</span><p>No tracking runs yet — click <b>Run tracking</b> to see how the AI models answer your buyers.</p></div>`;
 
         latestRunId = latest ? latest.id : null;
         document.getElementById("competitors-panel").innerHTML = "";
@@ -929,14 +1083,22 @@ function renderCompetitors(comps) {
         panel.innerHTML = "";
         return;
     }
+    const missing = comps.filter((c) => !c.domain).length;
     const rows = comps
         .map((c, i) => {
-            const site = c.domain && c.domain.toLowerCase() !== (c.name || "").toLowerCase()
-                ? `<a href="https://${escapeHtml(c.domain)}" target="_blank" rel="noopener" style="font-size:11px;color:var(--on-surface-secondary);margin-left:8px;text-decoration:none;">${escapeHtml(c.domain)} ↗</a>`
-                : "";
-            return `<div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--outline);">
-                <div style="flex:1;min-width:0;"><span style="font-size:13px;font-weight:500;">${escapeHtml(c.name)}</span>${site}</div>
-                <span class="badge badge-warning">${c.count}× recommended</span>
+            const isDomainName = c.domain && c.domain.toLowerCase() === (c.name || "").toLowerCase();
+            const site = c.domain
+                ? `<a href="https://${escapeHtml(c.domain)}" target="_blank" rel="noopener" class="comp-site">
+                       <span class="material-symbols-rounded" style="font-size:14px;">public</span>${escapeHtml(c.domain)}<span style="opacity:.55;">&nbsp;↗</span></a>`
+                : `<span class="comp-site" style="color:var(--on-surface-secondary);opacity:.7;">
+                       <span class="material-symbols-rounded" style="font-size:14px;">help</span>site not detected</span>`;
+            const name = isDomainName ? c.name.replace(/\.[a-z]{2,}$/i, "") : c.name;
+            return `<div style="display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--outline);">
+                <div style="flex:1;min-width:0;">
+                    <div style="font-size:13px;font-weight:600;line-height:1.3;">${escapeHtml(name)}</div>
+                    <div style="margin-top:2px;">${site}</div>
+                </div>
+                <span class="badge badge-warning" title="Times the AI recommended this brand across your prompts">${c.count}×</span>
                 ${c.is_configured
                     ? '<span class="badge badge-success">tracked</span>'
                     : `<button class="btn btn-secondary btn-sm" onclick="addCompetitor(${i}, this)"><span class="material-symbols-rounded">add</span> Add</button>`}
@@ -944,12 +1106,37 @@ function renderCompetitors(comps) {
             </div>`;
         })
         .join("");
+    const resolveNote = (missing && window._domainResolveRun !== latestRunId)
+        ? `<div style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--on-surface-secondary);margin-top:10px;"><div class="spinner spinner-sm"></div> Finding official sites for ${missing} brand${missing > 1 ? "s" : ""}…</div>`
+        : "";
     panel.innerHTML = `<div class="card" style="padding:16px;">
-        <h3 style="margin:0 0 4px;">Who the AI recommends instead</h3>
-        <p style="font-size:12px;color:var(--on-surface-secondary);margin:0 0 10px;">Brands/retailers surfaced in AI answers to your buyer queries — this is where your share of voice is going. Add any to your competitor list, or exclude ones that aren't real competitors (e.g. product brands you sell).</p>
+        <div style="display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;margin-bottom:4px;">
+            <h3 style="margin:0;">Who the AI recommends instead</h3>
+            <span class="badge badge-warning">${comps.length} brand${comps.length > 1 ? "s" : ""}</span>
+        </div>
+        <p style="font-size:12px;color:var(--on-surface-secondary);margin:0 0 10px;">Brands and retailers the AI surfaces for your buyer queries — this is where your share of voice is going. <b>Add</b> real competitors to track them, or <b>exclude</b> ones you actually sell.</p>
         ${rows}
+        ${resolveNote}
         <button class="btn btn-primary btn-sm" style="margin-top:12px;" onclick="runGapAnalysis(this)"><span class="material-symbols-rounded">analytics</span> Analyze competitive gap</button>
     </div>`;
+
+    if (missing && window._domainResolveRun !== latestRunId) {
+        window._domainResolveRun = latestRunId;
+        resolveCompetitorDomains();
+    }
+}
+
+async function resolveCompetitorDomains() {
+    if (!latestRunId) return;
+    try {
+        const res = await apiRequest("/api/ai-seo/tracking/resolve-domains", {
+            method: "POST",
+            body: { store_id: parseInt(getStoreId()), run_id: latestRunId },
+        });
+        if (res.competitors) renderCompetitors(res.competitors);
+    } catch (err) {
+        /* non-fatal — leave "site not detected" rows as-is */
+    }
 }
 
 async function addCompetitor(index, btn) {

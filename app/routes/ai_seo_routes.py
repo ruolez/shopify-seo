@@ -696,8 +696,8 @@ def optimize_batch():
     item_col = "collection_id" if resource_type == "collection" else "product_id"
     with db.get_cursor() as cur:
         cur.execute(
-            "INSERT INTO bulk_tasks (status, total, auto_apply) VALUES ('pending', %s, TRUE) RETURNING id",
-            (len(ids),),
+            "INSERT INTO bulk_tasks (status, total, auto_apply, store_id, kind, resource_type) VALUES ('pending', %s, TRUE, %s, 'geo_optimize', %s) RETURNING id",
+            (len(ids), int(store_id), resource_type),
         )
         batch_id = cur.fetchone()["id"]
         for rid in ids:
@@ -727,6 +727,259 @@ def optimize_batch_status(batch_id):
             "failed": row["failed"],
             "current": row["current_product_title"],
         }
+    )
+
+
+# ── Fact-density boost (research-driven, enrich-only, skips if nothing found) ──
+
+LOW_FACT_DENSITY = 50
+
+
+def _fact_density_score(store_id, resource_type, resource_id, item, store_domain):
+    """fact_density component for old and new description text (content-only)."""
+    return ai_seo_analyzer.analyze_ai_visibility(
+        {**item, "resource_type": resource_type}, store_domain=store_domain
+    )["breakdown"]["fact_density"]["score"]
+
+
+@ai_seo_bp.route("/api/ai-seo/facts/preview", methods=["POST"])
+def facts_preview():
+    from app.ai_agent import run_task
+
+    data = request.get_json() or {}
+    store_id = data.get("store_id")
+    resource_type = data.get("type", "product")
+    resource_id = data.get("id")
+    if not store_id or not resource_id:
+        return jsonify({"error": "store_id and id are required"}), 400
+
+    table = "synced_collections" if resource_type == "collection" else "synced_products"
+    with db.get_cursor() as cur:
+        cur.execute("SELECT * FROM stores WHERE id = %s", (int(store_id),))
+        store = cur.fetchone()
+        cur.execute(f"SELECT * FROM {table} WHERE id = %s", (resource_id,))
+        item = cur.fetchone()
+    if not item:
+        return jsonify({"error": "Item not found"}), 404
+    item = dict(item)
+    store_domain = _store_base_url(dict(store)) if store else None
+
+    task_type = "ai_seo_facts_collection" if resource_type == "collection" else "ai_seo_facts_product"
+    id_key = "collection_id" if resource_type == "collection" else "product_id"
+    result = run_task(task_type, {id_key: resource_id}, store_id)
+    if result.get("error"):
+        return jsonify({"error": result["error"]}), 502
+
+    item_meta = {"id": item["id"], "shopify_id": item.get("shopify_id"), "title": item.get("title")}
+    if result.get("no_change"):
+        return jsonify({"no_change": True, "reason": result.get("reason"), "item": item_meta})
+
+    before_fd = _fact_density_score(store_id, resource_type, resource_id, item, store_domain)
+    after_fd = _fact_density_score(
+        store_id, resource_type, resource_id,
+        {**item, "description": result["optimized_description_html"]}, store_domain,
+    )
+    return jsonify(
+        {
+            "preview": result,
+            "item": item_meta,
+            "before_fact_density": before_fd,
+            "after_fact_density": after_fd,
+        }
+    )
+
+
+@ai_seo_bp.route("/api/ai-seo/facts/apply", methods=["POST"])
+def facts_apply():
+    data = request.get_json() or {}
+    store_id = data.get("store_id")
+    resource_type = data.get("type", "product")
+    resource_id = data.get("id")
+    description_html = data.get("description_html", "")
+    if not store_id or not resource_id or not description_html:
+        return jsonify({"error": "store_id, id and description_html are required"}), 400
+
+    table = "synced_collections" if resource_type == "collection" else "synced_products"
+    with db.get_cursor() as cur:
+        cur.execute("SELECT * FROM stores WHERE id = %s", (int(store_id),))
+        store = cur.fetchone()
+        cur.execute(f"SELECT * FROM {table} WHERE id = %s", (resource_id,))
+        item = cur.fetchone()
+    if not store or not item:
+        return jsonify({"error": "Store or item not found"}), 404
+    store, item = dict(store), dict(item)
+    client = ShopifyClient(store["domain"], decrypt_value(store["access_token_enc"]), store["api_version"])
+    try:
+        result = _push_and_rescore(store, resource_type, item, description_html, "", "", None, client)
+    except Exception as e:
+        logger.exception("Fact-boost apply failed: %s", e)
+        return jsonify({"error": str(e)}), 502
+    return jsonify({"ok": True, "new_score": result["score"], "breakdown": result["breakdown"]})
+
+
+def _execute_fact_batch(batch_id, store_id, resource_type, resource_ids):
+    from app.ai_agent import run_task
+
+    with db.get_cursor() as cur:
+        cur.execute("UPDATE bulk_tasks SET status = 'running' WHERE id = %s", (batch_id,))
+        cur.execute("SELECT * FROM stores WHERE id = %s", (store_id,))
+        store = cur.fetchone()
+    if not store:
+        with db.get_cursor() as cur:
+            cur.execute("UPDATE bulk_tasks SET status = 'failed', completed_at = NOW() WHERE id = %s", (batch_id,))
+        return
+    store = dict(store)
+    base = _store_base_url(store)
+    client = ShopifyClient(store["domain"], decrypt_value(store["access_token_enc"]), store["api_version"])
+    table = "synced_collections" if resource_type == "collection" else "synced_products"
+    task_type = "ai_seo_facts_collection" if resource_type == "collection" else "ai_seo_facts_product"
+    id_key = "collection_id" if resource_type == "collection" else "product_id"
+    item_col = "collection_id" if resource_type == "collection" else "product_id"
+
+    completed = failed = 0
+    for rid in resource_ids:
+        with db.get_cursor() as cur:
+            cur.execute(f"SELECT * FROM {table} WHERE id = %s", (rid,))
+            item = cur.fetchone()
+        if not item:
+            failed += 1
+            continue
+        item = dict(item)
+        with db.get_cursor() as cur:
+            cur.execute("UPDATE bulk_tasks SET current_product_title = %s WHERE id = %s", (item.get("title"), batch_id))
+        try:
+            result = run_task(task_type, {id_key: rid}, store_id)
+            if result.get("error"):
+                raise ValueError(result["error"])
+            # Only apply when it measurably raises fact density — else leave the item alone.
+            enriched = False
+            if not result.get("no_change"):
+                new_html = result["optimized_description_html"]
+                before_fd = _fact_density_score(store_id, resource_type, rid, item, base)
+                after_fd = _fact_density_score(store_id, resource_type, rid, {**item, "description": new_html}, base)
+                if after_fd > before_fd:
+                    enriched = True
+                else:
+                    result["reason"] = "facts found but no measurable fact-density gain"
+            if enriched:
+                _push_and_rescore(store, resource_type, item, result["optimized_description_html"], "", "", None, client)
+            completed += 1
+            with db.get_cursor() as cur:
+                cur.execute(
+                    f"UPDATE bulk_task_items SET status = 'completed', ai_result = %s, completed_at = NOW() WHERE bulk_task_id = %s AND {item_col} = %s",
+                    (json.dumps({"enriched": enriched, "facts_added": result.get("facts_added", []), "reason": result.get("reason")}), batch_id, rid),
+                )
+        except Exception as e:
+            failed += 1
+            logger.exception("Fact-boost batch item %s failed: %s", rid, e)
+            with db.get_cursor() as cur:
+                cur.execute(
+                    f"UPDATE bulk_task_items SET status = 'failed', error = %s, completed_at = NOW() WHERE bulk_task_id = %s AND {item_col} = %s",
+                    (str(e), batch_id, rid),
+                )
+        with db.get_cursor() as cur:
+            cur.execute("UPDATE bulk_tasks SET completed = %s, failed = %s WHERE id = %s", (completed, failed, batch_id))
+
+    with db.get_cursor() as cur:
+        cur.execute("UPDATE bulk_tasks SET status = 'completed', completed_at = NOW(), current_product_title = NULL WHERE id = %s", (batch_id,))
+
+
+@ai_seo_bp.route("/api/ai-seo/facts/batch", methods=["POST"])
+def facts_batch():
+    _sweep_stale_jobs()
+    data = request.get_json() or {}
+    store_id = data.get("store_id")
+    resource_type = data.get("type", "product")
+    ids = data.get("ids")
+    if not store_id:
+        return jsonify({"error": "store_id is required"}), 400
+
+    with db.get_cursor() as cur:
+        if ids == "low":
+            cur.execute(
+                """SELECT resource_id FROM ai_seo_scores
+                   WHERE store_id = %s AND resource_type = %s
+                   AND (breakdown->'fact_density'->>'score')::int < %s
+                   ORDER BY (breakdown->'fact_density'->>'score')::int ASC""",
+                (int(store_id), resource_type, LOW_FACT_DENSITY),
+            )
+            ids = [r["resource_id"] for r in cur.fetchall()]
+        elif ids in (None, "all", []):
+            cur.execute(
+                "SELECT resource_id FROM ai_seo_scores WHERE store_id = %s AND resource_type = %s ORDER BY (breakdown->'fact_density'->>'score')::int ASC",
+                (int(store_id), resource_type),
+            )
+            ids = [r["resource_id"] for r in cur.fetchall()]
+    ids = [int(i) for i in ids]
+    if not ids:
+        return jsonify({"error": "No items to boost"}), 400
+
+    item_col = "collection_id" if resource_type == "collection" else "product_id"
+    with db.get_cursor() as cur:
+        cur.execute(
+            "INSERT INTO bulk_tasks (status, total, auto_apply, store_id, kind, resource_type) VALUES ('pending', %s, TRUE, %s, 'fact_boost', %s) RETURNING id",
+            (len(ids), int(store_id), resource_type),
+        )
+        batch_id = cur.fetchone()["id"]
+        for rid in ids:
+            cur.execute(f"INSERT INTO bulk_task_items (bulk_task_id, {item_col}) VALUES (%s, %s)", (batch_id, rid))
+
+    threading.Thread(target=_execute_fact_batch, args=(batch_id, int(store_id), resource_type, ids), daemon=True).start()
+    return jsonify({"ok": True, "batch_id": batch_id, "total": len(ids)}), 201
+
+
+@ai_seo_bp.route("/api/ai-seo/batches", methods=["GET"])
+def list_batches():
+    """Recent AI SEO batch jobs (optimize / fact-boost) with derived stats."""
+    store_id = request.args.get("store_id")
+    if not store_id:
+        return jsonify({"error": "store_id is required"}), 400
+    with db.get_cursor() as cur:
+        cur.execute(
+            """SELECT id, kind, resource_type, status, total, completed, failed,
+                      current_product_title, created_at, completed_at
+               FROM bulk_tasks WHERE store_id = %s AND kind IS NOT NULL
+               ORDER BY id DESC LIMIT 25""",
+            (int(store_id),),
+        )
+        batches = [dict(r) for r in cur.fetchall()]
+        ids = [b["id"] for b in batches]
+        stats = {}
+        if ids:
+            cur.execute(
+                """SELECT bulk_task_id,
+                    COUNT(*) FILTER (WHERE (ai_result->>'enriched') = 'true') AS enriched,
+                    COUNT(*) FILTER (WHERE ai_result IS NOT NULL AND (ai_result->>'enriched') = 'false') AS skipped,
+                    COALESCE(SUM(jsonb_array_length(ai_result->'facts_added'))
+                             FILTER (WHERE (ai_result->>'enriched') = 'true'
+                                     AND jsonb_typeof(ai_result->'facts_added') = 'array'), 0) AS facts,
+                    COUNT(*) FILTER (WHERE jsonb_typeof(ai_result->'dropped_keywords') = 'array'
+                                     AND jsonb_array_length(ai_result->'dropped_keywords') > 0) AS dropped
+                   FROM bulk_task_items WHERE bulk_task_id = ANY(%s) GROUP BY bulk_task_id""",
+                (ids,),
+            )
+            for r in cur.fetchall():
+                stats[r["bulk_task_id"]] = dict(r)
+    return jsonify(
+        [
+            {
+                "id": b["id"],
+                "kind": b["kind"],
+                "resource_type": b["resource_type"],
+                "status": b["status"],
+                "total": b["total"],
+                "completed": b["completed"],
+                "failed": b["failed"],
+                "current": b["current_product_title"],
+                "enriched": int((stats.get(b["id"]) or {}).get("enriched") or 0),
+                "skipped": int((stats.get(b["id"]) or {}).get("skipped") or 0),
+                "facts_added": int((stats.get(b["id"]) or {}).get("facts") or 0),
+                "dropped_kw_items": int((stats.get(b["id"]) or {}).get("dropped") or 0),
+                "created_at": b["created_at"].isoformat() if b["created_at"] else None,
+                "completed_at": b["completed_at"].isoformat() if b["completed_at"] else None,
+            }
+            for b in batches
+        ]
     )
 
 
@@ -896,6 +1149,29 @@ def add_competitor_from_results():
         logger.exception("Add competitor failed: %s", e)
         return jsonify({"error": str(e)}), 500
     return jsonify({"ok": True, "domain": domain, "name": display})
+
+
+@ai_seo_bp.route("/api/ai-seo/tracking/resolve-domains", methods=["POST"])
+def resolve_competitor_domains():
+    """Look up official websites for AI-recommended brands missing a domain.
+
+    Returns the refreshed competitor list (with newly resolved domains merged in).
+    Resolutions are cached in brand_domains, so this is cheap on repeat calls.
+    """
+    from app.services.ai_visibility_tracker import compute_share_of_voice, resolve_brand_domains
+
+    data = request.get_json() or {}
+    store_id = data.get("store_id")
+    run_id = data.get("run_id")
+    if not store_id or not run_id:
+        return jsonify({"error": "store_id and run_id are required"}), 400
+    try:
+        resolve_brand_domains(int(store_id), int(run_id))
+        agg = compute_share_of_voice(int(run_id))
+    except Exception as e:
+        logger.exception("Resolve competitor domains failed: %s", e)
+        return jsonify({"error": str(e)}), 500
+    return jsonify({"competitors": agg["competitors"]})
 
 
 @ai_seo_bp.route("/api/ai-seo/tracking/exclude", methods=["POST"])
