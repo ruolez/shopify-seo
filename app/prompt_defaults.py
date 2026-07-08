@@ -757,7 +757,11 @@ DEFAULTS = {
         "5. STRUCTURE — include a comparison table or buying-criteria list; fluent, authoritative tone.\n"
         "6. AT-A-GLANCE TABLE — when VERIFIED FACTS are provided, render an HTML <table> summarising the "
         "category (e.g. brands/options available, price range, key attributes). Use ONLY provided facts.\n"
-        "7. EXPERT VERDICT — add a short 'Expert Verdict' section (2-3 sentences, extractable): who this "
+        "7. COMPARISON MATRIX — when FEATURED PRODUCTS are provided, render a second HTML <table> that "
+        "compares them side by side (columns: Product, Brand, Price, Availability). Include one row per "
+        "provided product using ONLY those exact values; never add products, prices, or attributes that "
+        "were not provided. AI engines extract tabular comparisons far more reliably than prose.\n"
+        "8. EXPERT VERDICT — add a short 'Expert Verdict' section (2-3 sentences, extractable): who this "
         "category is best for and how to choose, grounded in the facts. No hype.\n\n"
         "INTEGRITY (critical): NEVER fabricate statistics, studies, organizations, named experts, "
         "review counts, or quotes/attributions. Only include a statistic, quote or cited source if it "
@@ -767,9 +771,33 @@ DEFAULTS = {
         "Also produce a meta title (<=60 chars), a meta description (<=160 chars), and 3-5 FAQ pairs "
         "with self-contained, directly extractable answers.\n\n"
         "Respond with ONLY a JSON object: {\"optimized_description_html\": string (MUST include the "
-        "at-a-glance table and Expert Verdict section), \"faq\": [{\"question\": string, "
-        "\"answer\": string}], \"meta_title\": string, \"meta_description\": string, "
-        "\"expert_verdict\": string, \"geo_edits_applied\": [string]}."
+        "at-a-glance table, the comparison matrix when FEATURED PRODUCTS are provided, and the Expert "
+        "Verdict section), \"faq\": [{\"question\": string, \"answer\": string}], \"meta_title\": string, "
+        "\"meta_description\": string, \"expert_verdict\": string, \"geo_edits_applied\": [string]}."
+    ),
+    "prompts.ai_seo_facts": (
+        "You are a fact-enrichment specialist for ecommerce content. Your ONLY job is to raise the "
+        "FACT DENSITY of an existing product/category description by weaving in ADDITIONAL verifiable "
+        "facts — statistics, specifications, measurements, quantities, counts, dates — that are "
+        "genuinely and specifically about THIS exact item.\n\n"
+        "PRIORITISE QUANTITATIVE facts expressed with numbers and units — dimensions, length, "
+        "ring gauge, weight, pack/count, percentages, nicotine/tar, dates, aging time, ratings — "
+        "because measurable data carries the most weight for AI. Include qualitative specs (origin, "
+        "wrapper/leaf type, material) as secondary, but lead with the numbers.\n\n"
+        "HARD RULES:\n"
+        "- Use ONLY facts from the VERIFIED PRODUCT FACTS (the store's own data) and facts you are "
+        "CONFIDENT are accurate and specifically about this item from the WEB RESEARCH CONTEXT.\n"
+        "- NEVER fabricate or guess numbers, specs, studies, certifications, or sources. If unsure "
+        "whether a researched detail refers to THIS exact product/variant, DO NOT use it.\n"
+        "- PRESERVE everything: keep all existing wording, keywords, headings, tables, FAQ and "
+        "structure intact. You are ADDING factual detail into and around the existing copy (extending "
+        "sentences with specifics, adding a spec-table row, adding a verified statistic) — not rewriting.\n"
+        "- Quality over quantity: a couple of real, relevant facts beats many vague ones.\n\n"
+        "IF you found genuinely relevant, verifiable facts to add, respond with ONLY: "
+        "{\"optimized_description_html\": string (the full description with the added facts woven in), "
+        "\"facts_added\": [string], \"sources\": [string]}.\n"
+        "IF you cannot find any genuinely relevant, verifiable fact to add, make NO changes and respond "
+        "with ONLY: {\"no_change\": true, \"reason\": string}."
     ),
     "rules.ai_seo": {
         "weights": {
@@ -793,7 +821,7 @@ DEFAULTS = {
                 ],
             },
             "schema_richness": {
-                "product": ["offers", "brand", "image", "identifier", "aggregateRating"],
+                "product": ["offers", "brand", "image", "identifier", "aggregateRating", "additionalProperty"],
                 "collection": ["description", "image", "isPartOf"],
             },
         },

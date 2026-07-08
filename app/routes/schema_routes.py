@@ -14,6 +14,18 @@ from app.shopify_client import ShopifyClient
 
 logger = logging.getLogger(__name__)
 
+
+def _spec_properties_for(product):
+    """Verified store facts (variant options, pack size, metafield specs) for a product,
+    used as schema.org additionalProperty. Best-effort — never blocks schema generation."""
+    try:
+        from app.ai_agent import _geo_product_facts
+
+        return _geo_product_facts(product, "product")
+    except Exception as e:
+        logger.warning("Spec-property fetch failed for product %s: %s", product.get("id"), e)
+        return None
+
 schema_bp = Blueprint("schema", __name__)
 
 
@@ -35,7 +47,7 @@ def generate_and_push_product_schema(product_id, client=None):
         store_domain = f"{store_domain}.myshopify.com"
 
     org_settings = _get_org_settings(product["store_id"])
-    schema = generate_product_schema(product, store_domain, org_settings)
+    schema = generate_product_schema(product, store_domain, org_settings, _spec_properties_for(product))
     is_valid, errors = validate_schema(schema)
 
     with db.get_cursor() as cur:
@@ -151,7 +163,7 @@ def generate_schema(product_id):
         store_domain = f"{store_domain}.myshopify.com"
 
     org_settings = _get_org_settings(product["store_id"])
-    schema = generate_product_schema(product, store_domain, org_settings)
+    schema = generate_product_schema(product, store_domain, org_settings, _spec_properties_for(product))
     is_valid, errors = validate_schema(schema)
 
     with db.get_cursor() as cur:
@@ -306,7 +318,7 @@ def batch_generate():
                 store_domain = f"{store_domain}.myshopify.com"
 
             org_settings = _get_org_settings(product["store_id"])
-            schema = generate_product_schema(product, store_domain, org_settings)
+            schema = generate_product_schema(product, store_domain, org_settings, _spec_properties_for(product))
             is_valid, validation_errors = validate_schema(schema)
 
             with db.get_cursor() as cur:
@@ -315,7 +327,8 @@ def batch_generate():
                     VALUES (%s, %s, 'product', 'Product', %s, %s, %s)
                     ON CONFLICT (store_id, resource_id, schema_type)
                     DO UPDATE SET schema_json = EXCLUDED.schema_json, is_valid = EXCLUDED.is_valid,
-                                  validation_errors = EXCLUDED.validation_errors, updated_at = NOW()
+                                  validation_errors = EXCLUDED.validation_errors, updated_at = NOW(),
+                                  pushed_to_shopify = FALSE, pushed_at = NULL
                 """, (
                     product["store_id"],
                     product["shopify_id"],

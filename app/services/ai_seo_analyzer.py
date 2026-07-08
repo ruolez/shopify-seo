@@ -135,7 +135,20 @@ def _extractability(text, html, h2s=None):
 
 
 def _schema_has_field(schema, field):
-    """Presence check for a rich-schema field (handles GTIN variants + identifiers)."""
+    """Presence check for a rich-schema field (handles GTIN variants + identifiers).
+
+    ProductGroup carries offers and identifiers on its per-variant hasVariant
+    entries rather than at the top level — look there so a richer variant schema
+    is never scored below a flat single Product.
+    """
+    if schema.get("@type") == "ProductGroup" and field in ("offers", "identifier"):
+        variants = schema.get("hasVariant") or []
+        if field == "offers":
+            return any(v.get("offers") for v in variants)
+        return any(
+            v.get("sku") or v.get("mpn") or any(k.startswith("gtin") for k in v)
+            for v in variants
+        )
     if field == "identifier":
         return bool(
             schema.get("sku")
@@ -150,6 +163,9 @@ def _structured_data_score(schema_types, resource_type, thresholds, primary_sche
     its RICHNESS (offers, brand, identifiers, ratings) — so an enriched Product
     schema scores above a thin theme default."""
     present = set(schema_types or [])
+    # A ProductGroup satisfies the "Product" structured-data requirement.
+    if "ProductGroup" in present:
+        present.add("Product")
     primary_type = "CollectionPage" if resource_type == "collection" else "Product"
     if primary_schema:
         present.add(primary_type)

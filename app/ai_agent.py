@@ -1653,6 +1653,60 @@ def _geo_product_facts(item, entity_type):
     return facts
 
 
+def _collection_top_members(store_id, collection_shopify_id, limit=5):
+    """Verified member products of a collection, for a grounded comparison matrix.
+
+    Returns compact rows (title, brand, price, availability) from the store's own
+    synced data — never fabricated. Ordered in-stock-first then cheapest (a stable,
+    honest ordering; we have no real sales-rank data).
+    """
+    if not store_id or not collection_shopify_id:
+        return []
+    with db.get_cursor() as cur:
+        cur.execute(
+            """SELECT sp.title, sp.vendor, sp.variants
+               FROM collection_product_map m
+               JOIN synced_products sp
+                 ON sp.shopify_id = m.product_shopify_id AND sp.store_id = m.store_id
+               WHERE m.store_id = %s AND m.collection_shopify_id = %s
+               LIMIT 200""",
+            (store_id, collection_shopify_id),
+        )
+        rows = cur.fetchall()
+    members = []
+    for r in rows:
+        variants = r["variants"]
+        if isinstance(variants, str):
+            try:
+                variants = json.loads(variants)
+            except (json.JSONDecodeError, ValueError):
+                variants = []
+        variants = variants or []
+        prices = []
+        for v in variants:
+            try:
+                prices.append(float(v.get("price")))
+            except (ValueError, TypeError):
+                pass
+        available = any(v.get("available", True) for v in variants) if variants else True
+        if prices:
+            lo, hi = min(prices), max(prices)
+            price = f"${lo:.2f}" if lo == hi else f"${lo:.2f}–${hi:.2f}"
+        else:
+            lo, price = float("inf"), ""
+        members.append(
+            {
+                "title": (r["title"] or "").strip(),
+                "brand": (r["vendor"] or "").strip(),
+                "price": price,
+                "available": available,
+                "_lo": lo,
+            }
+        )
+    members.sort(key=lambda m: (not m["available"], m["_lo"]))
+    return [{k: v for k, v in m.items() if k != "_lo"} for m in members[:limit] if m["title"]]
+
+
 def _geo_research(item):
     """Best-effort Brave web research for real product facts. Rate-limit-safe and cached
     (serp_scraper.brave_search sleeps between calls and backs off on 429)."""
@@ -1719,6 +1773,21 @@ def _generate_geo_content(client, config, item, entity_type, weak_signals=None):
             "THIS exact product and you are confident it is accurate; otherwise ignore it):\n" + research
         )
 
+    members_block = ""
+    if entity_type == "collection":
+        members = _collection_top_members(item.get("store_id"), item.get("shopify_id"))
+        if len(members) >= 2:
+            lines = [
+                f"- {m['title']} | Brand: {m['brand'] or 'n/a'} | Price: {m['price'] or 'n/a'} | "
+                f"{'In stock' if m['available'] else 'Out of stock'}"
+                for m in members
+            ]
+            members_block = (
+                "\n\nFEATURED PRODUCTS IN THIS COLLECTION (real member products from the store — render "
+                "these as a COMPARISON MATRIX table; use ONLY these exact rows and values, never add "
+                "products or invent data):\n" + "\n".join(lines)
+            )
+
     user_prompt = (
         f"{entity_type.capitalize()} title: {item.get('title') or ''}\n"
         f"Brand/Vendor: {item.get('vendor') or 'n/a'}\n"
@@ -1727,6 +1796,7 @@ def _generate_geo_content(client, config, item, entity_type, weak_signals=None):
         f"Current meta description: {item.get('meta_description') or '(none)'}\n\n"
         f"Current description HTML:\n{item.get('description') or '(none)'}"
         f"{facts_block}"
+        f"{members_block}"
         f"{research_block}"
         f"{preserve_block}"
         f"{weak_block}"
@@ -1775,6 +1845,54 @@ def _generate_geo_content(client, config, item, entity_type, weak_signals=None):
         "dropped_keywords": dropped_keywords,
         "expert_verdict": (data.get("expert_verdict") or "").strip(),
         "product_facts": facts,
+    }
+
+
+def _generate_fact_boost(client, config, item, entity_type):
+    """Dedicated fact-density pass: research + weave in verifiable, relevant facts
+    while preserving everything. Returns {"no_change": True, ...} if nothing solid
+    is found (never fabricates)."""
+    system_prompt = get_setting("prompts.ai_seo_facts", DEFAULTS["prompts.ai_seo_facts"])
+    facts = _geo_product_facts(item, entity_type)
+    research = _geo_research(item)
+    facts_block = "\n".join(f"- {k}: {v}" for k, v in facts.items()) or "(none)"
+    user_prompt = (
+        f"{entity_type.capitalize()} title: {item.get('title') or ''}\n"
+        f"Brand/Vendor: {item.get('vendor') or 'n/a'}\n"
+        f"Type: {item.get('product_type') or item.get('collection_type') or 'n/a'}\n\n"
+        f"Current description HTML:\n{item.get('description') or '(none)'}\n\n"
+        f"VERIFIED PRODUCT FACTS (store data — safe to state):\n{facts_block}\n\n"
+        f"WEB RESEARCH CONTEXT (only use a detail if clearly about THIS exact item):\n"
+        f"{research or '(no research results)'}"
+    )
+    resp = client.chat.completions.create(
+        model=config["model"],
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        temperature=0.3,
+    )
+    content = resp.choices[0].message.content or ""
+    start, end = content.find("{"), content.rfind("}") + 1
+    data = {}
+    if start >= 0 and end > start:
+        try:
+            data = json.loads(content[start:end])
+        except (json.JSONDecodeError, ValueError):
+            data = {}
+    if not data:
+        return {"no_change": True, "reason": "AI did not return valid output"}
+    if data.get("no_change"):
+        return {"no_change": True, "reason": data.get("reason") or "No verifiable, relevant facts found"}
+    desc = _sanitize_description(data.get("optimized_description_html") or "")
+    if not desc:
+        return {"no_change": True, "reason": "No enriched content produced"}
+    return {
+        "no_change": False,
+        "optimized_description_html": desc,
+        "facts_added": data.get("facts_added") or [],
+        "sources": data.get("sources") or [],
     }
 
 
@@ -4578,6 +4696,24 @@ def run_task(task_type, task_input, store_id=None):
         return _generate_geo_content(
             client, config, dict(item), "collection", task_input.get("weak_signals")
         )
+
+    elif task_type == "ai_seo_facts_product":
+        product_id = task_input.get("product_id")
+        with db.get_cursor() as cur:
+            cur.execute("SELECT * FROM synced_products WHERE id = %s", (product_id,))
+            item = cur.fetchone()
+        if not item:
+            return {"error": "Product not found"}
+        return _generate_fact_boost(client, config, dict(item), "product")
+
+    elif task_type == "ai_seo_facts_collection":
+        collection_id = task_input.get("collection_id")
+        with db.get_cursor() as cur:
+            cur.execute("SELECT * FROM synced_collections WHERE id = %s", (collection_id,))
+            item = cur.fetchone()
+        if not item:
+            return {"error": "Collection not found"}
+        return _generate_fact_boost(client, config, dict(item), "collection")
 
     elif task_type == "store_audit":
         system_prompt = get_setting("prompts.store_audit", DEFAULTS["prompts.store_audit"])
