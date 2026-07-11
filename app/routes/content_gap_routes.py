@@ -89,7 +89,7 @@ def update_status(gap_id):
     store_id = _get_store_id()
     if not store_id:
         return jsonify({"error": "store_id required"}), 400
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
     status = data.get("status")
     try:
         content_gap_service.update_gap_status(store_id, gap_id, status)
@@ -112,28 +112,34 @@ def generate_content(gap_id):
     store_id = _get_store_id()
     if not store_id:
         return jsonify({"error": "store_id required"}), 400
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
     selected_title = data.get("title", "")
     content_type = data.get("content_type", "collection")
     skip_cannibalization_check = data.get("skip_cannibalization_check", False)
 
     if not skip_cannibalization_check:
+        risk = None
         try:
             gap = content_gap_service.get_gap(store_id, gap_id)
-            if gap:
-                keyword = gap.get("keyword", "")
-                if keyword:
-                    risk = content_gap_service.check_cannibalization_risk(store_id, keyword)
-                    if risk.get("risk_level") == "high":
-                        return jsonify({
-                            "cannibalization_warning": True,
-                            "risk_level": risk["risk_level"],
-                            "recommendation": risk["recommendation"],
-                            "existing_pages": risk.get("existing_pages", [])[:3],
-                            "on_site_matches": risk.get("on_site_matches", [])[:3],
-                        }), 409
-        except Exception as e:
-            logger.warning("Cannibalization check failed, proceeding: %s", e)
+            keyword = (gap or {}).get("keyword", "")
+            if keyword:
+                risk = content_gap_service.check_cannibalization_risk(store_id, keyword)
+        except Exception:
+            # Fail closed — a broken check must not silently disable the gate.
+            logger.exception("Cannibalization check failed for gap %s", gap_id)
+            return jsonify({
+                "error": "Cannibalization check failed — retry, or resend with skip_cannibalization_check to override",
+            }), 502
+        if risk and risk.get("risk_level") == "high":
+            return jsonify({
+                "cannibalization_warning": True,
+                "error": "High cannibalization risk — existing pages already target this keyword",
+                "requires_confirmation": True,
+                "risk_level": risk["risk_level"],
+                "recommendation": risk.get("recommendation"),
+                "existing_pages": risk.get("existing_pages", [])[:3],
+                "on_site_matches": risk.get("on_site_matches", [])[:3],
+            }), 409
 
     try:
         result = content_gap_service.generate_content(store_id, gap_id, selected_title, content_type)
@@ -148,7 +154,7 @@ def publish_content(gap_id):
     store_id = _get_store_id()
     if not store_id:
         return jsonify({"error": "store_id required"}), 400
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
     try:
         result = content_gap_service.publish_content(store_id, gap_id, data)
         return jsonify(result)
@@ -179,6 +185,8 @@ def optimize_existing(gap_id):
                 if risk.get("risk_level") == "high":
                     return jsonify({
                         "cannibalization_warning": True,
+                "error": "High cannibalization risk — existing pages already target this keyword",
+                "requires_confirmation": True,
                         "risk_level": risk["risk_level"],
                         "recommendation": risk["recommendation"],
                         "existing_pages": risk.get("existing_pages", [])[:3],
@@ -201,7 +209,7 @@ def apply_optimization(gap_id):
     store_id = _get_store_id()
     if not store_id:
         return jsonify({"error": "store_id required"}), 400
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
     item_type = data.get("item_type")
     item_id = data.get("item_id")
     try:

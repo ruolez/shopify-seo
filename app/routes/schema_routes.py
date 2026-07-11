@@ -102,18 +102,6 @@ def _get_org_settings(store_id):
     return None
 
 
-def _get_store_domain(store_id):
-    with db.get_cursor() as cur:
-        cur.execute("SELECT COALESCE(primary_domain, domain) as domain FROM stores WHERE id = %s", (store_id,))
-        row = cur.fetchone()
-        if row:
-            domain = row["domain"]
-            if domain.endswith(".myshopify.com"):
-                return domain
-            return f"{domain}.myshopify.com"
-    return None
-
-
 @schema_bp.route("/api/schema/products", methods=["GET"])
 def list_products_schema():
     with db.get_cursor() as cur:
@@ -175,7 +163,8 @@ def generate_schema(product_id):
             VALUES (%s, %s, 'product', 'Product', %s, %s, %s)
             ON CONFLICT (store_id, resource_id, schema_type)
             DO UPDATE SET schema_json = EXCLUDED.schema_json, is_valid = EXCLUDED.is_valid,
-                          validation_errors = EXCLUDED.validation_errors, updated_at = NOW()
+                          validation_errors = EXCLUDED.validation_errors, updated_at = NOW(),
+                          pushed_to_shopify = FALSE, pushed_at = NULL
             RETURNING id
         """, (
             product["store_id"],
@@ -249,13 +238,16 @@ def push_schema(product_id):
 
     with db.get_cursor() as cur:
         cur.execute("""
-            SELECT schema_json FROM schema_markup
+            SELECT schema_json, is_valid, validation_errors FROM schema_markup
             WHERE store_id = %s AND resource_id = %s AND schema_type = 'Product'
         """, (product["store_id"], product["shopify_id"]))
         schema_row = cur.fetchone()
 
     if not schema_row:
         return jsonify({"error": "Schema not generated yet. Generate first."}), 400
+    if not schema_row["is_valid"]:
+        errs = schema_row.get("validation_errors") or []
+        return jsonify({"error": "Schema has validation errors — fix and regenerate before pushing", "validation_errors": errs}), 400
 
     schema_json = schema_row["schema_json"]
     if isinstance(schema_json, dict):
@@ -292,7 +284,7 @@ def push_schema(product_id):
 
 @schema_bp.route("/api/schema/batch/generate", methods=["POST"])
 def batch_generate():
-    data = request.get_json() or {}
+    data = request.get_json(silent=True) or {}
     product_ids = data.get("product_ids", [])
 
     if not product_ids:
@@ -435,9 +427,15 @@ def schema_stats():
 
 @schema_bp.route("/api/schema/settings", methods=["GET", "POST"])
 def schema_settings():
+    # Store-scoped when store_id is provided; falls back to the first store
+    # for the existing single-store UI.
+    req_store_id = request.args.get("store_id", type=int) or (request.get_json(silent=True) or {}).get("store_id")
     if request.method == "GET":
         with db.get_cursor() as cur:
-            cur.execute("SELECT * FROM schema_settings ORDER BY id LIMIT 1")
+            if req_store_id:
+                cur.execute("SELECT * FROM schema_settings WHERE store_id = %s", (req_store_id,))
+            else:
+                cur.execute("SELECT * FROM schema_settings ORDER BY id LIMIT 1")
             row = cur.fetchone()
 
         if not row:
@@ -455,16 +453,17 @@ def schema_settings():
             "default_currency": row["default_currency"] or "USD",
         })
 
-    data = request.get_json() or {}
+    data = request.get_json(silent=True) or {}
 
-    with db.get_cursor() as cur:
-        cur.execute("SELECT id FROM stores ORDER BY id LIMIT 1")
-        store_row = cur.fetchone()
-
-    if not store_row:
-        return jsonify({"error": "No store configured"}), 400
-
-    store_id = store_row["id"]
+    if req_store_id:
+        store_id = req_store_id
+    else:
+        with db.get_cursor() as cur:
+            cur.execute("SELECT id FROM stores ORDER BY id LIMIT 1")
+            store_row = cur.fetchone()
+        if not store_row:
+            return jsonify({"error": "No store configured"}), 400
+        store_id = store_row["id"]
 
     with db.get_cursor() as cur:
         cur.execute("""

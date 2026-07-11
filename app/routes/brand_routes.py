@@ -8,6 +8,7 @@ from flask import Blueprint, jsonify, render_template, request
 
 from app.auth import decrypt_value
 from app.database import db
+from app.services.task_runner import spawn as spawn_task
 from app.shopify_client import ShopifyClient
 
 logger = logging.getLogger(__name__)
@@ -58,7 +59,7 @@ def list_vendors():
 
 @brand_bp.route("/api/brands/create", methods=["POST"])
 def create_brand_collections():
-    data = request.get_json() or {}
+    data = request.get_json(silent=True) or {}
     store_id = data.get("store_id")
     vendors = data.get("vendors", [])
 
@@ -72,12 +73,7 @@ def create_brand_collections():
         )
         bulk_task_id = cur.fetchone()["id"]
 
-    thread = threading.Thread(
-        target=_execute_brand_collections,
-        args=(bulk_task_id, store_id, vendors),
-        daemon=True,
-    )
-    thread.start()
+    spawn_task("bulk_tasks", bulk_task_id, _execute_brand_collections, bulk_task_id, store_id, vendors)
 
     return jsonify({"ok": True, "bulk_task_id": bulk_task_id, "total": len(vendors)}), 201
 
@@ -157,11 +153,8 @@ def _execute_brand_collections(bulk_task_id, store_id, vendors):
             shopify_id = result["shopify_id"]
             handle = result["handle"]
 
-            try:
-                client.publish_to_all_channels(shopify_id)
-            except Exception:
-                logger.exception("Failed to publish brand collection '%s' to sales channels", vendor)
-
+            # Persist the Shopify id BEFORE the publish step — a failure after
+            # creation must not lose the id (re-runs would mint duplicates).
             with db.get_cursor() as cur:
                 cur.execute(
                     """INSERT INTO synced_collections (store_id, shopify_id, title, handle, collection_type, products_count, synced_at)
@@ -180,6 +173,11 @@ def _execute_brand_collections(bulk_task_id, store_id, vendors):
                         shopify_collection_id = EXCLUDED.shopify_collection_id, status = 'created', generation_mode = 'brands'""",
                     (store_id, brand_tag, synced_collection_id, shopify_id),
                 )
+
+            try:
+                client.publish_to_all_channels(shopify_id)
+            except Exception:
+                logger.exception("Failed to publish brand collection '%s' to sales channels", vendor)
 
             with db.get_cursor() as cur:
                 cur.execute(
@@ -301,7 +299,7 @@ def _repair_broken_brand_links(store_id):
 
 @brand_bp.route("/api/brands/fix-titles", methods=["POST"])
 def fix_brand_collection_titles():
-    data = request.get_json() or {}
+    data = request.get_json(silent=True) or {}
     store_id = data.get("store_id")
     if not store_id:
         return jsonify({"error": "store_id is required"}), 400
@@ -386,8 +384,11 @@ def delete_brand_collection(gc_id):
                     store["api_version"],
                 )
                 client.delete_collection(shopify_id)
-            except Exception:
-                logger.exception("Failed to delete brand collection from Shopify: %s", shopify_id)
+            except Exception as e:
+                if not any(t in str(e).lower() for t in ("does not exist", "not found", "invalid id", "no longer exists")):
+                    logger.exception("Failed to delete brand collection from Shopify: %s", shopify_id)
+                    return jsonify({"error": f"Shopify delete failed: {e} — nothing was removed locally"}), 502
+                logger.info("Collection already gone on Shopify: %s", shopify_id)
 
     with db.get_cursor() as cur:
         cur.execute("DELETE FROM generated_collections WHERE id = %s", (gc_id,))
@@ -399,7 +400,7 @@ def delete_brand_collection(gc_id):
 
 @brand_bp.route("/api/brands/landing-page", methods=["POST"])
 def generate_brand_landing_page():
-    data = request.get_json() or {}
+    data = request.get_json(silent=True) or {}
     store_id = data.get("store_id")
     if not store_id:
         return jsonify({"error": "store_id is required"}), 400
@@ -887,7 +888,7 @@ def generate_brand_logo(gc_id):
     if not store:
         return jsonify({"error": "Store not found"}), 404
 
-    req_data = request.get_json() or {}
+    req_data = request.get_json(silent=True) or {}
     search_keywords = req_data.get("search_keywords", "").strip() or None
     custom_prompt = req_data.get("custom_prompt", "").strip() or None
     result = _find_and_upload_brand_logo(store_id, brand_name, shopify_collection_id, row["collection_id"], store, gc_id=gc_id, search_keywords=search_keywords, custom_prompt=custom_prompt)
@@ -898,7 +899,7 @@ def generate_brand_logo(gc_id):
 
 @brand_bp.route("/api/brands/collections/bulk-logo", methods=["POST"])
 def bulk_generate_brand_logos():
-    data = request.get_json() or {}
+    data = request.get_json(silent=True) or {}
     store_id = data.get("store_id")
     gc_ids = data.get("gc_ids", [])
 
@@ -912,12 +913,7 @@ def bulk_generate_brand_logos():
         )
         bulk_task_id = cur.fetchone()["id"]
 
-    thread = threading.Thread(
-        target=_execute_bulk_brand_logos,
-        args=(bulk_task_id, store_id, gc_ids),
-        daemon=True,
-    )
-    thread.start()
+    spawn_task("bulk_tasks", bulk_task_id, _execute_bulk_brand_logos, bulk_task_id, store_id, gc_ids)
 
     return jsonify({"ok": True, "bulk_task_id": bulk_task_id, "total": len(gc_ids)}), 201
 
@@ -1167,7 +1163,7 @@ def get_brand_collection_seo(gc_id):
 
 @brand_bp.route("/api/brands/collections/<int:gc_id>/optimize", methods=["POST"])
 def optimize_brand_seo(gc_id):
-    data = request.get_json() or {}
+    data = request.get_json(silent=True) or {}
     keywords = data.get("keywords", [])
     interlink_collections = data.get("interlink_collections", [])
 
@@ -1223,15 +1219,14 @@ def optimize_brand_seo(gc_id):
                     (str(e), tid),
                 )
 
-    thread = threading.Thread(target=_run_brand_task, args=(task_id,), daemon=True)
-    thread.start()
+    spawn_task("ai_tasks", task_id, _run_brand_task, task_id)
 
     return jsonify({"ok": True, "task_id": task_id}), 201
 
 
 @brand_bp.route("/api/brands/collections/<int:gc_id>/apply", methods=["POST"])
 def apply_brand_seo(gc_id):
-    data = request.get_json() or {}
+    data = request.get_json(silent=True) or {}
 
     with db.get_cursor() as cur:
         cur.execute(
@@ -1289,7 +1284,7 @@ def apply_brand_seo(gc_id):
 
 @brand_bp.route("/api/brands/bulk-optimize", methods=["POST"])
 def bulk_optimize_brand_seo():
-    data = request.get_json() or {}
+    data = request.get_json(silent=True) or {}
     store_id = data.get("store_id")
     gc_ids = data.get("gc_ids", [])
     auto_apply = data.get("auto_apply", True)
@@ -1304,12 +1299,7 @@ def bulk_optimize_brand_seo():
         )
         bulk_task_id = cur.fetchone()["id"]
 
-    thread = threading.Thread(
-        target=_execute_bulk_brand_optimize,
-        args=(bulk_task_id, store_id, gc_ids, auto_apply),
-        daemon=True,
-    )
-    thread.start()
+    spawn_task("bulk_tasks", bulk_task_id, _execute_bulk_brand_optimize, bulk_task_id, store_id, gc_ids, auto_apply)
 
     return jsonify({"ok": True, "bulk_task_id": bulk_task_id, "total": len(gc_ids)}), 201
 
@@ -1377,7 +1367,11 @@ def _execute_bulk_brand_optimize(bulk_task_id, store_id, gc_ids, auto_apply):
 
             result = run_task("brand_seo", task_input, store_id)
 
-            if auto_apply and result and not result.get("error"):
+            item_error = None
+            if not result or result.get("error") or ("raw_response" in result and len(result) == 1):
+                item_error = (result or {}).get("error") or "AI returned unparsable output"
+
+            if auto_apply and not item_error:
                 fields = {}
                 if result.get("optimized_description"):
                     fields["description_html"] = result["optimized_description"]
@@ -1397,11 +1391,15 @@ def _execute_bulk_brand_optimize(bulk_task_id, store_id, gc_ids, auto_apply):
                             if fields.get("meta_description"):
                                 cur.execute("UPDATE synced_collections SET meta_description = %s WHERE id = %s", (fields["meta_description"], collection_id))
                             cur.execute("UPDATE synced_collections SET last_optimized_at = NOW() WHERE id = %s", (collection_id,))
-                    except Exception:
+                    except Exception as apply_err:
+                        item_error = f"Apply to Shopify failed: {apply_err}"
                         logger.exception("Failed to auto-apply brand SEO for '%s'", vendor_name)
 
             with db.get_cursor() as cur:
-                cur.execute("UPDATE bulk_tasks SET completed = completed + 1 WHERE id = %s", (bulk_task_id,))
+                if item_error:
+                    cur.execute("UPDATE bulk_tasks SET failed = failed + 1 WHERE id = %s", (bulk_task_id,))
+                else:
+                    cur.execute("UPDATE bulk_tasks SET completed = completed + 1 WHERE id = %s", (bulk_task_id,))
 
         except Exception:
             logger.exception("Failed to optimize brand SEO for '%s'", vendor_name)

@@ -1,6 +1,7 @@
 // ── News page ────────────────────────────────────────────────────
 
 let storeId = null;
+let storeBaseUrl = "";
 let currentSessionId = null;
 let current = null;       // working edited_result
 let lastSession = null;   // last fetched session row (hero/inline state)
@@ -173,7 +174,7 @@ function batchChip(item) {
     const s = item.status;
     if (!s) return `<span style="color:var(--on-surface-secondary);">Ready</span>`;
     if (s === "published") {
-        const url = `/blogs/news/${item.handle || ""}`;
+        const url = `${storeBaseUrl}/blogs/news/${item.handle || ""}`;
         return `<span style="color:var(--success);">✓ Published — <a href="${escapeAttr(url)}" target="_blank">view →</a></span>`;
     }
     if (s === "failed") return `<span style="color:var(--error);">Failed: ${escapeHtml(item.error || "error")}</span>`;
@@ -227,6 +228,7 @@ async function startBatch() {
 function pollBatch() {
     const status = document.getElementById("news-batch-status");
     const tracked = batchItems.filter((i) => i.sessionId);
+    let consecutiveErrors = 0;
     const poll = async () => {
         let rows;
         try {
@@ -234,9 +236,15 @@ function pollBatch() {
                 method: "POST",
                 body: { ids: tracked.map((i) => i.sessionId) },
             });
+            consecutiveErrors = 0;
             rows = res.sessions || [];
         } catch (e) {
-            status.innerHTML = `<p style="color: var(--error);">${escapeHtml(e.message)}</p>`;
+            consecutiveErrors++;
+            if (consecutiveErrors >= 5) {
+                status.innerHTML = `<p style="color: var(--error);">${escapeHtml(e.message)}</p>`;
+                return;
+            }
+            setTimeout(poll, 2000);
             return;
         }
         const byId = Object.fromEntries(rows.map((r) => [r.id, r]));
@@ -404,37 +412,47 @@ async function autoPublish() {
     if (!storeId) return showToast("No store found. Add a store first.", "error");
     if (!source) return showToast("Paste or upload an article first", "error");
 
-    status.innerHTML = `<div class="spinner" style="width:20px;height:20px;border-width:2px;"></div> Starting auto-publish…`;
-    try {
-        const res = await apiRequest("/api/news/auto", {
-            method: "POST",
-            body: { store_id: storeId, source_text: source, source_urls: sourceUrls },
-        });
-        currentSessionId = res.session_id;
-        pollAutoSession(currentSessionId, status);
-    } catch (e) {
-        status.innerHTML = `<p style="color: var(--error);">${escapeHtml(e.message)}</p>`;
-    }
+    const btn = typeof event !== "undefined" && event && event.target instanceof Element ? event.target.closest("button") : null;
+    return guardButton(btn, async () => {
+        status.innerHTML = `<div class="spinner" style="width:20px;height:20px;border-width:2px;"></div> Starting auto-publish…`;
+        try {
+            const res = await apiRequest("/api/news/auto", {
+                method: "POST",
+                body: { store_id: storeId, source_text: source, source_urls: sourceUrls },
+            });
+            currentSessionId = res.session_id;
+            pollAutoSession(currentSessionId, status);
+        } catch (e) {
+            status.innerHTML = `<p style="color: var(--error);">${escapeHtml(e.message)}</p>`;
+        }
+    });
 }
 
 function pollAutoSession(sessionId, status) {
+    let consecutiveErrors = 0;
     const poll = async () => {
         let session;
         try {
             session = await apiRequest(`/api/news/session/${sessionId}`);
+            consecutiveErrors = 0;
         } catch (e) {
-            status.innerHTML = `<p style="color: var(--error);">${escapeHtml(e.message)}</p>`;
+            consecutiveErrors++;
+            if (consecutiveErrors >= 5) {
+                status.innerHTML = `<p style="color: var(--error);">${escapeHtml(e.message)}</p>`;
+                return;
+            }
+            setTimeout(poll, 2000);
             return;
         }
         if (session.status === "published") {
             status.innerHTML = "";
-            const url = `/blogs/news/${session.article_handle || ""}`;
+            const url = `${storeBaseUrl}/blogs/news/${session.article_handle || ""}`;
             show("news-step-paste", false);
             show("news-step-review", false);
             show("news-step-done", true);
             document.getElementById("done-msg").textContent = "Published!";
             const link = document.getElementById("done-link");
-            link.textContent = window.location.origin.replace(/\/$/, "") + url;
+            link.textContent = url;
             link.href = url;
             showToast("Article auto-published.", "success");
             loadNewsArticles();
@@ -482,16 +500,23 @@ async function analyzeNews() {
 }
 
 function pollTask(taskId, onDone) {
+    let consecutiveErrors = 0;
     const poll = async () => {
         try {
             const task = await apiRequest(`/api/tasks/${taskId}`);
+            consecutiveErrors = 0;
             if (task.status === "completed" || task.status === "failed") {
                 onDone(task);
             } else {
                 setTimeout(poll, 2000);
             }
         } catch (e) {
-            onDone({ status: "failed", error: e.message });
+            consecutiveErrors++;
+            if (consecutiveErrors >= 5) {
+                onDone({ status: "failed", error: e.message });
+                return;
+            }
+            setTimeout(poll, 2000);
         }
     };
     poll();
@@ -677,21 +702,24 @@ async function generateLinks() {
 }
 
 async function publishNews(isPublished) {
-    try {
-        await saveSession();
-        const res = await apiRequest(`/api/news/session/${currentSessionId}/publish`, {
-            method: "POST",
-            body: { is_published: isPublished },
-        });
-        show("news-step-review", false);
-        show("news-step-done", true);
-        document.getElementById("done-msg").textContent = isPublished ? "Published!" : "Saved as draft";
-        const link = document.getElementById("done-link");
-        link.textContent = window.location.origin.replace(/\/$/, "") + (res.url || "");
-        link.href = res.url || "#";
-    } catch (e) {
-        showToast("Publish failed: " + e.message, "error");
-    }
+    const btn = typeof event !== "undefined" && event && event.target instanceof Element ? event.target.closest("button") : null;
+    return guardButton(btn, async () => {
+        try {
+            await saveSession();
+            const res = await apiRequest(`/api/news/session/${currentSessionId}/publish`, {
+                method: "POST",
+                body: { is_published: isPublished },
+            });
+            show("news-step-review", false);
+            show("news-step-done", true);
+            document.getElementById("done-msg").textContent = isPublished ? "Published!" : "Saved as draft";
+            const link = document.getElementById("done-link");
+            link.textContent = res.url || "";
+            link.href = res.url || "#";
+        } catch (e) {
+            showToast("Publish failed: " + e.message, "error");
+        }
+    });
 }
 
 function resetCreate() {
@@ -715,6 +743,7 @@ async function loadNewsArticles() {
     if (!storeId) { container.innerHTML = `<p>No store found.</p>`; return; }
     try {
         const data = await apiRequest(`/api/news/articles?store_id=${storeId}`);
+        storeBaseUrl = data.store_base_url || storeBaseUrl;
         const articles = data.articles || [];
         if (!articles.length) {
             container.innerHTML = `<div class="card"><p style="color:var(--on-surface-secondary);">No news published yet. Create your first article in the “Create News” tab.</p></div>`;
@@ -725,7 +754,7 @@ async function loadNewsArticles() {
             const status = a.is_published
                 ? `<span class="news-badge news-badge--ok">Published</span>`
                 : `<span class="news-badge news-badge--pending">Draft</span>`;
-            const url = `/blogs/news/${a.handle || ""}`;
+            const url = `${storeBaseUrl}/blogs/news/${a.handle || ""}`;
             return `<tr>
                 <td>${escapeHtml(a.title || "Untitled")}</td>
                 <td>${escapeHtml(a.category || "—")}</td>

@@ -143,23 +143,24 @@ function markStepCompleted(step) {
 async function runConsolidate() {
     if (!ksStoreId) return;
     const btn = document.getElementById("ks-consolidate-btn");
-    btn.disabled = true;
-    btn.innerHTML = '<span class="spinner" style="width:14px;height:14px;border-width:2px;"></span> Consolidating...';
-    showProgress("Consolidating keywords from Semrush & GSC...", 30);
-    try {
-        await apiRequest(`/api/keyword-strategy/consolidate?store_id=${ksStoreId}`, { method: "POST" });
-        pollRun("consolidate", (run) => {
-            hideProgress();
-            loadKwOverview();
-            loadKeywords();
-            markStepCompleted("keywords");
-            showToast("Keywords consolidated", "success");
-        }, (run) => {
-            const pct = run.total_items > 0 ? Math.round((run.completed_items / run.total_items) * 100) : 30;
-            showProgress(`Consolidating... ${(run.completed_items || 0).toLocaleString()} keywords`, pct);
-        });
-    } catch (e) { showToast("Consolidation failed: " + e.message, "error"); hideProgress(); }
-    finally { btn.disabled = false; btn.innerHTML = '<span class="material-symbols-rounded" style="font-size:16px;vertical-align:middle;">sync</span> Consolidate Keywords'; }
+    return guardButton(btn, async () => {
+        btn.innerHTML = '<span class="spinner" style="width:14px;height:14px;border-width:2px;"></span> Consolidating...';
+        showProgress("Consolidating keywords from Semrush & GSC...", 30);
+        try {
+            await apiRequest(`/api/keyword-strategy/consolidate?store_id=${ksStoreId}`, { method: "POST" });
+            pollRun("consolidate", (run) => {
+                hideProgress();
+                loadKwOverview();
+                loadKeywords();
+                markStepCompleted("keywords");
+                showToast("Keywords consolidated", "success");
+            }, (run) => {
+                const pct = run.total_items > 0 ? Math.round((run.completed_items / run.total_items) * 100) : 30;
+                showProgress(`Consolidating... ${(run.completed_items || 0).toLocaleString()} keywords`, pct);
+            });
+        } catch (e) { showToast("Consolidation failed: " + e.message, "error"); hideProgress(); }
+        finally { btn.innerHTML = '<span class="material-symbols-rounded" style="font-size:16px;vertical-align:middle;">sync</span> Consolidate Keywords'; }
+    });
 }
 
 async function runClustering() {
@@ -507,6 +508,9 @@ async function runPlanGeneration() {
         }, (run) => {
             const pct = run.total_items > 0 ? Math.round((run.completed_items / run.total_items) * 100) : 15;
             showProgress(`Assigning keywords... ${(run.completed_items || 0).toLocaleString()} / ${(run.total_items || 0).toLocaleString()}`, pct);
+        }, () => {
+            btn.disabled = false;
+            btn.innerHTML = '<span class="material-symbols-rounded" style="font-size:16px;vertical-align:middle;">auto_fix_high</span> Generate Plan';
         });
     } catch (e) {
         showToast("Failed: " + e.message, "error");
@@ -876,13 +880,15 @@ async function revertChange(changeId) {
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────
-function pollRun(runType, onComplete, onProgress) {
+function pollRun(runType, onComplete, onProgress, onFail) {
+    let consecutiveErrors = 0;
     const interval = setInterval(async () => {
         try {
             const d = await apiRequest(`/api/keyword-strategy/runs?store_id=${ksStoreId}`);
+            consecutiveErrors = 0;
             const runs = d.runs || [];
             const latest = runs.find(r => r.run_type === runType);
-            if (!latest) { clearInterval(interval); hideProgress(); return; }
+            if (!latest) { clearInterval(interval); hideProgress(); if (onFail) onFail(); return; }
             if (latest.status === "completed") {
                 clearInterval(interval);
                 onComplete(latest);
@@ -890,10 +896,19 @@ function pollRun(runType, onComplete, onProgress) {
                 clearInterval(interval);
                 hideProgress();
                 showToast(`${runType} failed: ${latest.error || 'Unknown'}`, "error");
+                if (onFail) onFail(latest);
             } else if (onProgress) {
                 onProgress(latest);
             }
-        } catch (e) { clearInterval(interval); hideProgress(); }
+        } catch (e) {
+            consecutiveErrors++;
+            if (consecutiveErrors >= 5) {
+                clearInterval(interval);
+                hideProgress();
+                showToast(`Lost contact with the ${runType} run (${e.message}). It may still be running — reload to check.`, "error");
+                if (onFail) onFail();
+            }
+        }
     }, 2000);
 }
 

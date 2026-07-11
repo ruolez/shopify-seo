@@ -17,6 +17,7 @@ from flask import Blueprint, jsonify, render_template, request
 
 from app.auth import decrypt_value
 from app.database import db
+from app.services.task_runner import spawn as spawn_task, sweep_stale_jobs
 from app.services import ai_seo_analyzer
 from app.services.serp_scraper import scrape_serp_pages
 from app.shopify_client import ShopifyClient
@@ -215,7 +216,7 @@ def ai_seo_page():
 
 @ai_seo_bp.route("/api/ai-seo/scan", methods=["POST"])
 def start_scan():
-    data = request.get_json() or {}
+    data = request.get_json(silent=True) or {}
     store_id = data.get("store_id")
     resource_type = data.get("type", "all")
     if not store_id:
@@ -228,9 +229,7 @@ def start_scan():
         )
         task_id = cur.fetchone()["id"]
 
-    threading.Thread(
-        target=_execute_scan, args=(task_id, int(store_id), resource_type), daemon=True
-    ).start()
+    spawn_task("ai_tasks", task_id, _execute_scan, task_id, int(store_id), resource_type)
     return jsonify({"ok": True, "task_id": task_id}), 201
 
 
@@ -395,7 +394,7 @@ def _rescore_item(store_id, resource_type, item, live, crawlability, store_domai
 def optimize_preview():
     from app.ai_agent import run_task
 
-    data = request.get_json() or {}
+    data = request.get_json(silent=True) or {}
     store_id = data.get("store_id")
     resource_type = data.get("type", "product")
     resource_id = data.get("id")
@@ -406,7 +405,7 @@ def optimize_preview():
     with db.get_cursor() as cur:
         cur.execute("SELECT * FROM stores WHERE id = %s", (int(store_id),))
         store = cur.fetchone()
-        cur.execute(f"SELECT * FROM {table} WHERE id = %s", (resource_id,))
+        cur.execute(f"SELECT * FROM {table} WHERE id = %s AND store_id = %s", (resource_id, int(store_id)))
         item = cur.fetchone()
     if not item:
         return jsonify({"error": "Item not found"}), 404
@@ -467,9 +466,19 @@ def _push_and_rescore(store, resource_type, item, description_html, meta_title, 
 
     Shared by single-item apply and batch optimize. Raises on Shopify errors.
     """
+    from app.services.ai_output_guard import (
+        clamp_meta_description,
+        clamp_meta_title,
+        sanitize_html,
+    )
+
     store_id = store["id"]
     resource_id = item["id"]
     shopify_id = item["shopify_id"]
+
+    description_html = sanitize_html(description_html) if description_html else description_html
+    meta_title = clamp_meta_title(meta_title) if meta_title else meta_title
+    meta_description = clamp_meta_description(meta_description) if meta_description else meta_description
 
     fields = {}
     if description_html:
@@ -550,7 +559,7 @@ def _push_and_rescore(store, resource_type, item, description_html, meta_title, 
 
 @ai_seo_bp.route("/api/ai-seo/optimize/apply", methods=["POST"])
 def optimize_apply():
-    data = request.get_json() or {}
+    data = request.get_json(silent=True) or {}
     store_id = data.get("store_id")
     resource_type = data.get("type", "product")
     resource_id = data.get("id")
@@ -561,7 +570,7 @@ def optimize_apply():
     with db.get_cursor() as cur:
         cur.execute("SELECT * FROM stores WHERE id = %s", (int(store_id),))
         store = cur.fetchone()
-        cur.execute(f"SELECT * FROM {table} WHERE id = %s", (resource_id,))
+        cur.execute(f"SELECT * FROM {table} WHERE id = %s AND store_id = %s", (resource_id, int(store_id)))
         item = cur.fetchone()
     if not store or not item:
         return jsonify({"error": "Store or item not found"}), 404
@@ -604,7 +613,7 @@ def _execute_ai_seo_batch(batch_id, store_id, resource_type, resource_ids):
     completed = failed = 0
     for rid in resource_ids:
         with db.get_cursor() as cur:
-            cur.execute(f"SELECT * FROM {table} WHERE id = %s", (rid,))
+            cur.execute(f"SELECT * FROM {table} WHERE id = %s AND store_id = %s", (rid, int(store_id)))
             item = cur.fetchone()
         if not item:
             failed += 1
@@ -674,7 +683,7 @@ def _sweep_stale_jobs():
 @ai_seo_bp.route("/api/ai-seo/optimize/batch", methods=["POST"])
 def optimize_batch():
     _sweep_stale_jobs()
-    data = request.get_json() or {}
+    data = request.get_json(silent=True) or {}
     store_id = data.get("store_id")
     resource_type = data.get("type", "product")
     ids = data.get("ids")
@@ -706,9 +715,7 @@ def optimize_batch():
                 (batch_id, rid),
             )
 
-    threading.Thread(
-        target=_execute_ai_seo_batch, args=(batch_id, int(store_id), resource_type, ids), daemon=True
-    ).start()
+    spawn_task("bulk_tasks", batch_id, _execute_ai_seo_batch, batch_id, int(store_id), resource_type, ids)
     return jsonify({"ok": True, "batch_id": batch_id, "total": len(ids)}), 201
 
 
@@ -746,7 +753,7 @@ def _fact_density_score(store_id, resource_type, resource_id, item, store_domain
 def facts_preview():
     from app.ai_agent import run_task
 
-    data = request.get_json() or {}
+    data = request.get_json(silent=True) or {}
     store_id = data.get("store_id")
     resource_type = data.get("type", "product")
     resource_id = data.get("id")
@@ -757,7 +764,7 @@ def facts_preview():
     with db.get_cursor() as cur:
         cur.execute("SELECT * FROM stores WHERE id = %s", (int(store_id),))
         store = cur.fetchone()
-        cur.execute(f"SELECT * FROM {table} WHERE id = %s", (resource_id,))
+        cur.execute(f"SELECT * FROM {table} WHERE id = %s AND store_id = %s", (resource_id, int(store_id)))
         item = cur.fetchone()
     if not item:
         return jsonify({"error": "Item not found"}), 404
@@ -791,7 +798,7 @@ def facts_preview():
 
 @ai_seo_bp.route("/api/ai-seo/facts/apply", methods=["POST"])
 def facts_apply():
-    data = request.get_json() or {}
+    data = request.get_json(silent=True) or {}
     store_id = data.get("store_id")
     resource_type = data.get("type", "product")
     resource_id = data.get("id")
@@ -803,7 +810,7 @@ def facts_apply():
     with db.get_cursor() as cur:
         cur.execute("SELECT * FROM stores WHERE id = %s", (int(store_id),))
         store = cur.fetchone()
-        cur.execute(f"SELECT * FROM {table} WHERE id = %s", (resource_id,))
+        cur.execute(f"SELECT * FROM {table} WHERE id = %s AND store_id = %s", (resource_id, int(store_id)))
         item = cur.fetchone()
     if not store or not item:
         return jsonify({"error": "Store or item not found"}), 404
@@ -839,7 +846,7 @@ def _execute_fact_batch(batch_id, store_id, resource_type, resource_ids):
     completed = failed = 0
     for rid in resource_ids:
         with db.get_cursor() as cur:
-            cur.execute(f"SELECT * FROM {table} WHERE id = %s", (rid,))
+            cur.execute(f"SELECT * FROM {table} WHERE id = %s AND store_id = %s", (rid, int(store_id)))
             item = cur.fetchone()
         if not item:
             failed += 1
@@ -887,7 +894,7 @@ def _execute_fact_batch(batch_id, store_id, resource_type, resource_ids):
 @ai_seo_bp.route("/api/ai-seo/facts/batch", methods=["POST"])
 def facts_batch():
     _sweep_stale_jobs()
-    data = request.get_json() or {}
+    data = request.get_json(silent=True) or {}
     store_id = data.get("store_id")
     resource_type = data.get("type", "product")
     ids = data.get("ids")
@@ -924,7 +931,7 @@ def facts_batch():
         for rid in ids:
             cur.execute(f"INSERT INTO bulk_task_items (bulk_task_id, {item_col}) VALUES (%s, %s)", (batch_id, rid))
 
-    threading.Thread(target=_execute_fact_batch, args=(batch_id, int(store_id), resource_type, ids), daemon=True).start()
+    spawn_task("bulk_tasks", batch_id, _execute_fact_batch, batch_id, int(store_id), resource_type, ids)
     return jsonify({"ok": True, "batch_id": batch_id, "total": len(ids)}), 201
 
 
@@ -998,7 +1005,7 @@ def _spawn_ai_seo_batch(store_id, kind, resource_type, ids):
         for rid in ids:
             cur.execute(f"INSERT INTO bulk_task_items (bulk_task_id, {item_col}) VALUES (%s, %s)", (batch_id, rid))
     runner = _execute_fact_batch if kind == "fact_boost" else _execute_ai_seo_batch
-    threading.Thread(target=runner, args=(batch_id, int(store_id), resource_type, ids), daemon=True).start()
+    spawn_task("bulk_tasks", batch_id, runner, batch_id, int(store_id), resource_type, ids)
     return batch_id
 
 
@@ -1030,7 +1037,7 @@ def retry_batch(batch_id):
 @ai_seo_bp.route("/api/ai-seo/batches/clear", methods=["POST"])
 def clear_batches():
     """Remove all finished AI SEO batches for a store (keeps running ones)."""
-    data = request.get_json() or {}
+    data = request.get_json(silent=True) or {}
     store_id = data.get("store_id")
     if not store_id:
         return jsonify({"error": "store_id is required"}), 400
@@ -1082,7 +1089,7 @@ def list_prompts():
 def manage_prompts():
     from app.services.ai_visibility_tracker import generate_prompt_set
 
-    data = request.get_json() or {}
+    data = request.get_json(silent=True) or {}
     action = data.get("action")
     store_id = data.get("store_id")
     if not store_id:
@@ -1124,7 +1131,7 @@ def tracking_run():
     from app.services.ai_visibility_tracker import start_tracking_run
 
     _sweep_stale_jobs()
-    data = request.get_json() or {}
+    data = request.get_json(silent=True) or {}
     store_id = data.get("store_id")
     if not store_id:
         return jsonify({"error": "store_id is required"}), 400
@@ -1202,7 +1209,7 @@ def add_competitor_from_results():
     """Add an AI-recommended brand to the store's competitor list."""
     import re as _re
 
-    data = request.get_json() or {}
+    data = request.get_json(silent=True) or {}
     store_id = data.get("store_id")
     name = (data.get("name") or "").strip()
     domain_in = (data.get("domain") or "").strip().lower()
@@ -1251,7 +1258,7 @@ def resolve_competitor_domains():
     """
     from app.services.ai_visibility_tracker import compute_share_of_voice, resolve_brand_domains
 
-    data = request.get_json() or {}
+    data = request.get_json(silent=True) or {}
     store_id = data.get("store_id")
     run_id = data.get("run_id")
     if not store_id or not run_id:
@@ -1270,7 +1277,7 @@ def exclude_brand_from_results():
     """Exclude an AI-recommended brand (by canonical key) from future results."""
     from app.services.ai_visibility_tracker import _canonical_brand_key
 
-    data = request.get_json() or {}
+    data = request.get_json(silent=True) or {}
     store_id = data.get("store_id")
     name = (data.get("name") or "").strip()
     key = (data.get("key") or "").strip() or _canonical_brand_key(data.get("domain") or name)
@@ -1467,7 +1474,7 @@ def aeo_preview():
 def aeo_robots_apply():
     from app.services import aeo_asset_generator as gen
 
-    data = request.get_json() or {}
+    data = request.get_json(silent=True) or {}
     store_id = data.get("store_id")
     if not store_id:
         return jsonify({"error": "store_id is required"}), 400
@@ -1491,7 +1498,7 @@ def aeo_robots_apply():
 def aeo_llms_apply():
     from app.services import aeo_asset_generator as gen
 
-    data = request.get_json() or {}
+    data = request.get_json(silent=True) or {}
     store_id = data.get("store_id")
     if not store_id:
         return jsonify({"error": "store_id is required"}), 400
@@ -1500,13 +1507,22 @@ def aeo_llms_apply():
         return jsonify({"error": "Store not found"}), 404
     content = gen.generate_llms_txt(int(store_id))
     try:
-        page = client.create_page(
-            title="llms.txt",
-            body_html=f"<pre>{content}</pre>",
-            handle="llms",
-            seo_title="llms.txt",
-            seo_description="AI crawler content index",
-        )
+        existing = client.get_page_by_handle("llms")
+        if existing:
+            # Update in place — creating again would mint llms-1, llms-2, ...
+            page = client.update_page(existing["id"], {
+                "title": "llms.txt",
+                "body": f"<pre>{content}</pre>",
+                "is_published": True,
+            })
+        else:
+            page = client.create_page(
+                title="llms.txt",
+                body_html=f"<pre>{content}</pre>",
+                handle="llms",
+                seo_title="llms.txt",
+                seo_description="AI crawler content index",
+            )
         _save_aeo_asset(int(store_id), "llms_txt", content, "published")
     except Exception as e:
         logger.exception("llms.txt page apply failed: %s", e)
@@ -1548,7 +1564,7 @@ def _remove_render_from_layout(layout, render_tag):
 def aeo_schema_apply():
     from app.services import aeo_asset_generator as gen
 
-    data = request.get_json() or {}
+    data = request.get_json(silent=True) or {}
     store_id = data.get("store_id")
     if not store_id:
         return jsonify({"error": "store_id is required"}), 400
@@ -1581,7 +1597,7 @@ def aeo_schema_apply():
 
 @ai_seo_bp.route("/api/ai-seo/aeo/schema/unpublish", methods=["POST"])
 def aeo_schema_unpublish():
-    data = request.get_json() or {}
+    data = request.get_json(silent=True) or {}
     store_id = data.get("store_id")
     if not store_id:
         return jsonify({"error": "store_id is required"}), 400
@@ -1607,7 +1623,7 @@ def aeo_schema_unpublish():
 def aeo_a11y_apply():
     from app.services import aeo_asset_generator as gen
 
-    data = request.get_json() or {}
+    data = request.get_json(silent=True) or {}
     store_id = data.get("store_id")
     if not store_id:
         return jsonify({"error": "store_id is required"}), 400
@@ -1633,7 +1649,7 @@ def aeo_a11y_apply():
 
 @ai_seo_bp.route("/api/ai-seo/aeo/a11y/unpublish", methods=["POST"])
 def aeo_a11y_unpublish():
-    data = request.get_json() or {}
+    data = request.get_json(silent=True) or {}
     store_id = data.get("store_id")
     if not store_id:
         return jsonify({"error": "store_id is required"}), 400
@@ -1678,7 +1694,7 @@ def aeo_org_settings():
             }
         )
 
-    data = request.get_json() or {}
+    data = request.get_json(silent=True) or {}
     same_as = [u.strip() for u in (data.get("same_as") or []) if isinstance(u, str) and u.strip()]
     knows = [k.strip() for k in (data.get("knows_about") or []) if isinstance(k, str) and k.strip()]
     with db.get_cursor() as cur:

@@ -76,7 +76,7 @@ def landing_pages_page():
 
 @landing_bp.route("/api/landing-pages/sync", methods=["POST"])
 def sync_pages():
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
     store_id = data.get("store_id")
     if not store_id:
         return jsonify({"error": "store_id required"}), 400
@@ -245,7 +245,7 @@ def ai_optimize_synced(page_id):
 
 @landing_bp.route("/api/landing-pages/synced/<int:page_id>/ai-apply", methods=["POST"])
 def ai_apply_synced(page_id):
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
     with db.get_cursor() as cur:
         cur.execute("SELECT * FROM synced_pages WHERE id = %s", (page_id,))
         page = cur.fetchone()
@@ -315,22 +315,28 @@ def list_builder_pages():
 
 @landing_bp.route("/api/landing-pages", methods=["POST"])
 def create_builder_page():
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
     store_id = data.get("store_id")
     title = data.get("title")
     if not store_id or not title:
         return jsonify({"error": "store_id and title required"}), 400
 
     handle = data.get("handle") or title.lower().replace(" ", "-")
-    handle = "".join(c for c in handle if c.isalnum() or c == "-")
+    handle = "".join(c for c in handle if c.isalnum() or c == "-").strip("-")
+    if not handle:
+        return jsonify({"error": "Title must contain letters or numbers (empty URL handle)"}), 400
 
-    with db.get_cursor() as cur:
-        cur.execute(
-            """INSERT INTO landing_pages (store_id, title, handle, meta_title, meta_description, sections)
-            VALUES (%s, %s, %s, %s, %s, '[]') RETURNING id""",
-            (store_id, title, handle, data.get("meta_title", ""), data.get("meta_description", "")),
-        )
-        page_id = cur.fetchone()["id"]
+    import psycopg2 as _pg
+    try:
+        with db.get_cursor() as cur:
+            cur.execute(
+                """INSERT INTO landing_pages (store_id, title, handle, meta_title, meta_description, sections)
+                VALUES (%s, %s, %s, %s, %s, '[]') RETURNING id""",
+                (store_id, title, handle, data.get("meta_title", ""), data.get("meta_description", "")),
+            )
+            page_id = cur.fetchone()["id"]
+    except _pg.errors.UniqueViolation:
+        return jsonify({"error": f"A landing page with the handle '{handle}' already exists — pick another title"}), 400
     return jsonify({"id": page_id, "title": title, "handle": handle})
 
 
@@ -349,7 +355,7 @@ def get_builder_page(page_id):
 
 @landing_bp.route("/api/landing-pages/<int:page_id>", methods=["PUT"])
 def update_builder_page(page_id):
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
     with db.get_cursor() as cur:
         cur.execute("SELECT id FROM landing_pages WHERE id = %s", (page_id,))
         if not cur.fetchone():
@@ -388,7 +394,7 @@ def delete_builder_page(page_id):
 
 @landing_bp.route("/api/landing-pages/<int:page_id>/sections", methods=["POST"])
 def add_section(page_id):
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
     section_type = data.get("type")
     if not section_type:
         return jsonify({"error": "type required"}), 400
@@ -421,7 +427,7 @@ def add_section(page_id):
 
 @landing_bp.route("/api/landing-pages/<int:page_id>/sections/<section_id>", methods=["PUT"])
 def update_section(page_id, section_id):
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
     with db.get_cursor() as cur:
         cur.execute("SELECT sections FROM landing_pages WHERE id = %s", (page_id,))
         row = cur.fetchone()
@@ -473,7 +479,7 @@ def delete_section(page_id, section_id):
 
 @landing_bp.route("/api/landing-pages/<int:page_id>/sections/reorder", methods=["POST"])
 def reorder_sections(page_id):
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
     order = data.get("order", [])
 
     with db.get_cursor() as cur:
@@ -492,6 +498,14 @@ def reorder_sections(page_id):
         if sid in section_map:
             section_map[sid]["order"] = i
             reordered.append(section_map[sid])
+
+    # Sections missing from the submitted order (e.g. added by a concurrent
+    # autosave) are appended, not silently deleted.
+    ordered_ids = set(order)
+    for s in sections:
+        if s["id"] not in ordered_ids:
+            s["order"] = len(reordered)
+            reordered.append(s)
 
     with db.get_cursor() as cur:
         cur.execute(
@@ -639,11 +653,15 @@ def unpublish_page(page_id):
     shopify_page_id = page.get("shopify_page_id") or ""
     if shopify_page_id.startswith("gid://shopify/Page/"):
         store, client = _get_store_client(page["store_id"])
-        if client:
-            try:
-                client.update_page(shopify_page_id, {"is_published": False})
-            except Exception as e:
+        if not client:
+            return jsonify({"error": "Store connection unavailable — page NOT unpublished"}), 502
+        try:
+            client.update_page(shopify_page_id, {"is_published": False})
+        except Exception as e:
+            if not any(t in str(e).lower() for t in ("does not exist", "not found", "invalid id", "no longer exists")):
                 logger.warning("Failed to unpublish on Shopify: %s", e)
+                return jsonify({"error": f"Shopify unpublish failed: {e} — the page is still live"}), 502
+            logger.info("Page already gone on Shopify: %s", shopify_page_id)
 
     with db.get_cursor() as cur:
         cur.execute(
@@ -669,7 +687,7 @@ def list_versions(page_id):
 
 @landing_bp.route("/api/landing-pages/<int:page_id>/versions", methods=["POST"])
 def save_version(page_id):
-    data = request.get_json() or {}
+    data = request.get_json(silent=True) or {}
     label = data.get("label", "Manual save")
     vid = _create_version(page_id, label)
     if not vid:
@@ -768,7 +786,7 @@ def ai_optimize_builder(page_id):
 
 @landing_bp.route("/api/landing-pages/ai-generate", methods=["POST"])
 def ai_generate_page():
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
     store_id = data.get("store_id")
     topic = data.get("topic")
     keywords = data.get("keywords", [])
@@ -1070,7 +1088,7 @@ def _get_collection_products(store_id, collection_handle):
 
 @landing_bp.route("/api/landing-pages/import", methods=["POST"])
 def import_to_builder():
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
     synced_page_id = data.get("synced_page_id")
     if not synced_page_id:
         return jsonify({"error": "synced_page_id required"}), 400

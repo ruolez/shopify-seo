@@ -355,6 +355,10 @@ def _get_cannibalization_risks(item_type, handle, store_id, semrush_keywords, gs
 def _get_image_alt_status(item_type, item_id, store_id):
     """Check image alt text coverage for a product or collection's products."""
     try:
+        if item_type not in ("product", "collection"):
+            # An article/page id would alias into the collection query below
+            # (independent SERIAL sequences) and report a random collection's images.
+            return None
         if item_type == "product":
             with db.get_cursor() as cur:
                 cur.execute("SELECT images FROM synced_products WHERE id = %s", (item_id,))
@@ -391,6 +395,8 @@ def _get_image_alt_status(item_type, item_id, store_id):
 def _get_faq_schema_status(item_type, item_id, store_id):
     """Check if FAQ schema already exists for this item."""
     try:
+        if item_type not in ("product", "collection"):
+            return None
         table = "synced_products" if item_type == "product" else "synced_collections"
         with db.get_cursor() as cur:
             cur.execute(f"SELECT shopify_id FROM {table} WHERE id = %s", (item_id,))
@@ -753,105 +759,6 @@ KEYWORD_ANALYSIS_TOOL_DEFINITIONS = [
     },
 ]
 
-KEYWORD_STRATEGY_TOOL_DEFINITIONS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "get_keyword_audit_context",
-            "description": (
-                "Get the keyword audit context for a store: master keywords with content audit matches. "
-                "Returns batches of keywords with their content mappings and current rankings."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "store_id": {"type": "integer", "description": "The store ID"},
-                    "batch_offset": {"type": "integer", "description": "Offset for pagination", "default": 0},
-                    "batch_size": {"type": "integer", "description": "Number of keywords per batch", "default": 50},
-                },
-                "required": ["store_id"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "propose_keyword_assignments",
-            "description": (
-                "Submit proposed keyword-to-page assignments. For each keyword, specify the best page "
-                "to target it and the reason."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "assignments": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "keyword_id": {"type": "integer"},
-                                "item_type": {"type": "string", "enum": ["product", "collection", "article", "page"]},
-                                "item_id": {"type": "integer"},
-                                "reason": {"type": "string"},
-                                "priority": {"type": "string", "enum": ["high", "medium", "low"]},
-                            },
-                            "required": ["keyword_id", "item_type", "item_id", "reason"],
-                        },
-                    },
-                },
-                "required": ["assignments"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "generate_seo_changes",
-            "description": (
-                "Generate optimized SEO content for a content item targeting assigned keywords. "
-                "Returns proposed meta_title, meta_description, and tag changes."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "item_type": {"type": "string"},
-                    "item_id": {"type": "integer"},
-                    "primary_keyword": {"type": "string"},
-                    "secondary_keywords": {"type": "array", "items": {"type": "string"}},
-                    "avoid_keywords": {"type": "array", "items": {"type": "string"}},
-                    "proposed_meta_title": {"type": "string"},
-                    "proposed_meta_description": {"type": "string"},
-                },
-                "required": ["item_type", "item_id", "primary_keyword"],
-            },
-        },
-    },
-]
-
-
-DISCOVERY_TOOL_DEFINITIONS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "search_store_products",
-            "description": (
-                "Search the store's product catalog by keyword. Matches against product title, tags, and product_type. "
-                "Returns up to 20 matching products with title and handle. "
-                "Call multiple times with different keywords to broaden discovery."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "keyword": {
-                        "type": "string",
-                        "description": "Search term to match against product title, tags, or product_type",
-                    }
-                },
-                "required": ["keyword"],
-            },
-        },
-    },
-]
 
 
 ARTICLE_TOOL_DEFINITIONS = [
@@ -1359,68 +1266,6 @@ def _handle_discovery_tool_call(name, args, store_id):
     return {"error": f"Unknown discovery tool: {name}"}
 
 
-def _discover_related_products(client, config, collection_title, store_id):
-    try:
-        system_prompt = get_setting("prompts.product_discovery", DEFAULTS["prompts.product_discovery"])
-        user_prompt = (
-            f'The collection is titled "{collection_title}". '
-            "Search for products that would belong in this collection."
-        )
-
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ]
-
-        for _ in range(6):
-            response = client.chat.completions.create(
-                model=config["model"],
-                messages=messages,
-                tools=DISCOVERY_TOOL_DEFINITIONS,
-                temperature=0.3,
-            )
-
-            choice = response.choices[0]
-
-            if choice.finish_reason == "tool_calls" or (
-                choice.message.tool_calls and len(choice.message.tool_calls) > 0
-            ):
-                messages.append(choice.message)
-                for tool_call in choice.message.tool_calls:
-                    fn_name = tool_call.function.name
-                    fn_args = json.loads(tool_call.function.arguments)
-                    result = _handle_discovery_tool_call(fn_name, fn_args, store_id)
-                    messages.append(
-                        {
-                            "role": "tool",
-                            "tool_call_id": tool_call.id,
-                            "content": json.dumps(result),
-                        }
-                    )
-            else:
-                content = choice.message.content or ""
-                try:
-                    start = content.find("{")
-                    end = content.rfind("}") + 1
-                    if start >= 0 and end > start:
-                        parsed = json.loads(content[start:end])
-                        selected = parsed.get("selected_products", [])
-                        validated = [
-                            p for p in selected
-                            if isinstance(p, dict) and p.get("title") and p.get("handle")
-                        ]
-                        if validated:
-                            logger.info("AI discovery found %d products for '%s'", len(validated), collection_title)
-                            return validated
-                except (json.JSONDecodeError, ValueError):
-                    pass
-                break
-
-    except Exception:
-        logger.exception("AI product discovery failed for '%s'", collection_title)
-
-    return []
-
 
 def _get_ai_config():
     with db.get_cursor() as cur:
@@ -1471,8 +1316,8 @@ def _build_faqpage_jsonld(faq):
             "name": f.get("question", ""),
             "acceptedAnswer": {"@type": "Answer", "text": f.get("answer", "")},
         }
-        for f in faq
-        if f.get("question") and f.get("answer")
+        for f in (faq or [])
+        if isinstance(f, dict) and f.get("question") and f.get("answer")
     ]
     if not entities:
         return None
@@ -1644,7 +1489,8 @@ def _geo_product_facts(item, entity_type, include_metafields=True):
         if prices:
             lo, hi = min(prices), max(prices)
             facts["Price"] = f"${lo:.2f}" if lo == hi else f"${lo:.2f}–${hi:.2f}"
-        facts["Availability"] = "In stock" if any(v.get("available", True) for v in variants) else "Out of stock"
+        if any("available" in v for v in variants):
+            facts["Availability"] = "In stock" if any(v.get("available") for v in variants) else "Out of stock"
         if variants[0].get("sku"):
             facts["SKU"] = variants[0]["sku"]
         if variants[0].get("barcode"):
@@ -1693,7 +1539,8 @@ def _collection_top_members(store_id, collection_shopify_id, limit=5):
                 prices.append(float(v.get("price")))
             except (ValueError, TypeError):
                 pass
-        available = any(v.get("available", True) for v in variants) if variants else True
+        has_avail = any("available" in v for v in variants)
+        available = any(v.get("available") for v in variants) if has_avail else None
         if prices:
             lo, hi = min(prices), max(prices)
             price = f"${lo:.2f}" if lo == hi else f"${lo:.2f}–${hi:.2f}"
@@ -1708,7 +1555,7 @@ def _collection_top_members(store_id, collection_shopify_id, limit=5):
                 "_lo": lo,
             }
         )
-    members.sort(key=lambda m: (not m["available"], m["_lo"]))
+    members.sort(key=lambda m: (m["available"] is False, m["_lo"]))
     return [{k: v for k, v in m.items() if k != "_lo"} for m in members[:limit] if m["title"]]
 
 
@@ -1784,7 +1631,7 @@ def _generate_geo_content(client, config, item, entity_type, weak_signals=None):
         if len(members) >= 2:
             lines = [
                 f"- {m['title']} | Brand: {m['brand'] or 'n/a'} | Price: {m['price'] or 'n/a'} | "
-                f"{'In stock' if m['available'] else 'Out of stock'}"
+                f"{'In stock' if m['available'] else ('Out of stock' if m['available'] is False else 'Availability: n/a')}"
                 for m in members
             ]
             members_block = (
@@ -1901,7 +1748,7 @@ def _generate_fact_boost(client, config, item, entity_type):
     }
 
 
-def _generate_description(client, config, main_result, serp_context, serp_benchmark, product_id):
+def _generate_description(client, config, main_result, serp_context, serp_benchmark, product_id, search_context=None):
     """Dedicated AI call to generate an SEO-optimized product description.
 
     Uses all context from the main analysis call plus SERP data to produce
@@ -2024,9 +1871,10 @@ def _generate_description(client, config, main_result, serp_context, serp_benchm
                 )
 
         try:
-            if product and product.get("store_id"):
+            search_ctx = search_context
+            if search_ctx is None and product and product.get("store_id"):
                 search_ctx = _get_search_context_for_item("product", product_id, product["store_id"])
-                if search_ctx:
+            if search_ctx:
                     user_parts.append(
                         "REAL SEARCH DATA (incorporate these keywords naturally):\n" + search_ctx
                     )
@@ -2078,7 +1926,7 @@ def _generate_description(client, config, main_result, serp_context, serp_benchm
     return main_result
 
 
-def _generate_collection_description(client, config, main_result, serp_context, serp_benchmark, collection_id, hierarchy_context=None):
+def _generate_collection_description(client, config, main_result, serp_context, serp_benchmark, collection_id, hierarchy_context=None, search_context=None):
     try:
         target_word_count = DEFAULT_TARGET_WORD_COUNT
         if serp_benchmark and serp_benchmark.get("avg_word_count"):
@@ -2207,9 +2055,10 @@ def _generate_collection_description(client, config, main_result, serp_context, 
                 )
 
         try:
-            if collection and collection.get("store_id"):
+            search_ctx = search_context
+            if search_ctx is None and collection and collection.get("store_id"):
                 search_ctx = _get_search_context_for_item("collection", collection_id, collection["store_id"])
-                if search_ctx:
+            if search_ctx:
                     user_parts.append(
                         "REAL SEARCH DATA (incorporate these keywords naturally):\n" + search_ctx
                     )
@@ -2249,7 +2098,7 @@ def _generate_collection_description(client, config, main_result, serp_context, 
     return main_result
 
 
-def _generate_brand_collection_description(client, config, main_result, serp_context, serp_benchmark, collection_id, interlink_collections=None, user_keywords=None):
+def _generate_brand_collection_description(client, config, main_result, serp_context, serp_benchmark, collection_id, interlink_collections=None, user_keywords=None, search_context=None):
     try:
         target_word_count = DEFAULT_TARGET_WORD_COUNT
         if serp_benchmark and serp_benchmark.get("avg_word_count"):
@@ -2386,9 +2235,10 @@ def _generate_brand_collection_description(client, config, main_result, serp_con
                 )
 
         try:
-            if collection and collection.get("store_id"):
+            search_ctx = search_context
+            if search_ctx is None and collection and collection.get("store_id"):
                 search_ctx = _get_search_context_for_item("collection", collection_id, collection["store_id"])
-                if search_ctx:
+            if search_ctx:
                     brand_context_parts.append(
                         "REAL SEARCH DATA (incorporate these keywords naturally):\n" + search_ctx
                     )
@@ -2517,10 +2367,11 @@ def _validate_landing_page_generate(result):
     result["sections"] = validated
 
     meta_title = result.get("meta_title", "")
-    if meta_title and (len(meta_title) < 30 or len(meta_title) > 70):
+    if meta_title and len(meta_title) > 70:
+        # Too-short titles can't be fixed by truncation — leave them for review.
         result["meta_title"] = meta_title[:60]
     meta_desc = result.get("meta_description", "")
-    if meta_desc and (len(meta_desc) < 100 or len(meta_desc) > 200):
+    if meta_desc and len(meta_desc) > 200:
         result["meta_description"] = meta_desc[:160]
 
     return result
@@ -2605,7 +2456,11 @@ def run_task(task_type, task_input, store_id=None):
             tags_instruction = (
                 "\n\nDo NOT suggest tags — they are managed separately via keyword analysis.\n"
             )
-            tags_keys = ""
+            # keywords_used stays in the schema — the description generator
+            # uses it as its keyword steering signal.
+            tags_keys = (
+                "- keywords_used (array of strings): Keywords you incorporated into the optimizations\n"
+            )
         else:
             tags_keys = (
                 "- suggested_tags (array of strings): Relevant product tags for Shopify\n"
@@ -2618,10 +2473,12 @@ def run_task(task_type, task_input, store_id=None):
         except (KeyError, IndexError):
             system_prompt = DEFAULTS["prompts.product_seo"].format(tags_keys=tags_keys)
         search_data_instruction = ""
+        prefetched_search_ctx = None
         try:
             effective_store = product_row["store_id"] if product_row else store_id
             if effective_store:
                 search_ctx = _get_search_context_for_item("product", product_id, effective_store)
+                prefetched_search_ctx = search_ctx or ""
                 if search_ctx:
                     search_data_instruction = (
                         "\n\n## CRITICAL: Real Search Data Available\n"
@@ -2703,10 +2560,12 @@ def run_task(task_type, task_input, store_id=None):
             )
 
         search_data_instruction = ""
+        prefetched_search_ctx = None
         try:
             effective_store = collection_row["store_id"] if collection_row else store_id
             if effective_store:
                 search_ctx = _get_search_context_for_item("collection", collection_id, effective_store)
+                prefetched_search_ctx = search_ctx or ""
                 if search_ctx:
                     search_data_instruction = (
                         "\n\n## CRITICAL: Real Search Data Available\n"
@@ -2789,10 +2648,12 @@ def run_task(task_type, task_input, store_id=None):
             brand_context += f"\nTarget keywords provided by the user: {', '.join(user_keywords)}"
 
         search_data_instruction = ""
+        prefetched_search_ctx = None
         try:
             effective_store = collection_row["store_id"] if collection_row else store_id
             if effective_store:
                 search_ctx = _get_search_context_for_item("collection", collection_id, effective_store)
+                prefetched_search_ctx = search_ctx or ""
                 if search_ctx:
                     search_data_instruction = (
                         "\n\n## CRITICAL: Real Search Data Available\n"
@@ -2822,9 +2683,38 @@ def run_task(task_type, task_input, store_id=None):
         logger.info("Keyword analysis Phase 1: building taxonomy for store %s", ka_store_id)
 
         phase1_system = get_setting("prompts.keyword_phase1", DEFAULTS["prompts.keyword_phase1"])
+
+        # Embed the catalog directly instead of letting the model paginate a
+        # tool 200 products at a time — the accumulated history was resent on
+        # every iteration (O(pages^2) prompt tokens on large stores).
+        with db.get_cursor() as cur:
+            cur.execute(
+                "SELECT title, product_type, vendor FROM synced_products "
+                "WHERE store_id = %s AND status = 'ACTIVE' ORDER BY id",
+                (ka_store_id,),
+            )
+            _p1_products = cur.fetchall()
+
+        _P1_MAX_LINES = 2000
+        catalog_lines = [
+            f"- {p['title']} | type: {p.get('product_type') or '-'} | vendor: {p.get('vendor') or '-'}"
+            for p in _p1_products[:_P1_MAX_LINES]
+        ]
+        catalog_block = "\n".join(catalog_lines)
+        if len(_p1_products) > _P1_MAX_LINES:
+            from collections import Counter
+            type_counts = Counter((p.get("product_type") or "-") for p in _p1_products)
+            catalog_block += (
+                f"\n... plus {len(_p1_products) - _P1_MAX_LINES} more products. "
+                "Product-type distribution of the FULL catalog: "
+                + ", ".join(f"{t} ({c})" for t, c in type_counts.most_common(50))
+            )
+
         phase1_user = (
             f"Analyze all products in store ID {ka_store_id} and build a comprehensive tag taxonomy. "
-            "Start by fetching all products — paginate until you've seen every product."
+            f"Here is the complete product catalog ({len(_p1_products)} products) — "
+            "you do NOT need to fetch anything:\n\n"
+            + catalog_block
         )
 
         p1_messages = [
@@ -2841,13 +2731,19 @@ def run_task(task_type, task_input, store_id=None):
                 temperature=0.3,
             )
             choice = response.choices[0]
-            if choice.finish_reason == "tool_calls" or (
-                choice.message.tool_calls and len(choice.message.tool_calls) > 0
-            ):
+            if choice.message.tool_calls:
                 p1_messages.append(choice.message)
                 for tool_call in choice.message.tool_calls:
                     fn_name = tool_call.function.name
-                    fn_args = json.loads(tool_call.function.arguments)
+                    try:
+                        fn_args = json.loads(tool_call.function.arguments or "{}")
+                    except (json.JSONDecodeError, TypeError):
+                        p1_messages.append({
+                            "role": "tool",
+                            "tool_call_id": tool_call.id,
+                            "content": json.dumps({"error": "Invalid tool arguments (malformed JSON). Retry with valid JSON."}),
+                        })
+                        continue
                     result = _handle_keyword_tool_call(fn_name, fn_args)
                     p1_messages.append({
                         "role": "tool",
@@ -2878,6 +2774,9 @@ def run_task(task_type, task_input, store_id=None):
                 all_allowed_tags.add(tag)
         for tag in global_tags:
             all_allowed_tags.add(tag)
+        # Case/whitespace-insensitive lookup mapping back to canonical casing —
+        # exact-match filtering silently dropped case-variant tags.
+        allowed_canonical = {str(t).strip().lower(): t for t in all_allowed_tags}
 
         logger.info(
             "Phase 1 complete — %d categories, %d total unique tags",
@@ -2933,7 +2832,11 @@ def run_task(task_type, task_input, store_id=None):
                     batch_parsed = json.loads(batch_content[bstart:bend])
                     batch_assignments = batch_parsed.get("assignments", [])
                     for a in batch_assignments:
-                        a["assigned_tags"] = [t for t in a.get("assigned_tags", []) if t in all_allowed_tags]
+                        a["assigned_tags"] = [
+                            allowed_canonical[str(t).strip().lower()]
+                            for t in a.get("assigned_tags", [])
+                            if str(t).strip().lower() in allowed_canonical
+                        ]
                     all_assignments.extend(batch_assignments)
                     logger.info(
                         "Phase 2 batch %d-%d: assigned tags to %d products",
@@ -2983,6 +2886,61 @@ def run_task(task_type, task_input, store_id=None):
                 {"role": "user", "content": user_prompt},
             ],
             temperature=0.3,
+        )
+
+        content = response.choices[0].message.content or ""
+        try:
+            start = content.find("{")
+            end = content.rfind("}") + 1
+            if start >= 0 and end > start:
+                return json.loads(content[start:end])
+        except (json.JSONDecodeError, ValueError):
+            pass
+        return {"raw_response": content}
+
+    elif task_type == "dedupe_group":
+        field = task_input.get("field")
+        group_items = task_input.get("items") or []
+        keep_id = task_input.get("keep_id")
+
+        if field not in ("seo_title", "meta_description"):
+            return {"error": f"Invalid dedupe field: {field}"}
+        if len(group_items) < 2:
+            return {"error": "Need at least 2 items to dedupe"}
+
+        payload = {
+            "field": field,
+            "keep_id": keep_id,
+            "items": [
+                {
+                    "id": it.get("id"),
+                    "type": it.get("type"),
+                    "title": it.get("title") or "",
+                    "meta_title": it.get("meta_title") or "",
+                    "meta_description": it.get("meta_description") or "",
+                    "vendor": it.get("vendor") or "",
+                    "product_type": it.get("product_type") or "",
+                    "handle": it.get("handle") or "",
+                }
+                for it in group_items
+            ],
+        }
+
+        system_prompt = get_setting("prompts.dedupe_group", DEFAULTS["prompts.dedupe_group"])
+        user_prompt = (
+            "These items share the same value for the field '"
+            + field
+            + "'. Make each one unique:\n\n"
+            + json.dumps(payload, indent=2)
+        )
+
+        response = client.chat.completions.create(
+            model=config["model"],
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.4,
         )
 
         content = response.choices[0].message.content or ""
@@ -3359,9 +3317,12 @@ def run_task(task_type, task_input, store_id=None):
                     continue
 
                 chunk_result = json.loads(content[start:end])
-            except (json.JSONDecodeError, ValueError, Exception) as e:
-                logger.warning("Interlinking chunk %d failed: %s", chunk_idx, e)
+            except (json.JSONDecodeError, ValueError) as e:
+                logger.warning("Interlinking chunk %d returned unparsable output: %s", chunk_idx, e)
                 continue
+            except Exception as e:
+                logger.exception("Interlinking chunk %d API call failed", chunk_idx)
+                return {"error": f"AI request failed on recommendations chunk {chunk_idx + 1}: {e}"}
 
             if not summary_text and chunk_result.get("summary"):
                 summary_text = chunk_result["summary"]
@@ -3705,13 +3666,24 @@ def run_task(task_type, task_input, store_id=None):
                 temperature=0.3,
             )
             choice = response.choices[0]
-            if choice.finish_reason == "tool_calls" or (
-                choice.message.tool_calls and len(choice.message.tool_calls) > 0
-            ):
+            if choice.message.tool_calls:
                 messages.append(choice.message)
                 for tool_call in choice.message.tool_calls:
                     fn_name = tool_call.function.name
-                    fn_args = json.loads(tool_call.function.arguments)
+                    try:
+                        fn_args = json.loads(tool_call.function.arguments or "{}")
+                    except (json.JSONDecodeError, TypeError):
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": tool_call.id,
+                            "content": json.dumps({"error": "Invalid tool arguments (malformed JSON). Retry with valid JSON."}),
+                        })
+                        continue
+                    if fn_name == "analyze_landing_page_seo":
+                        # Bind the page identity server-side — if the model omits
+                        # page_type, a builder id would alias into synced_pages.
+                        fn_args["page_type"] = "builder" if landing_page_id else "synced"
+                        fn_args["page_id"] = landing_page_id or synced_page_id
                     result = _handle_landing_page_tool_call(fn_name, fn_args)
                     messages.append({
                         "role": "tool",
@@ -3981,13 +3953,19 @@ def run_task(task_type, task_input, store_id=None):
                 temperature=0.3,
             )
             choice = response.choices[0]
-            if choice.finish_reason == "tool_calls" or (
-                choice.message.tool_calls and len(choice.message.tool_calls) > 0
-            ):
+            if choice.message.tool_calls:
                 messages.append(choice.message)
                 for tool_call in choice.message.tool_calls:
                     fn_name = tool_call.function.name
-                    fn_args = json.loads(tool_call.function.arguments)
+                    try:
+                        fn_args = json.loads(tool_call.function.arguments or "{}")
+                    except (json.JSONDecodeError, TypeError):
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": tool_call.id,
+                            "content": json.dumps({"error": "Invalid tool arguments (malformed JSON). Retry with valid JSON."}),
+                        })
+                        continue
                     result = _handle_article_tool_call(fn_name, fn_args)
                     messages.append({
                         "role": "tool",
@@ -4220,6 +4198,8 @@ def run_task(task_type, task_input, store_id=None):
             logger.warning("SERP research failed: %s", e)
 
         # Use AI to analyze and suggest keywords + content angles
+        content_angles = []
+        rec_word_count = 0
         try:
             research_system = get_setting("prompts.article_research", DEFAULTS["prompts.article_research"])
             primary_kw, secondary_kws = _split_keywords(keywords)
@@ -4250,25 +4230,46 @@ def run_task(task_type, task_input, store_id=None):
                     content_angles = ai_data.get("content_angle_suggestions", [])
                     rec_word_count = ai_data.get("recommended_word_count", 0)
             except (json.JSONDecodeError, ValueError):
-                content_angles = []
-                rec_word_count = 0
-        except Exception:
-            content_angles = []
-            rec_word_count = 0
+                logger.warning("article_research: could not parse AI research response")
+        except Exception as e:
+            logger.warning("article_research AI analysis failed: %s", e)
 
         # AI-powered discovery of related products/collections
         related_products = []
         related_collections = []
         if research_store_id:
             try:
+                # Pre-filter the catalog by topic/keyword relevance and cap the
+                # list — serializing every product (with tags) into one prompt
+                # blows the context window / cost on large stores.
+                terms = [t.strip() for t in re.split(r"[,\s]+", f"{topic} {keywords}") if len(t.strip()) >= 4][:8]
                 with db.get_cursor() as cur:
+                    if terms:
+                        like_clauses = " OR ".join(
+                            ["title ILIKE %s OR product_type ILIKE %s OR vendor ILIKE %s"] * len(terms)
+                        )
+                        like_params = []
+                        for t in terms:
+                            like_params.extend([f"%{t}%"] * 3)
+                        cur.execute(
+                            f"""SELECT id, title, handle, vendor, product_type FROM synced_products
+                                WHERE store_id = %s AND status = 'ACTIVE' AND ({like_clauses})
+                                LIMIT 300""",
+                            (research_store_id, *like_params),
+                        )
+                        all_products = [dict(r) for r in cur.fetchall()]
+                    else:
+                        all_products = []
+                    if not all_products:
+                        cur.execute(
+                            "SELECT id, title, handle, vendor, product_type FROM synced_products "
+                            "WHERE store_id = %s AND status = 'ACTIVE' ORDER BY id DESC LIMIT 300",
+                            (research_store_id,),
+                        )
+                        all_products = [dict(r) for r in cur.fetchall()]
                     cur.execute(
-                        "SELECT id, title, handle, vendor, product_type, tags FROM synced_products WHERE store_id = %s AND status = 'ACTIVE'",
-                        (research_store_id,),
-                    )
-                    all_products = [dict(r) for r in cur.fetchall()]
-                    cur.execute(
-                        "SELECT id, title, handle, collection_type FROM synced_collections WHERE store_id = %s AND handle IS NOT NULL AND handle != ''",
+                        "SELECT id, title, handle, collection_type FROM synced_collections "
+                        "WHERE store_id = %s AND handle IS NOT NULL AND handle != '' LIMIT 300",
                         (research_store_id,),
                     )
                     all_collections = [dict(r) for r in cur.fetchall()]
@@ -4277,7 +4278,7 @@ def run_task(task_type, task_input, store_id=None):
                     discovery_prompt = get_setting("prompts.article_discovery", DEFAULTS["prompts.article_discovery"])
 
                     product_list = "\n".join(
-                        f"- ID:{p['id']} | {p['title']} | handle:{p['handle']} | vendor:{p.get('vendor', '')} | type:{p.get('product_type', '')} | tags:{p.get('tags', '')}"
+                        f"- ID:{p['id']} | {p['title']} | handle:{p['handle']} | vendor:{p.get('vendor', '')} | type:{p.get('product_type', '')}"
                         for p in all_products
                     )
                     collection_list = "\n".join(
@@ -4328,7 +4329,7 @@ def run_task(task_type, task_input, store_id=None):
             "competitor_analysis": competitor_analysis,
             "keyword_opportunities": keyword_opportunities,
             "recommended_word_count": recommended,
-            "content_angle_suggestions": content_angles if 'content_angles' in dir() else [],
+            "content_angle_suggestions": content_angles,
             "related_products": related_products[:15],
             "related_collections": related_collections[:10],
         }
@@ -4746,13 +4747,19 @@ def run_task(task_type, task_input, store_id=None):
 
         choice = response.choices[0]
 
-        if choice.finish_reason == "tool_calls" or (
-            choice.message.tool_calls and len(choice.message.tool_calls) > 0
-        ):
+        if choice.message.tool_calls:
             messages.append(choice.message)
             for tool_call in choice.message.tool_calls:
                 fn_name = tool_call.function.name
-                fn_args = json.loads(tool_call.function.arguments)
+                try:
+                    fn_args = json.loads(tool_call.function.arguments or "{}")
+                except (json.JSONDecodeError, TypeError):
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tool_call.id,
+                        "content": json.dumps({"error": "Invalid tool arguments (malformed JSON). Retry with valid JSON."}),
+                    })
+                    continue
                 result = _handle_tool_call(fn_name, fn_args)
                 messages.append(
                     {
@@ -4777,6 +4784,11 @@ def run_task(task_type, task_input, store_id=None):
     if main_result is None:
         main_result = {"error": "Max iterations reached without final response"}
 
+    # A failed main analysis can't be applied — skip the paid description-
+    # generation call whose output every apply path would discard anyway.
+    if "error" in main_result or ("raw_response" in main_result and len(main_result) == 1):
+        return main_result
+
     if task_type == "product_seo":
         alt_suggestions = main_result.get("image_alt_suggestions", [])
         if alt_suggestions:
@@ -4799,12 +4811,13 @@ def run_task(task_type, task_input, store_id=None):
                     paired.append({"media_id": mid, "suggested_alt": str(alt)})
             main_result["image_alt_suggestions"] = paired
 
-        main_result = _generate_description(client, config, main_result, serp_context, serp_benchmark, product_id)
+        main_result = _generate_description(client, config, main_result, serp_context, serp_benchmark, product_id, search_context=prefetched_search_ctx)
 
     elif task_type == "collection_seo":
         main_result = _generate_collection_description(
             client, config, main_result, serp_context, serp_benchmark, collection_id,
             hierarchy_context=task_input.get("hierarchy_context"),
+            search_context=prefetched_search_ctx,
         )
 
     elif task_type == "brand_seo":
@@ -4812,6 +4825,7 @@ def run_task(task_type, task_input, store_id=None):
             client, config, main_result, serp_context, serp_benchmark,
             collection_id, task_input.get("interlink_collections", []),
             task_input.get("keywords", []),
+            search_context=prefetched_search_ctx,
         )
 
     return main_result

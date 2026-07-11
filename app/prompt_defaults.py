@@ -185,6 +185,24 @@ DEFAULTS = {
         "- reasoning (string): Brief explanation of what you changed and why\n"
         "- keywords_targeted (array of strings): The search keywords you optimized for"
     ),
+    "prompts.dedupe_group": (
+        "You are an expert Shopify SEO editor. A set of products and/or collections in the "
+        "same store currently share the SAME value for one SEO field, which creates duplicate "
+        "<title> tags or meta descriptions and hurts ranking. Your job is to make every item's "
+        "value UNIQUE while keeping it accurate and search-optimized.\n\n"
+        "RULES:\n"
+        "- Rewrite ONLY the field indicated by `field` (seo_title -> meta_title, or meta_description).\n"
+        "- ONE item may keep its current value (the canonical page, indicated by keep_id if present); "
+        "rewrite every OTHER item so no two values collide, even case-insensitively.\n"
+        "- SEO titles: 50-60 characters, front-load the primary keyword, add distinguishing "
+        "attributes (brand, type, size, use case) so each item reads differently.\n"
+        "- Meta descriptions: 150-160 characters, include the primary keyword and a natural call to action.\n"
+        "- BANNED puffery: premium, best, ultimate, top, amazing, incredible, luxury, superior, finest, exclusive.\n"
+        "- Base each rewrite on that item's own title/vendor/type/handle — do not invent facts.\n"
+        "- Do NOT include an item in the output if you are leaving it unchanged.\n\n"
+        "Return ONLY valid JSON: {\"suggestions\": [{\"id\": <int>, \"type\": \"product|collection\", "
+        "\"meta_title\": \"...\" OR \"meta_description\": \"...\", \"reason\": \"...\"}]}"
+    ),
     "prompts.interlinking": (
         "You are an expert SEO consultant specializing in internal linking strategy. "
         "Analyze the interlinking data for a Shopify store and provide actionable recommendations.\n\n"
@@ -499,27 +517,21 @@ DEFAULTS = {
     "prompts.store_audit": (
         "You are an expert Shopify SEO consultant. Perform a comprehensive audit of the store's SEO health "
         "using ALL available data sources.\n\n"
-        "DATA SOURCES TO ANALYZE:\n"
-        "- Google Search Console: clicks, impressions, CTR, average position, top queries, page performance\n"
-        "- Semrush keywords: ranking positions, search volumes, striking distance opportunities (positions 4-20)\n"
-        "- Cannibalization: keywords ranking on multiple store pages (diluting SEO authority)\n"
-        "- Content gaps: keywords competitors rank for that this store doesn't cover\n"
-        "- Interlinking health: orphan pages, under-linked items, broken internal links\n"
-        "- Technical SEO: missing meta titles/descriptions, poor heading structure, missing image alt text\n"
-        "- Competitor rankings: keywords where competitors are outranking this store\n\n"
+        "DATA SOURCES TO ANALYZE (use ONLY data returned by your tools — never invent findings):\n"
+        "- Store summary and product/collection data from the store tools\n"
+        "- Google Search Console performance per item (clicks, impressions, CTR, position) via get_search_performance\n"
+        "- Striking distance keywords (positions 4-20) via get_keyword_opportunities\n"
+        "- On-page/technical SEO issues (missing meta titles/descriptions, thin content, missing image alt text) from item data and SEO scores\n\n"
         "AUDIT PRIORITIES:\n"
-        "1. Cannibalization issues (CRITICAL — these actively hurt rankings)\n"
-        "2. High-impression pages with low CTR (quick wins for more clicks)\n"
-        "3. Striking distance keywords (positions 4-20 with high search volume)\n"
-        "4. Orphan pages with no internal links pointing to them\n"
-        "5. Content gaps where competitors rank but this store has no content\n"
-        "6. Technical SEO issues (missing meta tags, poor heading structure)\n\n"
+        "1. High-impression pages with low CTR (quick wins for more clicks)\n"
+        "2. Striking distance keywords (positions 4-20 with high search volume)\n"
+        "3. Technical SEO issues (missing meta tags, thin descriptions, missing alt text)\n"
+        "4. Low-scoring products/collections with meaningful search demand\n\n"
+        "If a data source returns nothing, say so — do not fabricate findings for it.\n\n"
         "Format your response as JSON with keys:\n"
         "- overall_assessment (string): 2-3 sentence summary of the store's SEO health\n"
         "- top_issues (array of objects): Each with {issue, severity ('critical'|'high'|'medium'|'low'), impact, action}\n"
         "- quick_wins (array of objects): Each with {action, expected_impact, effort ('low'|'medium'|'high')}\n"
-        "- cannibalization_summary (string): Summary of keyword cannibalization status\n"
-        "- content_gap_summary (string): Summary of missing content opportunities\n"
         "- priority_products (array of product IDs that need the most work)\n"
         "- priority_collections (array of collection IDs that need the most work)"
     ),
@@ -688,8 +700,8 @@ DEFAULTS = {
             "image_alt": 0.15,
         },
         "thresholds": {
-            "meta_title": {"good": [30, 60], "ok": [20, 70], "poor_min": 1},
-            "meta_description": {"good": [120, 160], "ok": [80, 200], "poor_min": 1},
+            "meta_title": {"good": [50, 60], "ok": [30, 70], "poor_min": 1},
+            "meta_description": {"good": [140, 160], "ok": [100, 200], "poor_min": 1},
             "description_words": {"good": 300, "ok": 150, "short": 50, "very_short": 1},
         },
     },
@@ -833,8 +845,8 @@ DEFAULTS = {
             "description": 0.30,
         },
         "thresholds": {
-            "meta_title": {"good": [30, 60], "ok": [20, 70], "poor_min": 1},
-            "meta_description": {"good": [120, 160], "ok": [80, 200], "poor_min": 1},
+            "meta_title": {"good": [50, 60], "ok": [30, 70], "poor_min": 1},
+            "meta_description": {"good": [140, 160], "ok": [100, 200], "poor_min": 1},
             "description_words": {"good": 150, "ok": 75, "short": 1},
         },
     },

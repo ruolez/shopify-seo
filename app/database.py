@@ -1,29 +1,76 @@
 import json
+import logging
+import os
+import threading
+import time
 from contextlib import contextmanager
 
 import psycopg2
 import psycopg2.extras
+import psycopg2.pool
 
 from app.config import DATABASE_URL
 
 psycopg2.extras.register_uuid()
 
+logger = logging.getLogger(__name__)
+
+# Arbitrary app-wide advisory-lock key: whoever holds it runs boot recovery
+# and the singleton schedulers.
+LEADER_LOCK_KEY = 725101
+
 
 class Database:
     def __init__(self, dsn=None):
         self.dsn = dsn or DATABASE_URL
+        self._pool = None
+        self._pool_pid = None
+        self._pool_lock = threading.Lock()
+        self._leader_conn = None
+
+    def _get_pool(self):
+        # Fork-aware: gunicorn --preload builds the pool in the master before
+        # forking; workers must NOT reuse the master's sockets (protocol
+        # corruption). Each process lazily builds its own pool.
+        pid = os.getpid()
+        if self._pool is None or self._pool_pid != pid:
+            with self._pool_lock:
+                if self._pool is None or self._pool_pid != pid:
+                    self._pool = psycopg2.pool.ThreadedConnectionPool(
+                        minconn=2, maxconn=16, dsn=self.dsn
+                    )
+                    self._pool_pid = pid
+        return self._pool
 
     @contextmanager
     def get_conn(self):
-        conn = psycopg2.connect(self.dsn)
+        pool = self._get_pool()
+        # ThreadedConnectionPool raises when exhausted instead of blocking —
+        # wait briefly so a burst of background threads queues instead of failing.
+        deadline = time.monotonic() + 30
+        while True:
+            try:
+                conn = pool.getconn()
+                break
+            except psycopg2.pool.PoolError:
+                if time.monotonic() >= deadline:
+                    raise
+                time.sleep(0.05)
+        broken = False
         try:
             yield conn
             conn.commit()
         except Exception:
-            conn.rollback()
+            try:
+                conn.rollback()
+            except Exception:
+                broken = True
             raise
         finally:
-            conn.close()
+            try:
+                pool.putconn(conn, close=broken or bool(conn.closed))
+            except Exception:
+                logger.exception("Failed to return connection to pool")
 
     @contextmanager
     def get_cursor(self):
@@ -34,9 +81,36 @@ class Database:
             finally:
                 cur.close()
 
-    def init_tables(self):
+    def try_acquire_leader(self):
+        """Session-level advisory lock held for the process lifetime.
+
+        Returns True if this process should run boot recovery and the
+        singleton schedulers. Uses a dedicated non-pooled connection — the
+        lock lives exactly as long as that session.
+        """
+        if self._leader_conn is not None:
+            return True
+        try:
+            conn = psycopg2.connect(self.dsn)
+            conn.autocommit = True
+            cur = conn.cursor()
+            cur.execute("SELECT pg_try_advisory_lock(%s)", (LEADER_LOCK_KEY,))
+            got = bool(cur.fetchone()[0])
+            cur.close()
+            if got:
+                self._leader_conn = conn
+                return True
+            conn.close()
+            return False
+        except Exception:
+            logger.exception("Leader election failed — assuming leadership")
+            return True
+
+    def init_tables(self, run_recovery=True):
         with self.get_cursor() as cur:
-            cur.execute("SELECT pg_advisory_lock(1)");
+            # Transaction-scoped: auto-releases at commit. The session-level
+            # variant would leak the lock on the pooled connection.
+            cur.execute("SELECT pg_advisory_xact_lock(1)")
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS users (
                     id SERIAL PRIMARY KEY,
@@ -51,7 +125,7 @@ class Database:
                     name VARCHAR(255) NOT NULL,
                     domain VARCHAR(255) NOT NULL,
                     access_token_enc TEXT NOT NULL,
-                    api_version VARCHAR(20) DEFAULT '2024-10',
+                    api_version VARCHAR(20) DEFAULT '2026-01',
                     is_active BOOLEAN DEFAULT TRUE,
                     last_synced_at TIMESTAMP,
                     created_at TIMESTAMP DEFAULT NOW()
@@ -468,6 +542,12 @@ class Database:
                 )
             """)
             cur.execute("""
+                DO $$ BEGIN
+                    ALTER TABLE article_wizard_sessions ADD COLUMN shopify_article_id VARCHAR(100);
+                EXCEPTION WHEN duplicate_column THEN NULL;
+                END $$
+            """)
+            cur.execute("""
                 CREATE TABLE IF NOT EXISTS blog_landing_pages (
                     id SERIAL PRIMARY KEY,
                     store_id INTEGER REFERENCES stores(id) ON DELETE CASCADE,
@@ -597,27 +677,27 @@ class Database:
             # Fail any orphaned tasks: background threads do not survive a restart,
             # so a task left 'pending'/'running' at boot is dead. Failing them here
             # stops the UI from polling a never-completing task forever.
-            cur.execute(
-                "UPDATE ai_tasks SET status = 'failed', "
-                "error = COALESCE(error, 'Interrupted — server restarted'), completed_at = NOW() "
-                "WHERE status IN ('pending', 'running')"
-            )
-            # Same recovery for batch tasks and tracking runs — their daemon threads die
-            # on restart too, otherwise the row is stuck 'running' forever (as old March
-            # bulk_tasks were). Guarded in case a table isn't created yet on a fresh DB.
-            cur.execute(
-                "DO $$ BEGIN "
-                "UPDATE bulk_tasks SET status = 'failed', completed_at = NOW() "
-                "WHERE status IN ('pending', 'running'); "
-                "EXCEPTION WHEN undefined_table THEN NULL; END $$"
-            )
-            cur.execute(
-                "DO $$ BEGIN "
-                "UPDATE ai_tracking_runs SET status = 'failed', "
-                "error = COALESCE(error, 'Interrupted — server restarted'), completed_at = NOW() "
-                "WHERE status IN ('pending', 'running'); "
-                "EXCEPTION WHEN undefined_table THEN NULL; END $$"
-            )
+            # Leader-gated: a second process (extra worker, dev run against the
+            # same DB) must not kill jobs that are alive in the leader.
+            if run_recovery:
+                cur.execute(
+                    "UPDATE ai_tasks SET status = 'failed', "
+                    "error = COALESCE(error, 'Interrupted — server restarted'), completed_at = NOW() "
+                    "WHERE status IN ('pending', 'running')"
+                )
+                cur.execute(
+                    "DO $$ BEGIN "
+                    "UPDATE bulk_tasks SET status = 'failed', completed_at = NOW() "
+                    "WHERE status IN ('pending', 'running'); "
+                    "EXCEPTION WHEN undefined_table THEN NULL; END $$"
+                )
+                cur.execute(
+                    "DO $$ BEGIN "
+                    "UPDATE ai_tracking_runs SET status = 'failed', "
+                    "error = COALESCE(error, 'Interrupted — server restarted'), completed_at = NOW() "
+                    "WHERE status IN ('pending', 'running'); "
+                    "EXCEPTION WHEN undefined_table THEN NULL; END $$"
+                )
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS news_hub_pages (
                     store_id INTEGER PRIMARY KEY REFERENCES stores(id) ON DELETE CASCADE,
@@ -641,6 +721,11 @@ class Database:
                 EXCEPTION WHEN duplicate_column THEN NULL;
                 END $$
             """)
+            # Migrate stores off end-of-life API versions (YYYY-MM sorts
+            # lexicographically, so string comparison is chronological).
+            cur.execute(
+                "UPDATE stores SET api_version = '2026-01' WHERE api_version < '2025-07'"
+            )
             cur.execute("""
                 DO $$ BEGIN
                     ALTER TABLE sync_jobs ADD COLUMN blogs_synced INTEGER DEFAULT 0;

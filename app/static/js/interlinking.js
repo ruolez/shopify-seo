@@ -95,8 +95,6 @@
         const crossLinksCount = (data.missing_crosslinks || []).length;
         const brokenLinksCount = (data.broken_links || []).length;
         const nonCanonicalCount = (data.non_canonical_links || []).length;
-        currentBrokenLinks = data.broken_links || [];
-        fixedBrokenLinks = new Set();
 
         let html = `
             <div class="interlink-action-bar" style="display: flex; align-items: center; gap: 12px; margin-bottom: 24px; flex-wrap: wrap;">
@@ -818,9 +816,11 @@
                 body: JSON.stringify({ store_id: currentStoreId }),
             });
 
+            let consecutiveErrors = 0;
             const poll = setInterval(async () => {
                 try {
                     const status = await apiRequest(`/api/interlinking/status?store_id=${currentStoreId}`);
+                    consecutiveErrors = 0;
                     if (!status.running) {
                         clearInterval(poll);
                         showToast('Analysis complete!', 'success');
@@ -829,7 +829,10 @@
                         loadAnalysis();
                     }
                 } catch (e) {
-                    clearInterval(poll);
+                    consecutiveErrors++;
+                    if (consecutiveErrors >= 5) {
+                        clearInterval(poll);
+                    }
                 }
             }, 2000);
         } catch (e) {
@@ -843,38 +846,33 @@
             return;
         }
 
-        const batchSel = document.getElementById('batch-size-select');
-        const batchSize = batchSel ? parseInt(batchSel.value) || 10 : 10;
-        const maxCrosslinks = Math.max(5, Math.round(batchSize / 2));
+        const btn = typeof event !== 'undefined' && event && event.target instanceof Element ? event.target.closest('button') : null;
+        return guardButton(btn, async () => {
+            const batchSel = document.getElementById('batch-size-select');
+            const batchSize = batchSel ? parseInt(batchSel.value) || 10 : 10;
+            const maxCrosslinks = Math.max(5, Math.round(batchSize / 2));
 
-        showToast(`Generating ${batchSize} AI recommendations...`, 'info');
-        try {
-            const resp = await apiRequest('/api/interlinking/recommendations', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ store_id: currentStoreId, max_fixes: batchSize, max_crosslinks: maxCrosslinks }),
-            });
+            showToast(`Generating ${batchSize} AI recommendations...`, 'info');
+            try {
+                const resp = await apiRequest('/api/interlinking/recommendations', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ store_id: currentStoreId, max_fixes: batchSize, max_crosslinks: maxCrosslinks }),
+                });
 
-            const taskId = resp.task_id;
-            const poll = setInterval(async () => {
+                const taskId = resp.task_id;
                 try {
-                    const task = await apiRequest(`/api/interlinking/recommendations/${taskId}`);
-                    if (task.status === 'completed') {
-                        clearInterval(poll);
-                        showToast('Recommendations ready!', 'success');
-                        renderRecommendations(task.result);
-                    } else if (task.status === 'failed') {
-                        clearInterval(poll);
-                        showToast('Recommendation generation failed: ' + (task.error || ''), 'error');
-                        renderRecommendations({ error: task.error });
-                    }
-                } catch (e) {
-                    clearInterval(poll);
+                    const task = await pollTaskUntilDone(`/api/interlinking/recommendations/${taskId}`, { intervalMs: 3000 });
+                    showToast('Recommendations ready!', 'success');
+                    renderRecommendations(task.result);
+                } catch (pollErr) {
+                    showToast('Recommendation generation failed: ' + pollErr.message, 'error');
+                    renderRecommendations({ error: pollErr.message });
                 }
-            }, 3000);
-        } catch (e) {
-            showToast('Failed to start recommendations', 'error');
-        }
+            } catch (e) {
+                showToast('Failed to start recommendations', 'error');
+            }
+        });
     };
 
     window._showItemDetail = async function (type, id) {

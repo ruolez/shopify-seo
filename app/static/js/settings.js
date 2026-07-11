@@ -613,11 +613,3 @@ window.resetList = async function (key) {
         showToast(`Failed to reset: ${err.message}`, "error");
     }
 };
-
-
-// ─── Utility ───
-function escapeHtml(str) {
-    const div = document.createElement("div");
-    div.textContent = str;
-    return div.innerHTML;
-}

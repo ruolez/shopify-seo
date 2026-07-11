@@ -14,7 +14,12 @@ def _get_fernet():
     if _fernet is None:
         key = ENCRYPTION_KEY
         if not key:
-            key = base64.urlsafe_b64encode(os.urandom(32)).decode()
+            # A silently generated random key would differ per worker process
+            # and make everything encrypted unrecoverable after restart.
+            raise RuntimeError(
+                "ENCRYPTION_KEY is not set. Add it to .env (see .env.example) — "
+                "generating a random one would make stored API tokens unreadable."
+            )
         _fernet = Fernet(key.encode() if isinstance(key, str) else key)
     return _fernet
 

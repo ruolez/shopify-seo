@@ -10,17 +10,35 @@ from openai import OpenAI
 from app.auth import decrypt_value
 from app.database import db
 from app.prompt_defaults import DEFAULTS
+from app.services.ai_output_guard import validate_injected_html
 from app.settings_manager import get_setting
 from app.shopify_client import ShopifyClient
+from app.services.task_runner import spawn as spawn_task
 
 logger = logging.getLogger(__name__)
 
 interlinking_bp = Blueprint("interlinking", __name__)
 
-_analysis_running = {}
+def _analysis_running_task(store_id):
+    """Return the id of a live analysis task for this store, if any.
+
+    Tracked in ai_tasks (not a per-process dict) so the status is correct
+    across all gunicorn workers.
+    """
+    with db.get_cursor() as cur:
+        cur.execute(
+            """SELECT id FROM ai_tasks
+               WHERE store_id = %s AND task_type = 'interlinking_analysis'
+                 AND status IN ('pending', 'running')
+                 AND created_at > NOW() - INTERVAL '30 minutes'
+               ORDER BY id DESC LIMIT 1""",
+            (store_id,),
+        )
+        row = cur.fetchone()
+    return row["id"] if row else None
 
 
-def _run_analysis(store_id):
+def _run_analysis(store_id, task_id):
     try:
         from app.services.interlinking_analyzer import (
             analyze_store_interlinking,
@@ -42,10 +60,18 @@ def _run_analysis(store_id):
             shopify_client = None
 
         analyze_store_interlinking(store_id, store_hosts, shopify_client)
-    except Exception:
+        with db.get_cursor() as cur:
+            cur.execute(
+                "UPDATE ai_tasks SET status = 'completed', completed_at = NOW() WHERE id = %s",
+                (task_id,),
+            )
+    except Exception as e:
         logger.exception("Interlinking analysis failed for store %s", store_id)
-    finally:
-        _analysis_running.pop(store_id, None)
+        with db.get_cursor() as cur:
+            cur.execute(
+                "UPDATE ai_tasks SET status = 'failed', error = %s, completed_at = NOW() WHERE id = %s",
+                (str(e), task_id),
+            )
 
 
 @interlinking_bp.route("/interlinking")
@@ -77,17 +103,23 @@ def get_analysis():
 
 @interlinking_bp.route("/api/interlinking/analyze", methods=["POST"])
 def trigger_analysis():
-    data = request.get_json() or {}
+    data = request.get_json(silent=True) or {}
     store_id = data.get("store_id")
     if not store_id:
         return jsonify({"error": "store_id is required"}), 400
 
-    if store_id in _analysis_running:
+    if _analysis_running_task(store_id):
         return jsonify({"ok": True, "message": "Analysis already running"}), 200
 
-    _analysis_running[store_id] = True
-    thread = threading.Thread(target=_run_analysis, args=(store_id,), daemon=True)
-    thread.start()
+    with db.get_cursor() as cur:
+        cur.execute(
+            """INSERT INTO ai_tasks (store_id, task_type, status, input)
+               VALUES (%s, 'interlinking_analysis', 'running', %s) RETURNING id""",
+            (store_id, json.dumps({"store_id": store_id})),
+        )
+        task_id = cur.fetchone()["id"]
+
+    spawn_task("ai_tasks", task_id, _run_analysis, store_id, task_id)
 
     return jsonify({"ok": True, "message": "Analysis started"}), 202
 
@@ -98,8 +130,7 @@ def analysis_status():
     if not store_id:
         return jsonify({"error": "store_id is required"}), 400
 
-    running = store_id in _analysis_running
-    return jsonify({"running": running})
+    return jsonify({"running": _analysis_running_task(store_id) is not None})
 
 
 @interlinking_bp.route("/api/interlinking/item/<item_type>/<int:item_id>")
@@ -230,7 +261,7 @@ def get_item_links(item_type, item_id):
 
 @interlinking_bp.route("/api/interlinking/recommendations", methods=["POST"])
 def trigger_recommendations():
-    data = request.get_json() or {}
+    data = request.get_json(silent=True) or {}
     store_id = data.get("store_id")
     if not store_id:
         return jsonify({"error": "store_id is required"}), 400
@@ -279,8 +310,7 @@ def trigger_recommendations():
                     (str(e), tid),
                 )
 
-    thread = threading.Thread(target=_run_recommendations, args=(task_id,), daemon=True)
-    thread.start()
+    spawn_task("ai_tasks", task_id, _run_recommendations, task_id)
 
     return jsonify({"ok": True, "task_id": task_id}), 202
 
@@ -476,7 +506,7 @@ def _update_local_db(item_type, item_id, new_html):
 
 @interlinking_bp.route("/api/interlinking/apply-fix", methods=["POST"])
 def apply_fix():
-    data = request.get_json() or {}
+    data = request.get_json(silent=True) or {}
     store_id = data.get("store_id")
     from_type = data.get("from_type")
     from_handle = data.get("from_handle")
@@ -503,6 +533,11 @@ def apply_fix():
         links = [{"url": target_url, "anchor_text": suggested_anchor}]
         new_html = _inject_link_via_ai(source["html"], links, config)
 
+        ok, reason = validate_injected_html(source["html"], new_html, expected_hrefs=[target_url])
+        if not ok:
+            logger.warning("Rejected AI link injection for %s '%s': %s", from_type, from_handle, reason)
+            return jsonify({"error": f"AI output rejected: {reason}"}), 422
+
         shopify_client = _get_shopify_client(store_id)
         _push_html_to_shopify(shopify_client, source["item_type"], source["shopify_id"], new_html)
         _update_local_db(source["item_type"], source["id"], new_html)
@@ -519,7 +554,7 @@ def apply_fix():
 
 @interlinking_bp.route("/api/interlinking/apply-all", methods=["POST"])
 def apply_all_fixes():
-    data = request.get_json() or {}
+    data = request.get_json(silent=True) or {}
     store_id = data.get("store_id")
     fixes = data.get("fixes", [])
 
@@ -582,6 +617,11 @@ def apply_all_fixes():
         try:
             ai_links = [{"url": l["url"], "anchor_text": l["anchor_text"]} for l in links_to_add]
             new_html = _inject_link_via_ai(current_html, ai_links, config)
+            ok, reason = validate_injected_html(
+                current_html, new_html, expected_hrefs=[l["url"] for l in ai_links]
+            )
+            if not ok:
+                raise ValueError(f"AI output rejected: {reason}")
             _push_html_to_shopify(shopify_client, source["item_type"], source["shopify_id"], new_html)
             _update_local_db(source["item_type"], source["id"], new_html)
 
@@ -708,7 +748,7 @@ def available_targets():
 
 @interlinking_bp.route("/api/interlinking/fix-broken-link", methods=["POST"])
 def fix_broken_link():
-    data = request.get_json() or {}
+    data = request.get_json(silent=True) or {}
     store_id = data.get("store_id")
     to_type = data.get("to_type")
     to_handle = data.get("to_handle")

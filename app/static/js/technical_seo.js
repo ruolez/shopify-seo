@@ -162,6 +162,22 @@ async function loadTseoProducts() {
     }
 }
 
+// Re-rendering rebuilds the search input, killing focus mid-typing. Swap the
+// HTML while preserving focus + caret if the user was typing in the search box.
+function setHtmlPreservingSearchFocus(container, html) {
+    const active = document.activeElement;
+    const caret = active && active.classList.contains("search-input") && container.contains(active)
+        ? active.selectionStart
+        : null;
+    container.innerHTML = html;
+    if (caret === null) return;
+    const input = container.querySelector(".search-input");
+    if (!input) return;
+    input.focus();
+    const pos = Math.min(caret, input.value.length);
+    input.setSelectionRange(pos, pos);
+}
+
 function renderTseoProductsTable(container, products) {
     let html = "";
     const hasMultipleStores = new Set(allTseoProducts.map(p => p.store_name)).size > 1;
@@ -214,7 +230,7 @@ function renderTseoProductsTable(container, products) {
                 <span class="material-symbols-rounded">clear_all</span> Clear Filters
             </button>
         </div>`;
-        container.innerHTML = html;
+        setHtmlPreservingSearchFocus(container, html);
         return;
     }
 
@@ -305,7 +321,7 @@ function renderTseoProductsTable(container, products) {
     });
 
     html += '</tbody></table></div>';
-    container.innerHTML = html;
+    setHtmlPreservingSearchFocus(container, html);
 }
 
 function onTseoProductSearch(value, immediate) {
@@ -482,7 +498,7 @@ function renderTseoCollectionsTable(container, collections) {
                 <span class="material-symbols-rounded">clear_all</span> Clear Filters
             </button>
         </div>`;
-        container.innerHTML = html;
+        setHtmlPreservingSearchFocus(container, html);
         return;
     }
 
@@ -570,7 +586,7 @@ function renderTseoCollectionsTable(container, collections) {
     });
 
     html += '</tbody></table></div>';
-    container.innerHTML = html;
+    setHtmlPreservingSearchFocus(container, html);
 }
 
 function onTseoCollectionSearch(value, immediate) {
@@ -644,18 +660,21 @@ function toggleTseoSelectAllCollections(checkbox) {
 // --- Analyze ---
 
 async function analyzeTseoItem(itemType, itemId) {
-    try {
-        showToast("Analyzing...", "info");
-        const result = await apiRequest("/api/technical-seo/analyze", {
-            method: "POST",
-            body: { item_type: itemType, item_id: itemId },
-        });
-        showToast(`Score: ${result.score} | ${result.issues_count} issues found`, "success");
-        if (itemType === "product") loadTseoProducts();
-        else loadTseoCollections();
-    } catch (err) {
-        showToast("Analysis failed: " + err.message, "error");
-    }
+    const btn = typeof event !== "undefined" && event && event.target instanceof Element ? event.target.closest("button") : null;
+    return guardButton(btn, async () => {
+        try {
+            showToast("Analyzing...", "info");
+            const result = await apiRequest("/api/technical-seo/analyze", {
+                method: "POST",
+                body: { item_type: itemType, item_id: itemId },
+            });
+            showToast(`Score: ${result.score} | ${result.issues_count} issues found`, "success");
+            if (itemType === "product") loadTseoProducts();
+            else loadTseoCollections();
+        } catch (err) {
+            showToast("Analysis failed: " + err.message, "error");
+        }
+    });
 }
 
 // --- Detail Modal ---
@@ -944,22 +963,29 @@ async function applySelectedFixes(itemType, itemId) {
         return;
     }
 
-    try {
-        showToast("Applying fixes to Shopify...", "info");
-        const result = await apiRequest("/api/technical-seo/apply", {
-            method: "POST",
-            body: { item_type: itemType, item_id: itemId, fixes },
-        });
+    const btn = typeof event !== "undefined" && event && event.target instanceof Element ? event.target.closest("button") : null;
+    const btnLabel = btn ? btn.innerHTML : null;
+    if (btn) btn.innerHTML = "Applying\u2026";
+    return guardButton(btn, async () => {
+        try {
+            showToast("Applying fixes to Shopify...", "info");
+            const result = await apiRequest("/api/technical-seo/apply", {
+                method: "POST",
+                body: { item_type: itemType, item_id: itemId, fixes },
+            });
 
-        if (result.ok) {
-            showToast(`Fixes applied! New score: ${result.new_score}`, "success");
-            viewTseoDetail(itemType, itemId);
-            if (itemType === "product") loadTseoProducts();
-            else loadTseoCollections();
+            if (result.ok) {
+                showToast(`Fixes applied! New score: ${result.new_score}`, "success");
+                viewTseoDetail(itemType, itemId);
+                if (itemType === "product") loadTseoProducts();
+                else loadTseoCollections();
+            }
+        } catch (err) {
+            showToast("Failed to apply fixes: " + err.message, "error");
+        } finally {
+            if (btn && btnLabel !== null) btn.innerHTML = btnLabel;
         }
-    } catch (err) {
-        showToast("Failed to apply fixes: " + err.message, "error");
-    }
+    });
 }
 
 // --- Bulk Operations ---
@@ -969,14 +995,11 @@ async function bulkAnalyzeTseoProducts() {
     if (ids.length === 0) return;
 
     try {
-        showToast(`Analyzing ${ids.length} products...`, "info");
         const result = await apiRequest("/api/technical-seo/bulk-analyze", {
             method: "POST",
             body: { item_type: "product", item_ids: ids },
         });
-        showToast(`${result.analyzed} products analyzed`, "success");
-        selectedTseoProductIds.clear();
-        loadTseoProducts();
+        pollTseoBulkTask(result.bulk_task_id, result.total, `Analyzing ${result.total} products...`);
     } catch (err) {
         showToast("Bulk analysis failed: " + err.message, "error");
     }
@@ -987,14 +1010,11 @@ async function bulkAnalyzeTseoCollections() {
     if (ids.length === 0) return;
 
     try {
-        showToast(`Analyzing ${ids.length} collections...`, "info");
         const result = await apiRequest("/api/technical-seo/bulk-analyze", {
             method: "POST",
             body: { item_type: "collection", item_ids: ids },
         });
-        showToast(`${result.analyzed} collections analyzed`, "success");
-        selectedTseoCollectionIds.clear();
-        loadTseoCollections();
+        pollTseoBulkTask(result.bulk_task_id, result.total, `Analyzing ${result.total} collections...`);
     } catch (err) {
         showToast("Bulk analysis failed: " + err.message, "error");
     }
@@ -1070,10 +1090,14 @@ function pollTseoBulkTask(bulkTaskId, total, subtitleText) {
                 current.textContent = task.current_item_title;
             }
 
-            if (task.status === "completed") {
+            if (task.status === "completed" || task.status === "failed") {
                 setTimeout(() => {
                     overlay.classList.remove("active");
-                    showToast(`Bulk operation complete: ${task.completed} succeeded, ${task.failed} failed`, task.failed > 0 ? "warning" : "success");
+                    if (task.status === "failed") {
+                        showToast("Bulk operation failed — check the logs and retry", "error");
+                    } else {
+                        showToast(`Bulk operation complete: ${task.completed} succeeded, ${task.failed} failed`, task.failed > 0 ? "warning" : "success");
+                    }
                     selectedTseoProductIds.clear();
                     selectedTseoCollectionIds.clear();
                     loadTseoProducts();
@@ -1119,9 +1143,4 @@ function tseoSortIcon(key, sortState) {
     return sortState.dir === "asc"
         ? '<span class="material-symbols-rounded" style="font-size: 16px;">arrow_upward</span>'
         : '<span class="material-symbols-rounded" style="font-size: 16px;">arrow_downward</span>';
-}
-
-function escapeAttr(str) {
-    if (!str) return "";
-    return str.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/'/g, "&#39;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }

@@ -53,7 +53,7 @@ def analyze_product_seo(product):
     )
 
     body = product.get("description") or ""
-    text_only = re.sub(r"<[^>]+>", "", body)
+    text_only = re.sub(r"<[^>]+>", " ", body)
     word_count = len(text_only.split())
     dw = thresholds["description_words"]
     if word_count >= dw["good"]:
@@ -112,7 +112,7 @@ def analyze_collection_seo(collection):
     )
 
     body = collection.get("description") or ""
-    text_only = re.sub(r"<[^>]+>", "", body)
+    text_only = re.sub(r"<[^>]+>", " ", body)
     word_count = len(text_only.split())
     dw = thresholds["description_words"]
     if word_count >= dw["good"]:
@@ -212,9 +212,9 @@ def analyze_search_performance(gsc_data, semrush_data, store_baselines=None):
             details["click_performance"] = "No position data"
     else:
         scores["search_visibility"] = 0
-        details["search_visibility"] = "No GSC data"
+        details["search_visibility"] = "No GSC data (excluded from score)"
         scores["click_performance"] = 0
-        details["click_performance"] = "No GSC data"
+        details["click_performance"] = "No GSC data (excluded from score)"
 
     if has_semrush:
         data_sources.append("semrush")
@@ -256,14 +256,24 @@ def analyze_search_performance(gsc_data, semrush_data, store_baselines=None):
             details["ranking_strength"] = "No position data"
     else:
         scores["keyword_coverage"] = 0
-        details["keyword_coverage"] = "No Semrush data"
+        details["keyword_coverage"] = "No Semrush data (excluded from score)"
         scores["ranking_strength"] = 0
-        details["ranking_strength"] = "No Semrush data"
+        details["ranking_strength"] = "No Semrush data (excluded from score)"
 
-    weighted_score = sum(
-        scores.get(k, 0) * search_weights.get(k, 0)
-        for k in search_weights
-    )
+    # Weight only the components whose data source exists, re-normalized to 1.0 —
+    # a page missing one source must not be scored as if it performed at zero there.
+    active_components = []
+    if has_gsc:
+        active_components += ["search_visibility", "click_performance"]
+    if has_semrush:
+        active_components += ["keyword_coverage", "ranking_strength"]
+    active_weight = sum(search_weights.get(k, 0) for k in active_components)
+    if active_weight > 0:
+        weighted_score = sum(
+            scores.get(k, 0) * search_weights.get(k, 0) for k in active_components
+        ) / active_weight
+    else:
+        weighted_score = 0
 
     return {
         "search_score": round(weighted_score),
@@ -292,7 +302,11 @@ def compute_composite_score(on_page_result, search_result):
     if "gsc" in sources and "semrush" in sources:
         weights = config.get("weights_with_search", DEFAULT_COMPOSITE_SCORING["weights_with_search"])
     else:
-        weights = config.get("weights_gsc_only", DEFAULT_COMPOSITE_SCORING["weights_gsc_only"])
+        # Single-source blend (the config key predates Semrush-only pages).
+        weights = (
+            config.get("weights_single_source")
+            or config.get("weights_gsc_only", DEFAULT_COMPOSITE_SCORING["weights_gsc_only"])
+        )
 
     composite = on_page_score * weights["on_page"] + search_score * weights["search"]
 

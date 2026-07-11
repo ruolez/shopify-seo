@@ -7,8 +7,20 @@ import requests
 logger = logging.getLogger(__name__)
 
 
+DEFAULT_API_VERSION = "2026-01"
+
+METAFIELDS_SET_MUTATION = """
+mutation ($metafields: [MetafieldsSetInput!]!) {
+  metafieldsSet(metafields: $metafields) {
+    metafields { id namespace key }
+    userErrors { field message }
+  }
+}
+"""
+
+
 class ShopifyClient:
-    def __init__(self, domain, access_token, api_version="2024-10"):
+    def __init__(self, domain, access_token, api_version=DEFAULT_API_VERSION):
         self.domain = domain.rstrip("/")
         if not self.domain.endswith(".myshopify.com"):
             self.domain = f"{self.domain}.myshopify.com"
@@ -27,29 +39,69 @@ class ShopifyClient:
         if variables:
             payload["variables"] = variables
 
-        max_retries = 3
-        for attempt in range(max_retries):
+        max_attempts = 5
+        throttle_budget = 5
+        attempt = 0
+        while True:
             try:
                 resp = requests.post(
                     self.graphql_url, json=payload, headers=self.headers, timeout=30
                 )
-                if resp.status_code == 429:
-                    retry_after = float(resp.headers.get("Retry-After", 2))
-                    logger.warning("Shopify rate limited, retrying after %.1fs", retry_after)
-                    time.sleep(retry_after)
-                    continue
-                resp.raise_for_status()
-                data = resp.json()
-                if "errors" in data:
-                    raise Exception(data["errors"][0].get("message", str(data["errors"])))
-                return data.get("data", {})
             except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
-                if attempt < max_retries - 1:
-                    wait = 2 ** attempt
-                    logger.warning("Shopify connection error (attempt %d/%d), retrying in %ds: %s", attempt + 1, max_retries, wait, e)
-                    time.sleep(wait)
-                else:
+                attempt += 1
+                if attempt >= max_attempts:
                     raise
+                wait = 2 ** attempt
+                logger.warning("Shopify connection error (attempt %d/%d), retrying in %ds: %s", attempt, max_attempts, wait, e)
+                time.sleep(wait)
+                continue
+
+            if resp.status_code == 429 or resp.status_code >= 500:
+                attempt += 1
+                if attempt >= max_attempts:
+                    raise Exception(
+                        f"Shopify request failed after {attempt} attempts (HTTP {resp.status_code})"
+                    )
+                wait = float(resp.headers.get("Retry-After", 2 ** attempt))
+                logger.warning("Shopify HTTP %d, retrying in %.1fs (attempt %d/%d)", resp.status_code, wait, attempt, max_attempts)
+                time.sleep(min(wait, 30))
+                continue
+
+            resp.raise_for_status()
+            data = resp.json()
+
+            errors = data.get("errors")
+            if errors:
+                # GraphQL cost throttling arrives as HTTP 200 with code THROTTLED.
+                throttled = any(
+                    (e.get("extensions") or {}).get("code") == "THROTTLED"
+                    for e in errors
+                    if isinstance(e, dict)
+                )
+                if throttled:
+                    if throttle_budget <= 0:
+                        raise Exception("Shopify rate limited (THROTTLED) — retries exhausted")
+                    throttle_budget -= 1
+                    cost = (data.get("extensions") or {}).get("cost") or {}
+                    status = cost.get("throttleStatus") or {}
+                    requested = cost.get("requestedQueryCost") or 100
+                    available = status.get("currentlyAvailable") or 0
+                    restore = status.get("restoreRate") or 50
+                    wait = max((requested - available) / max(restore, 1), 1.0)
+                    logger.warning("Shopify GraphQL throttled, waiting %.1fs (budget %d left)", wait, throttle_budget)
+                    time.sleep(min(wait, 30))
+                    continue
+                raise Exception(errors[0].get("message", str(errors)))
+            return data.get("data", {})
+
+    @staticmethod
+    def _normalize_tags(tags):
+        """Accept a list or comma-separated string; return a clean list of tags."""
+        if isinstance(tags, str):
+            return [t.strip() for t in tags.split(",") if t.strip()]
+        if isinstance(tags, list):
+            return [str(t).strip() for t in tags if str(t).strip()]
+        return []
 
     def test_connection(self):
         query = "{ shop { name id myshopifyDomain primaryDomain { host url } } }"
@@ -91,6 +143,15 @@ class ShopifyClient:
         data = self._graphql(query, {"q": f"handle:{handle}"})
         return bool(data.get("collections", {}).get("edges"))
 
+    def get_page_by_handle(self, handle):
+        """Return {id, title, handle} for the page with this handle, or None."""
+        if not handle:
+            return None
+        query = "query($q: String!) { pages(first: 1, query: $q) { edges { node { id title handle } } } }"
+        data = self._graphql(query, {"q": f"handle:{handle}"})
+        edges = data.get("pages", {}).get("edges", [])
+        return edges[0]["node"] if edges else None
+
     def page_exists(self, handle):
         """Return True if a page with this handle exists (published or not)."""
         if not handle:
@@ -124,14 +185,12 @@ class ShopifyClient:
         )
 
     def get_products(self, limit=50, cursor=None, query_filter=None):
-        after = f', after: "{cursor}"' if cursor else ""
-        q_filter = f', query: "{query_filter}"' if query_filter else ""
-        query = f"""
-        {{
-          products(first: {limit}{after}{q_filter}) {{
-            pageInfo {{ hasNextPage endCursor }}
-            edges {{
-              node {{
+        query = """
+        query ($first: Int!, $after: String, $query: String) {
+          products(first: $first, after: $after, query: $query) {
+            pageInfo { hasNextPage endCursor }
+            edges {
+              node {
                 id
                 title
                 handle
@@ -140,31 +199,31 @@ class ShopifyClient:
                 productType
                 tags
                 status
-                seo {{ title description }}
-                media(first: 10) {{
-                  edges {{
-                    node {{
-                      ... on MediaImage {{
+                seo { title description }
+                media(first: 50) {
+                  edges {
+                    node {
+                      ... on MediaImage {
                         id
                         alt
-                        preview {{ image {{ url }} }}
-                      }}
-                    }}
-                  }}
-                }}
-                variants(first: 10) {{
-                  edges {{
-                    node {{
+                        preview { image { url } }
+                      }
+                    }
+                  }
+                }
+                variants(first: 50) {
+                  edges {
+                    node {
                       id title price sku availableForSale compareAtPrice barcode
-                    }}
-                  }}
-                }}
-              }}
-            }}
-          }}
-        }}
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
         """
-        data = self._graphql(query)
+        data = self._graphql(query, {"first": limit, "after": cursor, "query": query_filter})
         products_data = data.get("products", {})
         page_info = products_data.get("pageInfo", {})
         edges = products_data.get("edges", [])
@@ -215,28 +274,27 @@ class ShopifyClient:
         }
 
     def get_collections(self, limit=50, cursor=None):
-        after = f', after: "{cursor}"' if cursor else ""
-        query = f"""
-        {{
-          collections(first: {limit}{after}) {{
-            pageInfo {{ hasNextPage endCursor }}
-            edges {{
-              node {{
+        query = """
+        query ($first: Int!, $after: String) {
+          collections(first: $first, after: $after) {
+            pageInfo { hasNextPage endCursor }
+            edges {
+              node {
                 id
                 title
                 handle
                 descriptionHtml
-                seo {{ title description }}
-                productsCount {{ count }}
-                image {{ url altText }}
-                ruleSet {{ appliedDisjunctively }}
-                resourcePublicationsV2(first: 1) {{ edges {{ node {{ isPublished }} }} }}
-              }}
-            }}
-          }}
-        }}
+                seo { title description }
+                productsCount { count }
+                image { url altText }
+                ruleSet { appliedDisjunctively }
+                resourcePublicationsV2(first: 20) { edges { node { isPublished } } }
+              }
+            }
+          }
+        }
         """
-        data = self._graphql(query)
+        data = self._graphql(query, {"first": limit, "after": cursor})
         collections_data = data.get("collections", {})
         page_info = collections_data.get("pageInfo", {})
         edges = collections_data.get("edges", [])
@@ -272,37 +330,31 @@ class ShopifyClient:
         }
 
     def update_product(self, shopify_id, fields):
-        input_parts = [f'id: "{shopify_id}"']
+        product_input = {"id": shopify_id}
         if "title" in fields:
-            title = fields["title"].replace('"', '\\"')
-            input_parts.append(f'title: "{title}"')
+            product_input["title"] = fields["title"]
         if "description_html" in fields:
-            desc = fields["description_html"].replace('"', '\\"').replace("\n", "\\n")
-            input_parts.append(f'descriptionHtml: "{desc}"')
-        if "tags" in fields and isinstance(fields["tags"], list):
-            tags_str = ", ".join(f'"{t}"' for t in fields["tags"])
-            input_parts.append(f"tags: [{tags_str}]")
+            product_input["descriptionHtml"] = fields["description_html"]
+        if "tags" in fields:
+            product_input["tags"] = self._normalize_tags(fields["tags"])
 
-        seo_parts = []
+        seo = {}
         if "meta_title" in fields:
-            mt = fields["meta_title"].replace('"', '\\"')
-            seo_parts.append(f'title: "{mt}"')
+            seo["title"] = fields["meta_title"]
         if "meta_description" in fields:
-            md = fields["meta_description"].replace('"', '\\"')
-            seo_parts.append(f'description: "{md}"')
-        if seo_parts:
-            input_parts.append(f"seo: {{ {', '.join(seo_parts)} }}")
+            seo["description"] = fields["meta_description"]
+        if seo:
+            product_input["seo"] = seo
 
-        input_str = ", ".join(input_parts)
-        query = f"""
-        mutation {{
-          productUpdate(input: {{ {input_str} }}) {{
-            product {{ id title }}
-            userErrors {{ field message }}
-          }}
-        }}
+        query = """
+        mutation ($product: ProductUpdateInput!) {
+          productUpdate(product: $product) {
+            product { id title }
+            userErrors { field message }
+          }
+        }
         """
-        data = self._graphql(query)
+        data = self._graphql(query, {"product": product_input})
         result = data.get("productUpdate", {})
         errors = result.get("userErrors", [])
         if errors:
@@ -348,37 +400,6 @@ class ShopifyClient:
             all_products.extend(page)
         return all_products
 
-    def get_collection_products(self, shopify_id):
-        query = """
-        query ($id: ID!) {
-          collection(id: $id) {
-            products(first: 50) {
-              edges {
-                node { id title handle status }
-              }
-            }
-          }
-        }
-        """
-        data = self._graphql(query, {"id": shopify_id})
-        collection = data.get("collection") or {}
-        edges = (collection.get("products") or {}).get("edges", [])
-
-        products = []
-        for edge in edges:
-            node = edge["node"]
-            if node.get("status") != "ACTIVE":
-                continue
-            products.append(
-                {
-                    "shopify_id": node["id"],
-                    "title": node.get("title", ""),
-                    "handle": node.get("handle", ""),
-                    "status": node.get("status", ""),
-                }
-            )
-        return products
-
     def get_all_collection_products(self, shopify_id):
         all_products = []
         cursor = None
@@ -417,34 +438,29 @@ class ShopifyClient:
         return all_products
 
     def update_collection(self, shopify_id, fields):
-        input_parts = [f'id: "{shopify_id}"']
+        collection_input = {"id": shopify_id}
         if "title" in fields:
-            title = fields["title"].replace('"', '\\"')
-            input_parts.append(f'title: "{title}"')
+            collection_input["title"] = fields["title"]
         if "description_html" in fields:
-            desc = fields["description_html"].replace('"', '\\"').replace("\n", "\\n")
-            input_parts.append(f'descriptionHtml: "{desc}"')
+            collection_input["descriptionHtml"] = fields["description_html"]
 
-        seo_parts = []
+        seo = {}
         if "meta_title" in fields:
-            mt = fields["meta_title"].replace('"', '\\"')
-            seo_parts.append(f'title: "{mt}"')
+            seo["title"] = fields["meta_title"]
         if "meta_description" in fields:
-            md = fields["meta_description"].replace('"', '\\"')
-            seo_parts.append(f'description: "{md}"')
-        if seo_parts:
-            input_parts.append(f"seo: {{ {', '.join(seo_parts)} }}")
+            seo["description"] = fields["meta_description"]
+        if seo:
+            collection_input["seo"] = seo
 
-        input_str = ", ".join(input_parts)
-        query = f"""
-        mutation {{
-          collectionUpdate(input: {{ {input_str} }}) {{
-            collection {{ id title }}
-            userErrors {{ field message }}
-          }}
-        }}
+        query = """
+        mutation ($input: CollectionInput!) {
+          collectionUpdate(input: $input) {
+            collection { id title }
+            userErrors { field message }
+          }
+        }
         """
-        data = self._graphql(query)
+        data = self._graphql(query, {"input": collection_input})
         result = data.get("collectionUpdate", {})
         errors = result.get("userErrors", [])
         if errors:
@@ -499,14 +515,7 @@ class ShopifyClient:
         return all_collections
 
     def set_product_metafield(self, product_shopify_id, namespace, key, value, value_type="json"):
-        query = """
-        mutation ($metafields: [MetafieldsSetInput!]!) {
-          metafieldsSet(metafields: $metafields) {
-            metafields { id namespace key }
-            userErrors { field message }
-          }
-        }
-        """
+        query = METAFIELDS_SET_MUTATION
         variables = {
             "metafields": [
                 {
@@ -526,23 +535,54 @@ class ShopifyClient:
         return result.get("metafields", [])
 
     def get_publications(self):
+        # catalog.title is only set for catalog-backed publications (markets/B2B);
+        # app channels like Online Store still need the legacy name field.
         query = """
         {
           publications(first: 50) {
             edges {
-              node { id name }
+              node { id name catalog { title } }
             }
           }
         }
         """
         data = self._graphql(query)
         edges = (data.get("publications") or {}).get("edges", [])
-        return [{"id": edge["node"]["id"], "name": edge["node"].get("name", "")} for edge in edges]
+        return [
+            {
+                "id": edge["node"]["id"],
+                "name": (
+                    ((edge["node"].get("catalog") or {}).get("title"))
+                    or edge["node"].get("name")
+                    or ""
+                ),
+            }
+            for edge in edges
+        ]
 
     def publish_to_all_channels(self, resource_shopify_id):
+        """Publish the resource to the Online Store channel.
+
+        (Name kept for caller compatibility.) Publishing to every app channel
+        (Google, Faire, POS, ...) caused partial-success errors and unwanted
+        third-party listings; if the Online Store publication can't be
+        identified, falls back to the previous publish-everywhere behavior.
+        """
         publications = self.get_publications()
         if not publications:
             return []
+
+        online_store = [
+            p for p in publications
+            if (p.get("name") or "").strip().lower() == "online store"
+        ]
+        if online_store:
+            publications = online_store
+        else:
+            logger.warning(
+                "Online Store publication not found among %d channels — publishing to all",
+                len(publications),
+            )
 
         publication_inputs = [{"publicationId": p["id"]} for p in publications]
         query = """
@@ -577,22 +617,19 @@ class ShopifyClient:
         return result.get("deletedCollectionId")
 
     def create_collection(self, title, description_html=""):
-        escaped_title = title.replace('"', '\\"')
-        input_parts = [f'title: "{escaped_title}"']
+        collection_input = {"title": title}
         if description_html:
-            escaped_desc = description_html.replace('"', '\\"').replace("\n", "\\n")
-            input_parts.append(f'descriptionHtml: "{escaped_desc}"')
+            collection_input["descriptionHtml"] = description_html
 
-        input_str = ", ".join(input_parts)
-        query = f"""
-        mutation {{
-          collectionCreate(input: {{ {input_str} }}) {{
-            collection {{ id title handle }}
-            userErrors {{ field message }}
-          }}
-        }}
+        query = """
+        mutation ($input: CollectionInput!) {
+          collectionCreate(input: $input) {
+            collection { id title handle }
+            userErrors { field message }
+          }
+        }
         """
-        data = self._graphql(query)
+        data = self._graphql(query, {"input": collection_input})
         result = data.get("collectionCreate", {})
         errors = result.get("userErrors", [])
         if errors:
@@ -725,17 +762,21 @@ class ShopifyClient:
               fileStatus
               image { url }
             }
+            ... on GenericFile {
+              fileStatus
+              url
+            }
           }
         }
         """
-        import time
         for _ in range(max_attempts):
             data = self._graphql(query, {"id": file_id})
-            node = data.get("node", {})
+            node = data.get("node")
+            if node is None:
+                raise Exception(f"Shopify file not found: {file_id}")
             status = node.get("fileStatus")
             if status == "READY":
-                image = node.get("image", {})
-                url = image.get("url")
+                url = ((node.get("image") or {}).get("url")) or node.get("url")
                 if url:
                     return url
             elif status == "FAILED":
@@ -872,24 +913,23 @@ class ShopifyClient:
         return products
 
     def get_blogs(self, limit=50, cursor=None):
-        after = f', after: "{cursor}"' if cursor else ""
-        query = f"""
-        {{
-          blogs(first: {limit}{after}) {{
-            pageInfo {{ hasNextPage endCursor }}
-            edges {{
-              node {{
+        query = """
+        query ($first: Int!, $after: String) {
+          blogs(first: $first, after: $after) {
+            pageInfo { hasNextPage endCursor }
+            edges {
+              node {
                 id
                 title
                 handle
                 commentPolicy
-                articlesCount {{ count }}
-              }}
-            }}
-          }}
-        }}
+                articlesCount { count }
+              }
+            }
+          }
+        }
         """
-        data = self._graphql(query)
+        data = self._graphql(query, {"first": limit, "after": cursor})
         blogs_data = data.get("blogs", {})
         page_info = blogs_data.get("pageInfo", {})
         edges = blogs_data.get("edges", [])
@@ -921,16 +961,15 @@ class ShopifyClient:
         return all_blogs
 
     def create_blog(self, title):
-        escaped_title = title.replace('"', '\\"')
-        query = f"""
-        mutation {{
-          blogCreate(blog: {{ title: "{escaped_title}" }}) {{
-            blog {{ id title handle }}
-            userErrors {{ field message }}
-          }}
-        }}
+        query = """
+        mutation ($blog: BlogCreateInput!) {
+          blogCreate(blog: $blog) {
+            blog { id title handle }
+            userErrors { field message }
+          }
+        }
         """
-        data = self._graphql(query)
+        data = self._graphql(query, {"blog": {"title": title}})
         result = data.get("blogCreate", {})
         errors = result.get("userErrors", [])
         if errors:
@@ -983,36 +1022,38 @@ class ShopifyClient:
         }
 
     def get_articles(self, limit=50, cursor=None, blog_id=None):
-        after = f', after: "{cursor}"' if cursor else ""
-        blog_filter = f', query: "blog_id:{blog_id}"' if blog_id else ""
-        query = f"""
-        {{
-          articles(first: {limit}{after}{blog_filter}) {{
-            pageInfo {{ hasNextPage endCursor }}
-            edges {{
-              node {{
+        # The blog_id search filter expects the numeric ID, not the GID.
+        blog_filter = None
+        if blog_id:
+            blog_filter = f"blog_id:{str(blog_id).rsplit('/', 1)[-1]}"
+        query = """
+        query ($first: Int!, $after: String, $query: String) {
+          articles(first: $first, after: $after, query: $query) {
+            pageInfo { hasNextPage endCursor }
+            edges {
+              node {
                 id
                 title
                 handle
                 body
                 summary
                 tags
-                blog {{ id title handle }}
-                author {{ name }}
-                image {{ url altText }}
+                blog { id title handle }
+                author { name }
+                image { url altText }
                 publishedAt
                 templateSuffix
-                metafields(first: 10, namespace: "global") {{
-                  edges {{
-                    node {{ key value }}
-                  }}
-                }}
-              }}
-            }}
-          }}
-        }}
+                metafields(first: 10, namespace: "global") {
+                  edges {
+                    node { key value }
+                  }
+                }
+              }
+            }
+          }
+        }
         """
-        data = self._graphql(query)
+        data = self._graphql(query, {"first": limit, "after": cursor, "query": blog_filter})
         articles_data = data.get("articles", {})
         page_info = articles_data.get("pageInfo", {})
         edges = articles_data.get("edges", [])
@@ -1137,9 +1178,11 @@ class ShopifyClient:
           }
         }
         """
-        article_input = {
-            "author": {"name": fields.get("author", "A2Z")},
-        }
+        # Only touch the author when the caller explicitly provides one —
+        # otherwise every unrelated update would overwrite the live byline.
+        article_input = {}
+        if fields.get("author"):
+            article_input["author"] = {"name": fields["author"]}
         if "blog_id" in fields:
             article_input["blogId"] = fields["blog_id"]
         if "title" in fields:
@@ -1196,14 +1239,7 @@ class ShopifyClient:
         if not metafields:
             return []
 
-        query = """
-        mutation ($metafields: [MetafieldsSetInput!]!) {
-          metafieldsSet(metafields: $metafields) {
-            metafields { id namespace key }
-            userErrors { field message }
-          }
-        }
-        """
+        query = METAFIELDS_SET_MUTATION
         data = self._graphql(query, {"metafields": metafields})
         result = data.get("metafieldsSet", {})
         errors = result.get("userErrors", [])
@@ -1233,14 +1269,7 @@ class ShopifyClient:
         if not metafields:
             return []
 
-        query = """
-        mutation ($metafields: [MetafieldsSetInput!]!) {
-          metafieldsSet(metafields: $metafields) {
-            metafields { id namespace key }
-            userErrors { field message }
-          }
-        }
-        """
+        query = METAFIELDS_SET_MUTATION
         data = self._graphql(query, {"metafields": metafields})
         result = data.get("metafieldsSet", {})
         errors = result.get("userErrors", [])
@@ -1270,14 +1299,7 @@ class ShopifyClient:
         if not metafields:
             return []
 
-        query = """
-        mutation ($metafields: [MetafieldsSetInput!]!) {
-          metafieldsSet(metafields: $metafields) {
-            metafields { id namespace key }
-            userErrors { field message }
-          }
-        }
-        """
+        query = METAFIELDS_SET_MUTATION
         data = self._graphql(query, {"metafields": metafields})
         result = data.get("metafieldsSet", {})
         errors = result.get("userErrors", [])
@@ -1319,13 +1341,12 @@ class ShopifyClient:
         return result.get("urlRedirect", {})
 
     def get_pages(self, limit=50, cursor=None):
-        after = f', after: "{cursor}"' if cursor else ""
-        query = f"""
-        {{
-          pages(first: {limit}{after}) {{
-            pageInfo {{ hasNextPage endCursor }}
-            edges {{
-              node {{
+        query = """
+        query ($first: Int!, $after: String) {
+          pages(first: $first, after: $after) {
+            pageInfo { hasNextPage endCursor }
+            edges {
+              node {
                 id
                 title
                 handle
@@ -1333,17 +1354,17 @@ class ShopifyClient:
                 isPublished
                 publishedAt
                 templateSuffix
-                metafields(first: 5, namespace: "global") {{
-                  edges {{
-                    node {{ key value }}
-                  }}
-                }}
-              }}
-            }}
-          }}
-        }}
+                metafields(first: 5, namespace: "global") {
+                  edges {
+                    node { key value }
+                  }
+                }
+              }
+            }
+          }
+        }
         """
-        data = self._graphql(query)
+        data = self._graphql(query, {"first": limit, "after": cursor})
         pages_data = data.get("pages", {})
         page_info = pages_data.get("pageInfo", {})
         edges = pages_data.get("edges", [])

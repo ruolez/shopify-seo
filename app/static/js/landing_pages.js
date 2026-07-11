@@ -759,8 +759,10 @@
         return { heading, items };
     }
 
+    // Returns true on success so callers (publish, manual version) can abort
+    // instead of proceeding with stale server-side content.
     async function saveBuilderPage() {
-        if (!currentBuilderPageId) return;
+        if (!currentBuilderPageId) return false;
         const btn = document.querySelector('[onclick="LandingPages.saveBuilderPage()"]');
         const origHtml = btn ? btn.innerHTML : '';
         if (btn) { btn.disabled = true; btn.innerHTML = '<span class="material-symbols-rounded spin">progress_activity</span> Saving...'; }
@@ -778,8 +780,10 @@
             });
             showToast('Page saved');
             document.getElementById('builder-page-title').textContent = data.title;
+            return true;
         } catch (e) {
             showToast('Failed to save: ' + e.message, 'error');
+            return false;
         } finally {
             if (btn) { btn.disabled = false; btn.innerHTML = origHtml; }
         }
@@ -814,7 +818,8 @@
         if (btn) { btn.disabled = true; btn.innerHTML = '<span class="material-symbols-rounded spin">progress_activity</span> Publishing...'; }
 
         try {
-            await saveBuilderPage();
+            const saved = await saveBuilderPage();
+            if (!saved) return;
             await apiRequest(`/api/landing-pages/${currentBuilderPageId}/publish`, { method: 'POST' });
             showToast('Page published to Shopify!');
             loadPageBuilder(currentBuilderPageId);
@@ -1012,33 +1017,10 @@
     // ── Helpers ────────────────────────────────────────────────────
 
     async function pollTask(taskId, onComplete) {
-        for (let i = 0; i < 60; i++) {
-            await new Promise(r => setTimeout(r, 2000));
-            try {
-                const task = await apiRequest(`/api/tasks/${taskId}`);
-                if (task.status === 'completed' && task.result) {
-                    const result = typeof task.result === 'string' ? JSON.parse(task.result) : task.result;
-                    onComplete(result);
-                    return;
-                }
-                if (task.status === 'failed') {
-                    throw new Error(task.error || 'Task failed');
-                }
-            } catch (e) {
-                if (e.message.includes('Task failed') || e.message.includes('failed')) throw e;
-            }
-        }
-        throw new Error('Task timed out');
-    }
-
-    function escapeHtml(str) {
-        const div = document.createElement('div');
-        div.textContent = str || '';
-        return div.innerHTML;
-    }
-
-    function escapeAttr(str) {
-        return (str || '').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+        const task = await pollTaskUntilDone(`/api/tasks/${taskId}`, { intervalMs: 2000, timeoutMs: 2 * 60 * 1000 });
+        if (!task.result) throw new Error('Task completed without a result');
+        const result = typeof task.result === 'string' ? JSON.parse(task.result) : task.result;
+        await onComplete(result);
     }
 
     // ── Version History ─────────────────────────────────────────
@@ -1092,7 +1074,8 @@
         const label = prompt('Version label:', 'Manual save');
         if (!label) return;
         try {
-            await saveBuilderPage();
+            const saved = await saveBuilderPage();
+            if (!saved) return;
             await apiRequest(`/api/landing-pages/${currentBuilderPageId}/versions`, {
                 method: 'POST', body: JSON.stringify({ label }),
             });

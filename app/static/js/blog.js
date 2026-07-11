@@ -58,6 +58,10 @@ async function loadArticles() {
                 <div class="empty-state">
                     <span class="material-symbols-rounded">edit_note</span>
                     <p>No articles synced yet. Sync your store or create a new post.</p>
+                    <button class="btn btn-primary" id="sync-blogs-btn" onclick="syncBlogs()">
+                        <span class="material-symbols-rounded">sync</span>
+                        Sync from Shopify
+                    </button>
                 </div>`;
             return;
         }
@@ -386,15 +390,18 @@ async function applyArticleChanges(articleId) {
 }
 
 async function analyzeArticleAI(articleId) {
-    const resultDiv = document.getElementById("article-ai-result");
-    resultDiv.innerHTML = '<div class="card"><div class="loading-spinner"><div class="spinner"></div><p>AI analyzing article...</p></div></div>';
+    const btn = typeof event !== "undefined" && event && event.target instanceof Element ? event.target.closest("button") : null;
+    return guardButton(btn, async () => {
+        const resultDiv = document.getElementById("article-ai-result");
+        resultDiv.innerHTML = '<div class="card"><div class="loading-spinner"><div class="spinner"></div><p>AI analyzing article...</p></div></div>';
 
-    try {
-        const { task_id } = await apiRequest(`/api/blog/articles/${articleId}/analyze`, { method: "POST" });
-        pollArticleAITask(task_id, articleId);
-    } catch (err) {
-        resultDiv.innerHTML = `<div class="card"><p style="color: var(--error);">${escapeHtml(err.message)}</p></div>`;
-    }
+        try {
+            const { task_id } = await apiRequest(`/api/blog/articles/${articleId}/analyze`, { method: "POST" });
+            pollArticleAITask(task_id, articleId);
+        } catch (err) {
+            resultDiv.innerHTML = `<div class="card"><p style="color: var(--error);">${escapeHtml(err.message)}</p></div>`;
+        }
+    });
 }
 
 function pollArticleAITask(taskId, articleId) {
@@ -416,14 +423,25 @@ function pollArticleAITask(taskId, articleId) {
     poll();
 }
 
+let lastArticleAiResult = null;
+
+function applyArticleAiField(targetId, key, msg) {
+    if (!lastArticleAiResult) return;
+    const el = document.getElementById(targetId);
+    if (!el) return;
+    el.value = lastArticleAiResult[key] || "";
+    showToast(msg, "success");
+}
+
 function renderArticleAIResult(container, result, articleId) {
+    lastArticleAiResult = result;
     let html = '<div class="card"><h4>AI Recommendations</h4>';
 
     if (result.optimized_meta_title) {
         html += `<div class="form-group">
             <label>Suggested Meta Title</label>
             <div class="ai-suggestion" style="padding: 8px 12px; background: var(--primary-light); border-radius: 8px; margin-bottom: 8px;">${escapeHtml(result.optimized_meta_title)}</div>
-            <button class="btn btn-sm btn-secondary" onclick="document.getElementById('article-edit-meta-title').value='${escapeHtml(result.optimized_meta_title).replace(/'/g, "\\'")}'; showToast('Applied', 'success');">Use This</button>
+            <button class="btn btn-sm btn-secondary" onclick="applyArticleAiField('article-edit-meta-title', 'optimized_meta_title', 'Applied')">Use This</button>
         </div>`;
     }
 
@@ -431,7 +449,7 @@ function renderArticleAIResult(container, result, articleId) {
         html += `<div class="form-group">
             <label>Suggested Meta Description</label>
             <div class="ai-suggestion" style="padding: 8px 12px; background: var(--primary-light); border-radius: 8px; margin-bottom: 8px;">${escapeHtml(result.optimized_meta_description)}</div>
-            <button class="btn btn-sm btn-secondary" onclick="document.getElementById('article-edit-meta-desc').value='${escapeHtml(result.optimized_meta_description).replace(/'/g, "\\'")}'; showToast('Applied', 'success');">Use This</button>
+            <button class="btn btn-sm btn-secondary" onclick="applyArticleAiField('article-edit-meta-desc', 'optimized_meta_description', 'Applied')">Use This</button>
         </div>`;
     }
 
@@ -449,7 +467,7 @@ function renderArticleAIResult(container, result, articleId) {
 
     if (result.optimized_body) {
         html += `<div class="form-group">
-            <button class="btn btn-sm btn-primary" onclick="document.getElementById('article-edit-body').value=\`${result.optimized_body.replace(/`/g, "\\`").replace(/\$/g, "\\$")}\`; showToast('Body updated', 'success');">
+            <button class="btn btn-sm btn-primary" onclick="applyArticleAiField('article-edit-body', 'optimized_body', 'Body updated')">
                 <span class="material-symbols-rounded">content_paste</span>
                 Apply Optimized Body
             </button>
@@ -484,9 +502,11 @@ async function startBulkOptimizeArticles() {
 }
 
 function pollBulkArticleProgress(bulkTaskId) {
+    let consecutiveErrors = 0;
     const poll = async () => {
         try {
             const task = await apiRequest(`/api/blog/bulk-status/${bulkTaskId}`);
+            consecutiveErrors = 0;
             const total = task.total || 1;
             const done = (task.completed || 0) + (task.failed || 0);
             const pct = Math.round((done / total) * 100);
@@ -506,8 +526,13 @@ function pollBulkArticleProgress(bulkTaskId) {
                 setTimeout(poll, 2000);
             }
         } catch (err) {
-            document.getElementById("blog-bulk-progress-overlay").classList.remove("active");
-            showToast(err.message, "error");
+            consecutiveErrors++;
+            if (consecutiveErrors >= 5) {
+                document.getElementById("blog-bulk-progress-overlay").classList.remove("active");
+                showToast(err.message, "error");
+                return;
+            }
+            setTimeout(poll, 2000);
         }
     };
     poll();
@@ -598,9 +623,11 @@ async function wizardStartResearch() {
 
 function pollWizardSession(sessionId, targetStatus, onComplete) {
     if (wizardPollTimer) clearTimeout(wizardPollTimer);
+    let consecutiveErrors = 0;
     const poll = async () => {
         try {
             const session = await apiRequest(`/api/blog/wizard/${sessionId}`);
+            consecutiveErrors = 0;
             if (session.status === targetStatus) {
                 onComplete(session);
             } else if (session.status === "error") {
@@ -610,7 +637,13 @@ function pollWizardSession(sessionId, targetStatus, onComplete) {
                 wizardPollTimer = setTimeout(poll, 2000);
             }
         } catch (err) {
-            showToast(err.message, "error");
+            consecutiveErrors++;
+            if (consecutiveErrors >= 5) {
+                showToast(err.message, "error");
+                showWizardStep(1);
+                return;
+            }
+            wizardPollTimer = setTimeout(poll, 2000);
         }
     };
     poll();
@@ -621,6 +654,8 @@ let wizardSelectedProducts = [];
 let wizardSelectedCollections = [];
 let productSearchTimer = null;
 let collectionSearchTimer = null;
+let wizardProductResults = [];
+let wizardCollectionResults = [];
 
 async function renderResearchResults(sessionId) {
     const session = await apiRequest(`/api/blog/wizard/${sessionId}`);
@@ -853,12 +888,13 @@ async function searchProducts(query) {
     try {
         const storeId = await getFirstStoreId();
         const results = await apiRequest(`/api/blog/wizard/search/products?store_id=${storeId}&q=${encodeURIComponent(query)}`);
+        wizardProductResults = results;
         if (!results.length) {
             dropdown.innerHTML = '<div class="autocomplete-item" style="color: var(--on-surface-secondary);">No products found</div>';
         } else {
-            dropdown.innerHTML = results.map((p) => {
+            dropdown.innerHTML = results.map((p, i) => {
                 const already = wizardSelectedProducts.some((s) => s.id === p.id);
-                return `<div class="autocomplete-item${already ? " disabled" : ""}" onclick="${already ? "" : `addSearchedProduct(${p.id}, '${escapeHtml(p.title).replace(/'/g, "\\'")}', '${escapeHtml(p.handle).replace(/'/g, "\\'")}')`}">
+                return `<div class="autocomplete-item${already ? " disabled" : ""}" onclick="${already ? "" : `addSearchedProduct(${i})`}">
                     <div>${escapeHtml(p.title)}${already ? ' <span style="color: var(--success); font-size: 12px;">(added)</span>' : ""}</div>
                     <div class="autocomplete-item-meta">${escapeHtml(p.vendor || "")}${p.vendor && p.product_type ? " · " : ""}${escapeHtml(p.product_type || "")}</div>
                 </div>`;
@@ -875,12 +911,13 @@ async function searchCollections(query) {
     try {
         const storeId = await getFirstStoreId();
         const results = await apiRequest(`/api/blog/wizard/search/collections?store_id=${storeId}&q=${encodeURIComponent(query)}`);
+        wizardCollectionResults = results;
         if (!results.length) {
             dropdown.innerHTML = '<div class="autocomplete-item" style="color: var(--on-surface-secondary);">No collections found</div>';
         } else {
-            dropdown.innerHTML = results.map((c) => {
+            dropdown.innerHTML = results.map((c, i) => {
                 const already = wizardSelectedCollections.some((s) => s.id === c.id);
-                return `<div class="autocomplete-item${already ? " disabled" : ""}" onclick="${already ? "" : `addSearchedCollection(${c.id}, '${escapeHtml(c.title).replace(/'/g, "\\'")}', '${escapeHtml(c.handle).replace(/'/g, "\\'")}')`}">
+                return `<div class="autocomplete-item${already ? " disabled" : ""}" onclick="${already ? "" : `addSearchedCollection(${i})`}">
                     <div>${escapeHtml(c.title)}${already ? ' <span style="color: var(--success); font-size: 12px;">(added)</span>' : ""}</div>
                     <div class="autocomplete-item-meta">${escapeHtml(c.collection_type || "")}${c.products_count != null ? ` · ${c.products_count} products` : ""}</div>
                 </div>`;
@@ -892,17 +929,21 @@ async function searchCollections(query) {
     }
 }
 
-function addSearchedProduct(id, title, handle) {
-    if (wizardSelectedProducts.some((p) => p.id === id)) return;
-    wizardSelectedProducts.push({ id, title, handle, reason: "Manually added" });
+function addSearchedProduct(idx) {
+    const p = wizardProductResults[idx];
+    if (!p) return;
+    if (wizardSelectedProducts.some((s) => s.id === p.id)) return;
+    wizardSelectedProducts.push({ id: p.id, title: p.title, handle: p.handle, reason: "Manually added" });
     renderProductChips();
     document.getElementById("wizard-product-search").value = "";
     document.getElementById("wizard-product-dropdown").style.display = "none";
 }
 
-function addSearchedCollection(id, title, handle) {
-    if (wizardSelectedCollections.some((c) => c.id === id)) return;
-    wizardSelectedCollections.push({ id, title, handle, reason: "Manually added" });
+function addSearchedCollection(idx) {
+    const c = wizardCollectionResults[idx];
+    if (!c) return;
+    if (wizardSelectedCollections.some((s) => s.id === c.id)) return;
+    wizardSelectedCollections.push({ id: c.id, title: c.title, handle: c.handle, reason: "Manually added" });
     renderCollectionChips();
     document.getElementById("wizard-collection-search").value = "";
     document.getElementById("wizard-collection-dropdown").style.display = "none";
@@ -1225,11 +1266,15 @@ async function wizardGenerateImage() {
 }
 
 function pollImageGeneration(taskId) {
+    // Capture the session id now — resetWizard() nulls the global mid-poll,
+    // which would otherwise make later ticks request /api/blog/wizard/null.
+    const sessionId = currentWizardSession;
+    if (!sessionId) return;
     const poll = async () => {
         try {
             const task = await apiRequest(`/api/tasks/${taskId}`);
             if (task.status === "completed") {
-                const session = await apiRequest(`/api/blog/wizard/${currentWizardSession}`);
+                const session = await apiRequest(`/api/blog/wizard/${sessionId}`);
                 const imageUrl = session.featured_image_url || "";
                 const container = document.getElementById("featured-image-container");
                 if (imageUrl) {
@@ -2191,6 +2236,8 @@ let refreshStoreId = null;
 let refreshOriginalBody = null;
 let refreshProductSearchTimer = null;
 let refreshCollectionSearchTimer = null;
+let refreshProductResults = [];
+let refreshCollectionResults = [];
 
 async function openRefreshLinksPanel(articleId, storeId) {
     refreshArticleId = articleId;
@@ -2295,12 +2342,13 @@ async function searchRefreshProducts(query) {
     const dropdown = document.getElementById("refresh-product-dropdown");
     try {
         const results = await apiRequest(`/api/blog/wizard/search/products?store_id=${refreshStoreId}&q=${encodeURIComponent(query)}`);
+        refreshProductResults = results;
         if (!results.length) {
             dropdown.innerHTML = '<div class="autocomplete-item" style="color: var(--on-surface-secondary);">No products found</div>';
         } else {
-            dropdown.innerHTML = results.map(p => {
+            dropdown.innerHTML = results.map((p, i) => {
                 const already = refreshSelectedProducts.some(s => s.id === p.id);
-                return `<div class="autocomplete-item${already ? " disabled" : ""}" onclick="${already ? "" : `addRefreshProduct(${p.id}, '${escapeHtml(p.title).replace(/'/g, "\\'")}', '${escapeHtml(p.handle).replace(/'/g, "\\'")}')`}">
+                return `<div class="autocomplete-item${already ? " disabled" : ""}" onclick="${already ? "" : `addRefreshProduct(${i})`}">
                     <div>${escapeHtml(p.title)}${already ? ' <span style="color: var(--success); font-size: 12px;">(added)</span>' : ""}</div>
                     <div class="autocomplete-item-meta">${escapeHtml(p.vendor || "")}${p.vendor && p.product_type ? " · " : ""}${escapeHtml(p.product_type || "")}</div>
                 </div>`;
@@ -2316,12 +2364,13 @@ async function searchRefreshCollections(query) {
     const dropdown = document.getElementById("refresh-collection-dropdown");
     try {
         const results = await apiRequest(`/api/blog/wizard/search/collections?store_id=${refreshStoreId}&q=${encodeURIComponent(query)}`);
+        refreshCollectionResults = results;
         if (!results.length) {
             dropdown.innerHTML = '<div class="autocomplete-item" style="color: var(--on-surface-secondary);">No collections found</div>';
         } else {
-            dropdown.innerHTML = results.map(c => {
+            dropdown.innerHTML = results.map((c, i) => {
                 const already = refreshSelectedCollections.some(s => s.id === c.id);
-                return `<div class="autocomplete-item${already ? " disabled" : ""}" onclick="${already ? "" : `addRefreshCollection(${c.id}, '${escapeHtml(c.title).replace(/'/g, "\\'")}', '${escapeHtml(c.handle).replace(/'/g, "\\'")}')`}">
+                return `<div class="autocomplete-item${already ? " disabled" : ""}" onclick="${already ? "" : `addRefreshCollection(${i})`}">
                     <div>${escapeHtml(c.title)}${already ? ' <span style="color: var(--success); font-size: 12px;">(added)</span>' : ""}</div>
                     <div class="autocomplete-item-meta">${escapeHtml(c.collection_type || "")}${c.products_count != null ? ` · ${c.products_count} products` : ""}</div>
                 </div>`;
@@ -2333,17 +2382,21 @@ async function searchRefreshCollections(query) {
     }
 }
 
-function addRefreshProduct(id, title, handle) {
-    if (refreshSelectedProducts.some(p => p.id === id)) return;
-    refreshSelectedProducts.push({ id, title, handle });
+function addRefreshProduct(idx) {
+    const p = refreshProductResults[idx];
+    if (!p) return;
+    if (refreshSelectedProducts.some(s => s.id === p.id)) return;
+    refreshSelectedProducts.push({ id: p.id, title: p.title, handle: p.handle });
     renderRefreshProductChips();
     document.getElementById("refresh-product-search").value = "";
     document.getElementById("refresh-product-dropdown").style.display = "none";
 }
 
-function addRefreshCollection(id, title, handle) {
-    if (refreshSelectedCollections.some(c => c.id === id)) return;
-    refreshSelectedCollections.push({ id, title, handle });
+function addRefreshCollection(idx) {
+    const c = refreshCollectionResults[idx];
+    if (!c) return;
+    if (refreshSelectedCollections.some(s => s.id === c.id)) return;
+    refreshSelectedCollections.push({ id: c.id, title: c.title, handle: c.handle });
     renderRefreshCollectionChips();
     document.getElementById("refresh-collection-search").value = "";
     document.getElementById("refresh-collection-dropdown").style.display = "none";

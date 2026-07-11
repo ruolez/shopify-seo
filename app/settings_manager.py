@@ -29,6 +29,7 @@ def get_setting(key, default=None):
             cur.execute("SELECT value FROM settings WHERE key = %s", (key,))
             row = cur.fetchone()
     except Exception:
+        logger.warning("Settings fetch failed for %s — falling back to default", key, exc_info=True)
         row = None
 
     if row:

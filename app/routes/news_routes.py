@@ -49,6 +49,12 @@ def _get_news_blog(store_id, client):
     return dict(blog)
 
 
+def _store_base_url(store):
+    """Absolute storefront origin — article URLs are store-relative, not app-relative."""
+    host = (store.get("primary_domain") or store.get("domain") or "").rstrip("/")
+    return f"https://{host}" if host else ""
+
+
 def _publisher_identity(store_id, store):
     """Resolve (publisher_name, logo_url) for NewsArticle schema from schema_settings."""
     name = None
@@ -107,8 +113,14 @@ def _regenerate_news_hub(store_id, client, store):
                 "title": page_title, "body": html_content, "is_published": True,
                 "seo_title": page_title[:60], "seo_description": meta_desc,
             })
-        except Exception:
-            page_id = None
+        except Exception as e:
+            # Only fall back to creating a new page when the old one is
+            # confirmed gone — a transient error must not mint news-1.
+            if any(t in str(e).lower() for t in ("does not exist", "not found", "invalid id", "no longer exists")):
+                logger.info("News hub page %s gone on Shopify — recreating", page_id)
+                page_id = None
+            else:
+                raise
     if not page_id:
         result = client.create_page(
             page_title, html_content, handle="news", is_published=True,
@@ -354,8 +366,27 @@ def _step_publish(session, store, client, is_published=True, regen_hub=True):
         fields["image_url"] = session["hero_image_url"]
         fields["image_alt"] = edited.get("hero_image_alt") or headline
 
-    result = client.create_article(blog["shopify_id"], fields)
-    shopify_id = result["shopify_id"]
+    existing_shopify_id = session.get("shopify_article_id")
+    if existing_shopify_id:
+        # Republish of an already-created article (double-click, retry after a
+        # partial failure) must update it, not mint a duplicate.
+        updated = client.update_article(existing_shopify_id, fields)
+        result = {
+            "shopify_id": existing_shopify_id,
+            "handle": updated.get("handle") or session.get("article_handle") or "",
+            "image_url": "",
+        }
+        shopify_id = existing_shopify_id
+    else:
+        result = client.create_article(blog["shopify_id"], fields)
+        shopify_id = result["shopify_id"]
+        # Persist the Shopify id immediately — if any later step fails, a retry
+        # takes the update path above instead of creating a second article.
+        with db.get_cursor() as cur:
+            cur.execute(
+                "UPDATE news_sessions SET shopify_article_id = %s, article_handle = %s, updated_at = NOW() WHERE id = %s",
+                (shopify_id, result.get("handle", ""), session["id"]),
+            )
 
     # SEO meta + news metafields (category + dateModified).
     try:
@@ -418,7 +449,7 @@ def _step_publish(session, store, client, is_published=True, regen_hub=True):
         "article_id": article_row["id"],
         "shopify_id": shopify_id,
         "handle": result.get("handle", ""),
-        "url": f"/blogs/news/{result.get('handle', '')}",
+        "url": f"{_store_base_url(store)}/blogs/{blog.get('handle') or 'news'}/{result.get('handle', '')}",
     }
 
 
@@ -493,7 +524,12 @@ def list_news_articles():
             (store_id,),
         )
         articles = [dict(a) for a in cur.fetchall()]
-    return jsonify({"articles": articles})
+        cur.execute("SELECT domain, primary_domain FROM stores WHERE id = %s", (store_id,))
+        store = cur.fetchone()
+    return jsonify({
+        "articles": articles,
+        "store_base_url": _store_base_url(dict(store)) if store else "",
+    })
 
 
 # ── Regenerate images on a published article ────────────────────
@@ -561,7 +597,7 @@ def get_article_images():
 
 @news_bp.route("/api/news/regenerate-hero", methods=["POST"])
 def regenerate_article_hero():
-    data = request.get_json() or {}
+    data = request.get_json(silent=True) or {}
     shopify_id = data.get("shopify_id")
     prompt = (data.get("prompt") or "").strip()
     article = _get_article(shopify_id) if shopify_id else None
@@ -602,8 +638,8 @@ def regenerate_article_hero():
 
             with db.get_cursor() as cur:
                 cur.execute(
-                    "UPDATE synced_articles SET image_url = %s, image_alt = %s, synced_at = NOW() WHERE shopify_id = %s",
-                    (cdn_url, new_alt, str(shopify_id)),
+                    "UPDATE synced_articles SET image_url = %s, image_alt = %s, synced_at = NOW() WHERE shopify_id = %s AND store_id = %s",
+                    (cdn_url, new_alt, str(shopify_id), store_id),
                 )
             if session:
                 new_edited = dict(edited)
@@ -635,7 +671,7 @@ def regenerate_article_hero():
 
 @news_bp.route("/api/news/regenerate-inline", methods=["POST"])
 def regenerate_article_inline():
-    data = request.get_json() or {}
+    data = request.get_json(silent=True) or {}
     shopify_id = data.get("shopify_id")
     prompt = (data.get("prompt") or "").strip()
     try:
@@ -696,8 +732,8 @@ def regenerate_article_inline():
                     (json.dumps(imgs), sess["id"]),
                 )
                 cur.execute(
-                    "UPDATE synced_articles SET body = %s, synced_at = NOW() WHERE shopify_id = %s",
-                    (new_body, str(shopify_id)),
+                    "UPDATE synced_articles SET body = %s, synced_at = NOW() WHERE shopify_id = %s AND store_id = %s",
+                    (new_body, str(shopify_id), store_id),
                 )
             with db.get_cursor() as cur:
                 cur.execute(
@@ -720,7 +756,7 @@ def regenerate_article_inline():
 
 @news_bp.route("/api/news/analyze", methods=["POST"])
 def news_analyze():
-    data = request.get_json() or {}
+    data = request.get_json(silent=True) or {}
     store_id = data.get("store_id")
     source_text = (data.get("source_text") or "").strip()
     sources = _normalize_sources(data)
@@ -781,7 +817,7 @@ def get_news_session(session_id):
 
 @news_bp.route("/api/news/session/<int:session_id>", methods=["PATCH"])
 def patch_news_session(session_id):
-    data = request.get_json() or {}
+    data = request.get_json(silent=True) or {}
     edited = data.get("edited_result")
     if edited is None:
         return jsonify({"error": "edited_result required"}), 400
@@ -804,6 +840,8 @@ def patch_news_session(session_id):
                 session_id,
             ),
         )
+        if cur.rowcount == 0:
+            return jsonify({"error": "Session not found"}), 404
     return jsonify({"ok": True})
 
 
@@ -947,7 +985,7 @@ def generate_links(session_id):
 
 @news_bp.route("/api/news/session/<int:session_id>/publish", methods=["POST"])
 def publish_news(session_id):
-    data = request.get_json() or {}
+    data = request.get_json(silent=True) or {}
     is_published = data.get("is_published", True)
 
     with db.get_cursor() as cur:
@@ -979,7 +1017,7 @@ def news_auto():
     """Run the full pipeline (analyze → hero → inline → links → publish) in one
     background thread. Image/link steps are best-effort; analyze and publish are
     fatal. The session 'status' column reports the current stage for the UI."""
-    data = request.get_json() or {}
+    data = request.get_json(silent=True) or {}
     store_id = data.get("store_id")
     source_text = (data.get("source_text") or "").strip()
     sources = _normalize_sources(data)
@@ -1037,7 +1075,7 @@ def news_auto_batch():
     """Auto-publish multiple articles. Creates one session per article and processes them
     sequentially in a single background thread (rate-limit friendly, survives browser close).
     A failed article is isolated; the rest continue. The hub is regenerated once at the end."""
-    data = request.get_json() or {}
+    data = request.get_json(silent=True) or {}
     store_id = data.get("store_id")
     articles = data.get("articles")
     if not store_id or not isinstance(articles, list) or not articles:
@@ -1088,7 +1126,7 @@ def news_auto_batch():
 @news_bp.route("/api/news/session-status", methods=["POST"])
 def news_session_status():
     """Return minimal status for a list of session ids (for batch progress polling)."""
-    data = request.get_json() or {}
+    data = request.get_json(silent=True) or {}
     ids = data.get("ids")
     if not isinstance(ids, list) or not ids:
         return jsonify({"sessions": []})
@@ -1108,7 +1146,7 @@ def news_session_status():
 
 @news_bp.route("/api/news/push-template", methods=["POST"])
 def push_template():
-    data = request.get_json() or {}
+    data = request.get_json(silent=True) or {}
     store_id = data.get("store_id")
     store, client = _get_store_client(store_id)
     if not client:
@@ -1154,7 +1192,7 @@ def template_status():
 
 @news_bp.route("/api/news/revert-template", methods=["POST"])
 def revert_template():
-    data = request.get_json() or {}
+    data = request.get_json(silent=True) or {}
     store_id = data.get("store_id")
     store, client = _get_store_client(store_id)
     if not client:
@@ -1173,18 +1211,27 @@ def revert_template():
         )
         news_ids = [r["shopify_id"] for r in cur.fetchall()]
     cleared = 0
+    cleared_ids = []
     for sid in news_ids:
         try:
             client.update_article(sid, {"template_suffix": ""})
             cleared += 1
+            cleared_ids.append(sid)
         except Exception as e:
             logger.warning("Failed to clear template_suffix on %s: %s", sid, e)
-    if news_ids:
+    if cleared_ids:
+        # Only clear locally what actually cleared on Shopify — otherwise the
+        # app loses track of articles still pointing at the deleted template.
         with db.get_cursor() as cur:
+            placeholders = ",".join(["%s"] * len(cleared_ids))
             cur.execute(
-                "UPDATE synced_articles SET template_suffix = '' WHERE store_id = %s AND article_type = 'news'",
-                (store_id,),
+                f"UPDATE synced_articles SET template_suffix = '' WHERE store_id = %s AND shopify_id IN ({placeholders})",
+                (store_id, *cleared_ids),
             )
+    if cleared < len(news_ids):
+        return jsonify({
+            "error": f"Cleared template on {cleared}/{len(news_ids)} articles — fix the failures and retry before removing the template files",
+        }), 502
 
     # Delete template then section.
     try:
@@ -1201,7 +1248,7 @@ def revert_template():
 
 @news_bp.route("/api/news/regenerate-hub", methods=["POST"])
 def regenerate_hub():
-    data = request.get_json() or {}
+    data = request.get_json(silent=True) or {}
     store_id = data.get("store_id")
     store, client = _get_store_client(store_id)
     if not client:

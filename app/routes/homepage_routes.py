@@ -6,6 +6,7 @@ from flask import Blueprint, jsonify, render_template, request
 
 from app.auth import decrypt_value
 from app.database import db
+from app.services.task_runner import spawn as spawn_task
 from app.services.home_carousel_generator import (
     SECTION_FILENAME,
     inject_section_into_index,
@@ -87,7 +88,7 @@ def get_home_page():
 
 @homepage_bp.route("/api/home-page", methods=["PUT"])
 def save_home_page():
-    data = request.get_json() or {}
+    data = request.get_json(silent=True) or {}
     store_id = data.get("store_id")
     if not store_id:
         return jsonify({"error": "store_id required"}), 400
@@ -114,7 +115,7 @@ def save_home_page():
 
 @homepage_bp.route("/api/home-page/generate", methods=["POST"])
 def generate_home_page():
-    data = request.get_json() or {}
+    data = request.get_json(silent=True) or {}
     store_id = data.get("store_id")
     topic = (data.get("topic") or "").strip()
     keywords = data.get("keywords") or []
@@ -146,7 +147,7 @@ def generate_home_page():
                     (str(e), task_id),
                 )
 
-    threading.Thread(target=_run, daemon=True).start()
+    spawn_task("ai_tasks", task_id, _run)
     return jsonify({"task_id": task_id})
 
 
@@ -202,7 +203,7 @@ def home_page_images():
 
 @homepage_bp.route("/api/home-page/generate-image", methods=["POST"])
 def generate_slide_image():
-    data = request.get_json() or {}
+    data = request.get_json(silent=True) or {}
     store_id = data.get("store_id")
     slide_index = data.get("slide_index", 0)
     prompt = (data.get("prompt") or "").strip()
@@ -283,7 +284,7 @@ def generate_slide_image():
                     (str(e), task_id),
                 )
 
-    threading.Thread(target=_run, daemon=True).start()
+    spawn_task("ai_tasks", task_id, _run)
     return jsonify({"task_id": task_id})
 
 
@@ -307,7 +308,7 @@ def preview_home_page():
 
 @homepage_bp.route("/api/home-page/publish", methods=["POST"])
 def publish_home_page():
-    data = request.get_json() or {}
+    data = request.get_json(silent=True) or {}
     store_id = data.get("store_id")
     if not store_id:
         return jsonify({"error": "store_id required"}), 400
@@ -330,11 +331,21 @@ def publish_home_page():
 
         current_index = client.get_theme_asset(theme_id, INDEX_TEMPLATE) or ""
 
-        # Capture a one-time backup of the pristine index.json before our first write.
-        if not home.get("is_published") or not home.get("index_json_backup"):
-            backup = current_index
-        else:
-            backup = home.get("index_json_backup")
+        # Persist the pristine index.json backup BEFORE any theme write — a
+        # partial failure after injection must never poison the next snapshot.
+        # Never snapshot an index that already contains our section.
+        if not home.get("index_json_backup"):
+            if section_key in current_index:
+                logger.warning(
+                    "index.json already contains section '%s' and no pristine backup exists — skipping snapshot",
+                    section_key,
+                )
+            else:
+                with db.get_cursor() as cur:
+                    cur.execute(
+                        "UPDATE home_pages SET index_json_backup = %s WHERE store_id = %s",
+                        (current_index, store_id),
+                    )
 
         section_liquid = render_home_carousel_section(dict(home), dict(store))
         client.upsert_theme_asset(theme_id, SECTION_FILENAME, section_liquid)
@@ -352,9 +363,9 @@ def publish_home_page():
         with db.get_cursor() as cur:
             cur.execute(
                 """UPDATE home_pages
-                SET is_published = TRUE, last_published_at = NOW(), index_json_backup = %s
+                SET is_published = TRUE, last_published_at = NOW()
                 WHERE store_id = %s""",
-                (backup, store_id),
+                (store_id,),
             )
         return jsonify({"success": True})
     except Exception as e:
@@ -364,7 +375,7 @@ def publish_home_page():
 
 @homepage_bp.route("/api/home-page/unpublish", methods=["POST"])
 def unpublish_home_page():
-    data = request.get_json() or {}
+    data = request.get_json(silent=True) or {}
     store_id = data.get("store_id")
     if not store_id:
         return jsonify({"error": "store_id required"}), 400

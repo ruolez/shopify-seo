@@ -1,4 +1,5 @@
 let currentStoreId = null;
+let gscPropertiesCache = [];
 let currentDateRange = 28;
 let currentDevice = "";
 let currentCountry = "";
@@ -45,6 +46,9 @@ document.getElementById("gsc-store-select").addEventListener("change", (e) => {
 
 async function onStoreSelected(storeId) {
     currentStoreId = storeId;
+    currentCountry = "";
+    const countrySelect = document.getElementById("gsc-country-filter");
+    if (countrySelect) countrySelect.innerHTML = '<option value="">All Countries</option>';
     hideAll();
     try {
         const status = await apiRequest(`/api/gsc/status?store_id=${storeId}`);
@@ -88,17 +92,18 @@ async function loadProperties() {
     container.innerHTML = '<div class="spinner"></div>';
     try {
         const props = await apiRequest(`/api/gsc/properties?store_id=${currentStoreId}`);
+        gscPropertiesCache = props;
         if (!props.length) {
             container.innerHTML = '<p style="color: var(--on-surface-secondary);">No verified properties found. Verify your site in Google Search Console first.</p>';
             return;
         }
-        container.innerHTML = props.map(p => `
+        container.innerHTML = props.map((p, i) => `
             <div style="display: flex; align-items: center; justify-content: space-between; padding: 12px; border: 1px solid var(--outline); border-radius: var(--radius-sm); margin-bottom: 8px;">
                 <div>
                     <strong style="font-size: 14px;">${escapeHtml(p.site_url)}</strong>
                     <span class="badge" style="margin-left: 8px; font-size: 11px;">${p.permission_level}</span>
                 </div>
-                <button class="btn btn-primary btn-sm" onclick="selectProperty('${escapeHtml(p.site_url)}')">Select</button>
+                <button class="btn btn-primary btn-sm" onclick="selectProperty(${i})">Select</button>
             </div>
         `).join("");
     } catch (err) {
@@ -106,7 +111,10 @@ async function loadProperties() {
     }
 }
 
-async function selectProperty(siteUrl) {
+async function selectProperty(idx) {
+    const prop = gscPropertiesCache[idx];
+    if (!prop) return;
+    const siteUrl = prop.site_url;
     try {
         await apiRequest(`/api/gsc/properties/select?store_id=${currentStoreId}`, {
             method: "POST", body: { site_url: siteUrl }
@@ -185,11 +193,17 @@ async function loadDashboardData() {
     loadActiveTab();
 }
 
+// Monotonic request ids per loader — a slow older response must never
+// overwrite the result of a newer load (store/filter changed mid-flight).
+const gscReqIds = { overview: 0, trends: 0, pages: 0, queries: 0 };
+
 // ─── Overview Cards ───
 
 async function loadOverview() {
+    const reqId = ++gscReqIds.overview;
     try {
         const data = await apiRequest(`/api/gsc/overview?${qp()}`);
+        if (reqId !== gscReqIds.overview) return;
         document.getElementById("gsc-total-clicks").textContent = Math.round(data.total_clicks).toLocaleString();
         document.getElementById("gsc-total-impressions").textContent = Math.round(data.total_impressions).toLocaleString();
         document.getElementById("gsc-avg-ctr").textContent = (data.avg_ctr * 100).toFixed(1) + "%";
@@ -230,13 +244,16 @@ function setChange(elId, value, pct, invertColor, suffix = "") {
 // ─── Trend Chart (SVG) ───
 
 async function loadTrends() {
+    const reqId = ++gscReqIds.trends;
     const container = document.getElementById("gsc-trend-chart");
     container.style.opacity = "0.4";
     try {
         const data = await apiRequest(`/api/gsc/trends?${qp()}`);
+        if (reqId !== gscReqIds.trends) return;
         container.style.opacity = "1";
         renderTrendChart(data);
     } catch (err) {
+        if (reqId !== gscReqIds.trends) return;
         container.style.opacity = "1";
         console.error("Failed to load trends:", err);
     }
@@ -348,6 +365,7 @@ function loadActiveTab() {
 // ─── Sortable Table Helper ───
 
 let gscTableData = { pages: [], queries: [], opportunities: [] };
+let gscRenderedRows = { pages: [], queries: [] };
 let gscTableSort = { pages: { col: "clicks", dir: "desc" }, queries: { col: "clicks", dir: "desc" }, opportunities: { col: "potential_clicks", dir: "desc" } };
 
 function sortGscTable(table, col) {
@@ -384,10 +402,13 @@ function sortHeader(table, col, label) {
 // ─── Top Pages ───
 
 async function loadTopPages() {
+    const reqId = ++gscReqIds.pages;
     const tbody = document.getElementById("gsc-pages-tbody");
     tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;"><div class="spinner" style="margin:20px auto;"></div></td></tr>';
     try {
-        gscTableData.pages = await apiRequest(`/api/gsc/top-pages?${qp()}&limit=500`);
+        const rows = await apiRequest(`/api/gsc/top-pages?${qp()}&limit=500`);
+        if (reqId !== gscReqIds.pages) return;
+        gscTableData.pages = rows;
         if (!gscTableData.pages.length) {
             tbody.innerHTML = "";
             document.getElementById("gsc-pages-empty").style.display = "";
@@ -396,6 +417,7 @@ async function loadTopPages() {
         document.getElementById("gsc-pages-empty").style.display = "none";
         renderPagesTable();
     } catch (err) {
+        if (reqId !== gscReqIds.pages) return;
         tbody.innerHTML = `<tr><td colspan="5" style="color: var(--error);">Failed to load: ${escapeHtml(err.message)}</td></tr>`;
     }
 }
@@ -408,8 +430,9 @@ function renderPagesTable() {
         + sortHeader("pages", "ctr", "CTR")
         + sortHeader("pages", "position", "Position");
 
-    document.getElementById("gsc-pages-tbody").innerHTML = sortedData("pages").map(r => `
-        <tr class="clickable-row" onclick="showPageDetail('${escapeHtml(r.page)}')">
+    gscRenderedRows.pages = sortedData("pages");
+    document.getElementById("gsc-pages-tbody").innerHTML = gscRenderedRows.pages.map((r, i) => `
+        <tr class="clickable-row" onclick="showPageDetail(${i})">
             <td style="max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="${escapeHtml(r.page)}">${shortenUrl(r.page)}</td>
             <td><strong>${Math.round(r.clicks).toLocaleString()}</strong></td>
             <td>${Math.round(r.impressions).toLocaleString()}</td>
@@ -422,10 +445,13 @@ function renderPagesTable() {
 // ─── Top Queries ───
 
 async function loadTopQueries() {
+    const reqId = ++gscReqIds.queries;
     const tbody = document.getElementById("gsc-queries-tbody");
     tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;"><div class="spinner" style="margin:20px auto;"></div></td></tr>';
     try {
-        gscTableData.queries = await apiRequest(`/api/gsc/top-queries?${qp()}&limit=500`);
+        const rows = await apiRequest(`/api/gsc/top-queries?${qp()}&limit=500`);
+        if (reqId !== gscReqIds.queries) return;
+        gscTableData.queries = rows;
         if (!gscTableData.queries.length) {
             tbody.innerHTML = "";
             document.getElementById("gsc-queries-empty").style.display = "";
@@ -434,6 +460,7 @@ async function loadTopQueries() {
         document.getElementById("gsc-queries-empty").style.display = "none";
         renderQueriesTable();
     } catch (err) {
+        if (reqId !== gscReqIds.queries) return;
         tbody.innerHTML = `<tr><td colspan="5" style="color: var(--error);">Failed to load: ${escapeHtml(err.message)}</td></tr>`;
     }
 }
@@ -446,8 +473,9 @@ function renderQueriesTable() {
         + sortHeader("queries", "ctr", "CTR")
         + sortHeader("queries", "position", "Position");
 
-    document.getElementById("gsc-queries-tbody").innerHTML = sortedData("queries").map(r => `
-        <tr class="clickable-row" onclick="showQueryDetail('${escapeHtml(r.query)}')">
+    gscRenderedRows.queries = sortedData("queries");
+    document.getElementById("gsc-queries-tbody").innerHTML = gscRenderedRows.queries.map((r, i) => `
+        <tr class="clickable-row" onclick="showQueryDetail(${i})">
             <td><strong>${escapeHtml(r.query)}</strong></td>
             <td><strong>${Math.round(r.clicks).toLocaleString()}</strong></td>
             <td>${Math.round(r.impressions).toLocaleString()}</td>
@@ -611,9 +639,12 @@ function renderFilteredCannibalization() {
     }
 }
 
-function setCannibalWinner(gi, pageUrl) {
+function setCannibalWinner(gi, pi) {
     const group = cannibalizationData[gi];
     if (!group) return;
+    const winnerPage = group.pages[pi];
+    if (!winnerPage) return;
+    const pageUrl = winnerPage.page;
 
     group.pages.forEach(p => {
         p.is_winner = (p.page === pageUrl);
@@ -716,7 +747,7 @@ function renderCannibalizationList(container, data) {
 
             const rowStyle = p.is_winner ? "background: var(--success-light);" : fix?.status === "needs_attention" ? "background: var(--error-light);" : fix?.status === "pending" ? "background: var(--warning-light);" : fix?.status === "verified" ? "background: var(--success-light); opacity: 0.7;" : "";
             const viewLink = match.type === "product" || match.type === "collection" ? `<a href="/seo" title="View in SEO" style="color:var(--primary);"><span class="material-symbols-rounded" style="font-size:16px;">open_in_new</span></a>` : "";
-            const setWinnerBtn = !p.is_winner ? `<button class="action-icon" title="Set as winner" onclick="event.stopPropagation();setCannibalWinner(${gi},'${escapeHtml(p.page)}')"><span class="material-symbols-rounded" style="font-size:16px;color:var(--success);">emoji_events</span></button>` : "";
+            const setWinnerBtn = !p.is_winner ? `<button class="action-icon" title="Set as winner" onclick="event.stopPropagation();setCannibalWinner(${gi},${group.pages.indexOf(p)})"><span class="material-symbols-rounded" style="font-size:16px;color:var(--success);">emoji_events</span></button>` : "";
 
             return `<tr style="${rowStyle}">
                 <td style="max-width: 280px;">
@@ -998,6 +1029,7 @@ async function applyCannibalizationFix(groupIndex, recIndex, itemType, itemId) {
         const altMsg = imageAlts.length > 0 ? ` + ${imageAlts.length} image alt texts` : "";
         showToast(`Fix applied to Shopify${altMsg}! Local database updated.`, "success");
         resultDiv.innerHTML = `<p style="font-size:12px;color:var(--success);margin-top:6px;"><span class="material-symbols-rounded" style="font-size:14px;vertical-align:middle;">check_circle</span> Applied successfully (meta${altMsg}). Re-analyze in a few days to verify improvement.</p>`;
+        loadCannibalization();
     } catch (err) {
         showToast("Apply failed: " + err.message, "error");
         applyBtn.disabled = false;
@@ -1155,7 +1187,10 @@ async function loadImprovements() {
 
 // ─── Detail Modal ───
 
-async function showPageDetail(pageUrl) {
+async function showPageDetail(idx) {
+    const row = gscRenderedRows.pages[idx];
+    if (!row) return;
+    const pageUrl = row.page;
     const modal = document.getElementById("gsc-detail-modal");
     document.getElementById("gsc-detail-title").textContent = "Queries for: " + shortenUrl(pageUrl);
     document.getElementById("gsc-detail-thead").innerHTML = "<th>Query</th><th>Clicks</th><th>Impressions</th><th>CTR</th><th>Position</th>";
@@ -1180,7 +1215,10 @@ async function showPageDetail(pageUrl) {
     }
 }
 
-async function showQueryDetail(query) {
+async function showQueryDetail(idx) {
+    const row = gscRenderedRows.queries[idx];
+    if (!row) return;
+    const query = row.query;
     const modal = document.getElementById("gsc-detail-modal");
     document.getElementById("gsc-detail-title").textContent = 'Pages ranking for: "' + query + '"';
     document.getElementById("gsc-detail-thead").innerHTML = "<th>Page</th><th>Clicks</th><th>Impressions</th><th>CTR</th><th>Position</th>";

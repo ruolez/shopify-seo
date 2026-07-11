@@ -7,6 +7,12 @@ let selectedProductIds = new Set();
 let selectedCollectionIds = new Set();
 let currentProducts = [];
 let currentCollections = [];
+// The product array actually rendered in the table (after search/status
+// filters — applied inside renderProductsTable). Select-all and shift-range
+// MUST operate on this, not currentProducts — otherwise a bulk apply hits
+// products the user never saw. (Collections filter before render, so
+// currentCollections is already the visible list.)
+let visibleProducts = [];
 let currentProductId = null;
 let currentItemStoreId = null;
 let currentItemType = "product";
@@ -384,6 +390,14 @@ document.addEventListener("DOMContentLoaded", () => {
 
 function handleDeepLink() {
     const params = new URLSearchParams(window.location.search);
+
+    // /seo?tab=<name> deep link (dashboard insight cards link here)
+    const tabParam = params.get("tab");
+    if (tabParam) {
+        const btn = document.querySelector(`.tab[data-tab="${CSS.escape(tabParam)}"]`);
+        if (btn) btn.click();
+    }
+
     const optimizeType = params.get("optimize");
     const itemId = params.get("id");
     const priorityAction = params.get("action");
@@ -427,6 +441,7 @@ function initTabs() {
             if (tab.dataset.tab === "products") loadProducts();
             if (tab.dataset.tab === "collections") loadCollections();
             if (tab.dataset.tab === "priorities") loadPriorities();
+            if (tab.dataset.tab === "duplicates") loadDuplicates();
             if (tab.dataset.tab === "schema") loadSchemaTab();
         });
     });
@@ -486,6 +501,22 @@ async function loadProducts() {
     }
 }
 
+// Re-rendering rebuilds the search input, killing focus mid-typing. Swap the
+// HTML while preserving focus + caret if the user was typing in the search box.
+function setHtmlPreservingSearchFocus(container, html) {
+    const active = document.activeElement;
+    const caret = active && active.classList.contains("search-input") && container.contains(active)
+        ? active.selectionStart
+        : null;
+    container.innerHTML = html;
+    if (caret === null) return;
+    const input = container.querySelector(".search-input");
+    if (!input) return;
+    input.focus();
+    const pos = Math.min(caret, input.value.length);
+    input.setSelectionRange(pos, pos);
+}
+
 function renderProductsTable(container, products) {
     let html = "";
 
@@ -518,6 +549,7 @@ function renderProductsTable(container, products) {
         const term = productSearchTerm.toLowerCase();
         filtered = products.filter(p => (p.title || "").toLowerCase().includes(term));
     }
+    visibleProducts = filtered;
 
     if (filtered.length === 0 && (currentStatusFilter || productSearchTerm)) {
         html += `<div class="empty-state">
@@ -528,7 +560,7 @@ function renderProductsTable(container, products) {
                 Clear Filters
             </button>
         </div>`;
-        container.innerHTML = html;
+        setHtmlPreservingSearchFocus(container, html);
         return;
     }
 
@@ -613,7 +645,7 @@ function renderProductsTable(container, products) {
         </tr>`;
     }
     html += "</tbody></table></div>";
-    container.innerHTML = html;
+    setHtmlPreservingSearchFocus(container, html);
 
     const selectAllCb = document.getElementById("select-all-checkbox");
     if (selectAllCb) {
@@ -650,7 +682,7 @@ function toggleProductSelect(productId, checkbox, event) {
         const start = Math.min(lastClickedProductIndex, currentIndex);
         const end = Math.max(lastClickedProductIndex, currentIndex);
         for (let i = start; i <= end; i++) {
-            const p = currentProducts[i];
+            const p = visibleProducts[i];
             if (p) {
                 if (isChecked) {
                     selectedProductIds.add(p.id);
@@ -673,7 +705,7 @@ function toggleProductSelect(productId, checkbox, event) {
 
 function toggleSelectAll(checkbox) {
     if (checkbox.checked) {
-        for (const p of currentProducts) {
+        for (const p of visibleProducts) {
             selectedProductIds.add(p.id);
         }
     } else {
@@ -751,49 +783,49 @@ async function executeBulkOptimize(skipTags = true, skipTitle = false) {
     }
 }
 
-function pollBulkTask(bulkTaskId, total, subtitleText = "Optimizing products...") {
+async function pollBulkTask(bulkTaskId, total, subtitleText = "Optimizing products...") {
     const overlay = document.getElementById("bulk-progress-overlay");
     const bar = document.getElementById("bulk-progress-bar");
     const stats = document.getElementById("bulk-progress-stats");
     const current = document.getElementById("bulk-progress-current");
     const subtitle = document.getElementById("bulk-progress-subtitle");
 
-    const interval = setInterval(async () => {
-        try {
-            const task = await apiRequest(`/api/tasks/bulk/${bulkTaskId}`);
-            const done = task.completed + task.failed;
-            const pct = total > 0 ? Math.round((done / total) * 100) : 0;
+    try {
+        const task = await pollTaskUntilDone(`/api/tasks/bulk/${bulkTaskId}`, {
+            timeoutMs: Infinity,
+            onProgress: (t) => {
+                const done = t.completed + t.failed;
+                const pct = total > 0 ? Math.round((done / total) * 100) : 0;
 
-            bar.style.width = `${pct}%`;
-            stats.textContent = `${done} / ${total} completed` + (task.failed > 0 ? ` (${task.failed} failed)` : "");
-            subtitle.textContent = subtitleText;
+                bar.style.width = `${pct}%`;
+                stats.textContent = `${done} / ${total} completed` + (t.failed > 0 ? ` (${t.failed} failed)` : "");
+                subtitle.textContent = subtitleText;
 
-            if (task.current_product_title) {
-                current.textContent = `Currently: ${task.current_product_title}`;
-            }
+                if (t.current_product_title) {
+                    current.textContent = `Currently: ${t.current_product_title}`;
+                }
+            },
+        });
 
-            if (task.status === "completed") {
-                clearInterval(interval);
-                bar.style.width = "100%";
-                current.textContent = "";
-                subtitle.textContent = "All done!";
+        bar.style.width = "100%";
+        current.textContent = "";
+        subtitle.textContent = "All done!";
 
-                setTimeout(() => {
-                    overlay.classList.remove("active");
-                    selectedProductIds.clear();
-                    loadProducts();
-                    showToast(
-                        `Bulk optimization complete: ${task.completed} succeeded, ${task.failed} failed`,
-                        task.failed > 0 ? "warning" : "success"
-                    );
-                }, 1500);
-            }
-        } catch {
-            clearInterval(interval);
+        setTimeout(() => {
             overlay.classList.remove("active");
-            showToast("Error polling bulk task status", "error");
-        }
-    }, 2000);
+            selectedProductIds.clear();
+            loadProducts();
+            showToast(
+                `Bulk optimization complete: ${task.completed} succeeded, ${task.failed} failed`,
+                task.failed > 0 ? "warning" : "success"
+            );
+        }, 1500);
+    } catch (err) {
+        overlay.classList.remove("active");
+        selectedProductIds.clear();
+        loadProducts();
+        showToast(err.message, "error");
+    }
 }
 
 async function loadCollections() {
@@ -1504,51 +1536,51 @@ async function executeBulkOptimizeCollections(skipTitle = false) {
     }
 }
 
-function pollBulkCollectionTask(bulkTaskId, total, subtitleText = "Optimizing collections...") {
+async function pollBulkCollectionTask(bulkTaskId, total, subtitleText = "Optimizing collections...") {
     const overlay = document.getElementById("bulk-progress-overlay");
     const bar = document.getElementById("bulk-progress-bar");
     const stats = document.getElementById("bulk-progress-stats");
     const current = document.getElementById("bulk-progress-current");
     const subtitle = document.getElementById("bulk-progress-subtitle");
 
-    const interval = setInterval(async () => {
-        try {
-            const task = await apiRequest(`/api/tasks/bulk/${bulkTaskId}`);
-            const done = task.completed + task.failed;
-            const pct = total > 0 ? Math.round((done / total) * 100) : 0;
+    try {
+        const task = await pollTaskUntilDone(`/api/tasks/bulk/${bulkTaskId}`, {
+            timeoutMs: Infinity,
+            onProgress: (t) => {
+                const done = t.completed + t.failed;
+                const pct = total > 0 ? Math.round((done / total) * 100) : 0;
 
-            bar.style.width = `${pct}%`;
-            stats.textContent = `${done} / ${total} completed` + (task.failed > 0 ? ` (${task.failed} failed)` : "");
-            subtitle.textContent = subtitleText;
+                bar.style.width = `${pct}%`;
+                stats.textContent = `${done} / ${total} completed` + (t.failed > 0 ? ` (${t.failed} failed)` : "");
+                subtitle.textContent = subtitleText;
 
-            if (task.current_item_title) {
-                current.textContent = `Currently: ${task.current_item_title}`;
-            } else if (task.current_product_title) {
-                current.textContent = `Currently: ${task.current_product_title}`;
-            }
+                if (t.current_item_title) {
+                    current.textContent = `Currently: ${t.current_item_title}`;
+                } else if (t.current_product_title) {
+                    current.textContent = `Currently: ${t.current_product_title}`;
+                }
+            },
+        });
 
-            if (task.status === "completed") {
-                clearInterval(interval);
-                bar.style.width = "100%";
-                current.textContent = "";
-                subtitle.textContent = "All done!";
+        bar.style.width = "100%";
+        current.textContent = "";
+        subtitle.textContent = "All done!";
 
-                setTimeout(() => {
-                    overlay.classList.remove("active");
-                    selectedCollectionIds.clear();
-                    loadCollections();
-                    showToast(
-                        `Bulk optimization complete: ${task.completed} succeeded, ${task.failed} failed`,
-                        task.failed > 0 ? "warning" : "success"
-                    );
-                }, 1500);
-            }
-        } catch {
-            clearInterval(interval);
+        setTimeout(() => {
             overlay.classList.remove("active");
-            showToast("Error polling bulk task status", "error");
-        }
-    }, 2000);
+            selectedCollectionIds.clear();
+            loadCollections();
+            showToast(
+                `Bulk optimization complete: ${task.completed} succeeded, ${task.failed} failed`,
+                task.failed > 0 ? "warning" : "success"
+            );
+        }, 1500);
+    } catch (err) {
+        overlay.classList.remove("active");
+        selectedCollectionIds.clear();
+        loadCollections();
+        showToast(err.message, "error");
+    }
 }
 
 function confirmDeleteCollection(collectionId, title) {
@@ -1582,24 +1614,21 @@ function startBulkDeleteCollections() {
 }
 
 async function executeDeleteCollections(ids) {
+    const overlay = document.getElementById("bulk-progress-overlay");
+    document.getElementById("bulk-progress-subtitle").textContent = "Deleting collections...";
+    document.getElementById("bulk-progress-bar").style.width = "0%";
+    document.getElementById("bulk-progress-stats").textContent = `0 / ${ids.length} completed`;
+    document.getElementById("bulk-progress-current").textContent = "";
+    overlay.classList.add("active");
+
     try {
         const resp = await apiRequest("/api/seo/collections/delete", {
             method: "POST",
             body: { collection_ids: ids },
         });
-
-        const deletedCount = resp.deleted ? resp.deleted.length : 0;
-        const failedCount = resp.failed ? resp.failed.length : 0;
-
-        if (failedCount > 0) {
-            showToast(`Deleted ${deletedCount}, failed ${failedCount}: ${resp.failed[0].error}`, "warning");
-        } else {
-            showToast(`Deleted ${deletedCount} collection${deletedCount !== 1 ? "s" : ""}`, "success");
-        }
-
-        selectedCollectionIds.clear();
-        loadCollections();
+        pollBulkCollectionTask(resp.bulk_task_id, resp.total, "Deleting collections...");
     } catch (err) {
+        overlay.classList.remove("active");
         showToast(`Delete failed: ${err.message}`, "error");
     }
 }
@@ -1621,24 +1650,21 @@ function startBulkPublishCollections() {
 }
 
 async function executeBulkPublishCollections(ids) {
+    const overlay = document.getElementById("bulk-progress-overlay");
+    document.getElementById("bulk-progress-subtitle").textContent = "Publishing collections...";
+    document.getElementById("bulk-progress-bar").style.width = "0%";
+    document.getElementById("bulk-progress-stats").textContent = `0 / ${ids.length} completed`;
+    document.getElementById("bulk-progress-current").textContent = "";
+    overlay.classList.add("active");
+
     try {
         const resp = await apiRequest("/api/seo/collections/publish", {
             method: "POST",
             body: { collection_ids: ids },
         });
-
-        const publishedCount = resp.published ? resp.published.length : 0;
-        const failedCount = resp.failed ? resp.failed.length : 0;
-
-        if (failedCount > 0) {
-            showToast(`Published ${publishedCount}, failed ${failedCount}: ${resp.failed[0].error}`, "warning");
-        } else {
-            showToast(`Published ${publishedCount} collection${publishedCount !== 1 ? "s" : ""}`, "success");
-        }
-
-        selectedCollectionIds.clear();
-        loadCollections();
+        pollBulkCollectionTask(resp.bulk_task_id, resp.total, "Publishing collections...");
     } catch (err) {
+        overlay.classList.remove("active");
         showToast(`Publish failed: ${err.message}`, "error");
     }
 }
@@ -1871,89 +1897,75 @@ function reoptimizeWithKeyword(itemId, keyword) {
 }
 
 async function analyzeProduct(productId, priorityContext) {
-    const modal = document.getElementById("product-modal");
-    if (!modal.classList.contains("active")) {
-        await viewProduct(productId);
-    }
+    const btn = typeof event !== "undefined" && event && event.target instanceof Element ? event.target.closest("button") : null;
+    return guardButton(btn, async () => {
+        const modal = document.getElementById("product-modal");
+        if (!modal.classList.contains("active")) {
+            await viewProduct(productId);
+        }
 
-    const resultsContainer = document.getElementById("ai-results-container");
-    if (!resultsContainer) return;
+        const resultsContainer = document.getElementById("ai-results-container");
+        if (!resultsContainer) return;
 
-    const contextNote = priorityContext ? `<div style="font-size:12px;color:var(--on-surface-secondary);margin-top:8px;padding:6px 10px;background:var(--surface-dim);border-radius:6px;"><strong>Priority focus:</strong> ${escapeHtml(priorityContext)}</div>` : '';
-    resultsContainer.innerHTML = `
-        <div class="ai-panel" style="margin-top: 20px;">
-            <h4><span class="material-symbols-rounded">smart_toy</span> AI Analysis</h4>
-            ${contextNote}
-            <div class="loading-spinner"><div class="spinner"></div><p>AI is analyzing this product...</p></div>
-        </div>`;
-
-    const taskInput = { product_id: productId };
-    if (priorityContext) taskInput.priority_context = priorityContext;
-
-    try {
-        const taskResp = await apiRequest("/api/tasks", {
-            method: "POST",
-            body: {
-                task_type: "product_seo",
-                input: taskInput,
-            },
-        });
-
-        const taskId = taskResp.task_id;
-        pollTaskResult(taskId, resultsContainer, productId);
-    } catch (err) {
+        const contextNote = priorityContext ? `<div style="font-size:12px;color:var(--on-surface-secondary);margin-top:8px;padding:6px 10px;background:var(--surface-dim);border-radius:6px;"><strong>Priority focus:</strong> ${escapeHtml(priorityContext)}</div>` : '';
         resultsContainer.innerHTML = `
             <div class="ai-panel" style="margin-top: 20px;">
                 <h4><span class="material-symbols-rounded">smart_toy</span> AI Analysis</h4>
-                <p style="color: var(--error);">Error: ${escapeHtml(err.message)}</p>
+                ${contextNote}
+                <div class="loading-spinner"><div class="spinner"></div><p>AI is analyzing this product...</p></div>
             </div>`;
-    }
-}
 
-function pollTaskResult(taskId, container, productId) {
-    const startTime = Date.now();
-    const maxWait = 180000; // 3 minutes
-    let pollCount = 0;
-
-    const interval = setInterval(async () => {
-        pollCount++;
-        const elapsed = Date.now() - startTime;
-
-        if (elapsed > maxWait) {
-            clearInterval(interval);
-            container.innerHTML = `
-                <div class="ai-panel" style="margin-top: 20px;">
-                    <h4><span class="material-symbols-rounded">smart_toy</span> AI Analysis</h4>
-                    <p style="color: var(--warning);">The AI is taking longer than expected. The task is still running in the background — refresh the page later to check results.</p>
-                    <p style="font-size: 12px; color: var(--on-surface-secondary);">Task ID: ${taskId}</p>
-                </div>`;
-            return;
-        }
-
-        // Update the spinner text with elapsed time
-        if (pollCount % 5 === 0) {
-            const secs = Math.round(elapsed / 1000);
-            const spinnerP = container.querySelector(".loading-spinner p");
-            if (spinnerP) spinnerP.textContent = `AI is analyzing... (${secs}s)`;
-        }
+        const taskInput = { product_id: productId };
+        if (priorityContext) taskInput.priority_context = priorityContext;
 
         try {
-            const task = await apiRequest(`/api/tasks/${taskId}`);
-            if (task.status === "completed") {
-                clearInterval(interval);
-                renderAIResults(container, task.result, productId);
-            } else if (task.status === "failed") {
-                clearInterval(interval);
-                container.innerHTML = `
-                    <div class="ai-panel" style="margin-top: 20px;">
-                        <h4><span class="material-symbols-rounded">smart_toy</span> AI Analysis</h4>
-                        <p style="color: var(--error);">Failed: ${escapeHtml(task.error || "Unknown error")}</p>
-                    </div>`;
-            }
-        } catch {
-            clearInterval(interval);
+            const taskResp = await apiRequest("/api/tasks", {
+                method: "POST",
+                body: {
+                    task_type: "product_seo",
+                    input: taskInput,
+                },
+            });
+
+            const taskId = taskResp.task_id;
+            await pollTaskResult(taskId, resultsContainer, productId);
+        } catch (err) {
+            resultsContainer.innerHTML = `
+                <div class="ai-panel" style="margin-top: 20px;">
+                    <h4><span class="material-symbols-rounded">smart_toy</span> AI Analysis</h4>
+                    <p style="color: var(--error);">Error: ${escapeHtml(err.message)}</p>
+                </div>`;
         }
-    }, 2000);
+    });
+}
+
+async function pollTaskResult(taskId, container, productId) {
+    const startTime = Date.now();
+    let pollCount = 0;
+
+    try {
+        const task = await pollTaskUntilDone(`/api/tasks/${taskId}`, {
+            timeoutMs: 180000, // 3 minutes
+            onProgress: () => {
+                pollCount++;
+                // Update the spinner text with elapsed time
+                if (pollCount % 5 === 0) {
+                    const secs = Math.round((Date.now() - startTime) / 1000);
+                    const spinnerP = container.querySelector(".loading-spinner p");
+                    if (spinnerP) spinnerP.textContent = `AI is analyzing... (${secs}s)`;
+                }
+            },
+        });
+        renderAIResults(container, task.result, productId);
+    } catch (err) {
+        container.innerHTML = `
+            <div class="ai-panel" style="margin-top: 20px;">
+                <h4><span class="material-symbols-rounded">smart_toy</span> AI Analysis</h4>
+                <p style="color: var(--error);">${escapeHtml(err.message)}</p>
+                <p style="font-size: 12px; color: var(--on-surface-secondary);">Task ID: ${taskId}</p>
+            </div>`;
+        showToast(err.message, "error");
+    }
 }
 
 function renderAIResults(container, result, productId) {
@@ -2035,9 +2047,9 @@ function renderAIResults(container, result, productId) {
         for (const item of allKws) {
             const kwName = item.kw.replace(/\s*\(.*?\)\s*$/, '').trim();
             if (item.isPrimary) {
-                html += `<span class="chip-display" style="background:var(--primary-light,#e8f0fe);border:1px solid var(--primary);font-weight:600;cursor:pointer;" title="Currently primary" onclick="reoptimizeWithKeyword(${productId}, '${escapeAttr(kwName)}')">Primary: ${escapeHtml(item.kw)}</span>`;
+                html += `<span class="chip-display" style="background:var(--primary-light,#e8f0fe);border:1px solid var(--primary);font-weight:600;cursor:pointer;" title="Currently primary" data-kw="${escapeAttr(kwName)}" onclick="reoptimizeWithKeyword(${productId}, this.dataset.kw)">Primary: ${escapeHtml(item.kw)}</span>`;
             } else {
-                html += `<span class="chip-display" style="cursor:pointer;" title="Click to re-optimize with this as primary" onclick="reoptimizeWithKeyword(${productId}, '${escapeAttr(kwName)}')">${escapeHtml(item.kw)}</span>`;
+                html += `<span class="chip-display" style="cursor:pointer;" title="Click to re-optimize with this as primary" data-kw="${escapeAttr(kwName)}" onclick="reoptimizeWithKeyword(${productId}, this.dataset.kw)">${escapeHtml(item.kw)}</span>`;
             }
         }
         if (allKws.length === 0) {
@@ -2096,11 +2108,6 @@ function renderAIResults(container, result, productId) {
 
     html += "</div>";
     container.innerHTML = html;
-}
-
-function escapeAttr(str) {
-    if (!str) return "";
-    return str.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
 function removeChip(btn) {
@@ -2336,64 +2343,60 @@ async function viewCollection(id) {
 }
 
 async function analyzeCollection(collectionId, priorityContext) {
-    const modal = document.getElementById("product-modal");
-    if (!modal.classList.contains("active")) {
-        await viewCollection(collectionId);
-    }
+    const btn = typeof event !== "undefined" && event && event.target instanceof Element ? event.target.closest("button") : null;
+    return guardButton(btn, async () => {
+        const modal = document.getElementById("product-modal");
+        if (!modal.classList.contains("active")) {
+            await viewCollection(collectionId);
+        }
 
-    const resultsContainer = document.getElementById("ai-collection-results-container");
-    if (!resultsContainer) return;
+        const resultsContainer = document.getElementById("ai-collection-results-container");
+        if (!resultsContainer) return;
 
-    const contextNote = priorityContext ? `<div style="font-size:12px;color:var(--on-surface-secondary);margin-top:8px;padding:6px 10px;background:var(--surface-dim);border-radius:6px;"><strong>Priority focus:</strong> ${escapeHtml(priorityContext)}</div>` : '';
-    resultsContainer.innerHTML = `
-        <div class="ai-panel" style="margin-top: 20px;">
-            <h4><span class="material-symbols-rounded">smart_toy</span> AI Analysis</h4>
-            ${contextNote}
-            <div class="loading-spinner"><div class="spinner"></div><p>AI is analyzing this collection...</p></div>
-        </div>`;
-
-    const taskInput = { collection_id: collectionId };
-    if (priorityContext) taskInput.priority_context = priorityContext;
-
-    try {
-        const taskResp = await apiRequest("/api/tasks", {
-            method: "POST",
-            body: {
-                task_type: "collection_seo",
-                input: taskInput,
-            },
-        });
-
-        const taskId = taskResp.task_id;
-        pollCollectionTaskResult(taskId, resultsContainer, collectionId);
-    } catch (err) {
+        const contextNote = priorityContext ? `<div style="font-size:12px;color:var(--on-surface-secondary);margin-top:8px;padding:6px 10px;background:var(--surface-dim);border-radius:6px;"><strong>Priority focus:</strong> ${escapeHtml(priorityContext)}</div>` : '';
         resultsContainer.innerHTML = `
             <div class="ai-panel" style="margin-top: 20px;">
                 <h4><span class="material-symbols-rounded">smart_toy</span> AI Analysis</h4>
-                <p style="color: var(--error);">Error: ${escapeHtml(err.message)}</p>
+                ${contextNote}
+                <div class="loading-spinner"><div class="spinner"></div><p>AI is analyzing this collection...</p></div>
             </div>`;
-    }
+
+        const taskInput = { collection_id: collectionId };
+        if (priorityContext) taskInput.priority_context = priorityContext;
+
+        try {
+            const taskResp = await apiRequest("/api/tasks", {
+                method: "POST",
+                body: {
+                    task_type: "collection_seo",
+                    input: taskInput,
+                },
+            });
+
+            const taskId = taskResp.task_id;
+            await pollCollectionTaskResult(taskId, resultsContainer, collectionId);
+        } catch (err) {
+            resultsContainer.innerHTML = `
+                <div class="ai-panel" style="margin-top: 20px;">
+                    <h4><span class="material-symbols-rounded">smart_toy</span> AI Analysis</h4>
+                    <p style="color: var(--error);">Error: ${escapeHtml(err.message)}</p>
+                </div>`;
+        }
+    });
 }
 
-function pollCollectionTaskResult(taskId, container, collectionId) {
-    const interval = setInterval(async () => {
-        try {
-            const task = await apiRequest(`/api/tasks/${taskId}`);
-            if (task.status === "completed") {
-                clearInterval(interval);
-                renderCollectionAIResults(container, task.result, collectionId);
-            } else if (task.status === "failed") {
-                clearInterval(interval);
-                container.innerHTML = `
-                    <div class="ai-panel" style="margin-top: 20px;">
-                        <h4><span class="material-symbols-rounded">smart_toy</span> AI Analysis</h4>
-                        <p style="color: var(--error);">Failed: ${escapeHtml(task.error || "Unknown error")}</p>
-                    </div>`;
-            }
-        } catch {
-            clearInterval(interval);
-        }
-    }, 2000);
+async function pollCollectionTaskResult(taskId, container, collectionId) {
+    try {
+        const task = await pollTaskUntilDone(`/api/tasks/${taskId}`);
+        renderCollectionAIResults(container, task.result, collectionId);
+    } catch (err) {
+        container.innerHTML = `
+            <div class="ai-panel" style="margin-top: 20px;">
+                <h4><span class="material-symbols-rounded">smart_toy</span> AI Analysis</h4>
+                <p style="color: var(--error);">Failed: ${escapeHtml(err.message)}</p>
+            </div>`;
+        showToast(err.message, "error");
+    }
 }
 
 function renderCollectionAIResults(container, result, collectionId) {
@@ -2626,92 +2629,91 @@ async function executeBulkOptimizeCollectionTitles() {
 }
 
 async function optimizeProductTitle(productId) {
-    const modal = document.getElementById("product-modal");
-    if (!modal.classList.contains("active")) {
-        await viewProduct(productId);
-    }
+    const btn = typeof event !== "undefined" && event && event.target instanceof Element ? event.target.closest("button") : null;
+    return guardButton(btn, async () => {
+        const modal = document.getElementById("product-modal");
+        if (!modal.classList.contains("active")) {
+            await viewProduct(productId);
+        }
 
-    const resultsContainer = document.getElementById("ai-results-container");
-    if (!resultsContainer) return;
+        const resultsContainer = document.getElementById("ai-results-container");
+        if (!resultsContainer) return;
 
-    resultsContainer.innerHTML = `
-        <div class="ai-panel" style="margin-top: 20px;">
-            <h4><span class="material-symbols-rounded">title</span> Title Optimization</h4>
-            <div class="loading-spinner"><div class="spinner"></div><p>AI is optimizing the title...</p></div>
-        </div>`;
-
-    try {
-        const taskResp = await apiRequest("/api/tasks", {
-            method: "POST",
-            body: {
-                task_type: "product_title_seo",
-                input: { product_id: productId },
-            },
-        });
-
-        pollTitleTaskResult(taskResp.task_id, resultsContainer, productId, "product");
-    } catch (err) {
         resultsContainer.innerHTML = `
             <div class="ai-panel" style="margin-top: 20px;">
                 <h4><span class="material-symbols-rounded">title</span> Title Optimization</h4>
-                <p style="color: var(--error);">Error: ${escapeHtml(err.message)}</p>
+                <div class="loading-spinner"><div class="spinner"></div><p>AI is optimizing the title...</p></div>
             </div>`;
-    }
+
+        try {
+            const taskResp = await apiRequest("/api/tasks", {
+                method: "POST",
+                body: {
+                    task_type: "product_title_seo",
+                    input: { product_id: productId },
+                },
+            });
+
+            await pollTitleTaskResult(taskResp.task_id, resultsContainer, productId, "product");
+        } catch (err) {
+            resultsContainer.innerHTML = `
+                <div class="ai-panel" style="margin-top: 20px;">
+                    <h4><span class="material-symbols-rounded">title</span> Title Optimization</h4>
+                    <p style="color: var(--error);">Error: ${escapeHtml(err.message)}</p>
+                </div>`;
+        }
+    });
 }
 
 async function optimizeCollectionTitle(collectionId) {
-    const modal = document.getElementById("product-modal");
-    if (!modal.classList.contains("active")) {
-        await viewCollection(collectionId);
-    }
+    const btn = typeof event !== "undefined" && event && event.target instanceof Element ? event.target.closest("button") : null;
+    return guardButton(btn, async () => {
+        const modal = document.getElementById("product-modal");
+        if (!modal.classList.contains("active")) {
+            await viewCollection(collectionId);
+        }
 
-    const resultsContainer = document.getElementById("ai-collection-results-container");
-    if (!resultsContainer) return;
+        const resultsContainer = document.getElementById("ai-collection-results-container");
+        if (!resultsContainer) return;
 
-    resultsContainer.innerHTML = `
-        <div class="ai-panel" style="margin-top: 20px;">
-            <h4><span class="material-symbols-rounded">title</span> Title Optimization</h4>
-            <div class="loading-spinner"><div class="spinner"></div><p>AI is optimizing the title...</p></div>
-        </div>`;
-
-    try {
-        const taskResp = await apiRequest("/api/tasks", {
-            method: "POST",
-            body: {
-                task_type: "collection_title_seo",
-                input: { collection_id: collectionId },
-            },
-        });
-
-        pollTitleTaskResult(taskResp.task_id, resultsContainer, collectionId, "collection");
-    } catch (err) {
         resultsContainer.innerHTML = `
             <div class="ai-panel" style="margin-top: 20px;">
                 <h4><span class="material-symbols-rounded">title</span> Title Optimization</h4>
-                <p style="color: var(--error);">Error: ${escapeHtml(err.message)}</p>
+                <div class="loading-spinner"><div class="spinner"></div><p>AI is optimizing the title...</p></div>
             </div>`;
-    }
+
+        try {
+            const taskResp = await apiRequest("/api/tasks", {
+                method: "POST",
+                body: {
+                    task_type: "collection_title_seo",
+                    input: { collection_id: collectionId },
+                },
+            });
+
+            await pollTitleTaskResult(taskResp.task_id, resultsContainer, collectionId, "collection");
+        } catch (err) {
+            resultsContainer.innerHTML = `
+                <div class="ai-panel" style="margin-top: 20px;">
+                    <h4><span class="material-symbols-rounded">title</span> Title Optimization</h4>
+                    <p style="color: var(--error);">Error: ${escapeHtml(err.message)}</p>
+                </div>`;
+        }
+    });
 }
 
-function pollTitleTaskResult(taskId, container, itemId, itemType) {
-    const interval = setInterval(async () => {
-        try {
-            const task = await apiRequest(`/api/tasks/${taskId}`);
-            if (task.status === "completed") {
-                clearInterval(interval);
-                renderTitleResults(container, task.result, itemId, itemType);
-            } else if (task.status === "failed") {
-                clearInterval(interval);
-                container.innerHTML = `
-                    <div class="ai-panel" style="margin-top: 20px;">
-                        <h4><span class="material-symbols-rounded">title</span> Title Optimization</h4>
-                        <p style="color: var(--error);">Failed: ${escapeHtml(task.error || "Unknown error")}</p>
-                    </div>`;
-            }
-        } catch {
-            clearInterval(interval);
-        }
-    }, 2000);
+async function pollTitleTaskResult(taskId, container, itemId, itemType) {
+    try {
+        const task = await pollTaskUntilDone(`/api/tasks/${taskId}`);
+        renderTitleResults(container, task.result, itemId, itemType);
+    } catch (err) {
+        container.innerHTML = `
+            <div class="ai-panel" style="margin-top: 20px;">
+                <h4><span class="material-symbols-rounded">title</span> Title Optimization</h4>
+                <p style="color: var(--error);">Failed: ${escapeHtml(err.message)}</p>
+            </div>`;
+        showToast(err.message, "error");
+    }
 }
 
 function renderTitleResults(container, result, itemId, itemType) {
@@ -3503,7 +3505,7 @@ function renderTagsTable(content, storeId, inline = false) {
         const tagRowClass = selectedTagKeys.has(key) ? "row-selected" : "";
 
         html += `<tr ${rowStyle} class="${tagRowClass}">
-            <td class="checkbox-col"><input type="checkbox" class="table-checkbox" data-tag-key="${escapeAttr(key)}" data-index="${idx}" ${checked} onclick="toggleTagSelect('${escapeAttr(key)}', this)"></td>
+            <td class="checkbox-col"><input type="checkbox" class="table-checkbox" data-tag-key="${escapeAttr(key)}" data-index="${idx}" ${checked} onclick="toggleTagSelect(this.dataset.tagKey, this)"></td>
             <td><strong>${escapeHtml(t.tag)}</strong></td>
             <td><input type="text" class="form-control" style="min-width: 180px;" value="${escapeAttr(titleValue)}" onchange="tagTitleOverrides['${escapeAttr(key)}'] = this.value" ${isExisting ? "disabled" : ""}></td>
             <td>${t.product_count}</td>
@@ -3646,6 +3648,11 @@ async function runAIFilter() {
         btn.innerHTML = '<span class="material-symbols-rounded">sync</span> Filtering...';
     }
 
+    // Snapshot state so a failed batch can roll back instead of leaving the
+    // feature disabled with a half-cleared selection until reload.
+    const prevSelectedTagKeys = new Set(selectedTagKeys);
+    const prevRejectedTags = { ...aiRejectedTags };
+
     try {
         const filteredTags = generateTagsData.filter(t => t.product_count >= minProductsFilter);
         const tagsPayload = filteredTags.map(t => ({ tag: t.tag, product_count: t.product_count }));
@@ -3702,11 +3709,11 @@ async function runAIFilter() {
         reRenderTagsTable();
         showToast(`AI filter complete: ${totalValid} valid, ${totalRejected} rejected`, "success");
     } catch (err) {
+        aiFilterApplied = false;
+        aiRejectedTags = prevRejectedTags;
+        selectedTagKeys = prevSelectedTagKeys;
+        reRenderTagsTable();
         showToast(`AI filter failed: ${err.message}`, "error");
-        if (btn) {
-            btn.disabled = false;
-            btn.innerHTML = '<span class="material-symbols-rounded">smart_toy</span> AI Filter (Optional)';
-        }
     }
 }
 
@@ -3723,6 +3730,9 @@ async function executeGenerateCollections() {
 
     const tagsToGenerate = [];
     for (const t of generateTagsData) {
+        // Only generate tags still visible under the current min-products
+        // filter — stale selections of hidden tags must not run.
+        if (t.product_count < minProductsFilter) continue;
         const key = t.tag.toLowerCase();
         if (selectedTagKeys.has(key)) {
             tagsToGenerate.push({
@@ -3765,61 +3775,60 @@ async function executeGenerateCollections() {
     }
 }
 
-function pollGenerateTask(bulkTaskId, total, autoOptimize) {
+async function pollGenerateTask(bulkTaskId, total, autoOptimize) {
     const overlay = document.getElementById("generate-progress-overlay");
     const bar = document.getElementById("generate-progress-bar");
     const stats = document.getElementById("generate-progress-stats");
     const current = document.getElementById("generate-progress-current");
     const subtitle = document.getElementById("generate-progress-subtitle");
 
-    const interval = setInterval(async () => {
-        try {
-            const task = await apiRequest(`/api/tasks/bulk/${bulkTaskId}`);
-            const done = task.completed + task.failed;
-            const pct = total > 0 ? Math.round((done / total) * 100) : 0;
+    try {
+        const task = await pollTaskUntilDone(`/api/tasks/bulk/${bulkTaskId}`, {
+            timeoutMs: Infinity,
+            onProgress: (t) => {
+                const done = t.completed + t.failed;
+                const pct = total > 0 ? Math.round((done / total) * 100) : 0;
 
-            bar.style.width = `${pct}%`;
-            stats.textContent = `${done} / ${total} completed` + (task.failed > 0 ? ` (${task.failed} failed)` : "");
-            subtitle.textContent = "Creating collections on Shopify...";
+                bar.style.width = `${pct}%`;
+                stats.textContent = `${done} / ${total} completed` + (t.failed > 0 ? ` (${t.failed} failed)` : "");
+                subtitle.textContent = "Creating collections on Shopify...";
 
-            if (task.current_product_title) {
-                current.textContent = `Currently: ${task.current_product_title}`;
-            }
-
-            if (task.status === "completed") {
-                clearInterval(interval);
-                bar.style.width = "100%";
-                current.textContent = "";
-
-                if (autoOptimize && task.completed > 0) {
-                    subtitle.textContent = "Collections created! Now running SEO optimization...";
-                    stats.textContent = `${task.completed} collections created. AI optimization running in background.`;
-                    setTimeout(() => {
-                        overlay.classList.remove("active");
-                        loadCollections();
-                        showToast(
-                            `${task.completed} collection${task.completed !== 1 ? "s" : ""} created! SEO optimization running in background.`,
-                            task.failed > 0 ? "warning" : "success"
-                        );
-                    }, 2000);
-                } else {
-                    subtitle.textContent = "All done!";
-                    setTimeout(() => {
-                        overlay.classList.remove("active");
-                        loadCollections();
-                        showToast(
-                            `${task.completed} collection${task.completed !== 1 ? "s" : ""} created${task.failed > 0 ? `, ${task.failed} failed` : ""}`,
-                            task.failed > 0 ? "warning" : "success"
-                        );
-                    }, 1500);
+                if (t.current_product_title) {
+                    current.textContent = `Currently: ${t.current_product_title}`;
                 }
-            }
-        } catch {
-            clearInterval(interval);
-            overlay.classList.remove("active");
-            showToast("Error polling generation status", "error");
+            },
+        });
+
+        bar.style.width = "100%";
+        current.textContent = "";
+
+        if (autoOptimize && task.completed > 0) {
+            subtitle.textContent = "Collections created! Now running SEO optimization...";
+            stats.textContent = `${task.completed} collections created. AI optimization running in background.`;
+            setTimeout(() => {
+                overlay.classList.remove("active");
+                loadCollections();
+                showToast(
+                    `${task.completed} collection${task.completed !== 1 ? "s" : ""} created! SEO optimization running in background.`,
+                    task.failed > 0 ? "warning" : "success"
+                );
+            }, 2000);
+        } else {
+            subtitle.textContent = "All done!";
+            setTimeout(() => {
+                overlay.classList.remove("active");
+                loadCollections();
+                showToast(
+                    `${task.completed} collection${task.completed !== 1 ? "s" : ""} created${task.failed > 0 ? `, ${task.failed} failed` : ""}`,
+                    task.failed > 0 ? "warning" : "success"
+                );
+            }, 1500);
         }
-    }, 2000);
+    } catch (err) {
+        overlay.classList.remove("active");
+        loadCollections();
+        showToast(err.message, "error");
+    }
 }
 
 
@@ -4108,7 +4117,14 @@ async function loadProductSchemaPreview(productId) {
     if (!container) return;
 
     try {
-        const resp = await apiRequest(`/api/schema/products/${productId}/generate`, { method: "POST" });
+        // Read-only preview: opening the modal must not regenerate (and reset
+        // the pushed flag); only generate when no schema exists yet.
+        let resp;
+        try {
+            resp = await apiRequest(`/api/schema/products/${productId}/view`);
+        } catch (viewErr) {
+            resp = await apiRequest(`/api/schema/products/${productId}/generate`, { method: "POST" });
+        }
         let html = "";
 
         if (resp.is_valid) {
@@ -4337,40 +4353,39 @@ async function executeBulkApplyTags(storeId) {
         const total = resp.total;
         stats.textContent = `0 / ${total} completed`;
 
-        const interval = setInterval(async () => {
-            try {
-                const task = await apiRequest(`/api/tasks/bulk/${bulkTaskId}`);
-                const done = task.completed + task.failed;
-                const pct = total > 0 ? Math.round((done / total) * 100) : 0;
+        try {
+            const task = await pollTaskUntilDone(`/api/tasks/bulk/${bulkTaskId}`, {
+                timeoutMs: Infinity,
+                onProgress: (t) => {
+                    const done = t.completed + t.failed;
+                    const pct = total > 0 ? Math.round((done / total) * 100) : 0;
 
-                bar.style.width = `${pct}%`;
-                stats.textContent = `${done} / ${total} completed` + (task.failed > 0 ? ` (${task.failed} failed)` : "");
+                    bar.style.width = `${pct}%`;
+                    stats.textContent = `${done} / ${total} completed` + (t.failed > 0 ? ` (${t.failed} failed)` : "");
 
-                if (task.current_product_title) {
-                    current.textContent = `Currently: ${task.current_product_title}`;
-                }
+                    if (t.current_product_title) {
+                        current.textContent = `Currently: ${t.current_product_title}`;
+                    }
+                },
+            });
 
-                if (task.status === "completed") {
-                    clearInterval(interval);
-                    bar.style.width = "100%";
-                    current.textContent = "";
-                    subtitle.textContent = "All done!";
+            bar.style.width = "100%";
+            current.textContent = "";
+            subtitle.textContent = "All done!";
 
-                    setTimeout(() => {
-                        overlay.classList.remove("active");
-                        loadProducts();
-                        showToast(
-                            `Tags applied: ${task.completed} succeeded, ${task.failed} failed`,
-                            task.failed > 0 ? "warning" : "success"
-                        );
-                    }, 1500);
-                }
-            } catch {
-                clearInterval(interval);
+            setTimeout(() => {
                 overlay.classList.remove("active");
-                showToast("Error polling bulk apply status", "error");
-            }
-        }, 2000);
+                loadProducts();
+                showToast(
+                    `Tags applied: ${task.completed} succeeded, ${task.failed} failed`,
+                    task.failed > 0 ? "warning" : "success"
+                );
+            }, 1500);
+        } catch (pollErr) {
+            overlay.classList.remove("active");
+            loadProducts();
+            showToast(pollErr.message, "error");
+        }
     } catch (err) {
         overlay.classList.remove("active");
         showToast(`Bulk apply failed: ${err.message}`, "error");
@@ -4493,5 +4508,233 @@ async function executeBulkGenerateCollectionImages() {
     } catch (err) {
         overlay.classList.remove("active");
         showToast(`Bulk image generation failed: ${err.message}`, "error");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Duplicates tab — detect & fix duplicate SEO titles / meta descriptions
+// ---------------------------------------------------------------------------
+
+// Loaded groups, keyed by field, so AI-fix can look items up by group index.
+let duplicateData = { seo_title: [], meta_description: [] };
+
+const DUP_FIELDS = [
+    { key: "seo_title", label: "Duplicate SEO Titles", apply: "meta_title" },
+    { key: "meta_description", label: "Duplicate Meta Descriptions", apply: "meta_description" },
+];
+
+async function loadDuplicates() {
+    const container = document.getElementById("duplicates-container");
+    const storeId = await _ensureStoreId();
+    if (!storeId) {
+        container.innerHTML = '<div class="empty-state"><span class="material-symbols-rounded">store</span><p>No stores found. Add a store first.</p></div>';
+        return;
+    }
+    container.innerHTML = '<div class="loading-spinner" style="padding:60px 0;"><div class="spinner"></div><p>Scanning products & collections for duplicates...</p></div>';
+
+    try {
+        const data = await apiRequest(`/api/seo/duplicates?store_id=${storeId}`);
+        duplicateData = { seo_title: data.seo_title || [], meta_description: data.meta_description || [] };
+        renderDuplicates(container, data);
+    } catch (err) {
+        container.innerHTML = `<div class="empty-state"><p>${escapeHtml(err.message)}</p></div>`;
+    }
+}
+
+function renderDuplicates(container, data) {
+    const totalGroups =
+        (data.seo_title || []).length + (data.meta_description || []).length;
+
+    let html = `<div class="toolbar-row" style="gap:12px;flex-wrap:wrap;align-items:center;">
+        <div style="font-size:13px;color:var(--on-surface-secondary);">
+            Compares products & collections in the same store. Re-sync from
+            <a href="/stores">Stores</a> for the latest data.
+        </div>
+        <button class="btn btn-secondary btn-sm" style="margin-left:auto;" onclick="loadDuplicates()">
+            <span class="material-symbols-rounded" style="font-size:16px;">refresh</span> Rescan
+        </button>
+    </div>`;
+
+    if (totalGroups === 0) {
+        container.innerHTML =
+            html +
+            '<div class="empty-state"><span class="material-symbols-rounded">verified</span><p>No duplicate SEO titles or meta descriptions found.</p></div>';
+        return;
+    }
+
+    for (const field of DUP_FIELDS) {
+        const groups = data[field.key] || [];
+        html += `<h3 style="margin:24px 0 8px;">${field.label} <span style="color:var(--on-surface-secondary);font-weight:400;">(${groups.length})</span></h3>`;
+        if (groups.length === 0) {
+            html += '<p style="color:var(--on-surface-secondary);font-size:13px;">None found.</p>';
+            continue;
+        }
+        groups.forEach((group, gi) => {
+            html += renderDuplicateGroup(field, gi, group);
+        });
+    }
+
+    container.innerHTML = html;
+}
+
+function renderDuplicateGroup(field, gi, group) {
+    // Canonical = highest on-page score among fixable (synced) items; suggested to keep.
+    const keepId = dedupeKeepId(group);
+
+    let rows = "";
+    group.items.forEach((it) => {
+        const current = field.key === "seo_title" ? it.meta_title || "" : it.meta_description || "";
+        const inputId = `dupinput-${field.key}-${gi}-${it.id}`;
+        const typeBadge = `<span class="badge ${it.type === "product" ? "badge-info" : "badge-warning"}">${it.type}</span>`;
+        const keepBadge = it.id != null && it.id === keepId ? '<span class="badge badge-success" title="Highest SEO score — suggested to keep">keep</span>' : "";
+        const blankHint =
+            field.key === "seo_title" && it.has_blank_meta_title
+                ? '<span style="color:var(--warning);font-size:11px;"> · blank SEO title, falls back to name</span>'
+                : "";
+        const unsynced = it.id == null;
+        const unsyncedHint = unsynced
+            ? '<span style="color:var(--warning);font-size:11px;"> · not synced — re-sync store to fix</span>'
+            : "";
+        rows += `<div class="dup-item" style="display:flex;gap:10px;align-items:flex-start;padding:10px 0;border-top:1px solid var(--outline);${unsynced ? "opacity:0.6;" : ""}">
+            <div style="flex:1;min-width:0;">
+                <div style="font-size:13px;font-weight:500;">${escapeHtml(it.title || "(untitled)")} ${typeBadge} ${keepBadge}</div>
+                <div style="font-size:11px;color:var(--on-surface-secondary);">${escapeHtml(it.handle || "")} · score ${it.on_page_score}${blankHint}${unsyncedHint}</div>
+                <textarea id="${inputId}" rows="2" style="width:100%;margin-top:6px;font-size:13px;" placeholder="${escapeHtml(it.title || "")}" ${unsynced ? "disabled" : ""}>${escapeHtml(current)}</textarea>
+            </div>
+            <button class="btn btn-primary btn-sm" style="white-space:nowrap;margin-top:22px;" ${unsynced ? "disabled" : ""}
+                onclick="applyDuplicateFix('${field.key}', '${it.type}', ${it.id}, '${inputId}', this)">Apply</button>
+        </div>`;
+    });
+
+    const groupId = `dupgroup-${field.key}-${gi}`;
+    return `<div class="card" id="${groupId}" style="margin-bottom:12px;padding:14px;">
+        <div style="display:flex;gap:10px;align-items:center;">
+            <div style="flex:1;min-width:0;">
+                <div style="font-size:12px;color:var(--on-surface-secondary);">Shared value (${group.count} items)</div>
+                <div style="font-weight:600;word-break:break-word;">${escapeHtml(group.value)}</div>
+            </div>
+            <button class="btn btn-secondary btn-sm" style="white-space:nowrap;"
+                onclick="fixGroupWithAI('${field.key}', ${gi}, ${keepId}, this)">
+                <span class="material-symbols-rounded" style="font-size:16px;">smart_toy</span> Fix group with AI
+            </button>
+        </div>
+        ${rows}
+    </div>`;
+}
+
+function dedupeKeepId(group) {
+    const fixable = group.items.filter((it) => it.id != null);
+    if (!fixable.length) return null;
+    return fixable.reduce((best, it) => (it.on_page_score > best.on_page_score ? it : best)).id;
+}
+
+async function fixGroupWithAI(fieldKey, gi, keepId, btn) {
+    const group = (duplicateData[fieldKey] || [])[gi];
+    if (!group) return;
+
+    // Only synced items can be applied afterwards, so only send those to the AI.
+    const fixable = group.items.filter((it) => it.id != null);
+    if (fixable.length < 2) {
+        showToast("Re-sync the store to enable AI fixes for this group", "warning");
+        return;
+    }
+
+    const original = btn.innerHTML;
+    btn.disabled = true;
+    btn.innerHTML = '<span class="material-symbols-rounded spin" style="font-size:16px;">progress_activity</span> Generating...';
+
+    try {
+        const resp = await apiRequest("/api/tasks", {
+            method: "POST",
+            body: {
+                store_id: group.store_id,
+                task_type: "dedupe_group",
+                input: { field: fieldKey, keep_id: keepId, items: fixable },
+            },
+        });
+        const suggestions = await pollDedupeTask(resp.task_id);
+        let filled = 0;
+        (suggestions || []).forEach((s) => {
+            const value = fieldKey === "seo_title" ? s.meta_title : s.meta_description;
+            const input = document.getElementById(`dupinput-${fieldKey}-${gi}-${s.id}`);
+            if (input && value) {
+                input.value = value;
+                input.style.borderColor = "var(--success)";
+                filled++;
+            }
+        });
+        showToast(
+            filled ? `AI filled ${filled} suggestion${filled === 1 ? "" : "s"} — review, then Apply` : "AI returned no changes",
+            filled ? "success" : "warning",
+        );
+    } catch (err) {
+        showToast(`AI fix failed: ${err.message}`, "error");
+    } finally {
+        btn.disabled = false;
+        btn.innerHTML = original;
+    }
+}
+
+function pollDedupeTask(taskId) {
+    return new Promise((resolve, reject) => {
+        const poll = async () => {
+            try {
+                const task = await apiRequest(`/api/tasks/${taskId}`);
+                if (task.status === "completed") {
+                    const result = task.result || {};
+                    if (result.error) return reject(new Error(result.error));
+                    return resolve(result.suggestions || []);
+                }
+                if (task.status === "failed") {
+                    return reject(new Error(task.error || "Task failed"));
+                }
+                setTimeout(poll, 2000);
+            } catch (err) {
+                reject(err);
+            }
+        };
+        poll();
+    });
+}
+
+async function applyDuplicateFix(fieldKey, itemType, itemId, inputId, btn) {
+    const input = document.getElementById(inputId);
+    const value = (input?.value || "").trim();
+    if (!value) {
+        showToast("Value cannot be empty", "error");
+        return;
+    }
+
+    const applyField = fieldKey === "seo_title" ? "meta_title" : "meta_description";
+    const endpoint =
+        itemType === "product"
+            ? `/api/seo/products/${itemId}/apply`
+            : `/api/seo/collections/${itemId}/apply`;
+
+    const original = btn.innerHTML;
+    btn.disabled = true;
+    btn.innerHTML = "Applying...";
+
+    try {
+        const resp = await apiRequest(endpoint, {
+            method: "POST",
+            body: { [applyField]: value, change_type: "duplicate_fix" },
+        });
+        if (resp.ok) {
+            showToast("Applied to Shopify", "success");
+            const row = btn.closest(".dup-item");
+            if (row) {
+                row.style.opacity = "0.5";
+                btn.textContent = "Applied";
+            }
+        } else {
+            btn.disabled = false;
+            btn.innerHTML = original;
+            showToast(`Failed: ${resp.error || "Unknown error"}`, "error");
+        }
+    } catch (err) {
+        btn.disabled = false;
+        btn.innerHTML = original;
+        showToast(`Failed: ${err.message}`, "error");
     }
 }

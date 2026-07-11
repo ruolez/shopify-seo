@@ -42,11 +42,11 @@ def list_stores():
 
 @store_bp.route("/api/stores", methods=["POST"])
 def create_store():
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
     name = (data.get("name") or "").strip()
     domain = (data.get("domain") or "").strip()
     access_token = (data.get("access_token") or "").strip()
-    api_version = (data.get("api_version") or "2024-10").strip()
+    api_version = (data.get("api_version") or "2026-01").strip()
 
     if not name or not domain or not access_token:
         return jsonify({"error": "Name, domain, and access token are required"}), 400
@@ -78,11 +78,11 @@ def create_store():
 
 @store_bp.route("/api/stores/<int:store_id>", methods=["PUT"])
 def update_store(store_id):
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
     name = (data.get("name") or "").strip()
     domain = (data.get("domain") or "").strip()
     access_token = (data.get("access_token") or "").strip()
-    api_version = (data.get("api_version") or "2024-10").strip()
+    api_version = (data.get("api_version") or "2026-01").strip()
 
     if not name or not domain:
         return jsonify({"error": "Name and domain are required"}), 400

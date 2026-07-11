@@ -41,7 +41,7 @@ def get_ai_config():
 
 @settings_bp.route("/api/settings/ai", methods=["POST"])
 def save_ai_config():
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
     api_key = (data.get("api_key") or "").strip()
     model = (data.get("model") or "anthropic/claude-sonnet-4").strip()
     daily_budget = data.get("daily_budget", 10.00)
@@ -75,7 +75,7 @@ def save_ai_config():
 
 @settings_bp.route("/api/settings/gsc", methods=["POST"])
 def save_gsc_config():
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
     client_id = (data.get("client_id") or "").strip()
     client_secret = (data.get("client_secret") or "").strip()
 
@@ -105,7 +105,7 @@ def save_gsc_config():
 
 @settings_bp.route("/api/settings/brave", methods=["POST"])
 def save_brave_config():
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
     api_key = (data.get("api_key") or "").strip()
 
     if not api_key:
@@ -313,7 +313,7 @@ def save_custom_setting(key):
     if key not in DEFAULTS:
         return jsonify({"error": f"Unknown setting key: {key}"}), 400
 
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
     value = data.get("value")
     if value is None:
         return jsonify({"error": "value is required"}), 400

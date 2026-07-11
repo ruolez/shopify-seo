@@ -10,6 +10,7 @@ import hashlib
 import json
 import logging
 import re
+import threading
 import time
 from collections import Counter
 from urllib.parse import urlparse
@@ -253,6 +254,7 @@ def _find_product_in_results(results, product):
 
 
 _brave_last_call = 0.0
+_brave_lock = threading.Lock()
 
 
 def brave_search(query, count=10):
@@ -272,14 +274,17 @@ def brave_search(query, count=10):
 
     for attempt in range(BRAVE_MAX_RETRIES):
         try:
-            elapsed = time.time() - _brave_last_call
-            if elapsed < BRAVE_RATE_LIMIT_DELAY:
-                wait = BRAVE_RATE_LIMIT_DELAY - elapsed
+            with _brave_lock:
+                now = time.time()
+                wait = max(0.0, BRAVE_RATE_LIMIT_DELAY - (now - _brave_last_call))
+                # Reserve the next slot before sleeping so concurrent callers
+                # queue up instead of all firing at once and tripping 429s.
+                _brave_last_call = now + wait
+            if wait > 0:
                 logger.info("Brave rate limit: waiting %.1fs before request", wait)
                 time.sleep(wait)
 
             logger.info("Brave search API call for query: %s (attempt %d)", query, attempt + 1)
-            _brave_last_call = time.time()
 
             resp = requests.get(
                 "https://api.search.brave.com/res/v1/web/search",
@@ -340,7 +345,10 @@ def brave_search(query, count=10):
                 continue
             return None
         except Exception:
-            logger.exception("Brave search exception for query: %s", query)
+            logger.exception("Brave search exception for query: %s (attempt %d/%d)", query, attempt + 1, BRAVE_MAX_RETRIES)
+            if attempt < BRAVE_MAX_RETRIES - 1:
+                time.sleep(2 ** attempt)
+                continue
             return None
 
     logger.error("Brave search exhausted %d retries for: %s", BRAVE_MAX_RETRIES, query)
@@ -791,7 +799,7 @@ def format_serp_benchmark_for_prompt(benchmark):
     lines.append(
         "IMPORTANT: Your recommendations MUST EXCEED these real competitor benchmarks — do not just match them. "
         "Meta titles should aim for 50-60 chars (use the full space Google displays). "
-        "Meta descriptions should aim for 145-160 chars (maximize snippet real estate). "
+        "Meta descriptions should aim for 140-160 chars (maximize snippet real estate). "
         "If competitors are using shorter titles or descriptions, that is an opportunity to stand out with more complete, keyword-rich metadata. "
         "Compare your product's current SERP presence against the competitor data above."
     )

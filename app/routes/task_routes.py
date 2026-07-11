@@ -9,6 +9,12 @@ from app.ai_agent import run_task
 from app.auth import decrypt_value
 from app.database import db
 from app.routes.schema_routes import generate_and_push_product_schema
+from app.services.ai_output_guard import (
+    clamp_meta_description,
+    clamp_meta_title,
+    sanitize_html,
+)
+from app.services.task_runner import is_failed_result, spawn as spawn_task, sweep_stale_jobs
 from app.shopify_client import ShopifyClient
 
 logger = logging.getLogger(__name__)
@@ -31,10 +37,12 @@ def _execute_task(task_id):
 
     try:
         result = run_task(task["task_type"], task["input"], task.get("store_id"))
+        status = "failed" if is_failed_result(result) else "completed"
+        error = (result.get("error") or "AI returned unparsable output") if status == "failed" else None
         with db.get_cursor() as cur:
             cur.execute(
-                "UPDATE ai_tasks SET status = 'completed', result = %s, completed_at = NOW() WHERE id = %s",
-                (json.dumps(result), task_id),
+                "UPDATE ai_tasks SET status = %s, error = %s, result = %s, completed_at = NOW() WHERE id = %s",
+                (status, error, json.dumps(result), task_id),
             )
     except Exception as e:
         with db.get_cursor() as cur:
@@ -46,7 +54,7 @@ def _execute_task(task_id):
 
 @task_bp.route("/api/tasks", methods=["POST"])
 def create_task():
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
     task_type = (data.get("task_type") or "").strip()
     store_id = data.get("store_id")
     task_input = data.get("input", {})
@@ -61,14 +69,14 @@ def create_task():
         )
         task_id = cur.fetchone()["id"]
 
-    thread = threading.Thread(target=_execute_task, args=(task_id,), daemon=True)
-    thread.start()
+    spawn_task("ai_tasks", task_id, _execute_task, task_id)
 
     return jsonify({"ok": True, "task_id": task_id}), 201
 
 
 @task_bp.route("/api/tasks/<int:task_id>", methods=["GET"])
 def get_task(task_id):
+    sweep_stale_jobs()
     with db.get_cursor() as cur:
         cur.execute("SELECT * FROM ai_tasks WHERE id = %s", (task_id,))
         task = cur.fetchone()
@@ -93,7 +101,7 @@ def get_task(task_id):
 
 @task_bp.route("/api/tasks/keyword-analysis", methods=["POST"])
 def create_keyword_analysis_task():
-    data = request.get_json() or {}
+    data = request.get_json(silent=True) or {}
     store_id = data.get("store_id")
 
     if not store_id:
@@ -106,10 +114,7 @@ def create_keyword_analysis_task():
         )
         task_id = cur.fetchone()["id"]
 
-    thread = threading.Thread(
-        target=_execute_keyword_analysis, args=(task_id, store_id), daemon=True
-    )
-    thread.start()
+    spawn_task("ai_tasks", task_id, _execute_keyword_analysis, task_id, store_id)
 
     return jsonify({"ok": True, "task_id": task_id}), 201
 
@@ -123,10 +128,12 @@ def _execute_keyword_analysis(task_id, store_id):
     try:
         result = run_task("keyword_analysis", {"store_id": store_id}, store_id)
 
+        status = "failed" if is_failed_result(result) else "completed"
+        error = (result.get("error") or "AI returned unparsable output") if status == "failed" else None
         with db.get_cursor() as cur:
             cur.execute(
-                "UPDATE ai_tasks SET status = 'completed', result = %s, completed_at = NOW() WHERE id = %s",
-                (json.dumps(result), task_id),
+                "UPDATE ai_tasks SET status = %s, error = %s, result = %s, completed_at = NOW() WHERE id = %s",
+                (status, error, json.dumps(result), task_id),
             )
 
         if "error" not in result and "raw_response" not in result:
@@ -184,7 +191,7 @@ def get_keyword_taxonomy(store_id):
 
 @task_bp.route("/api/tasks/bulk", methods=["POST"])
 def create_bulk_task():
-    data = request.get_json() or {}
+    data = request.get_json(silent=True) or {}
     product_ids = data.get("product_ids", [])
     auto_apply = data.get("auto_apply", True)
     skip_tags = data.get("skip_tags", True)
@@ -194,28 +201,33 @@ def create_bulk_task():
         return jsonify({"error": "product_ids is required"}), 400
 
     with db.get_cursor() as cur:
+        # Validate up front — unknown ids would be enqueued but never processed
+        # (executor JOIN drops them), leaving completed+failed < total forever.
+        cur.execute("SELECT id FROM synced_products WHERE id = ANY(%s)", ([int(i) for i in product_ids],))
+        valid_ids = [r["id"] for r in cur.fetchall()]
+        if not valid_ids:
+            return jsonify({"error": "No matching products found"}), 400
+
         cur.execute(
             "INSERT INTO bulk_tasks (status, total, auto_apply, skip_tags, skip_title) VALUES ('pending', %s, %s, %s, %s) RETURNING id",
-            (len(product_ids), auto_apply, skip_tags, skip_title),
+            (len(valid_ids), auto_apply, skip_tags, skip_title),
         )
         bulk_task_id = cur.fetchone()["id"]
 
-        for pid in product_ids:
+        for pid in valid_ids:
             cur.execute(
                 "INSERT INTO bulk_task_items (bulk_task_id, product_id) VALUES (%s, %s)",
                 (bulk_task_id, pid),
             )
 
-    thread = threading.Thread(
-        target=_execute_bulk_task, args=(bulk_task_id,), daemon=True
-    )
-    thread.start()
+    spawn_task("bulk_tasks", bulk_task_id, _execute_bulk_task, bulk_task_id)
 
     return jsonify({"ok": True, "bulk_task_id": bulk_task_id, "total": len(product_ids)}), 201
 
 
 @task_bp.route("/api/tasks/bulk/<int:bulk_task_id>", methods=["GET"])
 def get_bulk_task(bulk_task_id):
+    sweep_stale_jobs()
     with db.get_cursor() as cur:
         cur.execute("SELECT * FROM bulk_tasks WHERE id = %s", (bulk_task_id,))
         bulk_task = cur.fetchone()
@@ -264,7 +276,7 @@ def get_bulk_task(bulk_task_id):
 
 @task_bp.route("/api/tasks/bulk-collections", methods=["POST"])
 def create_bulk_collection_task():
-    data = request.get_json() or {}
+    data = request.get_json(silent=True) or {}
     collection_ids = data.get("collection_ids", [])
     auto_apply = data.get("auto_apply", True)
     skip_title = data.get("skip_title", False)
@@ -273,22 +285,24 @@ def create_bulk_collection_task():
         return jsonify({"error": "collection_ids is required"}), 400
 
     with db.get_cursor() as cur:
+        cur.execute("SELECT id FROM synced_collections WHERE id = ANY(%s)", ([int(i) for i in collection_ids],))
+        valid_ids = [r["id"] for r in cur.fetchall()]
+        if not valid_ids:
+            return jsonify({"error": "No matching collections found"}), 400
+
         cur.execute(
             "INSERT INTO bulk_tasks (status, total, auto_apply, task_type, skip_title) VALUES ('pending', %s, %s, 'collection', %s) RETURNING id",
-            (len(collection_ids), auto_apply, skip_title),
+            (len(valid_ids), auto_apply, skip_title),
         )
         bulk_task_id = cur.fetchone()["id"]
 
-        for cid in collection_ids:
+        for cid in valid_ids:
             cur.execute(
                 "INSERT INTO bulk_task_items (bulk_task_id, collection_id) VALUES (%s, %s)",
                 (bulk_task_id, cid),
             )
 
-    thread = threading.Thread(
-        target=_execute_bulk_collection_task, args=(bulk_task_id,), daemon=True
-    )
-    thread.start()
+    spawn_task("bulk_tasks", bulk_task_id, _execute_bulk_collection_task, bulk_task_id)
 
     return jsonify({"ok": True, "bulk_task_id": bulk_task_id, "total": len(collection_ids)}), 201
 
@@ -338,6 +352,10 @@ def _execute_bulk_collection_task(bulk_task_id):
                 task_input["claimed_keywords"] = list(claimed_keywords)
             ai_result = run_task("collection_seo", task_input)
 
+            item_error = None
+            if is_failed_result(ai_result):
+                item_error = ai_result.get("error") or "AI returned unparsable output"
+
             with db.get_cursor() as cur:
                 cur.execute(
                     "UPDATE bulk_task_items SET ai_result = %s WHERE id = %s",
@@ -364,11 +382,11 @@ def _execute_bulk_collection_task(bulk_task_id):
                     if not skip_title and ai_result.get("h1_tag"):
                         collection_fields["title"] = ai_result["h1_tag"]
                     if ai_result.get("optimized_description"):
-                        collection_fields["description_html"] = ai_result["optimized_description"]
+                        collection_fields["description_html"] = sanitize_html(ai_result["optimized_description"])
                     if ai_result.get("optimized_meta_title"):
-                        collection_fields["meta_title"] = ai_result["optimized_meta_title"]
+                        collection_fields["meta_title"] = clamp_meta_title(ai_result["optimized_meta_title"])
                     if ai_result.get("optimized_meta_description"):
-                        collection_fields["meta_description"] = ai_result["optimized_meta_description"]
+                        collection_fields["meta_description"] = clamp_meta_description(ai_result["optimized_meta_description"])
 
                     if collection_fields:
                         client.update_collection(item["shopify_id"], collection_fields)
@@ -391,6 +409,7 @@ def _execute_bulk_collection_task(bulk_task_id):
                         )
 
                 except Exception as apply_err:
+                    item_error = f"Apply to Shopify failed: {apply_err}"
                     with db.get_cursor() as cur:
                         cur.execute(
                             "UPDATE bulk_task_items SET apply_result = %s WHERE id = %s",
@@ -398,14 +417,24 @@ def _execute_bulk_collection_task(bulk_task_id):
                         )
 
             with db.get_cursor() as cur:
-                cur.execute(
-                    "UPDATE bulk_task_items SET status = 'completed', completed_at = NOW() WHERE id = %s",
-                    (item_id,),
-                )
-                cur.execute(
-                    "UPDATE bulk_tasks SET completed = completed + 1 WHERE id = %s",
-                    (bulk_task_id,),
-                )
+                if item_error:
+                    cur.execute(
+                        "UPDATE bulk_task_items SET status = 'failed', error = %s, completed_at = NOW() WHERE id = %s",
+                        (item_error, item_id),
+                    )
+                    cur.execute(
+                        "UPDATE bulk_tasks SET failed = failed + 1 WHERE id = %s",
+                        (bulk_task_id,),
+                    )
+                else:
+                    cur.execute(
+                        "UPDATE bulk_task_items SET status = 'completed', completed_at = NOW() WHERE id = %s",
+                        (item_id,),
+                    )
+                    cur.execute(
+                        "UPDATE bulk_tasks SET completed = completed + 1 WHERE id = %s",
+                        (bulk_task_id,),
+                    )
 
         except Exception as e:
             with db.get_cursor() as cur:
@@ -473,6 +502,10 @@ def _execute_bulk_task(bulk_task_id):
                 task_input["claimed_keywords"] = list(claimed_keywords)
             ai_result = run_task("product_seo", task_input)
 
+            item_error = None
+            if is_failed_result(ai_result):
+                item_error = ai_result.get("error") or "AI returned unparsable output"
+
             with db.get_cursor() as cur:
                 cur.execute(
                     "UPDATE bulk_task_items SET ai_result = %s WHERE id = %s",
@@ -499,11 +532,11 @@ def _execute_bulk_task(bulk_task_id):
                     if not skip_title and ai_result.get("h1_tag"):
                         product_fields["title"] = ai_result["h1_tag"]
                     if ai_result.get("optimized_description"):
-                        product_fields["description_html"] = ai_result["optimized_description"]
+                        product_fields["description_html"] = sanitize_html(ai_result["optimized_description"])
                     if ai_result.get("optimized_meta_title"):
-                        product_fields["meta_title"] = ai_result["optimized_meta_title"]
+                        product_fields["meta_title"] = clamp_meta_title(ai_result["optimized_meta_title"])
                     if ai_result.get("optimized_meta_description"):
-                        product_fields["meta_description"] = ai_result["optimized_meta_description"]
+                        product_fields["meta_description"] = clamp_meta_description(ai_result["optimized_meta_description"])
                     if not skip_tags and ai_result.get("suggested_tags") and isinstance(ai_result["suggested_tags"], list):
                         product_fields["tags"] = ai_result["suggested_tags"]
 
@@ -556,6 +589,7 @@ def _execute_bulk_task(bulk_task_id):
                         )
 
                 except Exception as apply_err:
+                    item_error = f"Apply to Shopify failed: {apply_err}"
                     with db.get_cursor() as cur:
                         cur.execute(
                             "UPDATE bulk_task_items SET apply_result = %s WHERE id = %s",
@@ -563,14 +597,24 @@ def _execute_bulk_task(bulk_task_id):
                         )
 
             with db.get_cursor() as cur:
-                cur.execute(
-                    "UPDATE bulk_task_items SET status = 'completed', completed_at = NOW() WHERE id = %s",
-                    (item_id,),
-                )
-                cur.execute(
-                    "UPDATE bulk_tasks SET completed = completed + 1 WHERE id = %s",
-                    (bulk_task_id,),
-                )
+                if item_error:
+                    cur.execute(
+                        "UPDATE bulk_task_items SET status = 'failed', error = %s, completed_at = NOW() WHERE id = %s",
+                        (item_error, item_id),
+                    )
+                    cur.execute(
+                        "UPDATE bulk_tasks SET failed = failed + 1 WHERE id = %s",
+                        (bulk_task_id,),
+                    )
+                else:
+                    cur.execute(
+                        "UPDATE bulk_task_items SET status = 'completed', completed_at = NOW() WHERE id = %s",
+                        (item_id,),
+                    )
+                    cur.execute(
+                        "UPDATE bulk_tasks SET completed = completed + 1 WHERE id = %s",
+                        (bulk_task_id,),
+                    )
 
         except Exception as e:
             with db.get_cursor() as cur:
@@ -594,7 +638,7 @@ def _execute_bulk_task(bulk_task_id):
 
 @task_bp.route("/api/tasks/bulk-titles", methods=["POST"])
 def create_bulk_title_task():
-    data = request.get_json() or {}
+    data = request.get_json(silent=True) or {}
     product_ids = data.get("product_ids", [])
 
     if not product_ids:
@@ -613,10 +657,7 @@ def create_bulk_title_task():
                 (bulk_task_id, pid),
             )
 
-    thread = threading.Thread(
-        target=_execute_bulk_title_task, args=(bulk_task_id,), daemon=True
-    )
-    thread.start()
+    spawn_task("bulk_tasks", bulk_task_id, _execute_bulk_title_task, bulk_task_id)
 
     return jsonify({"ok": True, "bulk_task_id": bulk_task_id, "total": len(product_ids)}), 201
 
@@ -657,6 +698,10 @@ def _execute_bulk_title_task(bulk_task_id):
         try:
             ai_result = run_task("product_title_seo", {"product_id": product_id})
 
+            item_error = None
+            if is_failed_result(ai_result):
+                item_error = ai_result.get("error") or "AI returned unparsable output"
+
             with db.get_cursor() as cur:
                 cur.execute(
                     "UPDATE bulk_task_items SET ai_result = %s WHERE id = %s",
@@ -684,6 +729,7 @@ def _execute_bulk_title_task(bulk_task_id):
                                 (json.dumps({"applied": True}), item_id),
                             )
                     except Exception as apply_err:
+                        item_error = f"Apply to Shopify failed: {apply_err}"
                         with db.get_cursor() as cur:
                             cur.execute(
                                 "UPDATE bulk_task_items SET apply_result = %s WHERE id = %s",
@@ -691,14 +737,24 @@ def _execute_bulk_title_task(bulk_task_id):
                             )
 
             with db.get_cursor() as cur:
-                cur.execute(
-                    "UPDATE bulk_task_items SET status = 'completed', completed_at = NOW() WHERE id = %s",
-                    (item_id,),
-                )
-                cur.execute(
-                    "UPDATE bulk_tasks SET completed = completed + 1 WHERE id = %s",
-                    (bulk_task_id,),
-                )
+                if item_error:
+                    cur.execute(
+                        "UPDATE bulk_task_items SET status = 'failed', error = %s, completed_at = NOW() WHERE id = %s",
+                        (item_error, item_id),
+                    )
+                    cur.execute(
+                        "UPDATE bulk_tasks SET failed = failed + 1 WHERE id = %s",
+                        (bulk_task_id,),
+                    )
+                else:
+                    cur.execute(
+                        "UPDATE bulk_task_items SET status = 'completed', completed_at = NOW() WHERE id = %s",
+                        (item_id,),
+                    )
+                    cur.execute(
+                        "UPDATE bulk_tasks SET completed = completed + 1 WHERE id = %s",
+                        (bulk_task_id,),
+                    )
 
         except Exception as e:
             with db.get_cursor() as cur:
@@ -722,7 +778,7 @@ def _execute_bulk_title_task(bulk_task_id):
 
 @task_bp.route("/api/tasks/bulk-collection-titles", methods=["POST"])
 def create_bulk_collection_title_task():
-    data = request.get_json() or {}
+    data = request.get_json(silent=True) or {}
     collection_ids = data.get("collection_ids", [])
 
     if not collection_ids:
@@ -741,10 +797,7 @@ def create_bulk_collection_title_task():
                 (bulk_task_id, cid),
             )
 
-    thread = threading.Thread(
-        target=_execute_bulk_collection_title_task, args=(bulk_task_id,), daemon=True
-    )
-    thread.start()
+    spawn_task("bulk_tasks", bulk_task_id, _execute_bulk_collection_title_task, bulk_task_id)
 
     return jsonify({"ok": True, "bulk_task_id": bulk_task_id, "total": len(collection_ids)}), 201
 
@@ -785,6 +838,10 @@ def _execute_bulk_collection_title_task(bulk_task_id):
         try:
             ai_result = run_task("collection_title_seo", {"collection_id": collection_id})
 
+            item_error = None
+            if is_failed_result(ai_result):
+                item_error = ai_result.get("error") or "AI returned unparsable output"
+
             with db.get_cursor() as cur:
                 cur.execute(
                     "UPDATE bulk_task_items SET ai_result = %s WHERE id = %s",
@@ -812,6 +869,7 @@ def _execute_bulk_collection_title_task(bulk_task_id):
                                 (json.dumps({"applied": True}), item_id),
                             )
                     except Exception as apply_err:
+                        item_error = f"Apply to Shopify failed: {apply_err}"
                         with db.get_cursor() as cur:
                             cur.execute(
                                 "UPDATE bulk_task_items SET apply_result = %s WHERE id = %s",
@@ -819,14 +877,24 @@ def _execute_bulk_collection_title_task(bulk_task_id):
                             )
 
             with db.get_cursor() as cur:
-                cur.execute(
-                    "UPDATE bulk_task_items SET status = 'completed', completed_at = NOW() WHERE id = %s",
-                    (item_id,),
-                )
-                cur.execute(
-                    "UPDATE bulk_tasks SET completed = completed + 1 WHERE id = %s",
-                    (bulk_task_id,),
-                )
+                if item_error:
+                    cur.execute(
+                        "UPDATE bulk_task_items SET status = 'failed', error = %s, completed_at = NOW() WHERE id = %s",
+                        (item_error, item_id),
+                    )
+                    cur.execute(
+                        "UPDATE bulk_tasks SET failed = failed + 1 WHERE id = %s",
+                        (bulk_task_id,),
+                    )
+                else:
+                    cur.execute(
+                        "UPDATE bulk_task_items SET status = 'completed', completed_at = NOW() WHERE id = %s",
+                        (item_id,),
+                    )
+                    cur.execute(
+                        "UPDATE bulk_tasks SET completed = completed + 1 WHERE id = %s",
+                        (bulk_task_id,),
+                    )
 
         except Exception as e:
             with db.get_cursor() as cur:
@@ -867,3 +935,255 @@ def list_tasks():
             for t in tasks
         ]
     )
+
+
+# ── Unified active-tasks feed (global tasks panel) ─────────────────
+# Read-only aggregation across every task-tracking table. Human labels and
+# owning-page links live here so the frontend needs no per-type knowledge.
+
+AI_TASK_META = {
+    "ai_seo_scan": ("AI SEO Scan", "/ai-seo"),
+    "article_seo": ("Article SEO Analysis", "/blog"),
+    "article_research": ("Article Research", "/blog"),
+    "article_outline": ("Article Outline", "/blog"),
+    "article_generate": ("Article Generation", "/blog"),
+    "article_refresh_links": ("Article Link Refresh", "/blog"),
+    "blog_sync": ("Blog Sync", "/blog"),
+    "blog_landing_page": ("Blog Landing Page", "/blog"),
+    "blog_hero_image": ("Blog Hero Image", "/blog"),
+    "blog_image": ("Blog Image", "/blog"),
+    "blog_seo_suggestions": ("Blog SEO Suggestions", "/blog"),
+    "brand_seo": ("Brand SEO", "/brands"),
+    "home_page_generate": ("Home Page Generation", "/home-page"),
+    "home_carousel_image": ("Home Carousel Image", "/home-page"),
+    "keyword_analysis": ("Keyword Analysis", "/seo"),
+    "landing_page_seo": ("Landing Page SEO", "/landing-pages"),
+    "landing_page_generate": ("Landing Page Generation", "/landing-pages"),
+    "landing_hero_image": ("Landing Page Hero Image", "/landing-pages"),
+    "news_analyze": ("News Analysis", "/news"),
+    "news_auto": ("News Auto-Publish", "/news"),
+    "news_hero_image": ("News Hero Image", "/news"),
+    "news_hub": ("News Hub Generation", "/news"),
+    "news_inline_images": ("News Inline Images", "/news"),
+    "news_links": ("News Link Building", "/news"),
+    "news_regen_hero": ("News Hero Regeneration", "/news"),
+    "news_regen_inline": ("News Inline Image Regeneration", "/news"),
+    "technical_seo_fix": ("Technical SEO Fix", "/technical-seo"),
+    "interlinking_analysis": ("Interlinking Analysis", "/interlinking"),
+}
+
+BULK_TASK_META = {
+    None: ("Product SEO Optimization", "/seo"),
+    "product": ("Product SEO Optimization", "/seo"),
+    "collection": ("Collection SEO Optimization", "/seo"),
+    "title": ("Product Title Optimization", "/seo"),
+    "collection_title": ("Collection Title Optimization", "/seo"),
+    "apply_tags": ("Apply Product Tags", "/seo"),
+    "article": ("Bulk Article SEO", "/blog"),
+    "brand_logos": ("Brand Logo Generation", "/brands"),
+    "brand_seo": ("Bulk Brand SEO", "/brands"),
+    "generate_brand_collections": ("Brand Collection Generation", "/brands"),
+    "collection_images": ("Collection Image Generation", "/seo"),
+    "fact_boost": ("Fact Boost", "/ai-seo"),
+    "geo_optimize": ("GEO Optimization", "/ai-seo"),
+    "generate_collections": ("Collection Generation", "/seo"),
+    "generate_taxonomy_collections": ("Taxonomy Collection Generation", "/seo"),
+    "placeholder_image": ("Placeholder Image Generation", "/images"),
+    "replace_placeholder_image": ("Placeholder Image Replacement", "/images"),
+    "technical_seo": ("Technical SEO Bulk Fix", "/technical-seo"),
+    "tseo_analyze": ("Technical SEO Analysis", "/technical-seo"),
+    "collection_publish": ("Publish Collections", "/seo"),
+    "collection_delete": ("Delete Collections", "/seo"),
+}
+
+KEYWORD_RUN_META = {
+    "consolidate": "Keyword Consolidation",
+    "audit": "Keyword Audit",
+    "plan": "Keyword Planning",
+    "apply": "Keyword Strategy Apply",
+}
+
+_ACTIVE_STATUSES = ("pending", "running")
+
+
+def _fallback_label(key):
+    return (str(key or "task")).replace("_", " ").title()
+
+
+def _iso(dt):
+    return dt.isoformat() if dt else None
+
+
+@task_bp.route("/api/tasks/active", methods=["GET"])
+def active_tasks():
+    sweep_stale_jobs()
+
+    if request.args.get("count_only"):
+        with db.get_cursor() as cur:
+            cur.execute(
+                """SELECT
+                     (SELECT COUNT(*) FROM ai_tasks WHERE status IN ('pending','running'))
+                   + (SELECT COUNT(*) FROM bulk_tasks WHERE status IN ('pending','running'))
+                   + (SELECT COUNT(*) FROM sync_jobs WHERE status IN ('pending','running'))
+                   + (SELECT COUNT(*) FROM keyword_strategy_runs WHERE status IN ('pending','running'))
+                   + (SELECT COUNT(*) FROM ai_tracking_runs WHERE status IN ('pending','running'))
+                   + (SELECT COUNT(*) FROM gsc_data_pulls WHERE status IN ('pending','running'))
+                   + (SELECT COUNT(*) FROM semrush_imports WHERE status IN ('pending','running'))
+                   AS active_count"""
+            )
+            n = cur.fetchone()["active_count"]
+        return jsonify({"active_count": int(n or 0)})
+
+    tasks = []
+    with db.get_cursor() as cur:
+        # 1. ai_tasks
+        cur.execute(
+            """SELECT id, store_id, task_type, status, error, created_at, completed_at,
+                      COALESCE(input->>'title', input->>'topic', input->>'handle') AS detail
+               FROM ai_tasks
+               WHERE status IN ('pending','running')
+                  OR (status IN ('completed','failed') AND completed_at > NOW() - INTERVAL '24 hours')
+               ORDER BY id DESC LIMIT 50"""
+        )
+        for r in cur.fetchall():
+            label, page = AI_TASK_META.get(r["task_type"], (_fallback_label(r["task_type"]), None))
+            tasks.append({
+                "source": "ai_tasks", "id": r["id"], "label": label, "page": page,
+                "detail": r["detail"], "status": r["status"], "progress": None,
+                "current_item": None, "store_id": r["store_id"],
+                "started_at": _iso(r["created_at"]), "completed_at": _iso(r["completed_at"]),
+                "error": r["error"],
+            })
+
+        # 2. bulk_tasks (discriminator spans two columns: kind holds geo_optimize/fact_boost)
+        cur.execute(
+            """SELECT id, store_id, kind, task_type, status, total, completed, failed,
+                      current_product_title, created_at, completed_at
+               FROM bulk_tasks
+               WHERE status IN ('pending','running')
+                  OR (status IN ('completed','failed') AND completed_at > NOW() - INTERVAL '24 hours')
+               ORDER BY id DESC LIMIT 50"""
+        )
+        for r in cur.fetchall():
+            key = r["task_type"] or r["kind"]
+            label, page = BULK_TASK_META.get(key, (_fallback_label(key), None))
+            tasks.append({
+                "source": "bulk", "id": r["id"], "label": label, "page": page,
+                "detail": None, "status": r["status"],
+                "progress": {"completed": r["completed"] or 0, "failed": r["failed"] or 0, "total": r["total"] or 0},
+                "current_item": r["current_product_title"], "store_id": r["store_id"],
+                "started_at": _iso(r["created_at"]), "completed_at": _iso(r["completed_at"]),
+                "error": None,
+            })
+
+        # 3. sync_jobs
+        cur.execute(
+            """SELECT id, store_id, status, current_phase, products_synced, collections_synced,
+                      blogs_synced, articles_synced, total_products, error, started_at, completed_at
+               FROM sync_jobs
+               WHERE status IN ('pending','running')
+                  OR (status IN ('completed','failed','completed_with_errors')
+                      AND completed_at > NOW() - INTERVAL '24 hours')
+               ORDER BY id DESC LIMIT 20"""
+        )
+        for r in cur.fetchall():
+            if r["status"] in _ACTIVE_STATUSES:
+                detail = (r["current_phase"] or "starting").replace("_", " ")
+            else:
+                detail = f"{r['products_synced'] or 0} products, {r['collections_synced'] or 0} collections"
+            progress = None
+            if r["total_products"]:
+                progress = {"completed": r["products_synced"] or 0, "failed": 0, "total": r["total_products"]}
+            tasks.append({
+                "source": "sync", "id": r["id"], "label": "Store Sync", "page": "/stores",
+                "detail": detail, "status": r["status"], "progress": progress,
+                "current_item": None, "store_id": r["store_id"],
+                "started_at": _iso(r["started_at"]), "completed_at": _iso(r["completed_at"]),
+                "error": r["error"],
+            })
+
+        # 4. keyword_strategy_runs
+        cur.execute(
+            """SELECT id, store_id, run_type, status, total_items, completed_items, failed_items,
+                      error, started_at, completed_at
+               FROM keyword_strategy_runs
+               WHERE status IN ('pending','running')
+                  OR (status IN ('completed','failed') AND completed_at > NOW() - INTERVAL '24 hours')
+               ORDER BY id DESC LIMIT 20"""
+        )
+        for r in cur.fetchall():
+            label = KEYWORD_RUN_META.get(r["run_type"], _fallback_label(r["run_type"]))
+            progress = None
+            if r["total_items"]:
+                progress = {"completed": r["completed_items"] or 0, "failed": r["failed_items"] or 0, "total": r["total_items"]}
+            tasks.append({
+                "source": "keyword_strategy", "id": r["id"], "label": label, "page": "/keyword-strategy",
+                "detail": None, "status": r["status"], "progress": progress,
+                "current_item": None, "store_id": r["store_id"],
+                "started_at": _iso(r["started_at"]), "completed_at": _iso(r["completed_at"]),
+                "error": r["error"],
+            })
+
+        # 5. ai_tracking_runs
+        cur.execute(
+            """SELECT id, store_id, status, error, started_at, completed_at
+               FROM ai_tracking_runs
+               WHERE status IN ('pending','running')
+                  OR (status IN ('completed','failed') AND completed_at > NOW() - INTERVAL '24 hours')
+               ORDER BY id DESC LIMIT 20"""
+        )
+        for r in cur.fetchall():
+            tasks.append({
+                "source": "ai_tracking", "id": r["id"], "label": "AI Visibility Tracking", "page": "/ai-seo",
+                "detail": None, "status": r["status"], "progress": None,
+                "current_item": None, "store_id": r["store_id"],
+                "started_at": _iso(r["started_at"]), "completed_at": _iso(r["completed_at"]),
+                "error": r["error"],
+            })
+
+        # 6. gsc_data_pulls
+        cur.execute(
+            """SELECT id, store_id, pull_type, rows_pulled, status, error_message, started_at, completed_at
+               FROM gsc_data_pulls
+               WHERE status IN ('pending','running')
+                  OR (status IN ('completed','failed') AND completed_at > NOW() - INTERVAL '24 hours')
+               ORDER BY id DESC LIMIT 20"""
+        )
+        for r in cur.fetchall():
+            tasks.append({
+                "source": "gsc_pull", "id": r["id"],
+                "label": f"GSC Data Pull ({r['pull_type'] or 'incremental'})", "page": "/gsc",
+                "detail": f"{r['rows_pulled']} rows" if r["rows_pulled"] else None,
+                "status": r["status"], "progress": None,
+                "current_item": None, "store_id": r["store_id"],
+                "started_at": _iso(r["started_at"]), "completed_at": _iso(r["completed_at"]),
+                "error": r["error_message"],
+            })
+
+        # 7. semrush_imports (no completed_at column — window on created_at)
+        cur.execute(
+            """SELECT id, store_id, import_type, filename, row_count, status, error_message, created_at
+               FROM semrush_imports
+               WHERE status IN ('pending','running')
+                  OR (status IN ('completed','failed') AND created_at > NOW() - INTERVAL '24 hours')
+               ORDER BY id DESC LIMIT 20"""
+        )
+        for r in cur.fetchall():
+            tasks.append({
+                "source": "semrush_import", "id": r["id"],
+                "label": f"Semrush Import ({r['import_type'] or 'csv'})", "page": "/semrush",
+                "detail": r["filename"], "status": r["status"], "progress": None,
+                "current_item": None, "store_id": r["store_id"],
+                "started_at": _iso(r["created_at"]), "completed_at": None,
+                "error": r["error_message"],
+            })
+
+    active = [t for t in tasks if t["status"] in _ACTIVE_STATUSES]
+    finished = [t for t in tasks if t["status"] not in _ACTIVE_STATUSES]
+
+    # running first, then pending — newest first within each
+    active.sort(key=lambda t: (t["status"] != "running", -(t["id"] or 0)))
+    finished.sort(key=lambda t: (t["completed_at"] or t["started_at"] or ""), reverse=True)
+    finished = finished[:20]
+
+    return jsonify({"tasks": active + finished, "active_count": len(active)})

@@ -25,6 +25,10 @@ def _get_sync_lock(store_id):
 
 
 def _upsert_product_batch(store_id, batch):
+    # De-dupe by shopify_id (keep the newest occurrence) — ON CONFLICT raises
+    # "cannot affect row a second time" if a product appears twice in one batch.
+    deduped = {p["shopify_id"]: p for p in batch}
+    batch = list(deduped.values())
     with db.get_conn() as conn:
         cur = conn.cursor()
         psycopg2.extras.execute_values(
@@ -70,6 +74,143 @@ def _upsert_product_batch(store_id, batch):
             template="(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())",
         )
         cur.close()
+
+
+def _sync_blogs_and_articles(client, store_id, progress_cb=None):
+    """Fetch all blogs + their articles and upsert them locally.
+
+    Shared by the full store sync and the blogs-only sync so the upsert
+    semantics (article_type promotion, staged-upload image filtering, stale
+    cleanup) can't drift apart. Returns (blogs_synced, articles_synced, errors).
+    """
+    blogs = client.get_all_blogs()
+    logger.info("Fetched %d blogs for store %s", len(blogs), store_id)
+
+    blogs_synced = 0
+    articles_synced = 0
+    blog_errors = []
+
+    for b in blogs:
+        try:
+            with db.get_conn() as conn:
+                cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+                cur.execute(
+                    """
+                    INSERT INTO synced_blogs
+                        (store_id, shopify_id, title, handle, comment_policy,
+                         articles_count, synced_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, NOW())
+                    ON CONFLICT (store_id, shopify_id) DO UPDATE SET
+                        title = EXCLUDED.title,
+                        handle = EXCLUDED.handle,
+                        comment_policy = EXCLUDED.comment_policy,
+                        articles_count = EXCLUDED.articles_count,
+                        synced_at = NOW()
+                    RETURNING id
+                    """,
+                    (
+                        store_id,
+                        b["shopify_id"],
+                        b["title"],
+                        b["handle"],
+                        b["comment_policy"],
+                        b["articles_count"],
+                    ),
+                )
+                blog_db_id = cur.fetchone()["id"]
+
+                blog_articles = client.get_all_articles(blog_id=b["shopify_id"])
+                for a in blog_articles:
+                    cur.execute(
+                        """
+                        INSERT INTO synced_articles
+                            (store_id, blog_id, shopify_id, shopify_blog_id, title, handle,
+                             body, summary, tags, author, meta_title, meta_description,
+                             image_url, image_alt, is_published, published_at, article_type, synced_at)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+                        ON CONFLICT (store_id, shopify_id) DO UPDATE SET
+                            blog_id = EXCLUDED.blog_id,
+                            shopify_blog_id = EXCLUDED.shopify_blog_id,
+                            title = EXCLUDED.title,
+                            handle = EXCLUDED.handle,
+                            body = EXCLUDED.body,
+                            summary = EXCLUDED.summary,
+                            tags = EXCLUDED.tags,
+                            author = EXCLUDED.author,
+                            meta_title = EXCLUDED.meta_title,
+                            meta_description = EXCLUDED.meta_description,
+                            image_url = CASE WHEN EXCLUDED.image_url LIKE '%%shopify-staged-uploads%%' THEN synced_articles.image_url ELSE EXCLUDED.image_url END,
+                            image_alt = EXCLUDED.image_alt,
+                            is_published = EXCLUDED.is_published,
+                            published_at = EXCLUDED.published_at,
+                            article_type = CASE WHEN EXCLUDED.article_type = 'news' THEN 'news' ELSE synced_articles.article_type END,
+                            synced_at = NOW()
+                        """,
+                        (
+                            store_id,
+                            blog_db_id,
+                            a["shopify_id"],
+                            a["blog_shopify_id"],
+                            a["title"],
+                            a["handle"],
+                            a["body"],
+                            a["summary"],
+                            a["tags"],
+                            a["author"],
+                            a["meta_title"],
+                            a["meta_description"],
+                            a["image_url"] if "shopify-staged-uploads" not in (a["image_url"] or "") else "",
+                            a["image_alt"],
+                            a["is_published"],
+                            a["published_at"],
+                            ("news" if (a.get("template_suffix") == "news" or "type:news" in (a.get("tags") or "")) else "blog"),
+                        ),
+                    )
+                    articles_synced += 1
+
+                # Stale-article cleanup runs even when the blog is now empty —
+                # the fetch succeeded, so an empty list means all were deleted.
+                shopify_article_ids = [a["shopify_id"] for a in blog_articles]
+                if shopify_article_ids:
+                    placeholders = ",".join(["%s"] * len(shopify_article_ids))
+                    cur.execute(
+                        f"DELETE FROM synced_articles WHERE blog_id = %s AND shopify_id NOT IN ({placeholders})",
+                        (blog_db_id, *shopify_article_ids),
+                    )
+                else:
+                    cur.execute("DELETE FROM synced_articles WHERE blog_id = %s", (blog_db_id,))
+                stale_article_count = cur.rowcount
+                if stale_article_count:
+                    logger.info("Removed %d stale articles for blog %s", stale_article_count, blog_db_id)
+
+                cur.close()
+
+            blogs_synced += 1
+            time.sleep(0.5)
+        except Exception as e:
+            logger.warning("Failed to sync blog %s: %s", b["shopify_id"], e)
+            blog_errors.append(f"{b.get('handle') or b['shopify_id']}: {e}")
+
+        if progress_cb:
+            progress_cb(blogs_synced, articles_synced)
+
+    # Stale-blog cleanup (articles cascade via FK). Unconditional: the fetch
+    # succeeded, so zero blogs means the store legitimately has none.
+    shopify_blog_ids = [b["shopify_id"] for b in blogs]
+    with db.get_cursor() as cur:
+        if shopify_blog_ids:
+            placeholders = ",".join(["%s"] * len(shopify_blog_ids))
+            cur.execute(
+                f"DELETE FROM synced_blogs WHERE store_id = %s AND shopify_id NOT IN ({placeholders})",
+                (store_id, *shopify_blog_ids),
+            )
+        else:
+            cur.execute("DELETE FROM synced_blogs WHERE store_id = %s", (store_id,))
+        stale_blog_count = cur.rowcount
+    if stale_blog_count:
+        logger.info("Removed %d stale blogs for store %s", stale_blog_count, store_id)
+
+    return blogs_synced, articles_synced, blog_errors
 
 
 def sync_store(store_id):
@@ -153,18 +294,21 @@ def _sync_store_inner(store_id):
                 )
         logger.info("Fetched and saved %d products", len(products))
 
-        # Clean up stale products
+        # Clean up stale products — unconditional: the fetch succeeded, so an
+        # empty list means the store legitimately has no matching products.
         shopify_product_ids = [p["shopify_id"] for p in products]
-        if shopify_product_ids:
-            placeholders = ",".join(["%s"] * len(shopify_product_ids))
-            with db.get_cursor() as cur:
+        with db.get_cursor() as cur:
+            if shopify_product_ids:
+                placeholders = ",".join(["%s"] * len(shopify_product_ids))
                 cur.execute(
                     f"DELETE FROM synced_products WHERE store_id = %s AND shopify_id NOT IN ({placeholders})",
                     (store_id, *shopify_product_ids),
                 )
-                stale_count = cur.rowcount
-            if stale_count:
-                logger.info("Removed %d stale products for store %s", stale_count, store_id)
+            else:
+                cur.execute("DELETE FROM synced_products WHERE store_id = %s", (store_id,))
+            stale_count = cur.rowcount
+        if stale_count:
+            logger.info("Removed %d stale products for store %s", stale_count, store_id)
 
         with db.get_cursor() as cur:
             cur.execute(
@@ -282,8 +426,6 @@ def _sync_store_inner(store_id):
             )
 
         logger.info("Fetching blogs for store %s...", store_id)
-        blogs = client.get_all_blogs()
-        logger.info("Fetched %d blogs", len(blogs))
 
         with db.get_cursor() as cur:
             cur.execute(
@@ -291,137 +433,39 @@ def _sync_store_inner(store_id):
                 (job_id,),
             )
 
-        blogs_synced = 0
-        articles_synced = 0
-        for b in blogs:
-            try:
-                with db.get_conn() as conn:
-                    cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-                    cur.execute(
-                        """
-                        INSERT INTO synced_blogs
-                            (store_id, shopify_id, title, handle, comment_policy,
-                             articles_count, synced_at)
-                        VALUES (%s, %s, %s, %s, %s, %s, NOW())
-                        ON CONFLICT (store_id, shopify_id) DO UPDATE SET
-                            title = EXCLUDED.title,
-                            handle = EXCLUDED.handle,
-                            comment_policy = EXCLUDED.comment_policy,
-                            articles_count = EXCLUDED.articles_count,
-                            synced_at = NOW()
-                        RETURNING id
-                        """,
-                        (
-                            store_id,
-                            b["shopify_id"],
-                            b["title"],
-                            b["handle"],
-                            b["comment_policy"],
-                            b["articles_count"],
-                        ),
-                    )
-                    blog_db_id = cur.fetchone()["id"]
-
-                    blog_articles = client.get_all_articles(blog_id=b["shopify_id"])
-                    for a in blog_articles:
-                        cur.execute(
-                            """
-                            INSERT INTO synced_articles
-                                (store_id, blog_id, shopify_id, shopify_blog_id, title, handle,
-                                 body, summary, tags, author, meta_title, meta_description,
-                                 image_url, image_alt, is_published, published_at, article_type, synced_at)
-                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
-                            ON CONFLICT (store_id, shopify_id) DO UPDATE SET
-                                blog_id = EXCLUDED.blog_id,
-                                shopify_blog_id = EXCLUDED.shopify_blog_id,
-                                title = EXCLUDED.title,
-                                handle = EXCLUDED.handle,
-                                body = EXCLUDED.body,
-                                summary = EXCLUDED.summary,
-                                tags = EXCLUDED.tags,
-                                author = EXCLUDED.author,
-                                meta_title = EXCLUDED.meta_title,
-                                meta_description = EXCLUDED.meta_description,
-                                image_url = CASE WHEN EXCLUDED.image_url LIKE '%%shopify-staged-uploads%%' THEN synced_articles.image_url ELSE EXCLUDED.image_url END,
-                                image_alt = EXCLUDED.image_alt,
-                                is_published = EXCLUDED.is_published,
-                                published_at = EXCLUDED.published_at,
-                                article_type = CASE WHEN EXCLUDED.article_type = 'news' THEN 'news' ELSE synced_articles.article_type END,
-                                synced_at = NOW()
-                            """,
-                            (
-                                store_id,
-                                blog_db_id,
-                                a["shopify_id"],
-                                a["blog_shopify_id"],
-                                a["title"],
-                                a["handle"],
-                                a["body"],
-                                a["summary"],
-                                a["tags"],
-                                a["author"],
-                                a["meta_title"],
-                                a["meta_description"],
-                                a["image_url"] if "shopify-staged-uploads" not in (a["image_url"] or "") else "",
-                                a["image_alt"],
-                                a["is_published"],
-                                a["published_at"],
-                                ("news" if (a.get("template_suffix") == "news" or "type:news" in (a.get("tags") or "")) else "blog"),
-                            ),
-                        )
-                        articles_synced += 1
-
-                    # Clean up stale articles within same transaction
-                    shopify_article_ids = [a["shopify_id"] for a in blog_articles]
-                    if shopify_article_ids:
-                        placeholders = ",".join(["%s"] * len(shopify_article_ids))
-                        cur.execute(
-                            f"DELETE FROM synced_articles WHERE blog_id = %s AND shopify_id NOT IN ({placeholders})",
-                            (blog_db_id, *shopify_article_ids),
-                        )
-                        stale_article_count = cur.rowcount
-                        if stale_article_count:
-                            logger.info("Removed %d stale articles for blog %s", stale_article_count, blog_db_id)
-
-                    cur.close()
-
-                blogs_synced += 1
-                time.sleep(0.5)
-            except Exception as e:
-                logger.warning("Failed to sync blog %s: %s", b["shopify_id"], e)
-
+        def _blog_progress(n_blogs, n_articles):
             with db.get_cursor() as cur:
                 cur.execute(
                     "UPDATE sync_jobs SET blogs_synced = %s, articles_synced = %s WHERE id = %s",
-                    (blogs_synced, articles_synced, job_id),
+                    (n_blogs, n_articles, job_id),
                 )
 
-        logger.info("Blog sync complete: %d blogs, %d articles", blogs_synced, articles_synced)
+        blogs_synced, articles_synced, blog_errors = _sync_blogs_and_articles(
+            client, store_id, progress_cb=_blog_progress
+        )
 
-        # Clean up stale blogs
-        shopify_blog_ids = [b["shopify_id"] for b in blogs]
-        if shopify_blog_ids:
-            placeholders = ",".join(["%s"] * len(shopify_blog_ids))
+        if blog_errors:
             with db.get_cursor() as cur:
                 cur.execute(
-                    f"DELETE FROM synced_blogs WHERE store_id = %s AND shopify_id NOT IN ({placeholders})",
-                    (store_id, *shopify_blog_ids),
+                    "UPDATE sync_jobs SET error = %s WHERE id = %s",
+                    (f"{len(blog_errors)} blog(s) failed to sync: " + "; ".join(blog_errors)[:1500], job_id),
                 )
-                stale_blog_count = cur.rowcount
-            if stale_blog_count:
-                logger.info("Removed %d stale blogs for store %s", stale_blog_count, store_id)
+
+        logger.info("Blog sync complete: %d blogs, %d articles (%d failed)", blogs_synced, articles_synced, len(blog_errors))
 
         shopify_collection_ids = [c["shopify_id"] for c in collections]
-        if shopify_collection_ids:
-            placeholders = ",".join(["%s"] * len(shopify_collection_ids))
-            with db.get_cursor() as cur:
+        with db.get_cursor() as cur:
+            if shopify_collection_ids:
+                placeholders = ",".join(["%s"] * len(shopify_collection_ids))
                 cur.execute(
                     f"DELETE FROM synced_collections WHERE store_id = %s AND shopify_id NOT IN ({placeholders})",
                     (store_id, *shopify_collection_ids),
                 )
-                stale_count = cur.rowcount
-            if stale_count:
-                logger.info("Removed %d stale collections for store %s", stale_count, store_id)
+            else:
+                cur.execute("DELETE FROM synced_collections WHERE store_id = %s", (store_id,))
+            stale_count = cur.rowcount
+        if stale_count:
+            logger.info("Removed %d stale collections for store %s", stale_count, store_id)
 
         # Clear stale interlinking analysis and re-run
         with db.get_cursor() as cur:
@@ -490,133 +534,31 @@ def sync_store_async(store_id):
 def sync_store_blogs(store_id):
     logger.info("Starting blog sync for store %s", store_id)
 
-    with db.get_cursor() as cur:
-        cur.execute("SELECT * FROM stores WHERE id = %s", (store_id,))
-        store = cur.fetchone()
-
-    if not store:
-        raise ValueError(f"Store {store_id} not found")
-
-    access_token = decrypt_value(store["access_token_enc"])
-    client = ShopifyClient(store["domain"], access_token, store["api_version"])
-
-    blogs = client.get_all_blogs()
-    logger.info("Fetched %d blogs for store %s", len(blogs), store_id)
-
-    blogs_synced = 0
-    articles_synced = 0
-
-    for b in blogs:
-        try:
-            with db.get_conn() as conn:
-                cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-                cur.execute(
-                    """
-                    INSERT INTO synced_blogs
-                        (store_id, shopify_id, title, handle, comment_policy,
-                         articles_count, synced_at)
-                    VALUES (%s, %s, %s, %s, %s, %s, NOW())
-                    ON CONFLICT (store_id, shopify_id) DO UPDATE SET
-                        title = EXCLUDED.title,
-                        handle = EXCLUDED.handle,
-                        comment_policy = EXCLUDED.comment_policy,
-                        articles_count = EXCLUDED.articles_count,
-                        synced_at = NOW()
-                    RETURNING id
-                    """,
-                    (
-                        store_id,
-                        b["shopify_id"],
-                        b["title"],
-                        b["handle"],
-                        b["comment_policy"],
-                        b["articles_count"],
-                    ),
-                )
-                blog_db_id = cur.fetchone()["id"]
-
-                blog_articles = client.get_all_articles(blog_id=b["shopify_id"])
-                for a in blog_articles:
-                    cur.execute(
-                        """
-                        INSERT INTO synced_articles
-                            (store_id, blog_id, shopify_id, shopify_blog_id, title, handle,
-                             body, summary, tags, author, meta_title, meta_description,
-                             image_url, image_alt, is_published, published_at, article_type, synced_at)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
-                        ON CONFLICT (store_id, shopify_id) DO UPDATE SET
-                            blog_id = EXCLUDED.blog_id,
-                            shopify_blog_id = EXCLUDED.shopify_blog_id,
-                            title = EXCLUDED.title,
-                            handle = EXCLUDED.handle,
-                            body = EXCLUDED.body,
-                            summary = EXCLUDED.summary,
-                            tags = EXCLUDED.tags,
-                            author = EXCLUDED.author,
-                            meta_title = EXCLUDED.meta_title,
-                            meta_description = EXCLUDED.meta_description,
-                            image_url = CASE WHEN EXCLUDED.image_url LIKE '%%shopify-staged-uploads%%' THEN synced_articles.image_url ELSE EXCLUDED.image_url END,
-                            image_alt = EXCLUDED.image_alt,
-                            is_published = EXCLUDED.is_published,
-                            published_at = EXCLUDED.published_at,
-                            synced_at = NOW()
-                        """,
-                        (
-                            store_id,
-                            blog_db_id,
-                            a["shopify_id"],
-                            a["blog_shopify_id"],
-                            a["title"],
-                            a["handle"],
-                            a["body"],
-                            a["summary"],
-                            a["tags"],
-                            a["author"],
-                            a["meta_title"],
-                            a["meta_description"],
-                            a["image_url"] if "shopify-staged-uploads" not in (a["image_url"] or "") else "",
-                            a["image_alt"],
-                            a["is_published"],
-                            a["published_at"],
-                            ("news" if (a.get("template_suffix") == "news" or "type:news" in (a.get("tags") or "")) else "blog"),
-                        ),
-                    )
-                    articles_synced += 1
-
-                # Clean up stale articles within same transaction
-                shopify_article_ids = [a["shopify_id"] for a in blog_articles]
-                if shopify_article_ids:
-                    placeholders = ",".join(["%s"] * len(shopify_article_ids))
-                    cur.execute(
-                        f"DELETE FROM synced_articles WHERE blog_id = %s AND shopify_id NOT IN ({placeholders})",
-                        (blog_db_id, *shopify_article_ids),
-                    )
-                    stale_article_count = cur.rowcount
-                    if stale_article_count:
-                        logger.info("Removed %d stale articles for blog %s", stale_article_count, blog_db_id)
-
-                cur.close()
-
-            blogs_synced += 1
-            time.sleep(0.5)
-        except Exception as e:
-            logger.warning("Failed to sync blog %s: %s", b["shopify_id"], e)
-
-    # Clean up stale blogs
-    shopify_blog_ids = [b["shopify_id"] for b in blogs]
-    if shopify_blog_ids:
-        placeholders = ",".join(["%s"] * len(shopify_blog_ids))
+    lock = _get_sync_lock(store_id)
+    if not lock.acquire(blocking=False):
+        raise RuntimeError("A sync is already running for this store — try again when it finishes")
+    try:
         with db.get_cursor() as cur:
-            cur.execute(
-                f"DELETE FROM synced_blogs WHERE store_id = %s AND shopify_id NOT IN ({placeholders})",
-                (store_id, *shopify_blog_ids),
-            )
+            cur.execute("SELECT * FROM stores WHERE id = %s", (store_id,))
+            store = cur.fetchone()
 
-    logger.info(
-        "Blog sync complete for store %s: %d blogs, %d articles",
-        store_id, blogs_synced, articles_synced,
-    )
-    return {
-        "blogs_synced": blogs_synced,
-        "articles_synced": articles_synced,
-    }
+        if not store:
+            raise ValueError(f"Store {store_id} not found")
+
+        access_token = decrypt_value(store["access_token_enc"])
+        client = ShopifyClient(store["domain"], access_token, store["api_version"])
+
+        blogs_synced, articles_synced, blog_errors = _sync_blogs_and_articles(client, store_id)
+
+        logger.info(
+            "Blog sync complete for store %s: %d blogs, %d articles (%d failed)",
+            store_id, blogs_synced, articles_synced, len(blog_errors),
+        )
+        return {
+            "blogs_synced": blogs_synced,
+            "articles_synced": articles_synced,
+            "blogs_failed": len(blog_errors),
+            "errors": blog_errors,
+        }
+    finally:
+        lock.release()

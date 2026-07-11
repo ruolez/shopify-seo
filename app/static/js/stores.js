@@ -9,11 +9,13 @@ document.getElementById("store-form").addEventListener("submit", async (e) => {
 });
 
 let activeSyncStoreId = null;
+let storesCache = [];
 
 async function loadStores() {
     const container = document.getElementById("stores-container");
     try {
         const stores = await apiRequest("/api/stores");
+        storesCache = stores;
         if (stores.length === 0) {
             container.innerHTML = `
                 <div class="empty-state">
@@ -41,8 +43,8 @@ async function loadStores() {
                 <td style="display: flex; gap: 4px; flex-wrap: wrap;">
                     <button class="btn btn-sm btn-secondary" onclick="testStore(${s.id})">Test</button>
                     <button class="btn btn-sm btn-primary" onclick="syncStore(${s.id})">Sync</button>
-                    <button class="btn btn-sm btn-secondary" onclick="openEditModal(${s.id}, '${escapeHtml(s.name)}', '${escapeHtml(s.domain)}', '${escapeHtml(s.api_version)}')">Edit</button>
-                    <button class="btn btn-sm btn-danger" onclick="deleteStore(${s.id}, '${escapeHtml(s.name)}')">Delete</button>
+                    <button class="btn btn-sm btn-secondary" onclick="openEditModal(${s.id})">Edit</button>
+                    <button class="btn btn-sm btn-danger" onclick="deleteStore(${s.id})">Delete</button>
                 </td>
             </tr>`;
         }
@@ -63,13 +65,15 @@ function openAddModal() {
     document.getElementById("store-modal").classList.add("active");
 }
 
-function openEditModal(id, name, domain, apiVersion) {
+function openEditModal(id) {
+    const store = storesCache.find((s) => s.id === id);
+    if (!store) return;
     document.getElementById("modal-title").textContent = "Edit Store";
     document.getElementById("store-id").value = id;
-    document.getElementById("store-name").value = name;
-    document.getElementById("store-domain").value = domain;
+    document.getElementById("store-name").value = store.name;
+    document.getElementById("store-domain").value = store.domain;
     document.getElementById("store-token").value = "";
-    document.getElementById("store-api-version").value = apiVersion;
+    document.getElementById("store-api-version").value = store.api_version;
     document.getElementById("store-modal").classList.add("active");
 }
 
@@ -146,11 +150,13 @@ async function syncStore(id) {
 }
 
 function pollSyncStatus(storeId) {
+    let consecutiveErrors = 0;
     const interval = setInterval(async () => {
         try {
             const status = await apiRequest(
                 `/api/stores/${storeId}/sync-status`
             );
+            consecutiveErrors = 0;
 
             const bar = document.getElementById("sync-progress-bar");
             const subtitle = document.getElementById("sync-progress-subtitle");
@@ -238,10 +244,14 @@ function pollSyncStatus(storeId) {
                 stats.textContent = `${status.blogs_synced || 0} blogs, ${status.articles_synced || 0} articles`;
                 current.textContent = "";
             }
-        } catch {
-            clearInterval(interval);
-            activeSyncStoreId = null;
-            hideSyncOverlay();
+        } catch (err) {
+            consecutiveErrors++;
+            if (consecutiveErrors >= 5) {
+                clearInterval(interval);
+                activeSyncStoreId = null;
+                hideSyncOverlay();
+                showToast(`Lost contact with the sync (${err.message}). It may still be running — reload to check.`, "error");
+            }
         }
     }, 1500);
 }
@@ -263,7 +273,9 @@ async function checkActiveSyncs() {
     }
 }
 
-async function deleteStore(id, name) {
+async function deleteStore(id) {
+    const store = storesCache.find((s) => s.id === id);
+    const name = store ? store.name : "";
     if (!confirm(`Delete store "${name}"? This will remove all synced data.`))
         return;
     try {

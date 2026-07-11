@@ -115,6 +115,30 @@ def _detect_date_columns(headers):
     return result
 
 
+def _build_column_map_for_type(headers, csv_type):
+    """Build a column map against a specific signature — used when the caller
+    forces a type over the detected one (the detected type's map would import
+    garbage or zero rows)."""
+    normalized = [_normalize_header(h) for h in headers]
+    norm_set = set(normalized)
+    sig = COLUMN_SIGNATURES.get(csv_type)
+    if not sig:
+        return {}
+    col_map = {}
+    for req in sig["required"]:
+        if req in norm_set:
+            col_map[req] = normalized.index(req)
+        else:
+            for i, n in enumerate(normalized):
+                if req in n:
+                    col_map[req] = i
+                    break
+    for opt in sig["optional"]:
+        if opt in norm_set:
+            col_map[opt] = normalized.index(opt)
+    return col_map
+
+
 def detect_csv_type(headers):
     normalized = [_normalize_header(h) for h in headers]
     norm_set = set(normalized)
@@ -284,7 +308,16 @@ def process_import(store_id, file_content, filename, force_type=None):
     if import_type == "unknown":
         raise ValueError("Could not detect CSV type. Please check the file format.")
 
-    col_map = detection["column_map"]
+    if force_type and force_type != detection["type"]:
+        col_map = _build_column_map_for_type(headers, force_type)
+        sig = COLUMN_SIGNATURES.get(force_type, {})
+        missing = [r for r in sig.get("required", set()) if r not in col_map]
+        if missing:
+            raise ValueError(
+                f"CSV is missing required columns for type '{force_type}': {', '.join(sorted(missing))}"
+            )
+    else:
+        col_map = detection["column_map"]
 
     with db.get_cursor() as cur:
         cur.execute(
@@ -898,21 +931,16 @@ def get_semrush_metrics_for_store(store_id):
         )
         rows = cur.fetchall()
 
-    with db.get_cursor() as cur:
-        cur.execute("SELECT gsc_property FROM gsc_credentials WHERE store_id = %s", (store_id,))
-        cred = cur.fetchone()
-    base_url = (cred["gsc_property"] or "").rstrip("/") if cred else ""
+    from app.services.url_utils import url_path_key
 
     metrics = {}
     for r in rows:
-        url = r["url"] or ""
-        path = url.replace(base_url, "").strip("/")
-        if not path and url:
-            try:
-                from urllib.parse import urlparse
-                path = urlparse(url).path.strip("/")
-            except Exception:
-                path = url
+        # Host/scheme-insensitive path key — the old base-URL string replace
+        # silently kept full URLs whenever Semrush and the GSC property
+        # disagreed on www/scheme, so nothing downstream ever matched.
+        path = url_path_key(r["url"])
+        if not path:
+            continue
 
         metrics[path] = {
             "semrush_volume": int(r["total_volume"] or 0),

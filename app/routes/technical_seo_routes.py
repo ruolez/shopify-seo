@@ -6,6 +6,7 @@ from flask import Blueprint, jsonify, render_template, request
 
 from app.auth import decrypt_value
 from app.database import db
+from app.services.task_runner import spawn as spawn_task
 from app.services.technical_seo_analyzer import (
     analyze_collection_technical_seo,
     analyze_product_technical_seo,
@@ -202,7 +203,7 @@ def list_collections_technical_seo():
 
 @technical_seo_bp.route("/api/technical-seo/analyze", methods=["POST"])
 def analyze_item():
-    data = request.get_json() or {}
+    data = request.get_json(silent=True) or {}
     item_type = data.get("item_type", "product")
     item_id = data.get("item_id")
 
@@ -257,59 +258,122 @@ def analyze_item():
 
 @technical_seo_bp.route("/api/technical-seo/bulk-analyze", methods=["POST"])
 def bulk_analyze():
-    data = request.get_json() or {}
+    """Analyze many items as a background bulk task (pollable via /api/tasks/bulk/<id>).
+
+    The previous synchronous loop blocked the request for the whole batch with
+    no progress feedback and risked proxy timeouts on large selections.
+    """
+    data = request.get_json(silent=True) or {}
     item_type = data.get("item_type", "product")
     item_ids = data.get("item_ids", [])
 
+    if item_type not in ("product", "collection"):
+        return jsonify({"error": f"Invalid item_type: {item_type}"}), 400
     if not item_ids:
         return jsonify({"error": "item_ids is required"}), 400
 
-    results = []
-    for item_id in item_ids:
-        with db.get_cursor() as cur:
-            if item_type == "product":
-                cur.execute("SELECT * FROM synced_products WHERE id = %s", (item_id,))
-            else:
-                cur.execute("SELECT * FROM synced_collections WHERE id = %s", (item_id,))
-            item = cur.fetchone()
+    table = "synced_products" if item_type == "product" else "synced_collections"
+    item_col = "product_id" if item_type == "product" else "collection_id"
 
-        if not item:
-            results.append({"item_id": item_id, "error": "not found"})
-            continue
+    with db.get_cursor() as cur:
+        cur.execute(f"SELECT id FROM {table} WHERE id = ANY(%s)", ([int(i) for i in item_ids],))
+        valid_ids = [r["id"] for r in cur.fetchall()]
+        if not valid_ids:
+            return jsonify({"error": "No matching items found"}), 400
 
-        if item_type == "product":
-            analysis = analyze_product_technical_seo(dict(item))
-        else:
-            analysis = analyze_collection_technical_seo(_enrich_collection_data(dict(item)))
-
-        store_id = item["store_id"]
-        with db.get_cursor() as cur:
+        cur.execute(
+            "INSERT INTO bulk_tasks (status, total, auto_apply, task_type) VALUES ('pending', %s, FALSE, 'tseo_analyze') RETURNING id",
+            (len(valid_ids),),
+        )
+        bulk_task_id = cur.fetchone()["id"]
+        for iid in valid_ids:
             cur.execute(
-                """INSERT INTO technical_seo_analyses
-                (store_id, item_type, item_id, score, detected_keywords, checks, issues_count, fixable_count, updated_at)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NOW())
-                ON CONFLICT (store_id, item_type, item_id) DO UPDATE SET
-                    score = EXCLUDED.score,
-                    detected_keywords = EXCLUDED.detected_keywords,
-                    checks = EXCLUDED.checks,
-                    issues_count = EXCLUDED.issues_count,
-                    fixable_count = EXCLUDED.fixable_count,
-                    updated_at = NOW()""",
-                (
-                    store_id,
-                    item_type,
-                    item_id,
-                    analysis["score"],
-                    json.dumps(analysis["detected_keywords"]),
-                    json.dumps(analysis["checks"]),
-                    analysis["issues_count"],
-                    analysis["fixable_count"],
-                ),
+                f"INSERT INTO bulk_task_items (bulk_task_id, {item_col}) VALUES (%s, %s)",
+                (bulk_task_id, iid),
             )
 
-        results.append({"item_id": item_id, "score": analysis["score"], "issues_count": analysis["issues_count"]})
+    spawn_task("bulk_tasks", bulk_task_id, _execute_bulk_analyze, bulk_task_id, item_type)
 
-    return jsonify({"results": results, "analyzed": len([r for r in results if "error" not in r])})
+    return jsonify({"ok": True, "bulk_task_id": bulk_task_id, "total": len(valid_ids)}), 201
+
+
+def _execute_bulk_analyze(bulk_task_id, item_type):
+    item_col = "product_id" if item_type == "product" else "collection_id"
+    table = "synced_products" if item_type == "product" else "synced_collections"
+
+    with db.get_cursor() as cur:
+        cur.execute("UPDATE bulk_tasks SET status = 'running' WHERE id = %s", (bulk_task_id,))
+        cur.execute(
+            f"SELECT bti.id AS bti_id, bti.{item_col} AS ref_id FROM bulk_task_items bti "
+            "WHERE bti.bulk_task_id = %s ORDER BY bti.id",
+            (bulk_task_id,),
+        )
+        items = cur.fetchall()
+
+    for row in items:
+        bti_id = row["bti_id"]
+        ref_id = row["ref_id"]
+        try:
+            with db.get_cursor() as cur:
+                cur.execute(f"SELECT * FROM {table} WHERE id = %s", (ref_id,))
+                item = cur.fetchone()
+
+            if not item:
+                raise ValueError("Item not found")
+
+            with db.get_cursor() as cur:
+                cur.execute(
+                    "UPDATE bulk_tasks SET current_product_title = %s WHERE id = %s",
+                    (item.get("title") or "", bulk_task_id),
+                )
+
+            if item_type == "product":
+                analysis = analyze_product_technical_seo(dict(item))
+            else:
+                analysis = analyze_collection_technical_seo(_enrich_collection_data(dict(item)))
+
+            with db.get_cursor() as cur:
+                cur.execute(
+                    """INSERT INTO technical_seo_analyses
+                    (store_id, item_type, item_id, score, detected_keywords, checks, issues_count, fixable_count, updated_at)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NOW())
+                    ON CONFLICT (store_id, item_type, item_id) DO UPDATE SET
+                        score = EXCLUDED.score,
+                        detected_keywords = EXCLUDED.detected_keywords,
+                        checks = EXCLUDED.checks,
+                        issues_count = EXCLUDED.issues_count,
+                        fixable_count = EXCLUDED.fixable_count,
+                        updated_at = NOW()""",
+                    (
+                        item["store_id"],
+                        item_type,
+                        ref_id,
+                        analysis["score"],
+                        json.dumps(analysis["detected_keywords"]),
+                        json.dumps(analysis["checks"]),
+                        analysis["issues_count"],
+                        analysis["fixable_count"],
+                    ),
+                )
+                cur.execute(
+                    "UPDATE bulk_task_items SET status = 'completed', completed_at = NOW() WHERE id = %s",
+                    (bti_id,),
+                )
+                cur.execute("UPDATE bulk_tasks SET completed = completed + 1 WHERE id = %s", (bulk_task_id,))
+        except Exception as e:
+            logger.exception("Bulk analyze failed for %s %s", item_type, ref_id)
+            with db.get_cursor() as cur:
+                cur.execute(
+                    "UPDATE bulk_task_items SET status = 'failed', error = %s, completed_at = NOW() WHERE id = %s",
+                    (str(e), bti_id),
+                )
+                cur.execute("UPDATE bulk_tasks SET failed = failed + 1 WHERE id = %s", (bulk_task_id,))
+
+    with db.get_cursor() as cur:
+        cur.execute(
+            "UPDATE bulk_tasks SET status = 'completed', current_product_title = NULL, completed_at = NOW() WHERE id = %s",
+            (bulk_task_id,),
+        )
 
 
 @technical_seo_bp.route("/api/technical-seo/analysis/<item_type>/<int:item_id>", methods=["GET"])
@@ -343,7 +407,7 @@ def get_analysis(item_type, item_id):
 
 @technical_seo_bp.route("/api/technical-seo/fix", methods=["POST"])
 def create_fix_task():
-    data = request.get_json() or {}
+    data = request.get_json(silent=True) or {}
     item_type = data.get("item_type", "product")
     item_id = data.get("item_id")
 
@@ -389,8 +453,7 @@ def create_fix_task():
             (task_id, analysis["id"]),
         )
 
-    thread = threading.Thread(target=_execute_fix_task, args=(task_id, analysis["id"]), daemon=True)
-    thread.start()
+    spawn_task("ai_tasks", task_id, _execute_fix_task, task_id, analysis["id"])
 
     return jsonify({"ok": True, "task_id": task_id}), 201
 
@@ -411,10 +474,13 @@ def _execute_fix_task(task_id, analysis_id):
     try:
         result = run_task(task["task_type"], task["input"], task.get("store_id"))
 
+        _failed = "error" in result or "raw_response" in result
         with db.get_cursor() as cur:
             cur.execute(
-                "UPDATE ai_tasks SET status = 'completed', result = %s, completed_at = NOW() WHERE id = %s",
-                (json.dumps(result), task_id),
+                "UPDATE ai_tasks SET status = %s, error = %s, result = %s, completed_at = NOW() WHERE id = %s",
+                ("failed" if _failed else "completed",
+                 (result.get("error") or "AI returned unparsable output") if _failed else None,
+                 json.dumps(result), task_id),
             )
 
         if "error" not in result and "raw_response" not in result:
@@ -434,7 +500,7 @@ def _execute_fix_task(task_id, analysis_id):
 
 @technical_seo_bp.route("/api/technical-seo/apply", methods=["POST"])
 def apply_fixes():
-    data = request.get_json() or {}
+    data = request.get_json(silent=True) or {}
     item_type = data.get("item_type", "product")
     item_id = data.get("item_id")
     fixes = data.get("fixes", [])
@@ -597,7 +663,7 @@ def apply_fixes():
 
 @technical_seo_bp.route("/api/technical-seo/bulk-fix-apply", methods=["POST"])
 def bulk_fix_apply():
-    data = request.get_json() or {}
+    data = request.get_json(silent=True) or {}
     item_type = data.get("item_type", "product")
     item_ids = data.get("item_ids", [])
 
@@ -623,10 +689,7 @@ def bulk_fix_apply():
                     (bulk_task_id, iid),
                 )
 
-    thread = threading.Thread(
-        target=_execute_bulk_fix_apply, args=(bulk_task_id, item_type), daemon=True
-    )
-    thread.start()
+    spawn_task("bulk_tasks", bulk_task_id, _execute_bulk_fix_apply, bulk_task_id, item_type)
 
     return jsonify({"ok": True, "bulk_task_id": bulk_task_id, "total": len(item_ids)}), 201
 
@@ -731,10 +794,10 @@ def _execute_bulk_fix_apply(bulk_task_id, item_type):
             if "error" in ai_result or "raw_response" in ai_result:
                 with db.get_cursor() as cur:
                     cur.execute(
-                        "UPDATE bulk_task_items SET status = 'completed', completed_at = NOW() WHERE id = %s",
-                        (bti_id,),
+                        "UPDATE bulk_task_items SET status = 'failed', error = %s, completed_at = NOW() WHERE id = %s",
+                        (ai_result.get("error") or "AI returned unparsable output", bti_id),
                     )
-                    cur.execute("UPDATE bulk_tasks SET completed = completed + 1 WHERE id = %s", (bulk_task_id,))
+                    cur.execute("UPDATE bulk_tasks SET failed = failed + 1 WHERE id = %s", (bulk_task_id,))
                 continue
 
             with db.get_cursor() as cur:
@@ -744,6 +807,7 @@ def _execute_bulk_fix_apply(bulk_task_id, item_type):
                 )
 
             # Step 3: Apply
+            item_error = None
             ai_fixes = ai_result.get("fixes", [])
             if ai_fixes:
                 try:
@@ -842,6 +906,7 @@ def _execute_bulk_fix_apply(bulk_task_id, item_type):
                             )
 
                 except Exception as apply_err:
+                    item_error = f"Apply to Shopify failed: {apply_err}"
                     with db.get_cursor() as cur:
                         cur.execute(
                             "UPDATE bulk_task_items SET apply_result = %s WHERE id = %s",
@@ -849,11 +914,18 @@ def _execute_bulk_fix_apply(bulk_task_id, item_type):
                         )
 
             with db.get_cursor() as cur:
-                cur.execute(
-                    "UPDATE bulk_task_items SET status = 'completed', completed_at = NOW() WHERE id = %s",
-                    (bti_id,),
-                )
-                cur.execute("UPDATE bulk_tasks SET completed = completed + 1 WHERE id = %s", (bulk_task_id,))
+                if item_error:
+                    cur.execute(
+                        "UPDATE bulk_task_items SET status = 'failed', error = %s, completed_at = NOW() WHERE id = %s",
+                        (item_error, bti_id),
+                    )
+                    cur.execute("UPDATE bulk_tasks SET failed = failed + 1 WHERE id = %s", (bulk_task_id,))
+                else:
+                    cur.execute(
+                        "UPDATE bulk_task_items SET status = 'completed', completed_at = NOW() WHERE id = %s",
+                        (bti_id,),
+                    )
+                    cur.execute("UPDATE bulk_tasks SET completed = completed + 1 WHERE id = %s", (bulk_task_id,))
 
         except Exception as e:
             logger.exception("Bulk fix-apply failed for %s %s", item_type, ref_id)

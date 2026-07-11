@@ -11,6 +11,12 @@ from flask import Blueprint, jsonify, render_template, request
 from app.auth import decrypt_value
 from app.database import db
 from app.routes.schema_routes import generate_and_push_product_schema
+from app.services.ai_output_guard import (
+    clamp_meta_description,
+    clamp_meta_title,
+    sanitize_html,
+)
+from app.services.task_runner import spawn as spawn_task
 from app.services.image_generator import (
     build_seo_alt_text,
     generate_collection_image,
@@ -28,6 +34,16 @@ from app.shopify_client import ShopifyClient
 logger = logging.getLogger(__name__)
 
 seo_bp = Blueprint("seo", __name__)
+
+
+def _guard_ai_content_fields(data):
+    """Clamp/sanitize AI-generated fields in an apply payload in place."""
+    if data.get("description_html"):
+        data["description_html"] = sanitize_html(data["description_html"])
+    if data.get("meta_title"):
+        data["meta_title"] = clamp_meta_title(data["meta_title"])
+    if data.get("meta_description"):
+        data["meta_description"] = clamp_meta_description(data["meta_description"])
 
 
 def _get_gsc_metrics_for_store(store_id):
@@ -252,6 +268,100 @@ def list_products_seo():
     return jsonify(result)
 
 
+@seo_bp.route("/api/seo/duplicates", methods=["GET"])
+def list_seo_duplicates():
+    """Find products/collections that share an SEO title or meta description.
+
+    Fetches SEO fields LIVE from Shopify via GraphQL (not the synced cache) so the scan
+    reflects the current store. Scoped to one store; SEO-title grouping uses the effective
+    title (meta_title, falling back to the display name).
+
+    Fixing still targets the local synced row, so each live item is mapped back to its
+    local DB id by shopify_id; items never synced get id=None (UI disables their fixes).
+    """
+    from app.services.duplicate_detector import DUPLICATE_FIELDS, find_duplicate_groups
+
+    store_id = request.args.get("store_id")
+    if not store_id:
+        return jsonify({"error": "store_id required"}), 400
+
+    with db.get_cursor() as cur:
+        cur.execute(
+            """SELECT domain, access_token_enc, api_version,
+                      COALESCE(shop_name, name) AS store_name
+               FROM stores WHERE id = %s""",
+            (store_id,),
+        )
+        store = cur.fetchone()
+        if not store:
+            return jsonify({"error": "Store not found"}), 404
+
+        cur.execute("SELECT id, shopify_id FROM synced_products WHERE store_id = %s", (store_id,))
+        product_local_ids = {r["shopify_id"]: r["id"] for r in cur.fetchall()}
+        cur.execute("SELECT id, shopify_id FROM synced_collections WHERE store_id = %s", (store_id,))
+        collection_local_ids = {r["shopify_id"]: r["id"] for r in cur.fetchall()}
+
+    try:
+        client = ShopifyClient(
+            store["domain"], decrypt_value(store["access_token_enc"]), store["api_version"]
+        )
+        products = client.get_all_products(
+            query_filter="status:active AND published_status:published"
+        )
+        collections = [c for c in client.get_all_collections() if c.get("published")]
+    except Exception as e:
+        logger.exception("Live duplicate scan failed for store %s: %s", store_id, e)
+        return jsonify({"error": f"Failed to fetch from Shopify: {e}"}), 502
+
+    logger.info(
+        "Live duplicate scan store %s: %d products, %d published collections",
+        store_id, len(products), len(collections),
+    )
+
+    items = []
+    for p in products:
+        items.append(_build_duplicate_item(
+            p, "product", int(store_id), store["store_name"], product_local_ids.get(p["shopify_id"])
+        ))
+    for c in collections:
+        items.append(_build_duplicate_item(
+            c, "collection", int(store_id), store["store_name"], collection_local_ids.get(c["shopify_id"])
+        ))
+
+    result = {"counts": {}}
+    for field in DUPLICATE_FIELDS:
+        groups = find_duplicate_groups(items, field)
+        result[field] = groups
+        result["counts"][field] = sum(g["count"] for g in groups)
+
+    return jsonify(result)
+
+
+def _build_duplicate_item(row, item_type, store_id, store_name, local_id):
+    """Normalize a live Shopify product/collection dict into a duplicate-scan item.
+
+    local_id is the synced_products/synced_collections row id used by the apply/AI-fix
+    endpoints; None when the item exists live but was never synced.
+    """
+    analyze = analyze_product_seo if item_type == "product" else analyze_collection_seo
+    on_page = analyze(row)["score"]
+    return {
+        "id": local_id,
+        "type": item_type,
+        "store_id": store_id,
+        "store_name": store_name,
+        "shopify_id": row["shopify_id"],
+        "title": row.get("title") or "",
+        "handle": row.get("handle") or "",
+        "meta_title": row.get("meta_title") or "",
+        "meta_description": row.get("meta_description") or "",
+        "vendor": row.get("vendor") or "",
+        "product_type": row.get("product_type") or "",
+        "has_blank_meta_title": not (row.get("meta_title") or "").strip(),
+        "on_page_score": on_page,
+    }
+
+
 @seo_bp.route("/api/seo/priorities", methods=["GET"])
 def seo_priorities():
     from app.services.seo_priority_service import get_priority_ranked_items
@@ -261,81 +371,13 @@ def seo_priorities():
         return jsonify({"error": "store_id required"}), 400
 
     item_type = request.args.get("type", "product")
-    limit = min(int(request.args.get("limit", 50)), 200)
+    limit = min(request.args.get("limit", 50, type=int) or 50, 200)
 
     try:
         results = get_priority_ranked_items(int(store_id), item_type=item_type, limit=limit)
         return jsonify(results)
     except Exception as e:
         logger.exception("Priority ranking failed: %s", e)
-        return jsonify({"error": str(e)}), 500
-
-
-@seo_bp.route("/api/seo/cannibalization", methods=["GET"])
-def cannibalization_report():
-    """Detect keywords ranking on multiple store pages (cannibalization)."""
-    from datetime import datetime, timedelta, timezone
-
-    store_id = request.args.get("store_id")
-    if not store_id:
-        return jsonify({"error": "store_id required"}), 400
-
-    today = datetime.now(timezone.utc).date()
-    date_from = (today - timedelta(days=30)).isoformat()
-    date_to = (today - timedelta(days=3)).isoformat()
-
-    try:
-        with db.get_cursor() as cur:
-            cur.execute(
-                """SELECT query, COUNT(DISTINCT page) as page_count,
-                          SUM(impressions) as total_impressions,
-                          SUM(clicks) as total_clicks
-                   FROM gsc_daily_metrics
-                   WHERE store_id = %s AND date >= %s AND date <= %s
-                   GROUP BY query
-                   HAVING COUNT(DISTINCT page) >= 2 AND SUM(impressions) >= 10
-                   ORDER BY SUM(impressions) DESC
-                   LIMIT 50""",
-                (int(store_id), date_from, date_to),
-            )
-            cannibal_queries = cur.fetchall()
-
-        results = []
-        for q in cannibal_queries:
-            with db.get_cursor() as cur:
-                cur.execute(
-                    """SELECT page,
-                              SUM(clicks) as clicks,
-                              SUM(impressions) as impressions,
-                              SUM(position * impressions) / NULLIF(SUM(impressions), 0) as position
-                       FROM gsc_daily_metrics
-                       WHERE store_id = %s AND query = %s AND date >= %s AND date <= %s
-                       GROUP BY page
-                       HAVING SUM(impressions) > 0
-                       ORDER BY SUM(impressions) DESC""",
-                    (int(store_id), q["query"], date_from, date_to),
-                )
-                pages = cur.fetchall()
-
-            results.append({
-                "query": q["query"],
-                "page_count": q["page_count"],
-                "total_impressions": int(float(q["total_impressions"] or 0)),
-                "total_clicks": int(float(q["total_clicks"] or 0)),
-                "pages": [
-                    {
-                        "url": p["page"],
-                        "clicks": int(float(p["clicks"] or 0)),
-                        "impressions": int(float(p["impressions"] or 0)),
-                        "position": round(float(p["position"] or 0), 1),
-                    }
-                    for p in pages
-                ],
-            })
-
-        return jsonify({"cannibalization_issues": results, "total": len(results)})
-    except Exception as e:
-        logger.exception("Cannibalization report failed: %s", e)
         return jsonify({"error": str(e)}), 500
 
 
@@ -348,7 +390,7 @@ def recently_optimized():
     if not store_id:
         return jsonify({"error": "store_id required"}), 400
     store_id = int(store_id)
-    limit = min(int(request.args.get("limit", 30)), 100)
+    limit = min(request.args.get("limit", 30, type=int) or 30, 100)
 
     with db.get_cursor() as cur:
         cur.execute(
@@ -433,7 +475,7 @@ def recently_optimized():
 @seo_bp.route("/api/seo/actions/preview", methods=["POST"])
 def preview_seo_action():
     """Generate a preview of what an action will do. User confirms before apply."""
-    data = request.get_json() or {}
+    data = request.get_json(silent=True) or {}
     action_type = data.get("type")
     store_id = data.get("store_id")
 
@@ -457,7 +499,7 @@ def preview_seo_action():
 @seo_bp.route("/api/seo/actions/apply", methods=["POST"])
 def apply_seo_action():
     """Apply a previously previewed action with user-confirmed data."""
-    data = request.get_json() or {}
+    data = request.get_json(silent=True) or {}
     action_type = data.get("type")
     store_id = data.get("store_id")
 
@@ -612,8 +654,13 @@ def _apply_internal_linking(data, store_id, client):
             continue
 
         try:
+            from app.services.ai_output_guard import validate_injected_html
             new_html = _inject_link_via_ai(art["body"], [{"url": target_url, "anchor_text": anchor_text}], config)
-            if new_html and new_html != art["body"]:
+            ok, reason = validate_injected_html(art["body"], new_html, expected_hrefs=[target_url])
+            if not ok:
+                results.append({"article_id": article_id, "status": "error", "reason": f"AI output rejected: {reason}"})
+                continue
+            if new_html != art["body"]:
                 _push_html_to_shopify(client, "article", article_shopify_id, new_html)
                 _update_local_db("article", art["id"], new_html)
                 results.append({"article_id": article_id, "status": "applied"})
@@ -987,7 +1034,8 @@ def product_status_counts():
 
 @seo_bp.route("/api/seo/products/<int:product_id>/apply", methods=["POST"])
 def apply_product_changes(product_id):
-    data = request.get_json() or {}
+    data = request.get_json(silent=True) or {}
+    _guard_ai_content_fields(data)
 
     with db.get_cursor() as cur:
         cur.execute(
@@ -1027,21 +1075,19 @@ def apply_product_changes(product_id):
                     old_key = "description" if field == "description_html" else field
                     changes_map[field] = {"old": (product.get(old_key) or "")[:200], "new": data[field][:200]}
 
-            with db.get_cursor() as cur:
-                cur.execute(
-                    """INSERT INTO seo_change_events
-                       (store_id, item_type, item_id, change_type, changes_applied,
-                        seo_score_before, search_score_before, composite_score_before)
-                       VALUES (%s, 'product', %s, %s, %s, %s, %s, %s)""",
-                    (product["store_id"], product_id,
-                     data.get("change_type", "ai_optimization"),
-                     json.dumps(changes_map) if changes_map else None,
-                     comp_before["on_page_score"],
-                     comp_before.get("search_score"),
-                     comp_before["composite_score"]),
-                )
+            # Recorded only after the Shopify push succeeds — an event for a
+            # failed push shows up as a phantom "optimization" in impact views.
+            _event_params = (
+                product["store_id"], product_id,
+                data.get("change_type", "ai_optimization"),
+                json.dumps(changes_map) if changes_map else None,
+                comp_before["on_page_score"],
+                comp_before.get("search_score"),
+                comp_before["composite_score"],
+            )
         except Exception:
-            logger.warning("Failed to record SEO change event for product %s", product_id)
+            _event_params = None
+            logger.warning("Failed to compute SEO change event for product %s", product_id)
 
         client = ShopifyClient(
             product["domain"],
@@ -1076,6 +1122,16 @@ def apply_product_changes(product_id):
             result = client.update_product_media(product["shopify_id"], data["image_alts"])
             logger.info("Alt text apply result: %s", result)
             updated_fields.append("image_alts")
+
+        if _event_params:
+            with db.get_cursor() as cur:
+                cur.execute(
+                    """INSERT INTO seo_change_events
+                       (store_id, item_type, item_id, change_type, changes_applied,
+                        seo_score_before, search_score_before, composite_score_before)
+                       VALUES (%s, 'product', %s, %s, %s, %s, %s, %s)""",
+                    _event_params,
+                )
 
         with db.get_cursor() as cur:
             if data.get("title"):
@@ -1288,7 +1344,8 @@ def list_collections_seo():
 
 @seo_bp.route("/api/seo/collections/<int:collection_id>/apply", methods=["POST"])
 def apply_collection_changes(collection_id):
-    data = request.get_json() or {}
+    data = request.get_json(silent=True) or {}
+    _guard_ai_content_fields(data)
 
     with db.get_cursor() as cur:
         cur.execute(
@@ -1329,21 +1386,17 @@ def apply_collection_changes(collection_id):
                     old_key = "description" if field == "description_html" else field
                     changes_map[field] = {"old": (collection.get(old_key) or "")[:200], "new": data[field][:200]}
 
-            with db.get_cursor() as cur:
-                cur.execute(
-                    """INSERT INTO seo_change_events
-                       (store_id, item_type, item_id, change_type, changes_applied,
-                        seo_score_before, search_score_before, composite_score_before)
-                       VALUES (%s, 'collection', %s, %s, %s, %s, %s, %s)""",
-                    (collection["store_id"], collection_id,
-                     data.get("change_type", "ai_optimization"),
-                     json.dumps(changes_map) if changes_map else None,
-                     comp_before["on_page_score"],
-                     comp_before.get("search_score"),
-                     comp_before["composite_score"]),
-                )
+            _event_params = (
+                collection["store_id"], collection_id,
+                data.get("change_type", "ai_optimization"),
+                json.dumps(changes_map) if changes_map else None,
+                comp_before["on_page_score"],
+                comp_before.get("search_score"),
+                comp_before["composite_score"],
+            )
         except Exception:
-            logger.warning("Failed to record SEO change event for collection %s", collection_id)
+            _event_params = None
+            logger.warning("Failed to compute SEO change event for collection %s", collection_id)
 
         client = ShopifyClient(
             collection["domain"],
@@ -1369,6 +1422,16 @@ def apply_collection_changes(collection_id):
 
         if fields:
             client.update_collection(collection["shopify_id"], fields)
+
+        if _event_params:
+            with db.get_cursor() as cur:
+                cur.execute(
+                    """INSERT INTO seo_change_events
+                       (store_id, item_type, item_id, change_type, changes_applied,
+                        seo_score_before, search_score_before, composite_score_before)
+                       VALUES (%s, 'collection', %s, %s, %s, %s, %s, %s)""",
+                    _event_params,
+                )
 
         with db.get_cursor() as cur:
             if data.get("title"):
@@ -1453,114 +1516,128 @@ def get_collection_seo(collection_id):
 
 @seo_bp.route("/api/seo/collections/delete", methods=["POST"])
 def delete_collections():
-    data = request.get_json() or {}
-    collection_ids = data.get("collection_ids", [])
-
-    if not collection_ids:
-        return jsonify({"error": "collection_ids is required"}), 400
-
-    with db.get_cursor() as cur:
-        placeholders = ", ".join(["%s"] * len(collection_ids))
-        cur.execute(
-            f"""
-            SELECT sc.id, sc.shopify_id, sc.title, sc.store_id,
-                   s.domain, s.access_token_enc, s.api_version
-            FROM synced_collections sc
-            JOIN stores s ON s.id = sc.store_id
-            WHERE sc.id IN ({placeholders})
-            """,
-            tuple(collection_ids),
-        )
-        collections = cur.fetchall()
-
-    if not collections:
-        return jsonify({"error": "No collections found"}), 404
-
-    deleted = []
-    failed = []
-
-    clients = {}
-    for c in collections:
-        store_id = c["store_id"]
-        if store_id not in clients:
-            clients[store_id] = ShopifyClient(
-                c["domain"],
-                decrypt_value(c["access_token_enc"]),
-                c["api_version"],
-            )
-
-        try:
-            clients[store_id].delete_collection(c["shopify_id"])
-
-            with db.get_cursor() as cur:
-                cur.execute("DELETE FROM generated_collections WHERE collection_id = %s", (c["id"],))
-                cur.execute("DELETE FROM synced_collections WHERE id = %s", (c["id"],))
-
-            deleted.append({"id": c["id"], "title": c["title"]})
-            logger.info("Deleted collection '%s' (shopify_id=%s)", c["title"], c["shopify_id"])
-        except Exception as e:
-            logger.exception("Failed to delete collection '%s'", c["title"])
-            failed.append({"id": c["id"], "title": c["title"], "error": str(e)})
-
-    return jsonify({"ok": True, "deleted": deleted, "failed": failed})
+    return _start_bulk_collection_action("delete")
 
 
 @seo_bp.route("/api/seo/collections/publish", methods=["POST"])
 def publish_collections():
-    data = request.get_json() or {}
+    return _start_bulk_collection_action("publish")
+
+
+def _start_bulk_collection_action(action):
+    """Run publish/delete over many collections as a pollable background task —
+    the synchronous loops gave no progress feedback and risked proxy timeouts."""
+    data = request.get_json(silent=True) or {}
     collection_ids = data.get("collection_ids", [])
 
     if not collection_ids:
         return jsonify({"error": "collection_ids is required"}), 400
 
     with db.get_cursor() as cur:
-        placeholders = ", ".join(["%s"] * len(collection_ids))
         cur.execute(
-            f"""
-            SELECT sc.id, sc.shopify_id, sc.title, sc.store_id,
-                   s.domain, s.access_token_enc, s.api_version
-            FROM synced_collections sc
-            JOIN stores s ON s.id = sc.store_id
-            WHERE sc.id IN ({placeholders})
-            """,
-            tuple(collection_ids),
+            "SELECT id FROM synced_collections WHERE id = ANY(%s)",
+            ([int(i) for i in collection_ids],),
         )
-        collections = cur.fetchall()
+        valid_ids = [r["id"] for r in cur.fetchall()]
+        if not valid_ids:
+            return jsonify({"error": "No collections found"}), 404
 
-    if not collections:
-        return jsonify({"error": "No collections found"}), 404
-
-    published = []
-    failed = []
-
-    clients = {}
-    for c in collections:
-        store_id = c["store_id"]
-        if store_id not in clients:
-            clients[store_id] = ShopifyClient(
-                c["domain"],
-                decrypt_value(c["access_token_enc"]),
-                c["api_version"],
+        cur.execute(
+            "INSERT INTO bulk_tasks (status, total, auto_apply, task_type) VALUES ('pending', %s, FALSE, %s) RETURNING id",
+            (len(valid_ids), f"collection_{action}"),
+        )
+        bulk_task_id = cur.fetchone()["id"]
+        for cid in valid_ids:
+            cur.execute(
+                "INSERT INTO bulk_task_items (bulk_task_id, collection_id) VALUES (%s, %s)",
+                (bulk_task_id, cid),
             )
 
+    spawn_task("bulk_tasks", bulk_task_id, _execute_bulk_collection_action, bulk_task_id, action)
+
+    return jsonify({"ok": True, "bulk_task_id": bulk_task_id, "total": len(valid_ids)}), 201
+
+
+def _execute_bulk_collection_action(bulk_task_id, action):
+    with db.get_cursor() as cur:
+        cur.execute("UPDATE bulk_tasks SET status = 'running' WHERE id = %s", (bulk_task_id,))
+        # Fetch everything up front — deleting a collection cascades away its
+        # bulk_task_items row (FK ON DELETE CASCADE), so don't rely on re-reads.
+        cur.execute(
+            """SELECT bti.id AS bti_id, sc.id AS cid, sc.shopify_id, sc.title, sc.store_id,
+                      s.domain, s.access_token_enc, s.api_version
+               FROM bulk_task_items bti
+               JOIN synced_collections sc ON sc.id = bti.collection_id
+               JOIN stores s ON s.id = sc.store_id
+               WHERE bti.bulk_task_id = %s ORDER BY bti.id""",
+            (bulk_task_id,),
+        )
+        items = cur.fetchall()
+
+    clients = {}
+    for c in items:
         try:
-            clients[store_id].publish_to_all_channels(c["shopify_id"])
-
             with db.get_cursor() as cur:
-                cur.execute("UPDATE synced_collections SET published = TRUE WHERE id = %s", (c["id"],))
+                cur.execute(
+                    "UPDATE bulk_tasks SET current_product_title = %s WHERE id = %s",
+                    (c["title"] or "", bulk_task_id),
+                )
 
-            published.append({"id": c["id"], "title": c["title"]})
-            logger.info("Published collection '%s' (shopify_id=%s)", c["title"], c["shopify_id"])
+            store_id = c["store_id"]
+            if store_id not in clients:
+                clients[store_id] = ShopifyClient(
+                    c["domain"],
+                    decrypt_value(c["access_token_enc"]),
+                    c["api_version"],
+                )
+            client = clients[store_id]
+
+            if action == "publish":
+                client.publish_to_all_channels(c["shopify_id"])
+                with db.get_cursor() as cur:
+                    cur.execute("UPDATE synced_collections SET published = TRUE WHERE id = %s", (c["cid"],))
+                    cur.execute(
+                        "UPDATE bulk_task_items SET status = 'completed', completed_at = NOW() WHERE id = %s",
+                        (c["bti_id"],),
+                    )
+                    cur.execute("UPDATE bulk_tasks SET completed = completed + 1 WHERE id = %s", (bulk_task_id,))
+            else:
+                try:
+                    client.delete_collection(c["shopify_id"])
+                except Exception as e:
+                    # Already gone on Shopify is fine — still clean up locally.
+                    if not any(t in str(e).lower() for t in ("does not exist", "not found", "no longer exists")):
+                        raise
+                with db.get_cursor() as cur:
+                    # Mark progress first — deleting the row cascades this item away.
+                    cur.execute(
+                        "UPDATE bulk_task_items SET status = 'completed', completed_at = NOW() WHERE id = %s",
+                        (c["bti_id"],),
+                    )
+                    cur.execute("UPDATE bulk_tasks SET completed = completed + 1 WHERE id = %s", (bulk_task_id,))
+                    cur.execute("DELETE FROM generated_collections WHERE collection_id = %s", (c["cid"],))
+                    cur.execute("DELETE FROM synced_collections WHERE id = %s", (c["cid"],))
+
+            logger.info("Bulk %s: collection '%s' (shopify_id=%s)", action, c["title"], c["shopify_id"])
         except Exception as e:
-            logger.exception("Failed to publish collection '%s'", c["title"])
-            failed.append({"id": c["id"], "title": c["title"], "error": str(e)})
+            logger.exception("Bulk %s failed for collection '%s'", action, c["title"])
+            with db.get_cursor() as cur:
+                cur.execute(
+                    "UPDATE bulk_task_items SET status = 'failed', error = %s, completed_at = NOW() WHERE id = %s",
+                    (str(e), c["bti_id"]),
+                )
+                cur.execute("UPDATE bulk_tasks SET failed = failed + 1 WHERE id = %s", (bulk_task_id,))
 
-    return jsonify({"ok": True, "published": published, "failed": failed})
+    with db.get_cursor() as cur:
+        cur.execute(
+            "UPDATE bulk_tasks SET status = 'completed', current_product_title = NULL, completed_at = NOW() WHERE id = %s",
+            (bulk_task_id,),
+        )
 
 
 @seo_bp.route("/api/seo/bulk-apply-tags/<int:store_id>", methods=["POST"])
 def bulk_apply_tags(store_id):
-    data = request.get_json() or {}
+    data = request.get_json(silent=True) or {}
     assignments = data.get("product_assignments")
 
     if not assignments:
@@ -1586,12 +1663,7 @@ def bulk_apply_tags(store_id):
         )
         bulk_task_id = cur.fetchone()["id"]
 
-    thread = threading.Thread(
-        target=_execute_bulk_apply_tags,
-        args=(bulk_task_id, store_id, assignments),
-        daemon=True,
-    )
-    thread.start()
+    spawn_task("bulk_tasks", bulk_task_id, _execute_bulk_apply_tags, bulk_task_id, store_id, assignments)
 
     return jsonify({"ok": True, "bulk_task_id": bulk_task_id, "total": len(assignments)}), 201
 
@@ -1749,7 +1821,7 @@ def extract_tags():
 
 @seo_bp.route("/api/seo/collections/generate/filter-tags", methods=["POST"])
 def filter_tags_ai():
-    data = request.get_json() or {}
+    data = request.get_json(silent=True) or {}
     tags = data.get("tags", [])
     if not tags:
         return jsonify({"error": "tags list is required"}), 400
@@ -1808,7 +1880,7 @@ def filter_tags_ai():
 
 @seo_bp.route("/api/seo/collections/generate", methods=["POST"])
 def generate_collections():
-    data = request.get_json() or {}
+    data = request.get_json(silent=True) or {}
     store_id = data.get("store_id")
     tags = data.get("tags", [])
     auto_optimize = data.get("auto_optimize", False)
@@ -1823,12 +1895,7 @@ def generate_collections():
         )
         bulk_task_id = cur.fetchone()["id"]
 
-    thread = threading.Thread(
-        target=_execute_generate_collections,
-        args=(bulk_task_id, store_id, tags, auto_optimize),
-        daemon=True,
-    )
-    thread.start()
+    spawn_task("bulk_tasks", bulk_task_id, _execute_generate_collections, bulk_task_id, store_id, tags, auto_optimize)
 
     return jsonify({"ok": True, "bulk_task_id": bulk_task_id, "total": len(tags)}), 201
 
@@ -1875,10 +1942,16 @@ def _execute_generate_collections(bulk_task_id, store_id, tags, auto_optimize):
 
         try:
             with db.get_cursor() as cur:
-                tag_pattern = f"%{tag}%"
+                # Exact tag membership — substring ILIKE matched unrelated tags
+                # ("red" matched "bordered") and treated %/_ as wildcards.
                 cur.execute(
-                    "SELECT shopify_id, title, handle FROM synced_products WHERE store_id = %s AND status = 'ACTIVE' AND tags ILIKE %s",
-                    (store_id, tag_pattern),
+                    """SELECT shopify_id, title, handle FROM synced_products
+                       WHERE store_id = %s AND status = 'ACTIVE'
+                         AND EXISTS (
+                            SELECT 1 FROM unnest(string_to_array(tags, ',')) t
+                            WHERE lower(trim(t)) = lower(%s)
+                         )""",
+                    (store_id, tag),
                 )
                 matching_products = cur.fetchall()
 
@@ -2007,7 +2080,7 @@ def _execute_generate_collections(bulk_task_id, store_id, tags, auto_optimize):
 
 @seo_bp.route("/api/seo/collections/generate/taxonomy", methods=["POST"])
 def generate_taxonomy_collections():
-    data = request.get_json() or {}
+    data = request.get_json(silent=True) or {}
     store_id = data.get("store_id")
     categories = data.get("categories", [])
     auto_optimize = data.get("auto_optimize", False)
@@ -2040,12 +2113,7 @@ def generate_taxonomy_collections():
     if isinstance(product_assignments, str):
         product_assignments = json.loads(product_assignments)
 
-    thread = threading.Thread(
-        target=_execute_generate_taxonomy_collections,
-        args=(bulk_task_id, store_id, categories, product_assignments, auto_optimize),
-        daemon=True,
-    )
-    thread.start()
+    spawn_task("bulk_tasks", bulk_task_id, _execute_generate_taxonomy_collections, bulk_task_id, store_id, categories, product_assignments, auto_optimize)
 
     return jsonify({"ok": True, "bulk_task_id": bulk_task_id, "total": total_work}), 201
 
@@ -2305,52 +2373,6 @@ def _execute_generate_taxonomy_collections(bulk_task_id, store_id, categories, p
         _auto_optimize_generated_collections(store_id, created_collection_ids, hierarchy)
 
 
-@seo_bp.route("/api/seo/collections/hierarchy/<int:store_id>", methods=["GET"])
-def get_collection_hierarchy(store_id):
-    with db.get_cursor() as cur:
-        cur.execute(
-            """SELECT gc.*, sc.shopify_id, sc.title as collection_title, sc.handle as collection_handle, sc.products_count as actual_products_count
-            FROM generated_collections gc
-            LEFT JOIN synced_collections sc ON sc.id = gc.collection_id
-            WHERE gc.store_id = %s AND gc.generation_mode = 'taxonomy'
-            ORDER BY gc.taxonomy_category, gc.parent_collection_id NULLS FIRST, gc.tag""",
-            (store_id,),
-        )
-        rows = cur.fetchall()
-
-    categories_map = {}
-    for r in rows:
-        cat_name = r["taxonomy_category"] or "Uncategorized"
-
-        if cat_name not in categories_map:
-            categories_map[cat_name] = {
-                "name": cat_name,
-                "parent_collection": None,
-                "children": [],
-            }
-
-        if r["parent_collection_id"] is None and r["tag"].startswith("__category__"):
-            categories_map[cat_name]["parent_collection"] = {
-                "id": r["collection_id"],
-                "shopify_id": r["shopify_id"],
-                "title": r["collection_title"],
-                "handle": r["collection_handle"],
-                "products_count": r["actual_products_count"] or 0,
-            }
-        else:
-            categories_map[cat_name]["children"].append({
-                "tag": r["tag"],
-                "collection": {
-                    "id": r["collection_id"],
-                    "shopify_id": r["shopify_id"],
-                    "title": r["collection_title"],
-                    "handle": r["collection_handle"],
-                },
-                "products_count": r["actual_products_count"] or r["products_count"] or 0,
-            })
-
-    return jsonify({"categories": list(categories_map.values())})
-
 
 def _auto_optimize_generated_collections(store_id, collection_ids, hierarchy=None):
     from app.ai_agent import run_task as ai_run_task
@@ -2560,7 +2582,7 @@ def _inject_image_into_description(client, collection, image_url, alt_text, widt
 
 @seo_bp.route("/api/seo/collections/<int:collection_id>/apply-image", methods=["POST"])
 def apply_collection_image(collection_id):
-    data = request.get_json() or {}
+    data = request.get_json(silent=True) or {}
     collection = _get_collection_with_store(collection_id)
     if not collection:
         return jsonify({"error": "Collection not found"}), 404
@@ -2614,7 +2636,7 @@ def apply_collection_image(collection_id):
 
 @seo_bp.route("/api/seo/collections/bulk-generate-images", methods=["POST"])
 def bulk_generate_collection_images():
-    data = request.get_json() or {}
+    data = request.get_json(silent=True) or {}
     collection_ids = data.get("collection_ids", [])
     if not collection_ids:
         return jsonify({"error": "collection_ids is required"}), 400
@@ -2632,12 +2654,7 @@ def bulk_generate_collection_images():
                 (bulk_task_id, cid),
             )
 
-    thread = threading.Thread(
-        target=_run_bulk_collection_images,
-        args=(bulk_task_id, collection_ids),
-        daemon=True,
-    )
-    thread.start()
+    spawn_task("bulk_tasks", bulk_task_id, _run_bulk_collection_images, bulk_task_id, collection_ids)
 
     return jsonify({"ok": True, "bulk_task_id": bulk_task_id, "total": len(collection_ids)}), 201
 

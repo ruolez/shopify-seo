@@ -195,6 +195,9 @@
 
     async function generateImage(i) {
         if (!currentStoreId || !slides[i]) return;
+        // Hold the slide object itself — the user may reorder/delete slides
+        // while the image generates, so the captured index can go stale.
+        const slide = slides[i];
         showToast(`Generating AI image for slide ${i + 1}…`, 'info');
         try {
             const { task_id } = await apiRequest('/api/home-page/generate-image', {
@@ -202,18 +205,20 @@
                 body: {
                     store_id: currentStoreId,
                     slide_index: i,
-                    prompt: slides[i].image_prompt || '',
-                    headline: slides[i].headline || '',
+                    prompt: slide.image_prompt || '',
+                    headline: slide.headline || '',
                 },
             });
             await pollTask(task_id, (result) => {
                 if (!result.image_url) { showToast('No image returned', 'error'); return; }
-                slides[i].image_url = result.image_url;
-                slides[i].source = 'ai';
-                if (!slides[i].image_alt) slides[i].image_alt = result.alt_text || '';
+                const idx = slides.indexOf(slide);
+                if (idx === -1) { showToast('Slide was removed — generated image discarded', 'warning'); return; }
+                slide.image_url = result.image_url;
+                slide.source = 'ai';
+                if (!slide.image_alt) slide.image_alt = result.alt_text || '';
                 renderSlides();
                 refreshPreview();
-                showToast(`Image ready for slide ${i + 1}`);
+                showToast(`Image ready for slide ${idx + 1}`);
             });
         } catch (e) {
             showToast('Image generation failed: ' + e.message, 'error');
@@ -346,16 +351,6 @@
         throw new Error('Task timed out');
     }
 
-    function escapeHtml(str) {
-        const div = document.createElement('div');
-        div.textContent = str || '';
-        return div.innerHTML;
-    }
-
-    function escapeAttr(str) {
-        return (str || '').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
-    }
-
     // ── Public API ────────────────────────────────────────────────
 
     window.HomePage = {
@@ -367,7 +362,13 @@
         openImageModal,
         pickImage,
         closeImageModal,
-        save: () => save(false),
+        save: async () => {
+            try {
+                await save(false);
+            } catch (e) {
+                showToast('Save failed: ' + e.message, 'error');
+            }
+        },
         refreshPreview,
         publish,
         unpublish,

@@ -8,6 +8,7 @@ from flask import Blueprint, jsonify, render_template, request
 
 from app.auth import decrypt_value
 from app.database import db
+from app.services.task_runner import spawn as spawn_task, sweep_stale_jobs
 from app.services.image_generator import generate_placeholder_image
 from app.shopify_client import ShopifyClient
 
@@ -114,7 +115,7 @@ def scan_missing_images():
 
 @image_bp.route("/api/images/generate-preview", methods=["POST"])
 def generate_preview():
-    data = request.get_json() or {}
+    data = request.get_json(silent=True) or {}
     product_title = data.get("title", "Sample Product")
     handle = data.get("handle")
 
@@ -130,7 +131,7 @@ def generate_preview():
 
 @image_bp.route("/api/images/bulk-upload", methods=["POST"])
 def bulk_upload():
-    data = request.get_json() or {}
+    data = request.get_json(silent=True) or {}
     product_ids = data.get("product_ids", [])
 
     if not product_ids:
@@ -149,10 +150,7 @@ def bulk_upload():
                 (bulk_task_id, pid),
             )
 
-    thread = threading.Thread(
-        target=_execute_bulk_upload, args=(bulk_task_id,), daemon=True
-    )
-    thread.start()
+    spawn_task("bulk_tasks", bulk_task_id, _execute_bulk_upload, bulk_task_id)
 
     return jsonify({"ok": True, "bulk_task_id": bulk_task_id, "total": len(product_ids)}), 201
 
@@ -343,7 +341,7 @@ def _execute_bulk_upload(bulk_task_id):
 
 @image_bp.route("/api/images/bulk-replace", methods=["POST"])
 def bulk_replace():
-    data = request.get_json() or {}
+    data = request.get_json(silent=True) or {}
     product_ids = data.get("product_ids", [])
 
     if not product_ids:
@@ -362,10 +360,7 @@ def bulk_replace():
                 (bulk_task_id, pid),
             )
 
-    thread = threading.Thread(
-        target=_execute_bulk_replace, args=(bulk_task_id,), daemon=True
-    )
-    thread.start()
+    spawn_task("bulk_tasks", bulk_task_id, _execute_bulk_replace, bulk_task_id)
 
     return jsonify({"ok": True, "bulk_task_id": bulk_task_id, "total": len(product_ids)}), 201
 

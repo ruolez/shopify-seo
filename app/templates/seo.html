@@ -24,6 +24,7 @@
                     <button class="tab active" data-tab="products">Products</button>
                     <button class="tab" data-tab="collections">Collections</button>
                     <button class="tab" data-tab="priorities">Priorities</button>
+                    <button class="tab" data-tab="duplicates">Duplicates</button>
                     <button class="tab" data-tab="schema">Schema Markup</button>
                 </div>
 
@@ -42,6 +43,12 @@
                 <div class="tab-panel" id="tab-priorities">
                     <div id="priorities-container">
                         <div class="loading-spinner"><div class="spinner"></div><p>Loading priorities...</p></div>
+                    </div>
+                </div>
+
+                <div class="tab-panel" id="tab-duplicates">
+                    <div id="duplicates-container">
+                        <div class="loading-spinner"><div class="spinner"></div><p>Loading duplicates...</p></div>
                     </div>
                 </div>
 
@@ -86,7 +93,8 @@
 
                 <!-- Bulk Progress Overlay -->
                 <div class="progress-overlay" id="bulk-progress-overlay">
-                    <div class="progress-card">
+                    <div class="progress-card" style="position: relative;">
+                        <button class="icon-btn" style="position: absolute; top: 8px; right: 8px;" title="Hide progress (task keeps running)" onclick="this.closest('.progress-overlay').classList.remove('active')"><span class="material-symbols-rounded">close</span></button>
                         <span class="material-symbols-rounded" style="font-size: 40px; color: var(--primary); margin-bottom: 12px;">sync</span>
                         <h3>Bulk Optimization</h3>
                         <p class="progress-subtitle" id="bulk-progress-subtitle">Optimizing products...</p>

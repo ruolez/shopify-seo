@@ -472,13 +472,61 @@ async function optimizeExistingPage(gapId) {
     document.getElementById("cg-brief-title").textContent = "Optimize Existing Page";
     document.getElementById("cg-brief-content").innerHTML = '<div style="padding:40px;text-align:center;"><div class="spinner" style="margin:0 auto;"></div><p style="margin-top:12px;font-size:14px;">Analyzing page and generating optimization strategy...</p><p style="font-size:12px;color:var(--on-surface-secondary);">Fetching current rankings, generating AI strategy</p></div>';
     modal.classList.add("active");
+    await runOptimizeExisting(gapId, {});
+}
 
+let cgPendingOptimize = null;
+
+async function runOptimizeExisting(gapId, body) {
     try {
-        const data = await apiRequest(`/api/content-gaps/${gapId}/optimize-existing?store_id=${cgStoreId}`, { method: "POST" });
-        renderOptimizationView(data);
+        const resp = await fetch(`/api/content-gaps/${gapId}/optimize-existing?store_id=${cgStoreId}`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body),
+        });
+        const result = await resp.json();
+
+        if (resp.status === 409 && result.cannibalization_warning) {
+            renderOptimizeCannibalizationWarning(gapId, body, result);
+            return;
+        }
+        if (!resp.ok) throw new Error(result.error || `Request failed (${resp.status})`);
+
+        renderOptimizationView(result);
     } catch (e) {
         document.getElementById("cg-brief-content").innerHTML = `<p style="padding:20px;color:var(--error);">Failed: ${escapeHtml(e.message)}</p>`;
     }
+}
+
+function renderOptimizeCannibalizationWarning(gapId, body, result) {
+    cgPendingOptimize = { gapId, body };
+    const riskLevel = (result.risk_level || "high").toUpperCase();
+    let h = `<div style="padding:16px;border:1px solid var(--error);border-radius:var(--radius-sm);background:var(--error-container);">
+        <strong style="color:var(--error);">Cannibalization Risk: ${escapeHtml(riskLevel)}</strong>
+        <p style="margin:8px 0;font-size:13px;">${escapeHtml(result.recommendation || result.error || "")}</p>`;
+    if (result.existing_pages?.length) {
+        h += '<div style="font-size:12px;margin-bottom:4px;"><strong>Pages already ranking for this keyword:</strong></div>';
+        result.existing_pages.forEach(p => {
+            h += `<div style="font-size:12px;margin-left:8px;color:var(--on-surface-variant);">- ${escapeHtml(p.url)} (pos: ${p.position}${p.source ? `, ${escapeHtml(p.source)}` : ""})</div>`;
+        });
+    }
+    if (result.on_site_matches?.length) {
+        h += '<div style="font-size:12px;margin-top:4px;"><strong>On-site pages targeting this keyword:</strong></div>';
+        result.on_site_matches.forEach(m => {
+            h += `<div style="font-size:12px;margin-left:8px;color:var(--on-surface-variant);">- ${escapeHtml(m.title)} (/${m.type}s/${m.handle})</div>`;
+        });
+    }
+    h += `<button class="btn btn-secondary btn-sm" onclick="forceOptimizeExisting()" style="margin-top:10px;">Optimize Anyway</button>
+    </div>`;
+    document.getElementById("cg-brief-content").innerHTML = h;
+}
+
+async function forceOptimizeExisting() {
+    if (!cgPendingOptimize) return;
+    const { gapId, body } = cgPendingOptimize;
+    cgPendingOptimize = null;
+    document.getElementById("cg-brief-content").innerHTML = '<div style="padding:40px;text-align:center;"><div class="spinner" style="margin:0 auto;"></div><p style="margin-top:12px;font-size:14px;">Generating optimization strategy...</p></div>';
+    await runOptimizeExisting(gapId, { ...body, skip_cannibalization_check: true });
 }
 
 function renderOptimizationView(data) {
@@ -594,15 +642,7 @@ async function switchOptTarget(gapId, newKeyword, newVolume) {
     document.getElementById("cg-brief-title").textContent = "Optimize Existing Page";
     document.getElementById("cg-brief-content").innerHTML = `<div style="padding:40px;text-align:center;"><div class="spinner" style="margin:0 auto;"></div><p style="margin-top:12px;font-size:14px;">Regenerating strategy for "${escapeHtml(newKeyword)}"...</p></div>`;
 
-    try {
-        const data = await apiRequest(`/api/content-gaps/${gapId}/optimize-existing?store_id=${cgStoreId}`, {
-            method: "POST",
-            body: { override_keyword: newKeyword, override_volume: newVolume },
-        });
-        renderOptimizationView(data);
-    } catch (e) {
-        document.getElementById("cg-brief-content").innerHTML = `<p style="padding:20px;color:var(--error);">Failed: ${escapeHtml(e.message)}</p>`;
-    }
+    await runOptimizeExisting(gapId, { override_keyword: newKeyword, override_volume: newVolume });
 }
 
 async function applyGapOptimization(gapId, itemType, itemId) {

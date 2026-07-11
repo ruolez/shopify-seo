@@ -90,7 +90,7 @@ def handle_500(e):
     logger = logging.getLogger("app.main")
     logger.error("500 error: %s\n%s", str(e), traceback.format_exc())
     if request.path.startswith("/api/"):
-        return jsonify({"error": "Internal server error", "detail": str(e)}), 500
+        return jsonify({"error": "Internal server error"}), 500
     return "Internal Server Error", 500
 
 
@@ -107,14 +107,30 @@ def health():
 
 
 with app.app_context():
-    db.init_tables()
+    # Leader election: exactly one process runs boot recovery, cache purge,
+    # and the singleton schedulers — regardless of gunicorn preload/worker
+    # configuration or extra processes pointed at the same database.
+    _is_leader = db.try_acquire_leader()
+    db.init_tables(run_recovery=_is_leader)
     ensure_default_admin(db)
-    from app.services.gsc_service import init_scheduler
-    init_scheduler()
-    from app.services.competitor_service import init_scheduler as init_competitor_scheduler
-    init_competitor_scheduler()
-    from app.services.ai_visibility_tracker import init_tracking_scheduler
-    init_tracking_scheduler()
+    if _is_leader:
+        try:
+            with db.get_cursor() as cur:
+                cur.execute("DELETE FROM serp_cache WHERE expires_at < NOW()")
+                if cur.rowcount:
+                    logging.getLogger("app.main").info("Purged %d expired serp_cache rows", cur.rowcount)
+        except Exception:
+            logging.getLogger("app.main").exception("serp_cache purge failed (non-fatal)")
+        from app.services.gsc_service import init_scheduler
+        init_scheduler()
+        from app.services.competitor_service import init_scheduler as init_competitor_scheduler
+        init_competitor_scheduler()
+        from app.services.ai_visibility_tracker import init_tracking_scheduler
+        init_tracking_scheduler()
+    else:
+        logging.getLogger("app.main").info(
+            "Another process holds the leader lock — skipping boot recovery and schedulers"
+        )
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000, debug=True)

@@ -34,7 +34,7 @@ def add_competitor():
     store_id = _get_store_id()
     if not store_id:
         return jsonify({"error": "store_id required"}), 400
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
     domain = (data.get("domain") or "").strip()
     name = (data.get("name") or "").strip()
     if not domain:
@@ -64,6 +64,8 @@ def trigger_check():
     keyword_limit = min(max(keyword_limit, 10), 500)
     try:
         result = competitor_service.run_competitor_check(store_id, keyword_limit=keyword_limit)
+        if isinstance(result, dict) and result.get("error"):
+            return jsonify(result), 400
         return jsonify(result)
     except Exception as e:
         return jsonify({"error": str(e)}), 500

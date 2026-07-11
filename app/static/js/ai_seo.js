@@ -1,3 +1,11 @@
+function sanitizeAiHtml(html) {
+    if (!html) return "";
+    return html
+        .replace(/<\s*(script|style)\b[^>]*>[\s\S]*?<\s*\/\s*\1\s*>/gi, "")
+        .replace(/\s+on[a-z]+\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi, "")
+        .replace(/\s+(href|src)\s*=\s*(["']?)\s*javascript:[^"'\s>]*\2/gi, "");
+}
+
 let scanType = loadFilter("aiSeoScanType", "product");
 let currentItems = [];
 let scanPollTimer = null;
@@ -282,9 +290,11 @@ async function boostFactsBatch() {
 
 function pollBatch(batchId) {
     if (batchPollTimer) clearInterval(batchPollTimer);
+    let consecutiveErrors = 0;
     batchPollTimer = setInterval(async () => {
         try {
             const s = await apiRequest(`/api/ai-seo/optimize/batch/${batchId}`);
+            consecutiveErrors = 0;
             const prog = document.getElementById("batch-progress");
             if (prog) prog.textContent = `Optimizing ${s.completed + s.failed}/${s.total}${s.current ? " · " + s.current : ""}`;
             if (s.status === "completed" || s.status === "failed") {
@@ -295,7 +305,13 @@ function pollBatch(batchId) {
                 loadOverview();
             }
         } catch (err) {
-            clearInterval(batchPollTimer);
+            consecutiveErrors++;
+            if (consecutiveErrors >= 5) {
+                clearInterval(batchPollTimer);
+                const prog = document.getElementById("batch-progress");
+                if (prog) prog.textContent = "";
+                showToast(`Lost contact with the batch (${err.message}). It may still be running — reload to check.`, "error");
+            }
         }
     }, 2500);
 }
@@ -409,7 +425,7 @@ function renderFactsPreview(res) {
             <ul style="margin:0 0 8px;padding-left:20px;">${facts || '<li style="color:var(--on-surface-secondary);">—</li>'}</ul>
             ${sources ? `<div style="font-size:12px;color:var(--on-surface-secondary);">Sources: ${sources}</div>` : ""}
             <h4 style="margin:12px 0 6px;">Enriched description</h4>
-            <div style="border:1px solid var(--outline);border-radius:8px;padding:12px;max-height:320px;overflow:auto;">${p.optimized_description_html || ""}</div>
+            <div style="border:1px solid var(--outline);border-radius:8px;padding:12px;max-height:320px;overflow:auto;">${sanitizeAiHtml(p.optimized_description_html || "")}</div>
         </div>`;
 }
 
@@ -501,7 +517,7 @@ function renderOptimizePreview(res) {
                 <div style="font-size:13px;font-style:italic;border-left:3px solid var(--primary);padding-left:10px;">${escapeHtml(p.expert_verdict)}</div>` : ""}
             ${p.product_facts && Object.keys(p.product_facts).length ? `<div style="font-size:12px;color:var(--on-surface-secondary);margin-top:8px;"><b>Specifications table sourced from your data:</b> ${Object.keys(p.product_facts).map(escapeHtml).join(", ")}</div>` : ""}
             <h4 style="margin:12px 0 6px;">Optimized description</h4>
-            <div style="border:1px solid var(--outline);border-radius:8px;padding:12px;max-height:340px;overflow:auto;">${p.optimized_description_html || ""}</div>
+            <div style="border:1px solid var(--outline);border-radius:8px;padding:12px;max-height:340px;overflow:auto;">${sanitizeAiHtml(p.optimized_description_html || "")}</div>
             <h4 style="margin:16px 0 6px;">FAQ (FAQPage schema)</h4>
             ${faqHtml || '<div style="color:var(--on-surface-secondary);">No FAQ generated</div>'}
             <div style="margin-top:14px;padding:8px 12px;background:var(--surface-dim);border-radius:8px;font-size:12px;color:var(--on-surface-secondary);">
@@ -567,9 +583,11 @@ async function runScan() {
 
 function pollScan(taskId) {
     if (scanPollTimer) clearInterval(scanPollTimer);
+    let consecutiveErrors = 0;
     scanPollTimer = setInterval(async () => {
         try {
             const task = await apiRequest(`/api/ai-seo/scan/${taskId}`);
+            consecutiveErrors = 0;
             if (task.status === "completed") {
                 clearInterval(scanPollTimer);
                 resetScanBtn();
@@ -582,8 +600,12 @@ function pollScan(taskId) {
                 showToast(`Scan failed: ${task.error || "unknown error"}`, "error");
             }
         } catch (err) {
-            clearInterval(scanPollTimer);
-            resetScanBtn();
+            consecutiveErrors++;
+            if (consecutiveErrors >= 5) {
+                clearInterval(scanPollTimer);
+                resetScanBtn();
+                showToast(`Lost contact with the scan (${err.message}). It may still be running — reload to check.`, "error");
+            }
         }
     }, 2000);
 }
@@ -1088,9 +1110,11 @@ async function runTracking() {
 }
 
 function pollRun(runId, btn) {
+    let consecutiveErrors = 0;
     const timer = setInterval(async () => {
         try {
             const d = await apiRequest(`/api/ai-seo/tracking/${runId}`);
+            consecutiveErrors = 0;
             if (["completed", "budget_capped", "failed"].includes(d.status)) {
                 clearInterval(timer);
                 btn.disabled = false;
@@ -1100,9 +1124,13 @@ function pollRun(runId, btn) {
                 loadRuns();
             }
         } catch (err) {
-            clearInterval(timer);
-            btn.disabled = false;
-            btn.innerHTML = '<span class="material-symbols-rounded">travel_explore</span> Run tracking';
+            consecutiveErrors++;
+            if (consecutiveErrors >= 5) {
+                clearInterval(timer);
+                btn.disabled = false;
+                btn.innerHTML = '<span class="material-symbols-rounded">travel_explore</span> Run tracking';
+                showToast(`Lost contact with the tracking run (${err.message}). It may still be running — reload to check.`, "error");
+            }
         }
     }, 3000);
 }

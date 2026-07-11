@@ -4,6 +4,7 @@ import logging
 import math
 import os
 import random
+import re
 import textwrap
 
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
@@ -17,6 +18,9 @@ logger = logging.getLogger(__name__)
 FONT_PATH = os.path.join(
     os.path.dirname(__file__), "..", "static", "fonts", "Inter-Bold.ttf"
 )
+
+# Brand text rendered on generated placeholder/collection images.
+BRAND_TEXT = "A2Z"
 
 
 def _load_font(size):
@@ -95,7 +99,7 @@ def generate_placeholder_image(product_title, handle=None):
 
     # A2Z branding — centered vertically in upper half
     a2z_font = _load_font(140)
-    a2z_text = "A2Z"
+    a2z_text = BRAND_TEXT
     a2z_bbox = draw.textbbox((0, 0), a2z_text, font=a2z_font)
     a2z_w = a2z_bbox[2] - a2z_bbox[0]
     a2z_h = a2z_bbox[3] - a2z_bbox[1]
@@ -238,7 +242,7 @@ def _draw_corner_brand(canvas, width):
     overlay = Image.new("RGBA", canvas.size, (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
     brand_font = _load_font(16)
-    draw.text((width - 60, 12), "A2Z", fill=(255, 255, 255, 140), font=brand_font)
+    draw.text((width - 60, 12), BRAND_TEXT, fill=(255, 255, 255, 140), font=brand_font)
     canvas.paste(Image.alpha_composite(canvas.convert("RGBA"), overlay).convert("RGB"))
 
 
@@ -248,7 +252,7 @@ def _draw_branded_placeholder(canvas, width, height, title):
     draw = ImageDraw.Draw(canvas)
 
     brand_font = _load_font(80)
-    brand_text = "A2Z"
+    brand_text = BRAND_TEXT
     bb = draw.textbbox((0, 0), brand_text, font=brand_font)
     bw = bb[2] - bb[0]
     draw.text(((width - bw) // 2, height // 2 - 80), brand_text, fill="#2d3748", font=brand_font)
@@ -415,7 +419,6 @@ def generate_blog_image_ai(article_title, keywords=None, product_titles=None):
                             return _make_blog_image_result(article_title, base64.b64decode(b64_data))
 
             if isinstance(content, str) and "data:image" in content:
-                import re
                 match = re.search(r"data:image/[^;]+;base64,([A-Za-z0-9+/=]+)", content)
                 if match:
                     return _make_blog_image_result(article_title, base64.b64decode(match.group(1)))
@@ -499,7 +502,6 @@ def generate_news_inline_image(subject_prompt, alt_text=None):
                             b64_data = url.split("base64,", 1)[1]
                             return _make_news_inline_result(alt_text, base64.b64decode(b64_data))
             if isinstance(content, str) and "data:image" in content:
-                import re
                 match = re.search(r"data:image/[^;]+;base64,([A-Za-z0-9+/=]+)", content)
                 if match:
                     return _make_news_inline_result(alt_text, base64.b64decode(match.group(1)))
@@ -595,7 +597,6 @@ def generate_blog_hero_image_ai(blog_title, intro_text=None, article_titles=None
                             return _make_hero_image_result(blog_title, base64.b64decode(b64_data))
 
             if isinstance(content, str) and "data:image" in content:
-                import re
                 match = re.search(r"data:image/[^;]+;base64,([A-Za-z0-9+/=]+)", content)
                 if match:
                     return _make_hero_image_result(blog_title, base64.b64decode(match.group(1)))
@@ -709,7 +710,6 @@ def generate_landing_hero_image_ai(page_title, page_description=None, keywords=N
                             return _make_landing_hero_result(page_title, base64.b64decode(b64_data))
 
             if isinstance(content, str) and "data:image" in content:
-                import re
                 match = re.search(r"data:image/[^;]+;base64,([A-Za-z0-9+/=]+)", content)
                 if match:
                     return _make_landing_hero_result(page_title, base64.b64decode(match.group(1)))
@@ -913,7 +913,6 @@ def generate_collection_image_ai(collection_title, product_image_bytes_list, pro
                             return _make_image_result(collection_title, base64.b64decode(b64_data), keywords)
 
             if isinstance(content, str) and "data:image" in content:
-                import re
                 match = re.search(r"data:image/[^;]+;base64,([A-Za-z0-9+/=]+)", content)
                 if match:
                     return _make_image_result(collection_title, base64.b64decode(match.group(1)), keywords)

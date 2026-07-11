@@ -175,10 +175,16 @@ def _detect_mentions(text, brand_terms, brand_host, product_titles, competitors,
     brand_mentioned = any(t in low for t in brand_terms)
     domain_cited = bool(brand_host) and brand_host in low
 
+    # Rank = ordinal among LIST ITEMS, not the raw line index (which counted
+    # intro paragraphs and blank lines, inflating avg_rank).
     brand_rank = None
-    for i, line in enumerate(text.splitlines()):
-        if _LIST_MARKER.match(line) and any(t in line.lower() for t in brand_terms):
-            brand_rank = i + 1
+    list_pos = 0
+    for line in text.splitlines():
+        if not _LIST_MARKER.match(line):
+            continue
+        list_pos += 1
+        if any(t in line.lower() for t in brand_terms):
+            brand_rank = list_pos
             break
 
     products = [t for t in product_titles if len(t) > 6 and t.lower() in low][:10]

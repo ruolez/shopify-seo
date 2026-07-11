@@ -579,7 +579,7 @@ def analyze_product_technical_seo(product):
     rules = get_setting("rules.technical_product", DEFAULTS["rules.technical_product"])
     weights = rules.get("weights", DEFAULTS["rules.technical_product"]["weights"])
 
-    overall = sum(checks[k]["score"] * weights[k] for k in weights)
+    overall = sum(checks[k]["score"] * weights.get(k, 0) for k in weights)
     issues_count = sum(1 for c in checks.values() if c["issue"])
     fixable_count = sum(1 for c in checks.values() if c["issue"] and c["fix_type"])
 

@@ -1,6 +1,8 @@
 let brandStoreId = null;
 let cachedVendors = [];
 let cachedCollections = [];
+let renderedBrandRows = [];
+let interlinkSearchResults = [];
 const selectedVendors = new Set();
 const selectedForLogo = new Set();
 const selectedForSeo = new Set();
@@ -170,11 +172,13 @@ function renderUnifiedTable() {
         return brandSortDir === "asc" ? cmp : -cmp;
     });
 
+    renderedBrandRows = [];
     let rowIndex = 0;
     for (const v of sortedVendors) {
         const gc = collectionsMap[v.vendor.toLowerCase()];
         const imgUrl = gc && gc.image_url ? gc.image_url : null;
         const gcId = gc ? gc.id : 0;
+        renderedBrandRows.push({ vendor: v.vendor, imgUrl, gcId });
 
         html += "<tr>";
 
@@ -187,7 +191,7 @@ function renderUnifiedTable() {
         }
 
         if (imgUrl) {
-            html += `<td><img src="${escapeHtml(imgUrl)}" alt="${escapeHtml(v.vendor)}" style="width: 48px; height: 48px; object-fit: cover; border-radius: 6px; cursor: pointer; border: 1px solid var(--outline);" onclick="previewBrandImage('${escapeHtml(imgUrl)}', '${escapeHtml(v.vendor)}')"></td>`;
+            html += `<td><img src="${escapeHtml(imgUrl)}" alt="${escapeHtml(v.vendor)}" style="width: 48px; height: 48px; object-fit: cover; border-radius: 6px; cursor: pointer; border: 1px solid var(--outline);" onclick="previewBrandImage(${rowIndex})"></td>`;
         } else if (v.created) {
             html += `<td><span style="display: inline-flex; width: 48px; height: 48px; align-items: center; justify-content: center; border-radius: 6px; background: var(--surface-variant, #f0f0f0); border: 1px dashed var(--outline);"><span class="material-symbols-rounded" style="font-size: 20px; color: var(--on-surface-secondary);">image</span></span></td>`;
         } else {
@@ -209,10 +213,10 @@ function renderUnifiedTable() {
                 html += `<button class="icon-btn" onclick="openBrandSeoModal(${gcId})" title="Optimize SEO">
                         <span class="material-symbols-rounded" style="color: var(--primary);">auto_awesome</span>
                     </button>
-                    <button class="icon-btn" id="logo-btn-${gcId}" onclick="generateBrandLogo(${gcId}, '${escapeHtml(v.vendor)}')" title="Generate Logo Image">
+                    <button class="icon-btn" id="logo-btn-${gcId}" onclick="generateBrandLogo(${rowIndex})" title="Generate Logo Image">
                         <span class="material-symbols-rounded">image</span>
                     </button>
-                    <button class="icon-btn" onclick="deleteBrandCollection(${gcId}, '${escapeHtml(v.vendor)}')" title="Delete">
+                    <button class="icon-btn" onclick="deleteBrandCollection(${rowIndex})" title="Delete">
                         <span class="material-symbols-rounded" style="color: var(--error);">delete</span>
                     </button>`;
             }
@@ -543,12 +547,19 @@ async function loadLandingPageStatus(storeId) {
     }
 }
 
-function deleteBrandCollection(gcId, title) {
+function deleteBrandCollection(rowIndex) {
+    const row = renderedBrandRows[rowIndex];
+    if (!row || !row.gcId) return;
+    const gcId = row.gcId;
+    const title = row.vendor;
     const overlay = document.getElementById("brand-confirm-dialog-overlay");
+    const titleEl = document.getElementById("brand-confirm-dialog-title");
     const msgEl = document.getElementById("brand-confirm-dialog-message");
     const okBtn = document.getElementById("brand-confirm-dialog-ok");
 
+    titleEl.textContent = "Delete Brand Collection";
     msgEl.textContent = `Delete the brand collection "${title}" from Shopify?`;
+    okBtn.textContent = "Delete";
     okBtn.onclick = async () => {
         closeBrandConfirmDialog();
         try {
@@ -562,7 +573,11 @@ function deleteBrandCollection(gcId, title) {
     overlay.classList.add("active");
 }
 
-async function generateBrandLogo(gcId, brandName) {
+async function generateBrandLogo(rowIndex) {
+    const row = renderedBrandRows[rowIndex];
+    if (!row || !row.gcId) return;
+    const gcId = row.gcId;
+    const brandName = row.vendor;
     const overlay = document.getElementById("brand-confirm-dialog-overlay");
     const titleEl = document.getElementById("brand-confirm-dialog-title");
     const msgEl = document.getElementById("brand-confirm-dialog-message");
@@ -605,6 +620,7 @@ async function generateBrandLogo(gcId, brandName) {
                 body,
             });
             showToast(`Brand logo image created for ${brandName}`, "success");
+            fetchVendors(brandStoreId);
         } catch (err) {
             showToast(`Logo generation failed: ${err.message}`, "error");
         } finally {
@@ -617,12 +633,14 @@ async function generateBrandLogo(gcId, brandName) {
     overlay.classList.add("active");
 }
 
-function previewBrandImage(imageUrl, brandName) {
+function previewBrandImage(rowIndex) {
+    const row = renderedBrandRows[rowIndex];
+    if (!row || !row.imgUrl) return;
     const overlay = document.getElementById("brand-image-preview-overlay");
     const img = document.getElementById("brand-preview-img");
     const title = document.getElementById("brand-preview-title");
-    img.src = imageUrl;
-    title.textContent = brandName;
+    img.src = row.imgUrl;
+    title.textContent = row.vendor;
     overlay.classList.add("active");
 }
 
@@ -643,15 +661,15 @@ function updateSeoCount() {
     if (label) label.textContent = selectedForSeo.size > 0 ? `Optimize SEO (${selectedForSeo.size})` : "Optimize SEO";
 }
 
-function escapeAttr(str) {
-    if (!str) return "";
-    return str.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/'/g, "&#39;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-}
-
-
 // ==================== Brand SEO Optimization ====================
 
+let brandSeoPollInterval = null;
+
 async function openBrandSeoModal(gcId) {
+    if (brandSeoPollInterval) {
+        clearInterval(brandSeoPollInterval);
+        brandSeoPollInterval = null;
+    }
     const overlay = document.getElementById("brand-seo-modal-overlay");
     const body = document.getElementById("brand-seo-modal-body");
     const title = document.getElementById("brand-seo-modal-title");
@@ -764,6 +782,10 @@ async function openBrandSeoModal(gcId) {
 }
 
 function closeBrandSeoModal() {
+    if (brandSeoPollInterval) {
+        clearInterval(brandSeoPollInterval);
+        brandSeoPollInterval = null;
+    }
     document.getElementById("brand-seo-modal-overlay").classList.remove("active");
 }
 
@@ -824,11 +846,12 @@ async function searchBrandInterlinks(query, input, dropdown) {
         const existing = new Set();
         document.querySelectorAll(".brand-interlink-cb").forEach(cb => existing.add(String(cb.value)));
 
+        interlinkSearchResults = results;
         let html = "";
-        for (const c of results) {
+        results.forEach((c, i) => {
             const alreadyAdded = existing.has(String(c.id));
             html += `<div class="interlink-search-item" style="padding:8px 14px;cursor:${alreadyAdded ? "default" : "pointer"};display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid var(--outline-variant, var(--outline));${alreadyAdded ? "opacity:0.5;" : ""}"
-                ${alreadyAdded ? "" : `onclick="addBrandInterlink(${c.id}, '${escapeAttr(c.title)}', '${escapeAttr(c.handle)}')"`}
+                ${alreadyAdded ? "" : `onclick="addBrandInterlink(${i})"`}
                 onmouseenter="if(!${alreadyAdded})this.style.background='var(--surface-variant, var(--surface-dim, #f0f0f0))'"
                 onmouseleave="this.style.background='transparent'">
                 <div>
@@ -837,7 +860,7 @@ async function searchBrandInterlinks(query, input, dropdown) {
                 </div>
                 ${alreadyAdded ? '<span style="font-size:12px;color:var(--on-surface-secondary);">Added</span>' : '<span class="material-symbols-rounded" style="font-size:18px;color:var(--primary);">add_circle</span>'}
             </div>`;
-        }
+        });
         dropdown.innerHTML = html;
         dropdown.style.display = "block";
     } catch {
@@ -845,7 +868,12 @@ async function searchBrandInterlinks(query, input, dropdown) {
     }
 }
 
-function addBrandInterlink(id, title, handle) {
+function addBrandInterlink(idx) {
+    const c = interlinkSearchResults[idx];
+    if (!c) return;
+    const id = c.id;
+    const title = c.title;
+    const handle = c.handle;
     const container = document.getElementById("brand-interlink-checkboxes");
     const existing = container.querySelector(`.brand-interlink-cb[value="${id}"]`);
     if (existing) return;
@@ -912,14 +940,19 @@ async function optimizeBrandSeo(gcId) {
 }
 
 function pollBrandSeoTask(taskId, gcId) {
+    if (brandSeoPollInterval) clearInterval(brandSeoPollInterval);
+    let consecutiveErrors = 0;
     const interval = setInterval(async () => {
         try {
             const task = await apiRequest(`/api/tasks/${taskId}`);
+            consecutiveErrors = 0;
             if (task.status === "completed") {
                 clearInterval(interval);
+                if (brandSeoPollInterval === interval) brandSeoPollInterval = null;
                 renderBrandSeoResults(task.result, gcId);
             } else if (task.status === "failed") {
                 clearInterval(interval);
+                if (brandSeoPollInterval === interval) brandSeoPollInterval = null;
                 const btn = document.getElementById("brand-seo-optimize-btn");
                 if (btn) {
                     btn.disabled = false;
@@ -931,11 +964,23 @@ function pollBrandSeoTask(taskId, gcId) {
                         <h4><span class="material-symbols-rounded">smart_toy</span> AI Analysis</h4>
                         <p style="color: var(--error);">Failed: ${escapeHtml(task.error || "Unknown error")}</p>
                     </div>`;
+                showToast(task.error || "Brand SEO optimization failed", "error");
             }
-        } catch {
-            clearInterval(interval);
+        } catch (err) {
+            consecutiveErrors++;
+            if (consecutiveErrors >= 5) {
+                clearInterval(interval);
+                if (brandSeoPollInterval === interval) brandSeoPollInterval = null;
+                const btn = document.getElementById("brand-seo-optimize-btn");
+                if (btn) {
+                    btn.disabled = false;
+                    btn.innerHTML = '<span class="material-symbols-rounded">auto_awesome</span> Optimize with AI';
+                }
+                showToast(`Lost contact with the optimization task (${err.message}). It may still be running — reload to check.`, "error");
+            }
         }
     }, 2000);
+    brandSeoPollInterval = interval;
 }
 
 function renderBrandSeoResults(result, gcId) {

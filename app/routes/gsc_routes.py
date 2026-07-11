@@ -78,6 +78,12 @@ def auth_callback():
     if not code:
         return redirect("/gsc?error=no_code")
 
+    # CSRF protection: the callback must carry the state minted in auth_start.
+    expected_state = session.pop("gsc_oauth_state", None)
+    if not state or state != expected_state:
+        logger.warning("GSC OAuth callback with invalid state (expected=%s)", bool(expected_state))
+        return redirect("/gsc?error=invalid_state")
+
     store_id = session.get("gsc_auth_store_id")
     if not store_id:
         return redirect("/gsc?error=no_store")
@@ -112,7 +118,7 @@ def select_property():
     if not store_id:
         return jsonify({"error": "store_id required"}), 400
 
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
     site_url = (data.get("site_url") or "").strip()
     if not site_url:
         return jsonify({"error": "site_url required"}), 400
@@ -123,7 +129,7 @@ def select_property():
         try:
             gsc_service.pull_data(store_id, pull_type="backfill")
         except Exception:
-            pass
+            logger.exception("GSC backfill failed for store %s", store_id)
 
     threading.Thread(target=_backfill, daemon=True).start()
 
@@ -158,14 +164,14 @@ def trigger_pull():
     if not store_id:
         return jsonify({"error": "store_id required"}), 400
 
-    data = request.get_json() or {}
+    data = request.get_json(silent=True) or {}
     pull_type = data.get("type", "incremental")
 
     def _pull():
         try:
             gsc_service.pull_data(store_id, pull_type=pull_type)
         except Exception:
-            pass
+            logger.exception("GSC pull failed for store %s", store_id)
 
     threading.Thread(target=_pull, daemon=True).start()
     return jsonify({"ok": True, "message": "Pull started in background"})
@@ -177,7 +183,7 @@ def trigger_pull_sync():
     if not store_id:
         return jsonify({"error": "store_id required"}), 400
 
-    data = request.get_json() or {}
+    data = request.get_json(silent=True) or {}
     pull_type = data.get("type", "incremental")
 
     try:
@@ -323,7 +329,7 @@ def take_snapshot():
         try:
             gsc_service.take_seo_score_snapshot(store_id)
         except Exception:
-            pass
+            logger.exception("GSC score snapshot failed for store %s", store_id)
 
     threading.Thread(target=_snap, daemon=True).start()
     return jsonify({"ok": True, "message": "Snapshot started"})
@@ -390,7 +396,7 @@ def analyze_cannibalization():
     from app.settings_manager import get_setting
     from app.prompt_defaults import DEFAULTS
 
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
     query = data.get("query")
     pages = data.get("pages", [])
     manual_winner = data.get("manual_winner")
@@ -430,7 +436,7 @@ def generate_cannibalization_fix():
     from app.settings_manager import get_setting
     from app.prompt_defaults import DEFAULTS
 
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
     item_type = data.get("item_type")
     item_id = data.get("item_id")
     competing_query = data.get("competing_query", "")
@@ -505,7 +511,7 @@ def apply_cannibalization_fix():
     from app.database import db
     from app.shopify_client import ShopifyClient
 
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
     item_type = data.get("item_type")
     item_id = data.get("item_id")
     new_title = data.get("new_title")
@@ -520,6 +526,8 @@ def apply_cannibalization_fix():
     if not item_type or not item_id:
         return jsonify({"error": "item_type and item_id required"}), 400
 
+    if item_type not in ("product", "collection"):
+        return jsonify({"error": f"Invalid item_type: {item_type}"}), 400
     table = "synced_products" if item_type == "product" else "synced_collections"
 
     with db.get_cursor() as cur:
@@ -659,7 +667,7 @@ def bulk_cannibalization_fix():
     from app.prompt_defaults import DEFAULTS
     from app.shopify_client import ShopifyClient
 
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
     items = data.get("items", [])
     if not items:
         return jsonify({"error": "items array required"}), 400
@@ -679,6 +687,9 @@ def bulk_cannibalization_fix():
         page_url = item_data.get("page_url", "")
 
         try:
+            if item_type not in ("product", "collection"):
+                results.append({"item_id": item_id, "status": "error", "error": f"Invalid item_type: {item_type}"})
+                continue
             table = "synced_products" if item_type == "product" else "synced_collections"
             with db.get_cursor() as cur:
                 if item_type == "product":
@@ -736,6 +747,11 @@ def bulk_cannibalization_fix():
                 fields["meta_description"] = fix["new_meta_description"]
                 updated.append("meta_description")
 
+            has_alt_suggestions = bool(item_type == "product" and fix.get("image_alt_suggestions"))
+            if not fields and not has_alt_suggestions:
+                results.append({"item_id": item_id, "status": "skipped", "updated": [], "explanation": fix.get("explanation", "AI proposed no changes")})
+                continue
+
             if fields:
                 if item_type == "product":
                     shopify_client.update_product(item["shopify_id"], fields)
@@ -743,16 +759,23 @@ def bulk_cannibalization_fix():
                     shopify_client.update_collection(item["shopify_id"], fields)
 
             image_alts_changed = 0
+            alt_by_media = {}
             if item_type == "product" and fix.get("image_alt_suggestions"):
                 alts_to_push = []
                 for sug in fix["image_alt_suggestions"]:
                     idx = sug.get("image_index", 0)
                     if idx < len(images) and images[idx].get("media_id"):
                         alts_to_push.append({"media_id": images[idx]["media_id"], "alt": sug["new_alt"]})
+                        alt_by_media[images[idx]["media_id"]] = sug["new_alt"]
                 if alts_to_push:
                     shopify_client.update_product_media(item["shopify_id"], alts_to_push)
                     image_alts_changed = len(alts_to_push)
                     updated.append("image_alts")
+
+            if not updated:
+                # Nothing to apply — don't stamp last_optimized_at or record a fix row.
+                results.append({"item_id": item_id, "status": "skipped", "updated": [], "explanation": fix.get("explanation", "AI proposed no changes")})
+                continue
 
             with db.get_cursor() as cur:
                 if fix.get("new_title"):
@@ -762,13 +785,14 @@ def bulk_cannibalization_fix():
                 if fix.get("new_meta_description"):
                     cur.execute(f"UPDATE {table} SET meta_description = %s WHERE id = %s", (fix["new_meta_description"], item_id))
                 if image_alts_changed and item_type == "product":
+                    # Key by media_id — positional indexing against the raw list
+                    # (which includes images without media_id) hit the wrong images.
                     db_images = item.get("images") or []
                     if isinstance(db_images, str):
                         db_images = json.loads(db_images)
-                    for sug in fix.get("image_alt_suggestions", []):
-                        idx = sug.get("image_index", 0)
-                        if idx < len(db_images):
-                            db_images[idx]["alt"] = sug["new_alt"]
+                    for img in db_images:
+                        if img.get("media_id") in alt_by_media:
+                            img["alt"] = alt_by_media[img["media_id"]]
                     cur.execute("UPDATE synced_products SET images = %s WHERE id = %s", (json.dumps(db_images), item_id))
                 cur.execute(f"UPDATE {table} SET last_optimized_at = NOW() WHERE id = %s", (item_id,))
 

@@ -51,7 +51,13 @@ def upload_import():
     if "file" not in request.files:
         return jsonify({"error": "No file provided"}), 400
     file = request.files["file"]
+    if not file.filename:
+        return jsonify({"error": "No file selected"}), 400
+    if not file.filename.lower().endswith(".csv"):
+        return jsonify({"error": "Only CSV files are supported"}), 400
     content = file.read()
+    if len(content) > 50 * 1024 * 1024:
+        return jsonify({"error": "File too large (max 50MB)"}), 400
     force_type = request.form.get("type")
 
     try:

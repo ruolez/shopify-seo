@@ -192,7 +192,7 @@ function renderImgResults(container, data) {
             statusCell = `<span class="badge badge-error">No Image</span>`;
         }
 
-        let actions = `<button class="btn btn-secondary btn-sm" onclick="previewPlaceholder(${p.id}, '${escapeAttr(p.title)}', '${escapeAttr(p.handle || "")}')" title="Preview">
+        let actions = `<button class="btn btn-secondary btn-sm" onclick="previewPlaceholder(${p.id})" title="Preview">
                         <span class="material-symbols-rounded">visibility</span>
                     </button>`;
 
@@ -300,7 +300,11 @@ function getFilteredImgProducts() {
 }
 
 // Preview
-async function previewPlaceholder(productId, title, handle) {
+async function previewPlaceholder(productId) {
+    const product = imgProducts.find((x) => x.id === productId);
+    if (!product) return;
+    const title = product.title;
+    const handle = product.handle || "";
     const modal = document.getElementById("img-preview-modal");
     const content = document.getElementById("img-preview-content");
     content.innerHTML = '<div class="loading-spinner"><div class="spinner"></div><p>Generating preview...</p></div>';
@@ -501,9 +505,4 @@ function openImgConfirm(title, message, onOk) {
 function closeImgConfirm() {
     document.getElementById("img-confirm-overlay").classList.remove("active");
     imgConfirmCallback = null;
-}
-
-function escapeAttr(str) {
-    if (!str) return "";
-    return str.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/'/g, "&#39;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }

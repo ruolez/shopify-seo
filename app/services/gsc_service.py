@@ -103,6 +103,12 @@ def _build_service(store_id):
     client_id = client_config["web"]["client_id"]
     client_secret = client_config["web"]["client_secret"]
 
+    # google-auth expects a naive UTC datetime; without it creds.expired is
+    # always False and the proactive refresh below never runs.
+    token_expiry = cred_row.get("token_expiry")
+    if token_expiry is not None and token_expiry.tzinfo is not None:
+        token_expiry = token_expiry.astimezone(timezone.utc).replace(tzinfo=None)
+
     creds = Credentials(
         token=access_token,
         refresh_token=refresh_token,
@@ -110,6 +116,7 @@ def _build_service(store_id):
         client_id=client_id,
         client_secret=client_secret,
         scopes=SCOPES,
+        expiry=token_expiry,
     )
 
     if creds.expired and creds.refresh_token:
@@ -289,10 +296,20 @@ def pull_data(store_id, date_from=None, date_to=None, pull_type="incremental"):
         fresh_from = (today - timedelta(days=2)).isoformat()
         fresh_to = today.isoformat()
         fresh_start = 0
+        fresh_window_cleared = False
         while True:
             fresh_rows = _fetch_gsc_data(service, site_url, fresh_from, fresh_to, fresh_start, data_state="all")
             if not fresh_rows:
                 break
+            if not fresh_window_cleared:
+                # Replace the previous fresh snapshot — page/query combos that
+                # drop out of fresh data otherwise linger forever.
+                with db.get_cursor() as cur:
+                    cur.execute(
+                        "DELETE FROM gsc_daily_metrics WHERE store_id = %s AND date >= %s AND date <= %s",
+                        (store_id, fresh_from, fresh_to),
+                    )
+                fresh_window_cleared = True
             with db.get_cursor() as cur:
                 for row in fresh_rows:
                     keys = row.get("keys", [])
@@ -394,17 +411,28 @@ def get_overview(store_id, date_from, date_to, compare=True, device=None, countr
 
         if service and site_url:
             current = _fetch_gsc_totals(service, site_url, date_from, date_to, device, country)
+            current_is_live = True
         else:
             current = _get_overview_from_db(store_id, date_from, date_to, device, country)
+            current_is_live = False
     except Exception:
         current = _get_overview_from_db(store_id, date_from, date_to, device, country)
+        current_is_live = False
 
     previous = None
     if compare:
         days_range = (datetime.fromisoformat(date_to) - datetime.fromisoformat(date_from)).days + 1
         prev_to = (datetime.fromisoformat(date_from) - timedelta(days=1)).date().isoformat()
         prev_from = (datetime.fromisoformat(date_from) - timedelta(days=days_range)).date().isoformat()
-        previous = _get_overview_from_db(store_id, prev_from, prev_to, device, country)
+        # Compare like with like — mixing a live current against DB-only
+        # previous (different data states) skewed every delta percentage.
+        if current_is_live:
+            try:
+                previous = _fetch_gsc_totals(service, site_url, prev_from, prev_to, device, country)
+            except Exception:
+                previous = _get_overview_from_db(store_id, prev_from, prev_to, device, country)
+        else:
+            previous = _get_overview_from_db(store_id, prev_from, prev_to, device, country)
 
     result = {
         "total_clicks": float(current["total_clicks"] or 0),
@@ -465,10 +493,13 @@ def _fetch_gsc_by_dimension(store_id, date_from, date_to, dimension, key_name, d
             response = service.searchanalytics().query(siteUrl=site_url, body=body).execute()
             rows = response.get("rows", [])
             all_rows.extend(rows)
-            if len(rows) < body["rowLimit"]:
+            # Stop once the caller's requested row count is satisfied — paging
+            # through everything burned API quota and ignored the limit.
+            if len(all_rows) >= limit or len(rows) < body["rowLimit"]:
                 break
             start += len(rows)
 
+        all_rows = all_rows[:limit]
         return [
             {
                 key_name: r["keys"][0],
@@ -485,9 +516,9 @@ def _fetch_gsc_by_dimension(store_id, date_from, date_to, dimension, key_name, d
 
 
 def get_top_pages(store_id, date_from, date_to, limit=500, offset=0, sort_by="clicks", device=None, country=None):
-    live = _fetch_gsc_by_dimension(store_id, date_from, date_to, "page", "page", device, country, limit)
+    live = _fetch_gsc_by_dimension(store_id, date_from, date_to, "page", "page", device, country, limit + offset)
     if live is not None:
-        return live
+        return live[offset:offset + limit]
 
     order = "total_clicks DESC" if sort_by == "clicks" else "total_impressions DESC"
     where, params = _build_filters(store_id, date_from, date_to, device, country)
@@ -521,9 +552,9 @@ def get_top_pages(store_id, date_from, date_to, limit=500, offset=0, sort_by="cl
 
 
 def get_top_queries(store_id, date_from, date_to, limit=500, offset=0, sort_by="clicks", device=None, country=None):
-    live = _fetch_gsc_by_dimension(store_id, date_from, date_to, "query", "query", device, country, limit)
+    live = _fetch_gsc_by_dimension(store_id, date_from, date_to, "query", "query", device, country, limit + offset)
     if live is not None:
-        return live
+        return live[offset:offset + limit]
 
     order = "total_clicks DESC" if sort_by == "clicks" else "total_impressions DESC"
     where, params = _build_filters(store_id, date_from, date_to, device, country)
@@ -680,6 +711,7 @@ def get_opportunities(store_id, date_from, date_to, limit=200, device=None, coun
                WHERE {where}
                GROUP BY page, query
                HAVING SUM(impressions) >= 10
+                  AND (CASE WHEN SUM(impressions) > 0 THEN SUM(clicks) / SUM(impressions) ELSE 0 END) < 0.05
                ORDER BY SUM(impressions) DESC, avg_ctr ASC
                LIMIT %s""",
             params,
@@ -1106,9 +1138,19 @@ class PullScheduler:
             self._stop_event.wait(self.interval)
 
     def _pull_all_stores(self):
+        # Skip stores pulled recently — restarts/multiple ticks must not
+        # double-pull and burn API quota.
         with db.get_cursor() as cur:
             cur.execute(
-                "SELECT store_id FROM gsc_credentials WHERE gsc_property IS NOT NULL"
+                """SELECT gc.store_id FROM gsc_credentials gc
+                   WHERE gc.gsc_property IS NOT NULL
+                     AND NOT EXISTS (
+                       SELECT 1 FROM gsc_data_pulls p
+                       WHERE p.store_id = gc.store_id
+                         AND p.status IN ('completed', 'running')
+                         AND p.started_at > NOW() - make_interval(secs => %s)
+                     )""",
+                (self.interval * 0.9,),
             )
             stores = cur.fetchall()
 

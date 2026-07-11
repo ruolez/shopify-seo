@@ -145,7 +145,7 @@ def blog_page():
 
 @blog_bp.route("/api/blog/sync", methods=["POST"])
 def sync_blogs():
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
     store_id = data.get("store_id")
     if not store_id:
         return jsonify({"error": "store_id is required"}), 400
@@ -211,7 +211,7 @@ def list_blogs():
 
 @blog_bp.route("/api/blog/blogs", methods=["POST"])
 def create_blog():
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
     store_id = data.get("store_id")
     title = re.sub(r'\s+', ' ', data.get("title", "")).strip()
     if not store_id or not title:
@@ -322,7 +322,7 @@ def get_article(article_id):
 
 @blog_bp.route("/api/blog/articles/<int:article_id>/apply", methods=["POST"])
 def apply_article(article_id):
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
     with db.get_cursor() as cur:
         cur.execute(
             """SELECT sa.*, s.id as sid
@@ -377,12 +377,12 @@ def apply_article(article_id):
                 update_params,
             )
 
-    return jsonify({"success": True})
+    return jsonify({"ok": True, "success": True})
 
 
 @blog_bp.route("/api/blog/articles/<int:article_id>/move", methods=["POST"])
 def move_article(article_id):
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
     target_blog_id = data.get("target_blog_id")
     if not target_blog_id:
         return jsonify({"error": "target_blog_id is required"}), 400
@@ -422,7 +422,7 @@ def move_article(article_id):
     _regen_landing_async(article["store_id"], source_blog_id, client, store)
     _regen_landing_async(article["store_id"], target_blog_id, client, store)
 
-    return jsonify({"success": True, "moved_to": target_blog["title"]})
+    return jsonify({"ok": True, "success": True, "moved_to": target_blog["title"]})
 
 
 @blog_bp.route("/api/blog/articles/<int:article_id>", methods=["DELETE"])
@@ -446,12 +446,12 @@ def delete_article(article_id):
     if client:
         _regen_landing_async(article["store_id"], article["blog_id"], client, store)
 
-    return jsonify({"success": True})
+    return jsonify({"ok": True, "success": True})
 
 
 @blog_bp.route("/api/blog/articles/delete", methods=["POST"])
 def bulk_delete_articles():
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
     article_ids = data.get("article_ids", [])
     if not article_ids:
         return jsonify({"error": "No articles specified"}), 400
@@ -466,29 +466,42 @@ def bulk_delete_articles():
 
     stores_cache = {}
     deleted = 0
+    failed = []
+    deletable_ids = []
     for article in articles:
         sid = article["store_id"]
         if sid not in stores_cache:
             stores_cache[sid] = _get_store_client(sid)
         _, client = stores_cache[sid]
-        if client:
-            try:
-                client.delete_article(article["shopify_id"])
-            except Exception as e:
+        if not client:
+            failed.append({"id": article["id"], "title": article.get("title"), "error": "store connection unavailable"})
+            continue
+        try:
+            client.delete_article(article["shopify_id"])
+            deletable_ids.append(article["id"])
+        except Exception as e:
+            # Already-gone articles are safe to remove locally; real failures
+            # keep the local row so the article doesn't become invisible while live.
+            if any(t in str(e).lower() for t in ("does not exist", "not found", "invalid id", "no longer exists")):
+                deletable_ids.append(article["id"])
+            else:
                 logger.warning("Failed to delete article %s from Shopify: %s", article["id"], e)
+                failed.append({"id": article["id"], "title": article.get("title"), "error": str(e)})
 
-    affected_blogs = set((a["store_id"], a["blog_id"]) for a in articles)
+    affected_blogs = set((a["store_id"], a["blog_id"]) for a in articles if a["id"] in set(deletable_ids))
 
-    with db.get_cursor() as cur:
-        cur.execute(f"DELETE FROM synced_articles WHERE id IN ({placeholders})", article_ids)
-        deleted = cur.rowcount
+    if deletable_ids:
+        del_placeholders = ",".join(["%s"] * len(deletable_ids))
+        with db.get_cursor() as cur:
+            cur.execute(f"DELETE FROM synced_articles WHERE id IN ({del_placeholders})", deletable_ids)
+            deleted = cur.rowcount
 
     for sid, bid in affected_blogs:
         store, client = stores_cache.get(sid, (None, None))
         if client:
             _regen_landing_async(sid, bid, client, store)
 
-    return jsonify({"deleted": deleted})
+    return jsonify({"deleted": deleted, "failed": failed})
 
 
 # ── AI SEO Analysis ──────────────────────────────────────────────
@@ -569,7 +582,7 @@ def refresh_article_links(article_id):
     if not article:
         return jsonify({"error": "Article not found"}), 404
 
-    data = request.get_json() or {}
+    data = request.get_json(silent=True) or {}
     product_ids = data.get("product_ids", [])
     collection_ids = data.get("collection_ids", [])
 
@@ -620,7 +633,7 @@ def refresh_article_links(article_id):
 
 @blog_bp.route("/api/blog/bulk-optimize", methods=["POST"])
 def bulk_optimize_articles():
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
     article_ids = data.get("article_ids", [])
     auto_apply = data.get("auto_apply", True)
     if not article_ids:
@@ -756,6 +769,8 @@ def bulk_optimize_articles():
 
 @blog_bp.route("/api/blog/bulk-status/<int:bulk_task_id>", methods=["GET"])
 def bulk_status(bulk_task_id):
+    from app.services.task_runner import sweep_stale_jobs
+    sweep_stale_jobs()
     with db.get_cursor() as cur:
         cur.execute("SELECT * FROM bulk_tasks WHERE id = %s", (bulk_task_id,))
         task = cur.fetchone()
@@ -766,238 +781,11 @@ def bulk_status(bulk_task_id):
 
 # ── Blog Consolidation ───────────────────────────────────────────
 
-@blog_bp.route("/api/blog/consolidate/preview", methods=["GET"])
-def consolidate_preview():
-    store_id = request.args.get("store_id")
-    if not store_id:
-        return jsonify({"error": "store_id is required"}), 400
-
-    with db.get_cursor() as cur:
-        cur.execute(
-            """SELECT sb.id, sb.title, sb.handle,
-                (SELECT COUNT(*) FROM synced_articles sa WHERE sa.blog_id = sb.id) as article_count
-            FROM synced_blogs sb
-            WHERE sb.store_id = %s AND sb.handle != 'news'
-            ORDER BY sb.title""",
-            (store_id,),
-        )
-        blogs = [dict(b) for b in cur.fetchall()]
-
-    total_articles = sum(b["article_count"] for b in blogs)
-    return jsonify({
-        "blogs": blogs,
-        "total_articles": total_articles,
-        "total_redirects": total_articles,
-    })
-
-
-@blog_bp.route("/api/blog/consolidate", methods=["POST"])
-def consolidate_blogs():
-    data = request.get_json()
-    store_id = data.get("store_id")
-    if not store_id:
-        return jsonify({"error": "store_id is required"}), 400
-
-    store, client = _get_store_client(store_id)
-    if not client:
-        return jsonify({"error": "Store not found"}), 404
-
-    with db.get_cursor() as cur:
-        cur.execute(
-            """INSERT INTO blog_migrations (store_id, status, started_at)
-            VALUES (%s, 'running', NOW()) RETURNING id""",
-            (store_id,),
-        )
-        migration_id = cur.fetchone()["id"]
-
-    def run_consolidation():
-        try:
-            # 1. Find or create News blog
-            news_blog = None
-            with db.get_cursor() as cur:
-                cur.execute(
-                    "SELECT * FROM synced_blogs WHERE store_id = %s AND handle = 'news'",
-                    (store_id,),
-                )
-                news_blog = cur.fetchone()
-
-            if not news_blog:
-                news_result = client.create_blog("News")
-                with db.get_cursor() as cur:
-                    cur.execute(
-                        """INSERT INTO synced_blogs (store_id, shopify_id, title, handle, synced_at)
-                        VALUES (%s, %s, %s, %s, NOW())
-                        ON CONFLICT (store_id, shopify_id) DO UPDATE SET
-                            title = EXCLUDED.title, handle = EXCLUDED.handle, synced_at = NOW()
-                        RETURNING *""",
-                        (store_id, news_result["shopify_id"], news_result["title"], news_result.get("handle", "news")),
-                    )
-                    news_blog = cur.fetchone()
-
-            news_blog_id = news_blog["id"]
-            news_shopify_id = news_blog["shopify_id"]
-
-            # 2. Get all non-News blogs and their articles
-            with db.get_cursor() as cur:
-                cur.execute(
-                    "SELECT * FROM synced_blogs WHERE store_id = %s AND handle != 'news'",
-                    (store_id,),
-                )
-                other_blogs = [dict(b) for b in cur.fetchall()]
-
-            with db.get_cursor() as cur:
-                cur.execute(
-                    """SELECT sa.*, sb.title as blog_title, sb.handle as blog_handle
-                    FROM synced_articles sa
-                    JOIN synced_blogs sb ON sb.id = sa.blog_id
-                    WHERE sa.store_id = %s AND sb.handle != 'news'
-                    ORDER BY sa.id""",
-                    (store_id,),
-                )
-                articles = [dict(a) for a in cur.fetchall()]
-
-            total = len(articles)
-            with db.get_cursor() as cur:
-                cur.execute(
-                    "UPDATE blog_migrations SET total_articles = %s WHERE id = %s",
-                    (total, migration_id),
-                )
-
-            migrated = 0
-            redirects = 0
-            failed = 0
-
-            # 3. Migrate each article
-            for article in articles:
-                try:
-                    # Skip landing-page articles
-                    existing_tags = [t.strip() for t in (article.get("tags") or "").split(",") if t.strip()]
-                    if "landing-page" in existing_tags:
-                        migrated += 1
-                        continue
-
-                    old_blog_title = article.get("blog_title", "")
-                    old_blog_handle = article.get("blog_handle", "")
-                    article_handle = article.get("handle", "")
-
-                    # Add old blog title as tag
-                    new_tags = list(existing_tags)
-                    if old_blog_title and old_blog_title not in new_tags:
-                        new_tags.append(old_blog_title)
-                    new_tags = list(dict.fromkeys(new_tags))
-
-                    # Move article on Shopify
-                    client.update_article(article["shopify_id"], {
-                        "blog_id": news_shopify_id,
-                        "tags": new_tags,
-                    })
-
-                    # Create URL redirect
-                    if old_blog_handle and article_handle:
-                        old_path = f"/blogs/{old_blog_handle}/{article_handle}"
-                        new_path = f"/blogs/news/{article_handle}"
-                        try:
-                            client.create_url_redirect(old_path, new_path)
-                            redirects += 1
-                        except Exception as redir_err:
-                            logger.warning("Redirect failed for %s: %s", old_path, redir_err)
-
-                    # Update local DB
-                    with db.get_cursor() as cur:
-                        cur.execute(
-                            """UPDATE synced_articles
-                            SET blog_id = %s, shopify_blog_id = %s, tags = %s
-                            WHERE id = %s""",
-                            (news_blog_id, news_shopify_id, ", ".join(new_tags), article["id"]),
-                        )
-
-                    migrated += 1
-                    with db.get_cursor() as cur:
-                        cur.execute(
-                            "UPDATE blog_migrations SET migrated_articles = %s, redirects_created = %s WHERE id = %s",
-                            (migrated, redirects, migration_id),
-                        )
-
-                    time.sleep(0.5)
-
-                except Exception as art_err:
-                    logger.exception("Failed to migrate article %s: %s", article.get("shopify_id"), art_err)
-                    failed += 1
-                    with db.get_cursor() as cur:
-                        cur.execute(
-                            "UPDATE blog_migrations SET failed_articles = %s WHERE id = %s",
-                            (failed, migration_id),
-                        )
-
-            # 4. Clean up old landing pages
-            for old_blog in other_blogs:
-                with db.get_cursor() as cur:
-                    cur.execute(
-                        "SELECT * FROM blog_landing_pages WHERE store_id = %s AND blog_id = %s",
-                        (store_id, old_blog["id"]),
-                    )
-                    landing = cur.fetchone()
-                if landing and landing.get("shopify_page_id"):
-                    try:
-                        client.delete_article(landing["shopify_page_id"])
-                    except Exception as e:
-                        logger.warning("Failed to delete old landing page: %s", e)
-                with db.get_cursor() as cur:
-                    cur.execute(
-                        "DELETE FROM blog_landing_pages WHERE store_id = %s AND blog_id = %s",
-                        (store_id, old_blog["id"]),
-                    )
-
-            # 5. Regenerate News landing page
-            _regen_landing_async(store_id, news_blog_id, client, store)
-
-            # 6. Mark completed
-            with db.get_cursor() as cur:
-                cur.execute(
-                    """UPDATE blog_migrations
-                    SET status = 'completed', migrated_articles = %s, redirects_created = %s,
-                        failed_articles = %s, completed_at = NOW()
-                    WHERE id = %s""",
-                    (migrated, redirects, failed, migration_id),
-                )
-
-        except Exception as e:
-            logger.exception("Blog consolidation failed: %s", e)
-            with db.get_cursor() as cur:
-                cur.execute(
-                    "UPDATE blog_migrations SET status = 'failed', error = %s, completed_at = NOW() WHERE id = %s",
-                    (str(e), migration_id),
-                )
-
-    threading.Thread(target=run_consolidation, daemon=True).start()
-    return jsonify({"migration_id": migration_id})
-
-
-@blog_bp.route("/api/blog/consolidate/status", methods=["GET"])
-def consolidate_status():
-    store_id = request.args.get("store_id")
-    if not store_id:
-        return jsonify({"error": "store_id is required"}), 400
-
-    with db.get_cursor() as cur:
-        cur.execute(
-            "SELECT * FROM blog_migrations WHERE store_id = %s ORDER BY id DESC LIMIT 1",
-            (store_id,),
-        )
-        migration = cur.fetchone()
-
-    if not migration:
-        return jsonify({"status": "none"})
-    return jsonify(dict(migration))
-
-
-# ── Wizard Endpoints ─────────────────────────────────────────────
-
 # ── Landing Page Generator ───────────────────────────────────────
 
 @blog_bp.route("/api/blog/generate-landing", methods=["POST"])
 def generate_landing_page():
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
     store_id = data.get("store_id")
     blog_id = data.get("blog_id")
     intro_text = data.get("intro_text", "").strip() or None
@@ -1206,64 +994,6 @@ def generate_landing_page():
     return jsonify({"task_id": task_id})
 
 
-@blog_bp.route("/api/blog/cleanup-landing-duplicates", methods=["POST"])
-def cleanup_landing_duplicates():
-    data = request.get_json()
-    store_id = data.get("store_id")
-    if not store_id:
-        return jsonify({"error": "store_id is required"}), 400
-
-    store, client = _get_store_client(store_id)
-    if not client:
-        return jsonify({"error": "Store not found"}), 404
-
-    # Get all articles tagged "landing-page" from Shopify
-    try:
-        all_articles = client.get_all_articles()
-    except Exception as e:
-        logger.warning("get_all_articles failed, trying direct query: %s", e)
-        all_articles = []
-        # Fallback: query articles with landing-page tag
-        query = """
-        {
-          articles(first: 50, query: "tag:landing-page") {
-            edges { node { id title handle tags } }
-          }
-        }
-        """
-        data = client._graphql(query)
-        for edge in data.get("articles", {}).get("edges", []):
-            node = edge["node"]
-            all_articles.append({
-                "shopify_id": node["id"],
-                "title": node.get("title", ""),
-                "tags": ", ".join(node.get("tags", [])),
-            })
-    landing_articles = [a for a in all_articles if "landing-page" in (a.get("tags") or "")]
-
-    # Group by title to find duplicates
-    by_title = {}
-    for article in landing_articles:
-        title = article["title"]
-        if title not in by_title:
-            by_title[title] = []
-        by_title[title].append(article)
-
-    deleted = []
-    for title, articles in by_title.items():
-        if len(articles) > 1:
-            # Keep the first, delete the rest
-            for dup in articles[1:]:
-                try:
-                    client.delete_article(dup["shopify_id"])
-                    deleted.append({"title": title, "shopify_id": dup["shopify_id"]})
-                    logger.info("Deleted duplicate landing page: %s (%s)", title, dup["shopify_id"])
-                except Exception as e:
-                    logger.warning("Failed to delete duplicate %s: %s", dup["shopify_id"], e)
-
-    return jsonify({"deleted": deleted, "total_landing_articles": len(landing_articles)})
-
-
 @blog_bp.route("/api/blog/landing-status", methods=["GET"])
 def landing_status():
     store_id = request.args.get("store_id")
@@ -1290,7 +1020,7 @@ def landing_status():
 
 @blog_bp.route("/api/blog/generate-hero-image", methods=["POST"])
 def generate_hero_image():
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
     store_id = data.get("store_id")
     blog_id = data.get("blog_id")
     if not store_id or not blog_id:
@@ -1401,7 +1131,7 @@ def generate_hero_image():
 
 @blog_bp.route("/api/blog/remove-hero-image", methods=["POST"])
 def remove_hero_image():
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
     store_id = data.get("store_id")
     blog_id = data.get("blog_id")
     if not store_id or not blog_id:
@@ -1418,12 +1148,12 @@ def remove_hero_image():
         )
 
     _regen_landing_async(store_id, blog_id, client, store)
-    return jsonify({"success": True})
+    return jsonify({"ok": True, "success": True})
 
 
 @blog_bp.route("/api/blog/wizard/start", methods=["POST"])
 def wizard_start():
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
     store_id = data.get("store_id")
     topic = data.get("topic", "").strip()
     keywords = data.get("keywords", [])
@@ -1533,6 +1263,8 @@ def wizard_update_keywords(session_id):
             "UPDATE article_wizard_sessions SET target_keywords = %s, updated_at = NOW() WHERE id = %s",
             (json.dumps(keywords), session_id),
         )
+        if cur.rowcount == 0:
+            return jsonify({"error": "Wizard session not found"}), 404
     return jsonify({"ok": True})
 
 
@@ -1577,7 +1309,7 @@ def wizard_search_collections():
 
 @blog_bp.route("/api/blog/wizard/<int:session_id>/linking", methods=["PUT"])
 def wizard_update_linking(session_id):
-    data = request.get_json() or {}
+    data = request.get_json(silent=True) or {}
     product_ids = data.get("product_ids", [])
     collection_ids = data.get("collection_ids", [])
     with db.get_cursor() as cur:
@@ -1585,6 +1317,8 @@ def wizard_update_linking(session_id):
             "UPDATE article_wizard_sessions SET target_product_ids = %s, target_collection_ids = %s, updated_at = NOW() WHERE id = %s",
             (json.dumps(product_ids), json.dumps(collection_ids), session_id),
         )
+        if cur.rowcount == 0:
+            return jsonify({"error": "Wizard session not found"}), 404
     return jsonify({"ok": True})
 
 
@@ -1742,13 +1476,15 @@ def wizard_outline(session_id):
 
 @blog_bp.route("/api/blog/wizard/<int:session_id>/outline", methods=["PUT"])
 def wizard_update_outline(session_id):
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
     with db.get_cursor() as cur:
         cur.execute(
             "UPDATE article_wizard_sessions SET outline_data = %s, updated_at = NOW() WHERE id = %s",
             (json.dumps(data.get("outline_data", {})), session_id),
         )
-    return jsonify({"success": True})
+        if cur.rowcount == 0:
+            return jsonify({"error": "Wizard session not found"}), 404
+    return jsonify({"ok": True, "success": True})
 
 
 @blog_bp.route("/api/blog/wizard/<int:session_id>/generate", methods=["POST"])
@@ -1825,7 +1561,7 @@ def wizard_generate(session_id):
 
 @blog_bp.route("/api/blog/wizard/<int:session_id>/review", methods=["PUT"])
 def wizard_update_review(session_id):
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
     with db.get_cursor() as cur:
         updates = ["generated_article = %s", "updated_at = NOW()"]
         params = [json.dumps(data.get("generated_article", {}))]
@@ -1837,12 +1573,14 @@ def wizard_update_review(session_id):
             f"UPDATE article_wizard_sessions SET {', '.join(updates)} WHERE id = %s",
             params,
         )
-    return jsonify({"success": True})
+        if cur.rowcount == 0:
+            return jsonify({"error": "Wizard session not found"}), 404
+    return jsonify({"ok": True, "success": True})
 
 
 @blog_bp.route("/api/blog/wizard/<int:session_id>/publish", methods=["POST"])
 def wizard_publish(session_id):
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
     is_published = data.get("is_published", False)
 
     with db.get_cursor() as cur:
@@ -1900,7 +1638,33 @@ def wizard_publish(session_id):
         fields["image_url"] = session["featured_image_url"]
         fields["image_alt"] = generated.get("title", session["topic"])
 
-    result = client.create_article(blog["shopify_id"], fields)
+    existing_article_id = session.get("shopify_article_id")
+    try:
+        if existing_article_id:
+            # Re-save: update the article this session already created rather than
+            # creating a duplicate (which would collide on handle).
+            raw = client.update_article(existing_article_id, fields)
+            result = {
+                "shopify_id": raw.get("id") or existing_article_id,
+                "title": raw.get("title", ""),
+                "handle": raw.get("handle", ""),
+                "image_url": fields.get("image_url", ""),
+                "image_alt": fields.get("image_alt", ""),
+            }
+        else:
+            try:
+                result = client.create_article(blog["shopify_id"], fields)
+            except Exception as create_err:
+                # A pre-existing article already owns this handle — let Shopify
+                # auto-generate a unique one instead of failing the whole save.
+                if "Handle has already been taken" in str(create_err):
+                    fields.pop("handle", None)
+                    result = client.create_article(blog["shopify_id"], fields)
+                else:
+                    raise
+    except Exception as e:
+        logger.exception("Wizard publish failed for session %s: %s", session_id, e)
+        return jsonify({"error": f"Shopify rejected the article: {e}"}), 502
 
     cdn_image_url = result.get("image_url", "")
     if not cdn_image_url or "shopify-staged-uploads" in cdn_image_url:
@@ -1939,8 +1703,8 @@ def wizard_publish(session_id):
         article_row = cur.fetchone()
 
         cur.execute(
-            "UPDATE article_wizard_sessions SET status = 'published', current_step = 6, updated_at = NOW() WHERE id = %s",
-            (session_id,),
+            "UPDATE article_wizard_sessions SET status = 'published', current_step = 6, shopify_article_id = %s, updated_at = NOW() WHERE id = %s",
+            (result["shopify_id"], session_id),
         )
 
     # Auto-regenerate landing page for this blog
@@ -1958,7 +1722,7 @@ def wizard_publish(session_id):
 
 @blog_bp.route("/api/blog/cleanup-empty-blogs", methods=["POST"])
 def cleanup_empty_blogs():
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
     store_id = data.get("store_id")
     if not store_id:
         return jsonify({"error": "store_id is required"}), 400
@@ -2015,7 +1779,7 @@ def list_empty_blogs():
 
 @blog_bp.route("/api/blog/ai-suggestions", methods=["POST"])
 def blog_ai_suggestions():
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
     store_id = data.get("store_id")
     blog_id = data.get("blog_id")
     if not store_id or not blog_id:
@@ -2097,7 +1861,7 @@ def blog_ai_suggestions():
 
 @blog_bp.route("/api/blog/save-intro", methods=["POST"])
 def save_intro():
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
     store_id = data.get("store_id")
     blog_id = data.get("blog_id")
     intro_text = data.get("intro_text", "").strip()
@@ -2112,14 +1876,14 @@ def save_intro():
             (store_id, blog_id, intro_text),
         )
 
-    return jsonify({"success": True})
+    return jsonify({"ok": True, "success": True})
 
 
 # ── Blog Rename ─────────────────────────────────────────────────
 
 @blog_bp.route("/api/blog/blogs/<int:blog_id>", methods=["PUT"])
 def update_blog(blog_id):
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
     title = re.sub(r'\s+', ' ', data.get("title", "")).strip()
     if not title:
         return jsonify({"error": "title is required"}), 400
@@ -2152,14 +1916,14 @@ def update_blog(blog_id):
             (result.get("title", title), blog_id),
         )
 
-    return jsonify({"success": True, "title": result.get("title", title)})
+    return jsonify({"ok": True, "success": True, "title": result.get("title", title)})
 
 
 # ── Refresh Images ───────────────────────────────────────────────
 
 @blog_bp.route("/api/blog/refresh-images", methods=["POST"])
 def refresh_images():
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
     store_id = data.get("store_id")
     blog_id = data.get("blog_id")
     if not store_id or not blog_id:
@@ -2191,7 +1955,7 @@ def refresh_images():
         if blog:
             _regen_landing_async(store_id, blog_id, client, store)
 
-    return jsonify({"success": True, "updated": updated})
+    return jsonify({"ok": True, "success": True, "updated": updated})
 
 
 # ── Theme SEO Snippet ───────────────────────────────────────────
@@ -2265,7 +2029,7 @@ def _scan_and_fix_meta_descriptions(client, theme_id):
 
 @blog_bp.route("/api/blog/push-seo-snippet", methods=["POST"])
 def push_seo_snippet():
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
     store_id = data.get("store_id")
     if not store_id:
         return jsonify({"error": "store_id is required"}), 400
@@ -2310,7 +2074,7 @@ def push_seo_snippet():
 
 @blog_bp.route("/api/blog/revert-seo-snippet", methods=["POST"])
 def revert_seo_snippet():
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
     store_id = data.get("store_id")
     if not store_id:
         return jsonify({"error": "store_id is required"}), 400
@@ -2340,41 +2104,9 @@ def revert_seo_snippet():
             except Exception:
                 pass
 
-        return jsonify({"success": True, "reverted": True})
+        return jsonify({"ok": True, "success": True, "reverted": True})
     except Exception as e:
         logger.exception("Failed to revert SEO snippet: %s", e)
-        return jsonify({"error": str(e)}), 500
-
-
-@blog_bp.route("/api/blog/debug-theme-meta", methods=["GET"])
-def debug_theme_meta():
-    store_id = request.args.get("store_id")
-    if not store_id:
-        return jsonify({"error": "store_id required"}), 400
-    store, client = _get_store_client(store_id)
-    if not client:
-        return jsonify({"error": "Store not found"}), 404
-    try:
-        theme_id = client.get_main_theme_id()
-        all_assets = client.list_theme_assets(theme_id)
-        findings = {}
-        for key in all_assets:
-            if not key.endswith(".liquid"):
-                continue
-            try:
-                content = client.get_theme_asset(theme_id, key)
-                if not content:
-                    continue
-                lines = []
-                for i, line in enumerate(content.split("\n"), 1):
-                    if "description" in line.lower() and "meta" in line.lower():
-                        lines.append({"line": i, "content": line.strip()[:200]})
-                if lines:
-                    findings[key] = lines
-            except Exception:
-                pass
-        return jsonify(findings)
-    except Exception as e:
         return jsonify({"error": str(e)}), 500
 
 
@@ -2435,7 +2167,7 @@ def detect_old_blogs():
 
 @blog_bp.route("/api/blog/create-redirects", methods=["POST"])
 def create_redirects():
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
     store_id = data.get("store_id")
     redirects = data.get("redirects", [])
     if not store_id:

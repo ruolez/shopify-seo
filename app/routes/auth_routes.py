@@ -15,7 +15,7 @@ def login_page():
 
 @auth_bp.route("/api/login", methods=["POST"])
 def login():
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
     username = (data.get("username") or "").strip()
     password = data.get("password") or ""
 

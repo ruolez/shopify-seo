@@ -137,7 +137,11 @@ function cancelSrPreview() {
 }
 
 async function executeSrImport() {
-    if (!srSelectedFile || !srStoreId) return;
+    if (!srSelectedFile) return;
+    if (!srStoreId) {
+        showToast("Select a store first", "warning");
+        return;
+    }
     const btn = document.getElementById("sr-import-btn");
     btn.disabled = true;
     btn.innerHTML = '<span class="spinner" style="width:14px;height:14px;border-width:2px;"></span> Importing...';

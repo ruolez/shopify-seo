@@ -196,7 +196,8 @@ def discover_gaps(store_id):
         elif our_pos > 20:
             gap_type = "weak"
         elif gsc and gsc["avg_position"] and float(gsc["avg_position"]) > 15:
-            gap_type = "weak"
+            # Ranked per Semrush but GSC shows the page slipping past 15.
+            gap_type = "declining"
         else:
             gap_type = "weak"
 
@@ -738,7 +739,7 @@ def publish_content(store_id, gap_id, content_data):
         try:
             client.publish_to_all_channels(shopify_id)
         except Exception:
-            pass
+            logger.warning("Publish to sales channels failed for %s", shopify_id, exc_info=True)
 
         if gap.get("matched_product_id"):
             with db.get_cursor() as cur:
@@ -748,7 +749,7 @@ def publish_content(store_id, gap_id, content_data):
                     try:
                         client.add_products_to_collection(shopify_id, [prod["shopify_id"]])
                     except Exception:
-                        pass
+                        logger.warning("Could not add matched product to new collection %s", shopify_id, exc_info=True)
 
         if generate_image:
             try:
@@ -772,7 +773,11 @@ def publish_content(store_id, gap_id, content_data):
 
     elif content_type == "blog":
         with db.get_cursor() as cur:
-            cur.execute("SELECT id, shopify_id FROM synced_blogs WHERE store_id = %s LIMIT 1", (store_id,))
+            cur.execute(
+                """SELECT id, shopify_id, handle FROM synced_blogs WHERE store_id = %s
+                   ORDER BY (handle = 'news') DESC, id DESC LIMIT 1""",
+                (store_id,),
+            )
             blog = cur.fetchone()
 
         if not blog:
@@ -810,7 +815,8 @@ def publish_content(store_id, gap_id, content_data):
                    ON CONFLICT (store_id, shopify_id) DO UPDATE SET title = EXCLUDED.title, body = EXCLUDED.body, synced_at = NOW()""",
                 (store_id, blog["id"], shopify_id, blog["shopify_id"], title, handle, body_html, ",".join(tags) if isinstance(tags, list) else tags, meta_title, meta_description),
             )
-        result = {"shopify_id": shopify_id, "handle": handle, "url": f"https://{store['domain']}/blogs/news/{handle}"}
+        blog_handle = blog.get("handle") or "news"
+        result = {"shopify_id": shopify_id, "handle": handle, "url": f"https://{store['domain']}/blogs/{blog_handle}/{handle}"}
 
     elif content_type == "page":
         shopify_result = client.create_page(title, body_html, slug or None, True, meta_title, meta_description)

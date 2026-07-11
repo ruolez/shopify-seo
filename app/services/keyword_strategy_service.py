@@ -143,7 +143,10 @@ def consolidate_master_keywords(store_id):
                          impressions = EXCLUDED.impressions,
                          ctr = EXCLUDED.ctr,
                          intent = EXCLUDED.intent,
-                         source = EXCLUDED.source,
+                         source = CASE
+                             WHEN master_keywords.source = 'manual' THEN 'manual'
+                             ELSE EXCLUDED.source
+                         END,
                          current_url = EXCLUDED.current_url,
                          updated_at = NOW()""",
                     row,
@@ -183,7 +186,7 @@ def add_manual_keyword(store_id, keyword, search_volume=None, intent=None):
                  intent = COALESCE(EXCLUDED.intent, master_keywords.intent),
                  updated_at = NOW()
                RETURNING id""",
-            (store_id, kw, search_volume or 0, intent),
+            (store_id, kw, search_volume, intent),
         )
         return cur.fetchone()["id"]
 
@@ -303,13 +306,16 @@ def cluster_keywords(store_id):
     """Group keywords by token-level Jaccard similarity."""
     with db.get_cursor() as cur:
         cur.execute(
-            "SELECT id, keyword FROM master_keywords WHERE store_id = %s AND status = 'active'",
+            "SELECT id, keyword, COALESCE(search_volume, 0) AS volume "
+            "FROM master_keywords WHERE store_id = %s AND status = 'active'",
             (store_id,),
         )
         rows = cur.fetchall()
 
     if not rows:
         return {"clusters": 0, "keywords": 0}
+
+    volumes = {row["id"]: row["volume"] or 0 for row in rows}
 
     # Tokenize all keywords
     kw_tokens = {}
@@ -334,15 +340,34 @@ def cluster_keywords(store_id):
         if ra != rb:
             parent[ra] = rb
 
-    ids = list(kw_tokens.keys())
-    for i in range(len(ids)):
-        for j in range(i + 1, len(ids)):
-            t1 = kw_tokens[ids[i]][1]
-            t2 = kw_tokens[ids[j]][1]
-            intersection = len(t1 & t2)
-            union_size = len(t1 | t2)
-            if union_size > 0 and intersection / union_size >= 0.5:
-                union(ids[i], ids[j])
+    # Inverted token index: Jaccard >= 0.5 requires at least one shared token,
+    # so only candidate pairs sharing a token need comparing — pure-Python
+    # all-pairs comparison hung for minutes at a few thousand keywords.
+    token_index = {}
+    for kid, (_, tokens) in kw_tokens.items():
+        for tok in tokens:
+            token_index.setdefault(tok, []).append(kid)
+
+    compared = set()
+    for tok, members in token_index.items():
+        if len(members) < 2 or len(members) > 500:
+            # a token shared by >500 keywords is a stop-word-like term; pairs
+            # relying on it alone can't reach Jaccard 0.5 anyway for multi-token
+            # keywords, and comparing them all would reintroduce the blowup
+            continue
+        for i in range(len(members)):
+            for j in range(i + 1, len(members)):
+                a, b = members[i], members[j]
+                pair = (a, b) if a < b else (b, a)
+                if pair in compared:
+                    continue
+                compared.add(pair)
+                t1 = kw_tokens[a][1]
+                t2 = kw_tokens[b][1]
+                intersection = len(t1 & t2)
+                union_size = len(t1 | t2)
+                if union_size > 0 and intersection / union_size >= 0.5:
+                    union(a, b)
 
     # Group by cluster root
     clusters = {}
@@ -370,9 +395,9 @@ def cluster_keywords(store_id):
                 continue
 
             # Name by highest volume keyword
-            best_kw = max(member_ids, key=lambda kid: _get_kw_volume(store_id, kid))
+            best_kw = max(member_ids, key=lambda kid: volumes.get(kid, 0))
             cluster_name = kw_tokens[best_kw][0]
-            total_vol = sum(_get_kw_volume(store_id, kid) for kid in member_ids)
+            total_vol = sum(volumes.get(kid, 0) for kid in member_ids)
 
             cur.execute(
                 """INSERT INTO master_keyword_clusters (store_id, name, keyword_count, total_volume)
@@ -385,11 +410,10 @@ def cluster_keywords(store_id):
             )
             cluster_id = cur.fetchone()["id"]
 
-            for kid in member_ids:
-                cur.execute(
-                    "UPDATE master_keywords SET cluster_id = %s WHERE id = %s AND store_id = %s",
-                    (cluster_id, kid, store_id),
-                )
+            cur.execute(
+                "UPDATE master_keywords SET cluster_id = %s WHERE store_id = %s AND id = ANY(%s)",
+                (cluster_id, store_id, member_ids),
+            )
             cluster_count += 1
 
     return {"clusters": cluster_count, "keywords": len(kw_tokens)}
@@ -681,14 +705,14 @@ def run_content_audit(store_id):
                             (completed, run_id),
                         )
 
-                # Flush batch every 500 keywords to avoid huge memory
+                # Flush batch periodically to avoid huge memory
                 if len(batch_rows) >= 5000:
-                    _flush_audit_batch(batch_rows, primary_tracker)
+                    _flush_audit_batch(batch_rows)
                     batch_rows = []
 
             # Flush remaining
             if batch_rows:
-                _flush_audit_batch(batch_rows, primary_tracker)
+                _flush_audit_batch(batch_rows)
 
             # Set primary flags
             with db.get_cursor() as cur:
@@ -730,7 +754,7 @@ def run_content_audit(store_id):
     return {"run_id": run_id}
 
 
-def _flush_audit_batch(batch_rows, primary_tracker):
+def _flush_audit_batch(batch_rows):
     """Insert a batch of content_keyword_map rows."""
     if not batch_rows:
         return
@@ -1525,12 +1549,12 @@ def generate_implementation_steps(store_id, assignment_id):
 
 def apply_single_step(store_id, assignment_id, step_index):
     """Apply a single implementation step to Shopify."""
-    from app.shopify_client import ShopifyClient
+    from app.shopify_client import DEFAULT_API_VERSION, ShopifyClient
     from app.auth import decrypt_value
 
     with db.get_cursor() as cur:
         cur.execute(
-            """SELECT ka.*, s.shop_domain, s.access_token_enc
+            """SELECT ka.*, s.domain, s.access_token_enc, s.api_version
                FROM keyword_assignments ka
                JOIN stores s ON s.id = ka.store_id
                WHERE ka.id = %s AND ka.store_id = %s""",
@@ -1584,7 +1608,9 @@ def apply_single_step(store_id, assignment_id, step_index):
 
     # Apply to Shopify
     access_token = decrypt_value(assignment["access_token_enc"])
-    client = ShopifyClient(assignment["shop_domain"], access_token)
+    client = ShopifyClient(
+        assignment["domain"], access_token, assignment["api_version"] or DEFAULT_API_VERSION
+    )
 
     if s_item_type == "product":
         client.update_product(shopify_id, update_fields)
@@ -1592,7 +1618,11 @@ def apply_single_step(store_id, assignment_id, step_index):
         client.update_collection(shopify_id, update_fields)
     elif s_item_type == "article":
         if field in ("meta_title", "meta_description"):
-            client.set_article_seo(shopify_id, update_fields)
+            client.set_article_seo(
+                shopify_id,
+                update_fields.get("meta_title"),
+                update_fields.get("meta_description"),
+            )
         else:
             client.update_article(shopify_id, update_fields)
     elif s_item_type == "page":
@@ -1708,11 +1738,11 @@ def preview_fix(store_id, assignment_id):
 
 def apply_fix(store_id, assignment_id):
     """Apply proposed changes to Shopify and record in audit trail."""
-    from app.shopify_client import ShopifyClient
+    from app.shopify_client import DEFAULT_API_VERSION, ShopifyClient
 
     with db.get_cursor() as cur:
         cur.execute(
-            """SELECT ka.*, mk.keyword, s.shopify_domain, s.access_token_encrypted
+            """SELECT ka.*, mk.keyword, s.domain, s.access_token_enc, s.api_version
                FROM keyword_assignments ka
                JOIN master_keywords mk ON mk.id = ka.master_keyword_id
                JOIN stores s ON s.id = ka.store_id
@@ -1744,21 +1774,12 @@ def apply_fix(store_id, assignment_id):
     if not shopify_id:
         raise ValueError("No Shopify ID found for item")
 
-    # Record changes before applying
-    with db.get_cursor() as cur:
-        for field, new_value in proposed.items():
-            old_value = current.get(field) or current.get(f"seo_{field}") or ""
-            cur.execute(
-                """INSERT INTO keyword_strategy_changes
-                   (store_id, assignment_id, item_type, item_id, field_name, old_value, new_value)
-                   VALUES (%s, %s, %s, %s, %s, %s, %s)""",
-                (store_id, assignment_id, item_type, item_id, field, str(old_value), new_value),
-            )
-
     # Build update payload
-    from app.auth import decrypt_api_key
-    access_token = decrypt_api_key(assignment["access_token_encrypted"])
-    client = ShopifyClient(assignment["shopify_domain"], access_token)
+    from app.auth import decrypt_value
+    access_token = decrypt_value(assignment["access_token_enc"])
+    client = ShopifyClient(
+        assignment["domain"], access_token, assignment["api_version"] or DEFAULT_API_VERSION
+    )
 
     update_fields = {}
     for field, value in proposed.items():
@@ -1781,7 +1802,24 @@ def apply_fix(store_id, assignment_id):
         elif item_type == "article":
             client.update_article(shopify_id, update_fields)
         elif item_type == "page":
-            client.update_page(shopify_id, update_fields)
+            page_fields = dict(update_fields)
+            if "meta_title" in page_fields:
+                page_fields["seo_title"] = page_fields.pop("meta_title")
+            if "meta_description" in page_fields:
+                page_fields["seo_description"] = page_fields.pop("meta_description")
+            client.update_page(shopify_id, page_fields)
+
+    # Record the audit trail only now that the Shopify push succeeded — rows
+    # for changes that never happened would make revert overwrite live values.
+    with db.get_cursor() as cur:
+        for field, new_value in proposed.items():
+            old_value = current.get(field) or current.get(f"seo_{field}") or ""
+            cur.execute(
+                """INSERT INTO keyword_strategy_changes
+                   (store_id, assignment_id, item_type, item_id, field_name, old_value, new_value)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s)""",
+                (store_id, assignment_id, item_type, item_id, field, str(old_value), new_value),
+            )
 
     # Update local DB
     with db.get_cursor() as cur:
@@ -1830,6 +1868,7 @@ def bulk_apply_fixes(store_id, assignment_ids):
     def _run():
         completed = 0
         failed = 0
+        first_error = None
         for aid in assignment_ids:
             try:
                 apply_fix(store_id, aid)
@@ -1837,17 +1876,20 @@ def bulk_apply_fixes(store_id, assignment_ids):
             except Exception as e:
                 logger.error("Failed to apply fix %s: %s", aid, e)
                 failed += 1
+                if first_error is None:
+                    first_error = f"assignment {aid}: {e}"
             with db.get_cursor() as cur:
                 cur.execute(
                     "UPDATE keyword_strategy_runs SET completed_items=%s, failed_items=%s WHERE id=%s",
                     (completed, failed, run_id),
                 )
 
+        final_status = "failed" if failed and not completed else "completed"
         with db.get_cursor() as cur:
             cur.execute(
-                "UPDATE keyword_strategy_runs SET status='completed', "
+                "UPDATE keyword_strategy_runs SET status=%s, error=%s, "
                 "completed_items=%s, failed_items=%s, completed_at=NOW() WHERE id=%s",
-                (completed, failed, run_id),
+                (final_status, first_error, completed, failed, run_id),
             )
 
     thread = threading.Thread(target=_run, daemon=True)
@@ -1857,12 +1899,12 @@ def bulk_apply_fixes(store_id, assignment_ids):
 
 def revert_fix(store_id, change_id):
     """Revert a previously applied change."""
-    from app.shopify_client import ShopifyClient
-    from app.auth import decrypt_api_key
+    from app.shopify_client import DEFAULT_API_VERSION, ShopifyClient
+    from app.auth import decrypt_value
 
     with db.get_cursor() as cur:
         cur.execute(
-            """SELECT ksc.*, s.shopify_domain, s.access_token_encrypted
+            """SELECT ksc.*, s.domain, s.access_token_enc, s.api_version
                FROM keyword_strategy_changes ksc
                JOIN stores s ON s.id = ksc.store_id
                WHERE ksc.id = %s AND ksc.store_id = %s AND ksc.reverted_at IS NULL""",
@@ -1878,8 +1920,10 @@ def revert_fix(store_id, change_id):
         raise ValueError("Content item not found")
 
     shopify_id = item.get("shopify_id")
-    access_token = decrypt_api_key(change["access_token_encrypted"])
-    client = ShopifyClient(change["shopify_domain"], access_token)
+    access_token = decrypt_value(change["access_token_enc"])
+    client = ShopifyClient(
+        change["domain"], access_token, change["api_version"] or DEFAULT_API_VERSION
+    )
 
     field = change["field_name"]
     old_value = change["old_value"]
@@ -1902,7 +1946,12 @@ def revert_fix(store_id, change_id):
         elif change["item_type"] == "article":
             client.update_article(shopify_id, update_fields)
         elif change["item_type"] == "page":
-            client.update_page(shopify_id, update_fields)
+            page_fields = dict(update_fields)
+            if "meta_title" in page_fields:
+                page_fields["seo_title"] = page_fields.pop("meta_title")
+            if "meta_description" in page_fields:
+                page_fields["seo_description"] = page_fields.pop("meta_description")
+            client.update_page(shopify_id, page_fields)
 
     with db.get_cursor() as cur:
         cur.execute(
@@ -1934,10 +1983,31 @@ def get_changes(store_id, limit=100, offset=0):
         )
         changes = cur.fetchall()
 
-    # Enrich with titles
+    # Enrich with titles (batched — one query per item type)
+    changes = [dict(c) for c in changes]
+    ids_by_type = {}
     for c in changes:
-        c = dict(c)
-        c["title"] = _get_item_title(c["item_type"], c["item_id"])
+        ids_by_type.setdefault(c["item_type"], set()).add(c["item_id"])
+    table_map = {
+        "product": "synced_products",
+        "collection": "synced_collections",
+        "article": "synced_articles",
+        "page": "synced_pages",
+    }
+    titles = {}
+    with db.get_cursor() as cur:
+        for item_type, ids in ids_by_type.items():
+            table = table_map.get(item_type)
+            if not table or not ids:
+                continue
+            cur.execute(
+                f"SELECT id, title FROM {table} WHERE id = ANY(%s)",
+                (list(ids),),
+            )
+            for r in cur.fetchall():
+                titles[(item_type, r["id"])] = r["title"]
+    for c in changes:
+        c["title"] = titles.get((c["item_type"], c["item_id"]))
 
     return {"changes": changes, "total": total}
 
