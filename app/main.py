@@ -125,8 +125,9 @@ with app.app_context():
         init_scheduler()
         from app.services.competitor_service import init_scheduler as init_competitor_scheduler
         init_competitor_scheduler()
-        from app.services.ai_visibility_tracker import init_tracking_scheduler
-        init_tracking_scheduler()
+        # AI visibility tracking is manual-only: the scheduler fired a full
+        # multi-model LLM run after every restart (real OpenRouter spend).
+        # Trigger runs from the AI SEO page when wanted.
     else:
         logging.getLogger("app.main").info(
             "Another process holds the leader lock — skipping boot recovery and schedulers"
