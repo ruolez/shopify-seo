@@ -1178,9 +1178,12 @@ def tracking_detail(run_id):
             return jsonify({"error": "Run not found"}), 404
         cur.execute(
             """
-            SELECT model, prompt, brand_mentioned, domain_cited, brand_rank,
-                   products_mentioned, competitors_mentioned
-            FROM ai_mention_results WHERE run_id = %s ORDER BY id
+            SELECT m.model, m.prompt, m.prompt_id, m.run_index, m.brand_mentioned,
+                   m.domain_cited, m.brand_rank, m.products_mentioned,
+                   m.competitors_mentioned, m.recommended_brands, p.intent
+            FROM ai_mention_results m
+            LEFT JOIN ai_prompts p ON p.id = m.prompt_id
+            WHERE m.run_id = %s ORDER BY m.id
             """,
             (run_id,),
         )
@@ -1197,56 +1200,106 @@ def tracking_detail(run_id):
             "citation_rate": agg["citation_rate"],
             "avg_rank": agg["avg_rank"],
             "brand_known_rate": agg["brand_known_rate"],
+            "total_answers": agg["total_answers"],
+            "brand_hits": agg["brand_hits"],
             "competitors": agg["competitors"],
+            "product_brands": agg["product_brands"],
             "gap_analysis": run["gap_analysis"],
             "results": results,
         }
     )
 
 
-@ai_seo_bp.route("/api/ai-seo/tracking/competitor", methods=["POST"])
-def add_competitor_from_results():
-    """Add an AI-recommended brand to the store's competitor list."""
-    import re as _re
+@ai_seo_bp.route("/api/ai-seo/tracking/prefs", methods=["GET"])
+def tracking_prefs():
+    """Tracked / excluded brand preferences for a store."""
+    store_id = request.args.get("store_id")
+    if not store_id:
+        return jsonify({"error": "store_id is required"}), 400
+    with db.get_cursor() as cur:
+        cur.execute(
+            """SELECT brand_key, name, domain, status FROM ai_brand_prefs
+               WHERE store_id = %s ORDER BY created_at DESC""",
+            (int(store_id),),
+        )
+        rows = [dict(r) for r in cur.fetchall()]
+    return jsonify(
+        {
+            "tracked": [r for r in rows if r["status"] == "tracked"],
+            "excluded": [r for r in rows if r["status"] == "excluded"],
+        }
+    )
 
+
+@ai_seo_bp.route("/api/ai-seo/tracking/prefs", methods=["POST"])
+def set_tracking_pref():
+    """Upsert a brand pref keyed by the run's canonical brand key.
+
+    status 'tracked'/'excluded' upserts; status null removes the pref
+    (un-track / un-exclude)."""
     data = request.get_json(silent=True) or {}
     store_id = data.get("store_id")
     name = (data.get("name") or "").strip()
-    domain_in = (data.get("domain") or "").strip().lower()
-    if not store_id or not name:
-        return jsonify({"error": "store_id and name are required"}), 400
+    domain = (data.get("domain") or "").strip().lower() or None
+    status = data.get("status")
     from app.services.ai_visibility_tracker import _canonical_brand_key
 
-    # Prefer the real domain when we have one; else use the name if it's a domain, else slugify.
-    if domain_in:
-        domain, display = domain_in, name
-    elif _re.match(r"^(?:[a-z0-9-]+\.)+[a-z]{2,}$", name, _re.I):
-        domain, display = name.lower(), name
-    else:
-        domain = _re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-") or name.lower()
-        display = name
-
-    # The domain resolver maps several generic brand names to the same retailer site,
-    # so UNIQUE(store_id, domain) would silently drop this distinct brand (ON CONFLICT
-    # DO NOTHING) and leave it un-tracked. If the domain is already tracked under a
-    # different brand, key this one off its name so it still gets its own tracked row.
-    try:
-        with db.get_cursor() as cur:
-            cur.execute("SELECT name FROM competitors WHERE store_id = %s AND domain = %s", (int(store_id), domain))
-            clash = cur.fetchone()
-        if clash and _canonical_brand_key(clash["name"]) != _canonical_brand_key(display):
-            domain = _re.sub(r"[^a-z0-9]+", "-", display.lower()).strip("-") or domain
-        with db.get_cursor() as cur:
+    key = (data.get("key") or "").strip() or _canonical_brand_key(domain or name)
+    if not store_id or not key:
+        return jsonify({"error": "store_id and key/name are required"}), 400
+    if status not in ("tracked", "excluded", None):
+        return jsonify({"error": "status must be 'tracked', 'excluded' or null"}), 400
+    with db.get_cursor() as cur:
+        if status is None:
             cur.execute(
-                """INSERT INTO competitors (store_id, domain, name, notes)
-                   VALUES (%s, %s, %s, 'Added from AI visibility results')
-                   ON CONFLICT (store_id, domain) DO NOTHING""",
-                (int(store_id), domain, display),
+                "DELETE FROM ai_brand_prefs WHERE store_id = %s AND brand_key = %s",
+                (int(store_id), key),
             )
-    except Exception as e:
-        logger.exception("Add competitor failed: %s", e)
-        return jsonify({"error": str(e)}), 500
-    return jsonify({"ok": True, "domain": domain, "name": display})
+        else:
+            cur.execute(
+                """INSERT INTO ai_brand_prefs (store_id, brand_key, name, domain, status)
+                   VALUES (%s, %s, %s, %s, %s)
+                   ON CONFLICT (store_id, brand_key)
+                   DO UPDATE SET status = EXCLUDED.status, name = EXCLUDED.name,
+                                 domain = COALESCE(EXCLUDED.domain, ai_brand_prefs.domain)""",
+                (int(store_id), key, name or key, domain, status),
+            )
+    # Tracked brands with a real domain also feed the classic competitor tracker.
+    if status == "tracked" and domain and "." in domain:
+        try:
+            with db.get_cursor() as cur:
+                cur.execute(
+                    "SELECT name FROM competitors WHERE store_id = %s AND domain = %s",
+                    (int(store_id), domain),
+                )
+                clash = cur.fetchone()
+            if not clash:
+                with db.get_cursor() as cur:
+                    cur.execute(
+                        """INSERT INTO competitors (store_id, domain, name, notes)
+                           VALUES (%s, %s, %s, 'Added from AI visibility results')
+                           ON CONFLICT (store_id, domain) DO NOTHING""",
+                        (int(store_id), domain, name or key),
+                    )
+        except Exception as e:
+            logger.warning("Competitor mirror insert failed: %s", e)
+    return jsonify({"ok": True, "key": key, "status": status})
+
+
+@ai_seo_bp.route("/api/ai-seo/tracking/<int:run_id>/reanalyze", methods=["POST"])
+def tracking_reanalyze(run_id):
+    """Re-extract entities from a run's stored answers with the LLM extractor."""
+    from app.services.ai_visibility_tracker import start_reanalyze
+
+    with db.get_cursor() as cur:
+        cur.execute("SELECT status FROM ai_tracking_runs WHERE id = %s", (run_id,))
+        run = cur.fetchone()
+    if not run:
+        return jsonify({"error": "Run not found"}), 404
+    if run["status"] in ("pending", "running", "reanalyzing"):
+        return jsonify({"error": "Run is busy"}), 409
+    start_reanalyze(run_id)
+    return jsonify({"ok": True, "run_id": run_id}), 202
 
 
 @ai_seo_bp.route("/api/ai-seo/tracking/resolve-domains", methods=["POST"])
@@ -1270,26 +1323,6 @@ def resolve_competitor_domains():
         logger.exception("Resolve competitor domains failed: %s", e)
         return jsonify({"error": str(e)}), 500
     return jsonify({"competitors": agg["competitors"]})
-
-
-@ai_seo_bp.route("/api/ai-seo/tracking/exclude", methods=["POST"])
-def exclude_brand_from_results():
-    """Exclude an AI-recommended brand (by canonical key) from future results."""
-    from app.services.ai_visibility_tracker import _canonical_brand_key
-
-    data = request.get_json(silent=True) or {}
-    store_id = data.get("store_id")
-    name = (data.get("name") or "").strip()
-    key = (data.get("key") or "").strip() or _canonical_brand_key(data.get("domain") or name)
-    if not store_id or not key:
-        return jsonify({"error": "store_id and key/name are required"}), 400
-    with db.get_cursor() as cur:
-        cur.execute(
-            """INSERT INTO ai_excluded_brands (store_id, brand_key, name)
-               VALUES (%s, %s, %s) ON CONFLICT (store_id, brand_key) DO NOTHING""",
-            (int(store_id), key, name or key),
-        )
-    return jsonify({"ok": True, "key": key})
 
 
 @ai_seo_bp.route("/api/ai-seo/tracking/<int:run_id>/gap-analysis", methods=["POST"])

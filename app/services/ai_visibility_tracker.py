@@ -31,9 +31,27 @@ _DOMAIN_RE = re.compile(r"\b((?:[a-z0-9][a-z0-9-]{1,40}\.)+(?:com|net|org|co|io|
 _LIST_BOLD_RE = re.compile(r"^\s*(?:\d+[.)]|[-*•])\s*\*\*\s*([^*\n]{2,45}?)\s*\*\*", re.M)
 # Domains that are references, not competing storefronts.
 _DOMAIN_STOPLIST = {
-    "wikipedia.org", "reddit.com", "youtube.com", "facebook.com", "instagram.com",
-    "twitter.com", "x.com", "quora.com", "example.com", "google.com", "bing.com",
-    "tiktok.com", "pinterest.com", "yelp.com",
+    "wikipedia.org", "reddit.com", "redditinc.com", "youtube.com", "facebook.com",
+    "instagram.com", "twitter.com", "x.com", "quora.com", "example.com", "google.com",
+    "bing.com", "tiktok.com", "pinterest.com", "yelp.com",
+}
+
+
+def _stoplisted_domain(dom):
+    """True for reference/social sites, including subdomains (en.wikipedia.org)."""
+    return any(dom == s or dom.endswith("." + s) for s in _DOMAIN_STOPLIST)
+
+
+# Generic place descriptors models use instead of naming a store — not competitors.
+_GENERIC_RETAILERS = {
+    "gas station", "gas stations", "convenience store", "convenience stores",
+    "smoke shop", "smoke shops", "local smoke shop", "local smoke shops",
+    "vape shop", "vape shops", "tobacco shop", "tobacco shops", "local tobacco shop",
+    "online marketplace", "online marketplaces", "online retailers", "online stores",
+    "online tobacco retailers", "grocery store", "grocery stores", "drugstore",
+    "drugstores", "liquor store", "liquor stores", "local retailers", "head shop",
+    "head shops", "specialty tobacco shops", "specialty tobacco shop", "dispensary",
+    "dispensaries", "wholesale tobacco suppliers",
 }
 # "I don't know this brand" markers → the model has no real knowledge of the store.
 _LABEL_STOPLIST = {
@@ -79,7 +97,7 @@ def _extract_recommended_brands(text, brand_terms):
         ck = _canonical_brand_key(raw)
         if len(ck) < 3:
             return
-        if is_domain and raw.lower() in _DOMAIN_STOPLIST:
+        if is_domain and _stoplisted_domain(raw.lower()):
             return
         if not is_domain:
             r = raw.strip()
@@ -207,16 +225,109 @@ def _detect_mentions(text, brand_terms, brand_host, product_titles, competitors,
     }
 
 
-def _query_model(client, model, prompt):
+def _query_model(client, model, prompt, temperature=0.3):
     resp = client.chat.completions.create(
         model=model,
         messages=[{"role": "user", "content": prompt}],
-        temperature=0.3,
+        temperature=temperature,
     )
     content = resp.choices[0].message.content or ""
     tokens = getattr(resp, "usage", None)
     total = getattr(tokens, "total_tokens", 0) if tokens else 0
     return content, total
+
+
+def _extract_entities_llm(client, model, question, answer, store_name, brand_ck):
+    """One cheap structured call per answer: which retailers does it send buyers to,
+    and which product brands does it mention? Far more reliable than the regex
+    fallback at telling 'JR Cigars' from a 'Flavor profile:' heading. Returns
+    (entities, tokens); entities is None when the response can't be parsed."""
+    prompt = (
+        "A shopper asked an AI assistant a question; the answer is below. Identify the "
+        "entities the answer mentions.\n\n"
+        f"QUESTION: {question}\n\nANSWER:\n{answer}\n\n"
+        "Extract:\n"
+        "1. retailers — actual stores, websites, or marketplaces the answer points to as "
+        "PLACES TO BUY. Include a domain only if it literally appears in the answer.\n"
+        "2. product_brands — product brands / manufacturers mentioned (things you buy, "
+        "not places to buy).\n"
+        "Do NOT include section headings, advice phrases, product categories, or generic "
+        f'terms — only real, named businesses and brands. Do not include "{store_name}".\n'
+        'Return ONLY JSON: {"retailers": [{"name": string, "domain": string|null}], '
+        '"product_brands": [string]}'
+    )
+    text, tokens = _query_model(client, model, prompt, temperature=0)
+    s, e = text.find("{"), text.rfind("}") + 1
+    if s < 0 or e <= s:
+        return None, tokens
+    try:
+        data = json.loads(text[s:e])
+    except (json.JSONDecodeError, ValueError):
+        return None, tokens
+
+    retailers, seen = [], set()
+    for r in data.get("retailers") or []:
+        if isinstance(r, str):
+            r = {"name": r}
+        if not isinstance(r, dict):
+            continue
+        name = (r.get("name") or "").strip()
+        if name and _norm_brand(name) in _GENERIC_RETAILERS:
+            continue
+        domain = _host(r.get("domain") or "") or None
+        if domain and (_stoplisted_domain(domain) or "." not in domain):
+            domain = None
+        # Domain-derived keys are stable across runs; name variants aren't.
+        key = _canonical_brand_key(domain or name)
+        if not key or len(key) < 3 or key in seen:
+            continue
+        if any(b in key or key in b for b in brand_ck):
+            continue
+        seen.add(key)
+        retailers.append({"key": key, "name": name or domain, "domain": domain})
+
+    brands, bseen = [], set()
+    for b in data.get("product_brands") or []:
+        if not isinstance(b, str) or not b.strip():
+            continue
+        name = b.strip()
+        key = _canonical_brand_key(name)
+        if not key or len(key) < 2 or key in bseen or key in seen:
+            continue
+        if any(bb in key or key in bb for bb in brand_ck):
+            continue
+        bseen.add(key)
+        brands.append({"key": key, "name": name})
+    return {"retailers": retailers[:20], "product_brands": brands[:25]}, tokens
+
+
+def _vendor_keys(store_id):
+    with db.get_cursor() as cur:
+        cur.execute(
+            "SELECT DISTINCT vendor FROM synced_products WHERE store_id = %s AND vendor <> ''",
+            (store_id,),
+        )
+        return {k for k in (_canonical_brand_key(r["vendor"]) for r in cur.fetchall()) if k}
+
+
+def _brand_prefs(store_id):
+    """Excluded / tracked canonical-key sets from ai_brand_prefs."""
+    with db.get_cursor() as cur:
+        cur.execute("SELECT brand_key, status FROM ai_brand_prefs WHERE store_id = %s", (store_id,))
+        rows = cur.fetchall()
+    excluded = {r["brand_key"] for r in rows if r["status"] == "excluded"}
+    tracked = {r["brand_key"] for r in rows if r["status"] == "tracked"}
+    return excluded, tracked
+
+
+def _key_in(key, keys):
+    """Key-set membership tolerant of singular/plural name variants
+    ('jrcigar' vs 'jrcigars') so prefs survive across runs."""
+    if not key:
+        return False
+    if key in keys or (key + "s") in keys:
+        return True
+    return key.endswith("s") and key[:-1] in keys
 
 
 def generate_prompt_set(store_id, n=12):
@@ -287,11 +398,8 @@ def compute_share_of_voice(run_id):
     with db.get_cursor() as cur:
         cur.execute("SELECT store_id FROM ai_tracking_runs WHERE id = %s", (run_id,))
         run = cur.fetchone()
-        excluded = set()
         domain_cache = {}
         if run:
-            cur.execute("SELECT brand_key FROM ai_excluded_brands WHERE store_id = %s", (run["store_id"],))
-            excluded = {r["brand_key"] for r in cur.fetchall()}
             cur.execute(
                 "SELECT brand_key, domain FROM brand_domains WHERE store_id = %s AND domain <> ''",
                 (run["store_id"],),
@@ -303,9 +411,11 @@ def compute_share_of_voice(run_id):
             (run_id,),
         )
         rows = cur.fetchall()
+    excluded, tracked = _brand_prefs(run["store_id"]) if run else (set(), set())
     if not rows:
         return {"brand_mention_rate": 0, "citation_rate": 0, "share_of_voice": 0,
-                "avg_rank": None, "brand_known_rate": None, "competitors": []}
+                "avg_rank": None, "brand_known_rate": None, "competitors": [],
+                "product_brands": [], "total_answers": 0, "brand_hits": 0}
 
     buyer = [r for r in rows if (r.get("intent") or "buyer") != "brand"]
     brand_rows = [r for r in rows if r.get("intent") == "brand"]
@@ -315,12 +425,15 @@ def compute_share_of_voice(run_id):
     cite_hits = sum(1 for r in buyer if r["domain_cited"])
     ranks = [r["brand_rank"] for r in buyer if r["brand_rank"]]
 
-    # Aggregate every retailer/brand the models recommended across buyer answers.
+    # Aggregate every retailer the models recommended across buyer answers.
     counts, display, domains = {}, {}, {}
     for r in buyer:
         for b in (r["recommended_brands"] or []):
             key = b.get("key")
-            if not key or key in excluded:
+            if not key or _key_in(key, excluded):
+                continue
+            # Screens generic descriptors already stored by earlier runs.
+            if _norm_brand(b.get("name") or "") in _GENERIC_RETAILERS:
                 continue
             counts[key] = counts.get(key, 0) + 1
             name = b.get("name") or key
@@ -332,14 +445,25 @@ def compute_share_of_voice(run_id):
     competitor_total = sum(counts.values())
     sov = (brand_hits / (brand_hits + competitor_total) * 100) if (brand_hits + competitor_total) else 0
 
-    configured = _competitor_terms(run["store_id"]) if run else []
-    configured_keys = set().union(*(c["keys"] for c in configured)) if configured else set()
-    def _is_configured(key):
-        return key in configured_keys
-
     competitors = sorted(
         ({"key": k, "name": display[k], "domain": domains.get(k) or domain_cache.get(k),
-          "count": v, "is_configured": _is_configured(k)} for k, v in counts.items()),
+          "count": v, "tracked": _key_in(k, tracked)} for k, v in counts.items()),
+        key=lambda c: -c["count"],
+    )[:25]
+
+    # Product brands mentioned in answers — informational, kept out of SoV math.
+    pb_counts, pb_display, pb_carried = {}, {}, {}
+    for r in buyer:
+        for b in (r.get("product_brands") or []):
+            key = b.get("key")
+            if not key or _key_in(key, excluded):
+                continue
+            pb_counts[key] = pb_counts.get(key, 0) + 1
+            pb_display.setdefault(key, b.get("name") or key)
+            pb_carried[key] = pb_carried.get(key) or bool(b.get("carried"))
+    product_brands = sorted(
+        ({"key": k, "name": pb_display[k], "count": v, "carried": pb_carried[k]}
+         for k, v in pb_counts.items()),
         key=lambda c: -c["count"],
     )[:25]
 
@@ -355,6 +479,9 @@ def compute_share_of_voice(run_id):
         "avg_rank": round(sum(ranks) / len(ranks), 2) if ranks else None,
         "brand_known_rate": brand_known_rate,
         "competitors": competitors,
+        "product_brands": product_brands,
+        "total_answers": len(buyer),
+        "brand_hits": brand_hits,
     }
 
 
@@ -372,7 +499,7 @@ def _lookup_official_domain(name, store_host):
         return None
     for r in results:
         dom = _host(r.get("domain") or "")
-        if not dom or dom in _DOMAIN_STOPLIST:
+        if not dom or _stoplisted_domain(dom):
             continue
         if store_host and (dom == store_host or dom.endswith("." + store_host)):
             continue
@@ -440,8 +567,11 @@ def run_tracking(run_id):
         budget = float(cfg.get("daily_budget") or 10.0)
         runs_per_prompt = max(1, int(cfg.get("runs_per_prompt") or 3))
         brand_terms, brand_host = _brand_terms(store)
+        brand_ck = {c for c in (_canonical_brand_key(t) for t in brand_terms) if c}
         competitors = _competitor_terms(store_id)
         titles = _product_titles(store_id)
+        vendors = _vendor_keys(store_id)
+        extract_model = cfg.get("model") or "openai/gpt-4o-mini"
 
         cost = 0.0
         capped = False
@@ -465,21 +595,39 @@ def run_tracking(run_id):
                         continue
                     cost += tokens * COST_PER_TOKEN
                     det = _detect_mentions(text, brand_terms, brand_host, titles, competitors, intent)
+                    # LLM entity extraction beats the regex at separating real
+                    # retailers from headings and product brands; regex result
+                    # (already in det) stays as the fallback.
+                    product_brands = []
+                    if intent != "brand":
+                        try:
+                            entities, etok = _extract_entities_llm(
+                                client, extract_model, pr["prompt"], text[:4000], store["name"], brand_ck
+                            )
+                            cost += etok * COST_PER_TOKEN
+                            if entities is not None:
+                                det["recommended_brands"] = entities["retailers"]
+                                product_brands = [
+                                    {**b, "carried": b["key"] in vendors} for b in entities["product_brands"]
+                                ]
+                        except Exception as e:
+                            logger.warning("Entity extraction failed (%s): %s", extract_model, e)
                     with db.get_cursor() as cur:
                         cur.execute(
                             """
                             INSERT INTO ai_mention_results
                                 (run_id, prompt_id, model, prompt, response_text, brand_mentioned,
                                  domain_cited, brand_rank, products_mentioned, competitors_mentioned,
-                                 recommended_brands, brand_known, run_index, tokens_used)
-                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                                 recommended_brands, product_brands, brand_known, run_index, tokens_used)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                             """,
                             (
                                 run_id, pr["id"], model, pr["prompt"], text[:4000],
                                 det["brand_mentioned"], det["domain_cited"], det["brand_rank"],
                                 json.dumps(det["products_mentioned"]),
                                 json.dumps(det["competitors_mentioned"]),
-                                json.dumps(det["recommended_brands"]), det["brand_known"],
+                                json.dumps(det["recommended_brands"]),
+                                json.dumps(product_brands), det["brand_known"],
                                 run_index, tokens,
                             ),
                         )
@@ -496,7 +644,7 @@ def run_tracking(run_id):
                     "budget_capped" if capped else "completed",
                     len(prompts), agg["brand_mention_rate"], agg["citation_rate"],
                     agg["share_of_voice"], agg["avg_rank"], round(cost, 4),
-                    json.dumps({"competitors": agg["competitors"], "brand_known_rate": agg["brand_known_rate"]}), run_id,
+                    json.dumps(_run_summary(agg)), run_id,
                 ),
             )
         # Resolve official websites for the recommended brands so the competitor
@@ -522,6 +670,16 @@ def run_tracking(run_id):
             )
 
 
+def _run_summary(agg):
+    return {
+        "competitors": agg["competitors"],
+        "product_brands": agg["product_brands"],
+        "brand_known_rate": agg["brand_known_rate"],
+        "total_answers": agg["total_answers"],
+        "brand_hits": agg["brand_hits"],
+    }
+
+
 def start_tracking_run(store_id, model_ids=None):
     with db.get_cursor() as cur:
         cur.execute(
@@ -531,6 +689,80 @@ def start_tracking_run(store_id, model_ids=None):
         run_id = cur.fetchone()["id"]
     threading.Thread(target=run_tracking, args=(run_id,), daemon=True).start()
     return run_id
+
+
+def reanalyze_run(run_id):
+    """Re-extract entities from a run's stored answers with the LLM extractor and
+    recompute its aggregates — cleans up runs recorded by the old regex extractor
+    without paying for new model answers."""
+    with db.get_cursor() as cur:
+        cur.execute("SELECT * FROM ai_tracking_runs WHERE id = %s", (run_id,))
+        run = cur.fetchone()
+        if not run:
+            raise ValueError("Run not found")
+        prior_status = run["status"]
+        cur.execute("UPDATE ai_tracking_runs SET status = 'reanalyzing' WHERE id = %s", (run_id,))
+    try:
+        store_id = run["store_id"]
+        with db.get_cursor() as cur:
+            cur.execute("SELECT * FROM stores WHERE id = %s", (store_id,))
+            store = dict(cur.fetchone())
+            cur.execute(
+                """SELECT m.id, m.prompt, m.response_text, p.intent FROM ai_mention_results m
+                   LEFT JOIN ai_prompts p ON p.id = m.prompt_id WHERE m.run_id = %s""",
+                (run_id,),
+            )
+            rows = cur.fetchall()
+        client, cfg, _ = _client_and_config()
+        extract_model = cfg.get("model") or "openai/gpt-4o-mini"
+        brand_terms, _bh = _brand_terms(store)
+        brand_ck = {c for c in (_canonical_brand_key(t) for t in brand_terms) if c}
+        vendors = _vendor_keys(store_id)
+        cost = float(run.get("cost_estimate") or 0)
+        for r in rows:
+            if (r.get("intent") or "buyer") == "brand" or not r.get("response_text"):
+                continue
+            try:
+                entities, tokens = _extract_entities_llm(
+                    client, extract_model, r.get("prompt") or "", r["response_text"], store["name"], brand_ck
+                )
+            except Exception as e:
+                logger.warning("Reanalyze extraction failed (%s): %s", extract_model, e)
+                continue
+            cost += tokens * COST_PER_TOKEN
+            if entities is None:
+                continue
+            pbs = [{**b, "carried": b["key"] in vendors} for b in entities["product_brands"]]
+            with db.get_cursor() as cur:
+                cur.execute(
+                    "UPDATE ai_mention_results SET recommended_brands = %s, product_brands = %s WHERE id = %s",
+                    (json.dumps(entities["retailers"]), json.dumps(pbs), r["id"]),
+                )
+        agg = compute_share_of_voice(run_id)
+        final_status = prior_status if prior_status in ("completed", "budget_capped") else "completed"
+        with db.get_cursor() as cur:
+            cur.execute(
+                """UPDATE ai_tracking_runs SET status = %s, brand_mention_rate = %s, citation_rate = %s,
+                       share_of_voice = %s, avg_rank = %s, cost_estimate = %s, summary = %s WHERE id = %s""",
+                (
+                    final_status, agg["brand_mention_rate"], agg["citation_rate"],
+                    agg["share_of_voice"], agg["avg_rank"], round(cost, 4),
+                    json.dumps(_run_summary(agg)), run_id,
+                ),
+            )
+        try:
+            if agg["competitors"]:
+                resolve_brand_domains(store_id, run_id)
+        except Exception as e:
+            logger.warning("Brand-domain resolution failed for run %s: %s", run_id, e)
+    except Exception as e:
+        logger.exception("Reanalyze of run %s failed: %s", run_id, e)
+        with db.get_cursor() as cur:
+            cur.execute("UPDATE ai_tracking_runs SET status = %s WHERE id = %s", (prior_status, run_id))
+
+
+def start_reanalyze(run_id):
+    threading.Thread(target=reanalyze_run, args=(run_id,), daemon=True).start()
 
 
 _DOMAINISH_RE = re.compile(r"^(?:[a-z0-9-]+\.)+[a-z]{2,}$", re.I)

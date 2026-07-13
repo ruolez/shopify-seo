@@ -1277,6 +1277,27 @@ class Database:
                 )
             """)
 
+            # Per-store tracked/excluded state for AI-recommended brands, keyed by
+            # the run's own canonical brand key so state survives name variants
+            # across runs. Supersedes ai_excluded_brands (kept for migration).
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS ai_brand_prefs (
+                    id SERIAL PRIMARY KEY,
+                    store_id INTEGER REFERENCES stores(id) ON DELETE CASCADE,
+                    brand_key VARCHAR(120) NOT NULL,
+                    name VARCHAR(255),
+                    domain VARCHAR(255),
+                    status VARCHAR(20) NOT NULL,
+                    created_at TIMESTAMP DEFAULT NOW(),
+                    UNIQUE(store_id, brand_key)
+                )
+            """)
+            cur.execute("""
+                INSERT INTO ai_brand_prefs (store_id, brand_key, name, status)
+                SELECT store_id, brand_key, name, 'excluded' FROM ai_excluded_brands
+                ON CONFLICT (store_id, brand_key) DO NOTHING
+            """)
+
             # Cache of resolved official websites for AI-recommended brands so we
             # only pay the Brave lookup once per brand (empty domain = looked-up,
             # none found — avoids re-querying on every panel load).
@@ -1302,6 +1323,7 @@ class Database:
                 "ALTER TABLE ai_mention_results ADD COLUMN recommended_brands JSONB DEFAULT '[]'",
                 "ALTER TABLE ai_mention_results ADD COLUMN brand_known BOOLEAN",
                 "ALTER TABLE ai_mention_results ADD COLUMN run_index INTEGER DEFAULT 0",
+                "ALTER TABLE ai_mention_results ADD COLUMN product_brands JSONB DEFAULT '[]'",
                 "ALTER TABLE ai_tracking_runs ADD COLUMN gap_analysis JSONB",
             ]:
                 cur.execute(

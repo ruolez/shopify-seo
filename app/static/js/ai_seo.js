@@ -1093,6 +1093,18 @@ async function deletePrompt(id) {
 }
 
 // ── Visibility: tracking runs ───────────────────────────────────
+let latestRunId = null;
+const visState = { detail: null, competitors: [], productBrands: [], showAllComps: false };
+
+function fmtPct(v) {
+    return v == null ? "—" : `${Math.round(+v)}%`;
+}
+
+function currentStoreName() {
+    const sel = document.getElementById("store-select");
+    return sel?.selectedOptions?.[0]?.textContent || "Your store";
+}
+
 async function runTracking() {
     const storeId = getStoreId();
     const btn = document.getElementById("track-btn");
@@ -1109,7 +1121,7 @@ async function runTracking() {
     }
 }
 
-function pollRun(runId, btn) {
+function pollRun(runId, btn, idleLabel = '<span class="material-symbols-rounded">travel_explore</span> Run tracking') {
     let consecutiveErrors = 0;
     const timer = setInterval(async () => {
         try {
@@ -1117,123 +1129,237 @@ function pollRun(runId, btn) {
             consecutiveErrors = 0;
             if (["completed", "budget_capped", "failed"].includes(d.status)) {
                 clearInterval(timer);
-                btn.disabled = false;
-                btn.innerHTML = '<span class="material-symbols-rounded">travel_explore</span> Run tracking';
-                if (d.status === "failed") showToast("Tracking failed", "error");
-                else showToast(`Tracking ${d.status} — SoV ${d.share_of_voice ?? 0}%`, "success");
+                if (btn) {
+                    btn.disabled = false;
+                    btn.innerHTML = idleLabel;
+                }
+                if (d.status === "failed") showToast("Tracking failed — see run history for the error", "error");
+                else if (d.total_answers)
+                    showToast(`Done — your store appeared in ${d.brand_hits} of ${d.total_answers} AI answers`, "success");
+                else showToast(`Tracking ${d.status}`, "success");
                 loadRuns();
             }
         } catch (err) {
             consecutiveErrors++;
             if (consecutiveErrors >= 5) {
                 clearInterval(timer);
-                btn.disabled = false;
-                btn.innerHTML = '<span class="material-symbols-rounded">travel_explore</span> Run tracking';
-                showToast(`Lost contact with the tracking run (${err.message}). It may still be running — reload to check.`, "error");
+                if (btn) {
+                    btn.disabled = false;
+                    btn.innerHTML = idleLabel;
+                }
+                showToast(`Lost contact with the run (${err.message}). It may still be running — reload to check.`, "error");
             }
         }
     }, 3000);
 }
 
-let latestRunId = null;
-
 async function loadRuns() {
     const storeId = getStoreId();
     const metrics = document.getElementById("visibility-metrics");
+    const summary = document.getElementById("visibility-summary");
     const container = document.getElementById("runs-container");
     try {
         const runs = await apiRequest(`/api/ai-seo/tracking/runs?store_id=${storeId}`);
-        const latest = runs.find((r) => r.status === "completed" || r.status === "budget_capped");
-        const brandKnown = latest?.summary?.brand_known_rate;
-        metrics.innerHTML = latest
-            ? `<div class="stat-card">${renderScoreRing(Math.round(latest.share_of_voice || 0), 56)}<div class="stat-label" style="margin-top:8px;">Share of voice</div></div>
-               <div class="stat-card"><div class="stat-value">${latest.brand_mention_rate ?? 0}%</div><div class="stat-label">Brand mention rate</div></div>
-               <div class="stat-card"><div class="stat-value">${brandKnown != null ? brandKnown + "%" : "—"}</div><div class="stat-label">Brand knowledge (do models know you)</div></div>
-               <div class="stat-card"><div class="stat-value">${latest.avg_rank ?? "—"}</div><div class="stat-label">Avg rank when listed</div></div>`
-            : `<div class="empty-state" style="grid-column:1/-1;"><span class="material-symbols-rounded">travel_explore</span><p>No tracking runs yet — click <b>Run tracking</b> to see how the AI models answer your buyers.</p></div>`;
+        const latest = runs.find((r) => ["completed", "budget_capped", "reanalyzing"].includes(r.status));
+        renderHeadline(latest, summary, metrics);
 
         latestRunId = latest ? latest.id : null;
-        document.getElementById("competitors-panel").innerHTML = "";
-        document.getElementById("gap-panel").innerHTML = "";
+        ["competitors-panel", "brands-panel", "gap-panel", "breakdown-panel"].forEach(
+            (id) => (document.getElementById(id).innerHTML = "")
+        );
         if (latestRunId) loadRunDetail(latestRunId);
+        loadExcluded();
 
-        if (!runs.length) {
-            container.innerHTML = "";
-            return;
-        }
-        container.innerHTML = `<div class="table-container"><table>
-            <thead><tr><th>When</th><th>Status</th><th>Prompts</th><th>SoV</th><th>Mentions</th><th>Citations</th><th>Cost</th></tr></thead>
-            <tbody>${runs
-                .map(
-                    (r) => `<tr>
-                    <td style="font-size:12px;">${formatRelativeTime(r.started_at)}</td>
-                    <td><span class="badge ${r.status === "completed" ? "badge-success" : r.status === "failed" ? "badge-error" : "badge-warning"}">${r.status}</span></td>
-                    <td>${r.prompt_count || 0}</td>
-                    <td>${r.share_of_voice ?? "—"}%</td>
-                    <td>${r.brand_mention_rate ?? "—"}%</td>
-                    <td>${r.citation_rate ?? "—"}%</td>
-                    <td style="font-size:12px;">$${(r.cost_estimate || 0)}</td>
-                </tr>`
-                )
-                .join("")}</tbody></table></div>`;
+        container.innerHTML = runs.length ? renderRunsTable(runs, latest) : "";
     } catch (err) {
         showToast(`Failed to load runs: ${err.message}`, "error");
+    }
+}
+
+function renderHeadline(latest, summary, metrics) {
+    if (!latest) {
+        summary.innerHTML = "";
+        metrics.innerHTML = `<div class="empty-state" style="grid-column:1/-1;"><span class="material-symbols-rounded">travel_explore</span><p>No tracking runs yet — click <b>Run tracking</b> to see how the AI models answer your buyers.</p></div>`;
+        return;
+    }
+    const s = latest.summary || {};
+    const total = s.total_answers;
+    const hits = s.brand_hits;
+    const summaryLine =
+        total != null
+            ? `Last run ${formatRelativeTime(latest.started_at)}: ${latest.prompt_count} buyer questions were asked across ${(latest.models || []).length || "several"} AI models — <b>${total} answers</b> in total. Your store appeared in <b>${hits}</b> of them.`
+            : `Last run ${formatRelativeTime(latest.started_at)}.`;
+    const zeroCallout =
+        total > 0 && hits === 0
+            ? `<div style="display:flex;gap:10px;align-items:flex-start;background:var(--warning-light);border:1px solid var(--outline);border-radius:var(--radius-sm);padding:10px 12px;margin-top:10px;">
+                <span class="material-symbols-rounded" style="color:var(--warning);font-size:20px;">visibility_off</span>
+                <div style="font-size:12.5px;line-height:1.45;">AI models never recommended your store for these buyer questions — your share of voice is going to the retailers in the list below. The <b>gap analysis</b> shows what to change to start appearing.</div>
+               </div>`
+            : "";
+    summary.innerHTML = `<p style="font-size:13px;color:var(--on-surface-secondary);margin:12px 0 0;">${summaryLine}</p>${zeroCallout}`;
+
+    const brandKnown = s.brand_known_rate;
+    metrics.innerHTML = `
+        <div class="stat-card">${renderScoreRing(Math.round(latest.share_of_voice || 0), 56)}
+            <div class="stat-label" style="margin-top:8px;">Share of voice</div>
+            <div class="stat-label" style="color:var(--on-surface-secondary);">your mentions vs. competitors'</div></div>
+        <div class="stat-card"><div class="stat-value">${total != null ? `${hits}<span style="font-size:14px;color:var(--on-surface-secondary);"> / ${total}</span>` : fmtPct(latest.brand_mention_rate)}</div>
+            <div class="stat-label">Answers naming your store</div>
+            <div class="stat-label" style="color:var(--on-surface-secondary);">out of all AI answers probed</div></div>
+        <div class="stat-card"><div class="stat-value">${fmtPct(brandKnown)}</div>
+            <div class="stat-label">Brand knowledge</div>
+            <div class="stat-label" style="color:var(--on-surface-secondary);">do models know your store exists</div></div>
+        <div class="stat-card"><div class="stat-value">${latest.avg_rank ?? "—"}</div>
+            <div class="stat-label">Avg position when listed</div>
+            <div class="stat-label" style="color:var(--on-surface-secondary);">1 = first recommendation</div></div>`;
+}
+
+function renderRunsTable(runs, latest) {
+    const statusBadge = (st) =>
+        `<span class="badge ${st === "completed" ? "badge-success" : st === "failed" ? "badge-error" : "badge-warning"}">${st}</span>`;
+    const rows = runs
+        .map((r) => {
+            const s = r.summary || {};
+            if (r.status === "failed")
+                return `<tr>
+                    <td style="font-size:12px;">${formatRelativeTime(r.started_at)}</td>
+                    <td>${statusBadge(r.status)}</td>
+                    <td colspan="4" style="font-size:12px;color:var(--error);">${escapeHtml(r.error || "Unknown error")}</td>
+                    <td></td>
+                </tr>`;
+            const appeared =
+                s.total_answers != null
+                    ? `${s.brand_hits} of ${s.total_answers} (${fmtPct(s.total_answers ? (s.brand_hits / s.total_answers) * 100 : null)})`
+                    : fmtPct(r.brand_mention_rate);
+            const action =
+                latest && r.id === latest.id && r.status !== "reanalyzing"
+                    ? `<button class="btn btn-secondary btn-sm" title="Re-extract retailers &amp; brands from this run's stored answers — no new AI probing cost" onclick="reanalyzeRun(${r.id}, this)"><span class="material-symbols-rounded">refresh</span> Re-analyze</button>`
+                    : "";
+            return `<tr>
+                <td style="font-size:12px;">${formatRelativeTime(r.started_at)}</td>
+                <td>${statusBadge(r.status)}</td>
+                <td>${r.prompt_count || 0}</td>
+                <td>${appeared}</td>
+                <td>${fmtPct(r.share_of_voice)}</td>
+                <td style="font-size:12px;">$${(+r.cost_estimate || 0).toFixed(3)}</td>
+                <td>${action}</td>
+            </tr>`;
+        })
+        .join("");
+    return `<div class="table-container"><table>
+        <thead><tr>
+            <th>When</th><th>Status</th>
+            <th title="Buyer + brand questions asked">Questions</th>
+            <th title="AI answers that named your store">You appeared</th>
+            <th title="Your mentions as a share of all retailer recommendations">Share of voice</th>
+            <th>Cost</th><th></th>
+        </tr></thead>
+        <tbody>${rows}</tbody></table></div>`;
+}
+
+async function reanalyzeRun(runId, btn) {
+    btn.disabled = true;
+    btn.innerHTML = '<span class="material-symbols-rounded">hourglass_empty</span> Re-analyzing…';
+    try {
+        await apiRequest(`/api/ai-seo/tracking/${runId}/reanalyze`, { method: "POST", body: {} });
+        showToast("Re-analyzing the stored answers with improved extraction…", "info");
+        pollRun(runId, btn, '<span class="material-symbols-rounded">refresh</span> Re-analyze');
+    } catch (err) {
+        showToast(`Re-analyze failed: ${err.message}`, "error");
+        btn.disabled = false;
+        btn.innerHTML = '<span class="material-symbols-rounded">refresh</span> Re-analyze';
     }
 }
 
 async function loadRunDetail(runId) {
     try {
         const d = await apiRequest(`/api/ai-seo/tracking/${runId}`);
-        renderCompetitors(d.competitors || []);
+        visState.detail = d;
+        renderLeaderboard(d);
+        renderProductBrands(d.product_brands || []);
         renderGap(d.gap_analysis);
+        renderBreakdown(d.results || []);
     } catch (err) {
         /* non-fatal */
     }
 }
 
-function renderCompetitors(comps) {
+function renderLeaderboard(d) {
     const panel = document.getElementById("competitors-panel");
-    window._competitors = comps;
-    if (!comps.length) {
+    const comps = d.competitors || [];
+    visState.competitors = comps;
+    if (!comps.length && !d.brand_hits) {
         panel.innerHTML = "";
         return;
     }
-    const missing = comps.filter((c) => !c.domain).length;
+    const wasOpen = panel.querySelector("details")?.open ?? true;
+    const max = Math.max(d.brand_hits || 0, ...comps.map((c) => c.count), 1);
+    const bar = (count, you) =>
+        `<div class="sov-bar-track"><div class="sov-bar-fill${you ? " sov-bar-you" : ""}" style="width:${Math.max(2, Math.round((count / max) * 100))}%;"></div></div>`;
+
+    const youRow = `<div class="sov-row sov-row-you">
+        <span class="sov-rank">—</span>
+        <div style="flex:1;min-width:0;">
+            <div style="font-size:13px;font-weight:700;">${escapeHtml(currentStoreName())} <span class="badge" style="background:var(--primary-surface);color:var(--primary);margin-left:4px;">you</span></div>
+        </div>
+        ${bar(d.brand_hits || 0, true)}
+        <span class="sov-count" title="AI answers that recommended your store">${d.brand_hits || 0}×</span>
+        <span style="width:118px;"></span>
+    </div>`;
+
+    const limit = visState.showAllComps ? comps.length : 10;
     const rows = comps
+        .slice(0, limit)
         .map((c, i) => {
             const isDomainName = c.domain && c.domain.toLowerCase() === (c.name || "").toLowerCase();
-            const site = c.domain
-                ? `<a href="https://${escapeHtml(c.domain)}" target="_blank" rel="noopener" class="comp-site">
-                       <span class="material-symbols-rounded" style="font-size:14px;">public</span>${escapeHtml(c.domain)}<span style="opacity:.55;">&nbsp;↗</span></a>`
-                : `<span class="comp-site" style="color:var(--on-surface-secondary);opacity:.7;">
-                       <span class="material-symbols-rounded" style="font-size:14px;">help</span>site not detected</span>`;
             const name = isDomainName ? c.name.replace(/\.[a-z]{2,}$/i, "") : c.name;
-            return `<div style="display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--outline);">
+            const site = c.domain
+                ? `<a href="https://${escapeHtml(c.domain)}" target="_blank" rel="noopener" class="comp-site"><span class="material-symbols-rounded" style="font-size:13px;">public</span>${escapeHtml(c.domain)}<span style="opacity:.55;">&nbsp;↗</span></a>`
+                : `<span class="comp-site" style="color:var(--on-surface-secondary);opacity:.7;"><span class="material-symbols-rounded" style="font-size:13px;">help</span>site not detected</span>`;
+            const trackBtn = c.tracked
+                ? `<button class="btn btn-secondary btn-sm" style="color:var(--success);" title="Tracking as a competitor — click to stop" onclick="toggleTracked(${i}, this)"><span class="material-symbols-rounded">check</span> Tracking</button>`
+                : `<button class="btn btn-secondary btn-sm" title="Track this retailer as a competitor" onclick="toggleTracked(${i}, this)"><span class="material-symbols-rounded">add</span> Track</button>`;
+            return `<div class="sov-row">
+                <span class="sov-rank">${i + 1}</span>
                 <div style="flex:1;min-width:0;">
                     <div style="font-size:13px;font-weight:600;line-height:1.3;">${escapeHtml(name)}</div>
-                    <div style="margin-top:2px;">${site}</div>
+                    <div style="margin-top:1px;">${site}</div>
                 </div>
-                <span class="badge badge-warning" title="Times the AI recommended this brand across your prompts">${c.count}×</span>
-                ${c.is_configured
-                    ? '<span class="badge badge-success">tracked</span>'
-                    : `<button class="btn btn-secondary btn-sm" onclick="addCompetitor(${i}, this)"><span class="material-symbols-rounded">add</span> Add</button>`}
-                <button class="icon-btn" title="Exclude from future results" onclick="excludeCompetitor(${i})"><span class="material-symbols-rounded">block</span></button>
+                ${bar(c.count, false)}
+                <span class="sov-count" title="AI answers that recommended this retailer">${c.count}×</span>
+                <span style="width:118px;display:inline-flex;gap:4px;justify-content:flex-end;">
+                    ${trackBtn}
+                    <button class="icon-btn" title="Not a competitor — exclude from all results" onclick="excludeBrand('comp', ${i})"><span class="material-symbols-rounded">block</span></button>
+                </span>
             </div>`;
         })
         .join("");
-    const resolveNote = (missing && window._domainResolveRun !== latestRunId)
-        ? `<div style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--on-surface-secondary);margin-top:10px;"><div class="spinner spinner-sm"></div> Finding official sites for ${missing} brand${missing > 1 ? "s" : ""}…</div>`
-        : "";
-    panel.innerHTML = `<div class="card" style="padding:16px;">
-        <div style="display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;margin-bottom:4px;">
-            <h3 style="margin:0;">Who the AI recommends instead</h3>
-            <span class="badge badge-warning">${comps.length} brand${comps.length > 1 ? "s" : ""}</span>
+
+    const showAllBtn =
+        comps.length > 10
+            ? `<button class="btn btn-secondary btn-sm" style="margin-top:10px;" onclick="visState.showAllComps=!visState.showAllComps;renderLeaderboard(visState.detail);">${visState.showAllComps ? "Show top 10" : `Show all ${comps.length}`}</button>`
+            : "";
+    const missing = comps.filter((c) => !c.domain).length;
+    const resolveNote =
+        missing && window._domainResolveRun !== latestRunId
+            ? `<div style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--on-surface-secondary);margin-top:10px;"><div class="spinner spinner-sm"></div> Finding official sites for ${missing} brand${missing > 1 ? "s" : ""}…</div>`
+            : "";
+
+    panel.innerHTML = `<details class="card" style="padding:0;" ${wasOpen ? "open" : ""}>
+        <summary style="padding:14px 16px;cursor:pointer;list-style:none;display:flex;align-items:center;gap:8px;">
+            <span class="material-symbols-rounded" style="color:var(--on-surface-secondary);">social_leaderboard</span>
+            <b style="flex:1;">Share of voice — you vs. the retailers AI recommends</b>
+            <span class="badge badge-warning">${comps.length} retailer${comps.length === 1 ? "" : "s"}</span>
+        </summary>
+        <div style="padding:0 16px 16px;">
+            <p style="font-size:12px;color:var(--on-surface-secondary);margin:0 0 10px;">Each count is the number of AI answers that recommended that store for your buyer questions. <b>Track</b> a real competitor to keep an eye on it, or <b>exclude</b> anything that isn't one.</p>
+            ${youRow}
+            ${rows}
+            ${showAllBtn}
+            ${resolveNote}
+            <div><button class="btn btn-primary btn-sm" style="margin-top:12px;" onclick="runGapAnalysis(this)"><span class="material-symbols-rounded">analytics</span> Analyze competitive gap</button></div>
         </div>
-        <p style="font-size:12px;color:var(--on-surface-secondary);margin:0 0 10px;">Brands and retailers the AI surfaces for your buyer queries — this is where your share of voice is going. <b>Add</b> real competitors to track them, or <b>exclude</b> ones you actually sell.</p>
-        ${rows}
-        ${resolveNote}
-        <button class="btn btn-primary btn-sm" style="margin-top:12px;" onclick="runGapAnalysis(this)"><span class="material-symbols-rounded">analytics</span> Analyze competitive gap</button>
-    </div>`;
+    </details>`;
 
     if (missing && window._domainResolveRun !== latestRunId) {
         window._domainResolveRun = latestRunId;
@@ -1248,41 +1374,179 @@ async function resolveCompetitorDomains() {
             method: "POST",
             body: { store_id: parseInt(getStoreId()), run_id: latestRunId },
         });
-        if (res.competitors) renderCompetitors(res.competitors);
+        if (res.competitors && visState.detail) {
+            visState.detail.competitors = res.competitors;
+            renderLeaderboard(visState.detail);
+        }
     } catch (err) {
         /* non-fatal — leave "site not detected" rows as-is */
     }
 }
 
-async function addCompetitor(index, btn) {
-    const c = window._competitors?.[index];
+async function toggleTracked(index, btn) {
+    const c = visState.competitors[index];
     if (!c) return;
     btn.disabled = true;
+    const newStatus = c.tracked ? null : "tracked";
     try {
-        await apiRequest("/api/ai-seo/tracking/competitor", {
+        await apiRequest("/api/ai-seo/tracking/prefs", {
             method: "POST",
-            body: { store_id: parseInt(getStoreId()), name: c.name, domain: c.domain },
+            body: { store_id: parseInt(getStoreId()), key: c.key, name: c.name, domain: c.domain, status: newStatus },
         });
-        showToast(`Added ${c.name} to competitors`, "success");
-        btn.outerHTML = '<span class="badge badge-success">tracked</span>';
+        c.tracked = !c.tracked;
+        showToast(c.tracked ? `Tracking ${c.name} as a competitor` : `Stopped tracking ${c.name}`, "success");
+        renderLeaderboard(visState.detail);
     } catch (err) {
-        showToast(`Add failed: ${err.message}`, "error");
+        showToast(`Update failed: ${err.message}`, "error");
         btn.disabled = false;
     }
 }
 
-async function excludeCompetitor(index) {
-    const c = window._competitors?.[index];
+async function excludeBrand(kind, index) {
+    const c = kind === "comp" ? visState.competitors[index] : visState.productBrands[index];
     if (!c) return;
     try {
-        await apiRequest("/api/ai-seo/tracking/exclude", {
+        await apiRequest("/api/ai-seo/tracking/prefs", {
             method: "POST",
-            body: { store_id: parseInt(getStoreId()), key: c.key, name: c.name, domain: c.domain },
+            body: { store_id: parseInt(getStoreId()), key: c.key, name: c.name, domain: c.domain || null, status: "excluded" },
         });
-        showToast(`Excluded "${c.name}" from future results`, "success");
+        showToast(`Excluded "${c.name}" — undo anytime under Excluded brands`, "success");
         if (latestRunId) loadRunDetail(latestRunId);
+        loadExcluded();
     } catch (err) {
         showToast(`Exclude failed: ${err.message}`, "error");
+    }
+}
+
+function renderProductBrands(brands) {
+    const panel = document.getElementById("brands-panel");
+    visState.productBrands = brands;
+    if (!brands.length) {
+        panel.innerHTML = "";
+        return;
+    }
+    const carried = brands.filter((b) => b.carried).length;
+    const rows = brands
+        .map(
+            (b, i) => `<div class="sov-row">
+            <div style="flex:1;min-width:0;font-size:13px;font-weight:600;">${escapeHtml(b.name)}
+                ${b.carried ? '<span class="badge badge-success" style="margin-left:6px;" title="Matches a vendor in your synced catalog">you carry this</span>' : ""}
+            </div>
+            <span class="sov-count" title="AI answers that mentioned this brand">${b.count}×</span>
+            <button class="icon-btn" title="Exclude from all results" onclick="excludeBrand('brand', ${i})"><span class="material-symbols-rounded">block</span></button>
+        </div>`
+        )
+        .join("");
+    panel.innerHTML = `<details class="card" style="padding:0;">
+        <summary style="padding:14px 16px;cursor:pointer;list-style:none;display:flex;align-items:center;gap:8px;">
+            <span class="material-symbols-rounded" style="color:var(--on-surface-secondary);">sell</span>
+            <b style="flex:1;">Product brands in AI answers</b>
+            <span style="font-size:12px;color:var(--on-surface-secondary);">${carried} of ${brands.length} are brands you carry</span>
+        </summary>
+        <div style="padding:0 16px 16px;">
+            <p style="font-size:12px;color:var(--on-surface-secondary);margin:0 0 8px;">Products the AI talks about for your buyer questions — not competitors, but a signal of what to stock and feature. Kept out of the share-of-voice math.</p>
+            ${rows}
+        </div>
+    </details>`;
+}
+
+function renderBreakdown(results) {
+    const panel = document.getElementById("breakdown-panel");
+    const buyer = results.filter((r) => (r.intent || "buyer") !== "brand");
+    if (!buyer.length) {
+        panel.innerHTML = "";
+        return;
+    }
+    const byPrompt = new Map();
+    for (const r of buyer) {
+        if (!byPrompt.has(r.prompt)) byPrompt.set(r.prompt, []);
+        byPrompt.get(r.prompt).push(r);
+    }
+    const groups = [...byPrompt.entries()]
+        .map(([prompt, rows]) => {
+            const hits = rows.filter((r) => r.brand_mentioned).length;
+            const recCounts = {};
+            for (const r of rows)
+                for (const b of r.recommended_brands || []) {
+                    if (!b.name) continue;
+                    recCounts[b.name] = (recCounts[b.name] || 0) + 1;
+                }
+            const top = Object.entries(recCounts).sort((a, b) => b[1] - a[1]).slice(0, 6);
+            const perAnswer = rows
+                .map(
+                    (r) => `<div style="display:flex;gap:8px;align-items:baseline;padding:4px 0;font-size:12px;">
+                    <span class="material-symbols-rounded" style="font-size:15px;color:${r.brand_mentioned ? "var(--success)" : "var(--on-surface-secondary)"};">${r.brand_mentioned ? "check_circle" : "radio_button_unchecked"}</span>
+                    <span style="min-width:170px;color:var(--on-surface-secondary);">${escapeHtml(r.model)} · run ${(r.run_index ?? 0) + 1}</span>
+                    <span style="flex:1;">${(r.recommended_brands || []).map((b) => escapeHtml(b.name)).join(", ") || "<i>no retailers named</i>"}</span>
+                </div>`
+                )
+                .join("");
+            return `<details style="border-bottom:1px solid var(--outline);padding:8px 0;">
+                <summary style="cursor:pointer;list-style:none;display:flex;gap:10px;align-items:baseline;">
+                    <span class="badge ${hits ? "badge-success" : "badge-warning"}" style="flex-shrink:0;" title="Answers naming your store for this question">${hits}/${rows.length}</span>
+                    <span style="flex:1;font-size:13px;">${escapeHtml(prompt)}</span>
+                </summary>
+                <div style="padding:6px 0 4px 8px;">
+                    ${top.length ? `<div style="font-size:12px;color:var(--on-surface-secondary);margin-bottom:4px;">AI recommends: ${top.map(([n, c]) => `${escapeHtml(n)} (${c}×)`).join(", ")}</div>` : ""}
+                    ${perAnswer}
+                </div>
+            </details>`;
+        })
+        .join("");
+    panel.innerHTML = `<details class="card" style="padding:0;">
+        <summary style="padding:14px 16px;cursor:pointer;list-style:none;display:flex;align-items:center;gap:8px;">
+            <span class="material-symbols-rounded" style="color:var(--on-surface-secondary);">quiz</span>
+            <b style="flex:1;">Question-by-question breakdown</b>
+            <span style="font-size:12px;color:var(--on-surface-secondary);">what each model actually answered</span>
+        </summary>
+        <div style="padding:0 16px 16px;">${groups}</div>
+    </details>`;
+}
+
+async function loadExcluded() {
+    const panel = document.getElementById("excluded-panel");
+    try {
+        const prefs = await apiRequest(`/api/ai-seo/tracking/prefs?store_id=${getStoreId()}`);
+        const excluded = prefs.excluded || [];
+        if (!excluded.length) {
+            panel.innerHTML = "";
+            return;
+        }
+        const rows = excluded
+            .map(
+                (p) => `<div class="sov-row">
+                <div style="flex:1;font-size:13px;">${escapeHtml(p.name || p.brand_key)}</div>
+                <button class="btn btn-secondary btn-sm" onclick="restorePref('${escapeHtml(p.brand_key)}')"><span class="material-symbols-rounded">undo</span> Restore</button>
+            </div>`
+            )
+            .join("");
+        panel.innerHTML = `<details class="card" style="padding:0;">
+            <summary style="padding:14px 16px;cursor:pointer;list-style:none;display:flex;align-items:center;gap:8px;">
+                <span class="material-symbols-rounded" style="color:var(--on-surface-secondary);">block</span>
+                <b style="flex:1;">Excluded brands</b>
+                <span class="badge" style="background:var(--surface-dim);color:var(--on-surface);">${excluded.length}</span>
+            </summary>
+            <div style="padding:0 16px 16px;">
+                <p style="font-size:12px;color:var(--on-surface-secondary);margin:0 0 8px;">Hidden from every run's results. Restore one to see it again.</p>
+                ${rows}
+            </div>
+        </details>`;
+    } catch (err) {
+        /* non-fatal */
+    }
+}
+
+async function restorePref(key) {
+    try {
+        await apiRequest("/api/ai-seo/tracking/prefs", {
+            method: "POST",
+            body: { store_id: parseInt(getStoreId()), key, status: null },
+        });
+        showToast("Restored", "success");
+        loadExcluded();
+        if (latestRunId) loadRunDetail(latestRunId);
+    } catch (err) {
+        showToast(`Restore failed: ${err.message}`, "error");
     }
 }
 

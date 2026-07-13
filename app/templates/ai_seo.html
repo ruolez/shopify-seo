@@ -67,13 +67,20 @@
                                 <span class="material-symbols-rounded">travel_explore</span> Run tracking
                             </button>
                         </div>
+                        <div id="visibility-summary"></div>
                         <div id="visibility-metrics" class="stats-grid" style="margin-top:16px;"></div>
                     </div>
 
-                    <!-- Where your share of voice is going -->
+                    <!-- Us vs. them: where your share of voice is going -->
                     <div id="competitors-panel" style="margin-bottom:16px;"></div>
+                    <!-- Product brands the AI mentions (informational) -->
+                    <div id="brands-panel" style="margin-bottom:16px;"></div>
                     <!-- How to close the gap -->
                     <div id="gap-panel" style="margin-bottom:16px;"></div>
+                    <!-- Per-question breakdown of what each model answered -->
+                    <div id="breakdown-panel" style="margin-bottom:12px;"></div>
+                    <!-- Excluded brands manager (undo) -->
+                    <div id="excluded-panel" style="margin-bottom:12px;"></div>
 
                     <!-- Secondary controls, collapsed to keep the insights above the fold -->
                     <details class="card" style="padding:0;margin-bottom:12px;">
@@ -96,6 +103,7 @@
                         <summary style="padding:14px 16px;cursor:pointer;list-style:none;display:flex;align-items:center;gap:8px;">
                             <span class="material-symbols-rounded" style="color:var(--on-surface-secondary);">history</span>
                             <b style="flex:1;">Run history</b>
+                            <span style="font-size:12px;color:var(--on-surface-secondary);">each row is one full probe of all prompts</span>
                         </summary>
                         <div style="padding:0 16px 16px;">
                             <div id="runs-container"></div>

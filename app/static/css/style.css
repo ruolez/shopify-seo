@@ -3941,3 +3941,56 @@ thead th.row-num-col {
 .nav-group.collapsed .nav-group-items {
     max-height: 0;
 }
+
+/* AI visibility — share-of-voice leaderboard */
+.sov-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 0;
+    border-bottom: 1px solid var(--outline);
+}
+
+.sov-row-you {
+    background: var(--primary-light);
+    border: 1px solid var(--primary-surface);
+    border-radius: var(--radius-sm);
+    padding: 10px;
+    margin-bottom: 4px;
+}
+
+.sov-rank {
+    width: 20px;
+    font-size: 12px;
+    color: var(--on-surface-secondary);
+    text-align: right;
+    flex-shrink: 0;
+}
+
+.sov-bar-track {
+    flex: 1;
+    max-width: 220px;
+    min-width: 80px;
+    height: 8px;
+    background: var(--surface-dim);
+    border-radius: 4px;
+    overflow: hidden;
+}
+
+.sov-bar-fill {
+    height: 100%;
+    border-radius: 4px;
+    background: var(--warning);
+}
+
+.sov-bar-you {
+    background: var(--primary);
+}
+
+.sov-count {
+    width: 42px;
+    font-size: 12px;
+    font-weight: 600;
+    text-align: right;
+    flex-shrink: 0;
+}
