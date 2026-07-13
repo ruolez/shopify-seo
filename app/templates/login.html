@@ -23,6 +23,10 @@
                     <label for="password">Password</label>
                     <input type="password" id="password" class="form-control" placeholder="Enter password" autocomplete="current-password" required>
                 </div>
+                <label style="display: flex; align-items: center; gap: 8px; font-size: 13px; margin-bottom: 16px; cursor: pointer; color: var(--on-surface-secondary);">
+                    <input type="checkbox" id="remember-me" checked>
+                    Keep me signed in for 30 days
+                </label>
                 <button type="submit" class="btn btn-primary">Sign In</button>
             </form>
         </div>
@@ -36,9 +40,10 @@
             const password = document.getElementById('password').value;
 
             try {
+                const remember = document.getElementById('remember-me').checked;
                 await apiRequest('/api/login', {
                     method: 'POST',
-                    body: { username, password }
+                    body: { username, password, remember }
                 });
                 window.location.href = '/';
             } catch (err) {

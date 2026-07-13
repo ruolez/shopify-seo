@@ -31,6 +31,9 @@ def login():
 
     session["user_id"] = user["id"]
     session["username"] = user["username"]
+    # "Keep me signed in": persistent 30-day rolling cookie; otherwise the
+    # session ends when the browser does (previous behavior).
+    session.permanent = bool(data.get("remember"))
     return jsonify({"ok": True})
 
 

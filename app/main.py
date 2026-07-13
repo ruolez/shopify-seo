@@ -1,5 +1,6 @@
 import logging
 import sys
+from datetime import timedelta
 
 from flask import Flask, jsonify, redirect, request, session, url_for
 from werkzeug.middleware.proxy_fix import ProxyFix
@@ -37,6 +38,9 @@ from app.routes.ai_seo_routes import ai_seo_bp
 
 app = Flask(__name__)
 app.secret_key = SECRET_KEY
+# Applies only to sessions marked permanent ("Keep me signed in" at login);
+# refreshed on each request, so it's a rolling 30-day window.
+app.permanent_session_lifetime = timedelta(days=30)
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_port=1)
 
 app.register_blueprint(auth_bp)
