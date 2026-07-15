@@ -344,12 +344,17 @@ function renderArticleDetail(container, article) {
                     <h4>SEO Score: ${getScoreBadge(article.seo_score)}</h4>
                     <div class="seo-breakdown">${breakdownHtml}</div>
                 </div>
-                ${article.image_url ? `
                 <div class="card" style="margin-top: 16px;">
                     <h4>Featured Image</h4>
+                    ${article.image_url ? `
                     <img src="${article.image_url}" alt="${escapeHtml(article.image_alt || "")}" style="width: 100%; border-radius: 8px;">
-                    <small style="color: var(--on-surface-secondary); display: block; margin-top: 8px;">Alt: ${escapeHtml(article.image_alt || "No alt text")}</small>
-                </div>` : ""}
+                    <small style="color: var(--on-surface-secondary); display: block; margin-top: 8px;">Alt: ${escapeHtml(article.image_alt || "No alt text")}</small>`
+                    : `<p style="font-size: 13px; color: var(--on-surface-secondary); margin: 0;">No featured image.</p>`}
+                    <button class="btn btn-secondary btn-sm" style="margin-top: 10px;" onclick="regenerateArticleImage(${article.id}, this)">
+                        <span class="material-symbols-rounded">auto_awesome</span>
+                        ${article.image_url ? "Regenerate image" : "Generate image"}
+                    </button>
+                </div>
                 <div class="card" style="margin-top: 16px;">
                     <h4>Info</h4>
                     <p><strong>Author:</strong> ${escapeHtml(article.author || "")}</p>
@@ -365,6 +370,37 @@ function renderArticleDetail(container, article) {
 
 function closeArticleModal() {
     document.getElementById("article-modal").classList.remove("active");
+}
+
+async function regenerateArticleImage(articleId, btn) {
+    const idle = btn.innerHTML;
+    btn.disabled = true;
+    btn.innerHTML = '<span class="material-symbols-rounded">hourglass_empty</span> Generating…';
+    try {
+        const res = await apiRequest(`/api/blog/articles/${articleId}/regenerate-image`, { method: "POST", body: {} });
+        showToast("Generating a new featured image — this may take ~30s", "info");
+        const interval = setInterval(async () => {
+            try {
+                const task = await apiRequest(`/api/tasks/${res.task_id}`);
+                if (task.status === "completed") {
+                    clearInterval(interval);
+                    showToast("Featured image updated on Shopify", "success");
+                    openArticleDetail(articleId);
+                } else if (task.status === "failed") {
+                    clearInterval(interval);
+                    showToast("Image generation failed: " + (task.error || "Unknown error"), "error");
+                    btn.disabled = false;
+                    btn.innerHTML = idle;
+                }
+            } catch {
+                clearInterval(interval);
+            }
+        }, 3000);
+    } catch (err) {
+        showToast(`Failed to start: ${err.message}`, "error");
+        btn.disabled = false;
+        btn.innerHTML = idle;
+    }
 }
 
 async function applyArticleChanges(articleId) {

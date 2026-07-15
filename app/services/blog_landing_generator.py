@@ -9,7 +9,10 @@ def _slugify(text):
 
 
 def _strip_html(text):
-    return re.sub(r"<[^>]+>", "", text or "")
+    # Drop style/script blocks with their contents first — plain tag-stripping
+    # would leak raw CSS/JS text into excerpts.
+    text = re.sub(r"<\s*(style|script)\b[^>]*>[\s\S]*?<\s*/\s*\1\s*>", "", text or "", flags=re.I)
+    return re.sub(r"<[^>]+>", "", text)
 
 
 def _truncate(text, length=160):
@@ -35,8 +38,11 @@ def _format_date(dt):
 
 
 def _pub_sort_key(a):
-    """Stable sort key for published_at that tolerates datetime, str, or None."""
-    pa = a.get("published_at")
+    """Stable sort key for published_at that tolerates datetime, str, or None.
+
+    Falls back to synced_at so articles missing a publish date still sort by
+    when they appeared instead of sinking to one end of the list."""
+    pa = a.get("published_at") or a.get("synced_at")
     if not pa:
         return ""
     return pa.isoformat() if hasattr(pa, "isoformat") else str(pa)
@@ -64,7 +70,11 @@ def get_tags(articles):
 
 
 def generate_blog_landing_html(articles, blog_handle, blog_title, intro_text=None, hero_image_url=None, hero_image_alt=None):
-    articles = [a for a in articles if a.get("is_published")]
+    # Never list the landing-page article inside its own grid.
+    articles = [
+        a for a in articles
+        if a.get("is_published") and "landing-page" not in (a.get("tags") or "").lower()
+    ]
     articles.sort(key=_pub_sort_key, reverse=True)
     articles = articles[:50]
 
@@ -163,7 +173,7 @@ def _build_grid(articles, blog_handle):
         link = f"/blogs/{html.escape(blog_handle)}/{handle}"
         image_url = article.get("image_url") or ""
         author = html.escape(article.get("author") or "")
-        date = _format_date(article.get("published_at"))
+        date = _format_date(article.get("published_at") or article.get("synced_at"))
         excerpt = _get_excerpt(article)
         tags_str = article.get("tags") or ""
 
@@ -241,7 +251,7 @@ def _build_css():
 
 .blog-landing__grid {
   display: flex !important;
-  flex-direction: column-reverse !important;
+  flex-direction: column !important;
   gap: 20px !important;
   margin-bottom: 40px !important;
 }

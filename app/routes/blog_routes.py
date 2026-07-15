@@ -51,7 +51,7 @@ def _regen_landing_async(store_id, blog_id, client, store):
 
             with db.get_cursor() as cur:
                 cur.execute(
-                    "SELECT * FROM synced_articles WHERE store_id = %s AND blog_id = %s AND is_published = TRUE AND article_type = 'blog' ORDER BY published_at DESC",
+                    "SELECT * FROM synced_articles WHERE store_id = %s AND blog_id = %s AND is_published = TRUE AND article_type = 'blog' AND COALESCE(tags, '') NOT ILIKE '%%landing-page%%' ORDER BY COALESCE(published_at, synced_at) DESC",
                     (store_id, blog_id),
                 )
                 articles = [dict(a) for a in cur.fetchall()]
@@ -863,7 +863,8 @@ def generate_landing_page():
                     """SELECT * FROM synced_articles
                     WHERE store_id = %s AND blog_id = %s AND is_published = TRUE
                     AND article_type = 'blog'
-                    ORDER BY published_at DESC""",
+                    AND COALESCE(tags, '') NOT ILIKE '%%landing-page%%'
+                    ORDER BY COALESCE(published_at, synced_at) DESC""",
                     (store_id, blog_id),
                 )
                 articles = [dict(a) for a in cur.fetchall()]
@@ -1126,6 +1127,72 @@ def generate_hero_image():
                 )
 
     threading.Thread(target=run_hero_gen, daemon=True).start()
+    return jsonify({"task_id": task_id})
+
+
+@blog_bp.route("/api/blog/articles/<int:article_id>/regenerate-image", methods=["POST"])
+def regenerate_article_image(article_id):
+    """Generate a fresh featured image for an existing article and push it to Shopify."""
+    with db.get_cursor() as cur:
+        cur.execute("SELECT * FROM synced_articles WHERE id = %s", (article_id,))
+        article = cur.fetchone()
+    if not article:
+        return jsonify({"error": "Article not found"}), 404
+    store_id = article["store_id"]
+    store, client = _get_store_client(store_id)
+    if not client:
+        return jsonify({"error": "Store not found"}), 404
+
+    with db.get_cursor() as cur:
+        cur.execute(
+            """INSERT INTO ai_tasks (store_id, task_type, status, input)
+            VALUES (%s, 'article_image', 'pending', %s) RETURNING id""",
+            (store_id, json.dumps({"article_id": article_id, "title": article["title"]})),
+        )
+        task_id = cur.fetchone()["id"]
+
+    def run_image_gen():
+        try:
+            with db.get_cursor() as cur:
+                cur.execute("UPDATE ai_tasks SET status = 'running' WHERE id = %s", (task_id,))
+
+            keywords = [t.strip() for t in (article.get("tags") or "").split(",") if t.strip()]
+            from app.services.image_generator import generate_blog_image_ai
+            result = generate_blog_image_ai(article["title"], keywords=keywords)
+            if not result:
+                raise Exception("Image generation returned no result")
+            image_bytes, filename, alt_text, width, height = result
+
+            mime = "image/webp" if filename.endswith(".webp") else "image/jpeg"
+            staged = client.staged_upload_create(filename, mime, len(image_bytes), resource="IMAGE")
+            resource_url = client.upload_staged_file(staged, image_bytes, content_type=mime)
+            file_obj = client.file_create(resource_url, filename=filename, alt_text=alt_text)
+            file_id = file_obj.get("id")
+            if not file_id:
+                raise Exception("fileCreate did not return a file ID")
+            cdn_url = client.file_get_url(file_id)
+
+            client.update_article(article["shopify_id"], {"image_url": cdn_url, "image_alt": alt_text})
+
+            with db.get_cursor() as cur:
+                cur.execute(
+                    "UPDATE synced_articles SET image_url = %s, image_alt = %s WHERE id = %s",
+                    (cdn_url, alt_text, article_id),
+                )
+            with db.get_cursor() as cur:
+                cur.execute(
+                    "UPDATE ai_tasks SET status = 'completed', result = %s, completed_at = NOW() WHERE id = %s",
+                    (json.dumps({"image_url": cdn_url, "image_alt": alt_text, "width": width, "height": height}), task_id),
+                )
+        except Exception as e:
+            logger.exception("Article image regeneration failed: %s", e)
+            with db.get_cursor() as cur:
+                cur.execute(
+                    "UPDATE ai_tasks SET status = 'failed', error = %s, completed_at = NOW() WHERE id = %s",
+                    (str(e), task_id),
+                )
+
+    threading.Thread(target=run_image_gen, daemon=True).start()
     return jsonify({"task_id": task_id})
 
 
@@ -1677,11 +1744,14 @@ def wizard_publish(session_id):
             """INSERT INTO synced_articles
                 (store_id, blog_id, shopify_id, shopify_blog_id, title, handle,
                  body, summary, tags, meta_title, meta_description,
-                 image_url, image_alt, is_published, article_type, synced_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'blog', NOW())
+                 image_url, image_alt, is_published, article_type, synced_at,
+                 published_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'blog', NOW(),
+                    CASE WHEN %s THEN NOW() END)
             ON CONFLICT (store_id, shopify_id) DO UPDATE SET
                 title = EXCLUDED.title, handle = EXCLUDED.handle,
-                body = EXCLUDED.body, article_type = 'blog', synced_at = NOW()
+                body = EXCLUDED.body, article_type = 'blog', synced_at = NOW(),
+                published_at = COALESCE(synced_articles.published_at, EXCLUDED.published_at)
             RETURNING id""",
             (
                 session["store_id"],
@@ -1697,6 +1767,7 @@ def wizard_publish(session_id):
                 fields["meta_description"],
                 cdn_image_url,
                 result.get("image_alt", "") or fields.get("image_alt", ""),
+                is_published,
                 is_published,
             ),
         )
