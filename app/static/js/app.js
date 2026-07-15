@@ -190,6 +190,14 @@ function renderScoreRing(score, size = 44) {
     </div>`;
 }
 
+function setupModalDismiss(overlayId, closeFn) {
+    const overlay = document.getElementById(overlayId);
+    if (!overlay) return;
+    overlay.addEventListener("click", (e) => {
+        if (e.target === overlay) closeFn();
+    });
+}
+
 function initThemeToggle() {
     const saved = localStorage.getItem("theme");
     if (saved === "dark") {

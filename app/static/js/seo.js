@@ -357,14 +357,6 @@ function toggleSchemaSettings() {
     trigger.classList.toggle("open");
 }
 
-function setupModalDismiss(overlayId, closeFn) {
-    const overlay = document.getElementById(overlayId);
-    if (!overlay) return;
-    overlay.addEventListener("click", (e) => {
-        if (e.target === overlay) closeFn();
-    });
-}
-
 document.addEventListener("keydown", (e) => {
     if (e.key === "Escape") {
         if (closeLightbox()) return;
