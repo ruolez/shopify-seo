@@ -1,5 +1,6 @@
 import json
 import logging
+import re
 import threading
 from datetime import datetime, timezone
 
@@ -325,6 +326,62 @@ def _step_links(session, store_id):
     return result
 
 
+# ── Duplicate-title guard ───────────────────────────────────────
+
+_TITLE_TOKEN_RE = re.compile(r"[a-z0-9]+")
+
+_TITLE_STOPWORDS = {
+    "a", "an", "the", "and", "or", "of", "in", "on", "for", "to", "with", "as",
+    "at", "by", "its", "is", "are", "from", "this", "that", "up", "over", "under",
+}
+
+
+def _title_tokens(title):
+    # Apostrophes (straight or curly) are removed, not treated as separators, so
+    # quoted words ('Lax') and possessives (Estate's/Estates) tokenize identically.
+    # Stopwords are dropped so filler-word rewrites don't dilute the overlap.
+    cleaned = (title or "").casefold().replace("'", "").replace("’", "")
+    tokens = set(_TITLE_TOKEN_RE.findall(cleaned))
+    content = tokens - _TITLE_STOPWORDS
+    return content or tokens
+
+
+def _titles_match(a, b, threshold=0.8):
+    """True when two headlines read as the same story.
+
+    Fuzzy on purpose — re-importing the same source yields AI headlines that differ
+    by a word or two ("Over Lax" vs "For Lax") or trim trailing detail, which exact
+    matching would miss. Same story = token-set Jaccard >= threshold, or (for titles
+    with enough substance) the shorter title's tokens are >= threshold contained in
+    the longer one's.
+    """
+    ta, tb = _title_tokens(a), _title_tokens(b)
+    if not ta or not tb:
+        return False
+    inter = len(ta & tb)
+    if inter / len(ta | tb) >= threshold:
+        return True
+    smaller = min(len(ta), len(tb))
+    return smaller >= 4 and inter / smaller >= threshold
+
+
+def _find_duplicate_news_article(store_id, title, exclude_shopify_id=None):
+    """Return the existing news article whose title matches `title`, or None."""
+    with db.get_cursor() as cur:
+        cur.execute(
+            """SELECT id, shopify_id, title, handle FROM synced_articles
+               WHERE store_id = %s AND article_type = 'news'""",
+            (store_id,),
+        )
+        rows = cur.fetchall()
+    for r in rows:
+        if exclude_shopify_id and str(r["shopify_id"]) == str(exclude_shopify_id):
+            continue
+        if _titles_match(title, r["title"]):
+            return dict(r)
+    return None
+
+
 def _step_publish(session, store, client, is_published=True, regen_hub=True):
     """Compose the final body, create the Shopify article, persist, and regen the hub.
 
@@ -378,6 +435,13 @@ def _step_publish(session, store, client, is_published=True, regen_hub=True):
         }
         shopify_id = existing_shopify_id
     else:
+        dup = _find_duplicate_news_article(store_id, headline)
+        if dup:
+            raise Exception(
+                f'Duplicate guard: an existing news article has a matching title — '
+                f'"{dup["title"]}" (/blogs/news/{dup.get("handle") or ""}). '
+                f"Delete it or change the headline, then retry."
+            )
         result = client.create_article(blog["shopify_id"], fields)
         shopify_id = result["shopify_id"]
         # Persist the Shopify id immediately — if any later step fails, a retry
@@ -530,6 +594,79 @@ def list_news_articles():
         "articles": articles,
         "store_base_url": _store_base_url(dict(store)) if store else "",
     })
+
+
+@news_bp.route("/api/news/check-duplicates", methods=["POST"])
+def check_duplicate_titles():
+    """Pre-import duplicate check: which of `titles` match an already-published
+    news article (or an earlier title in the same list)? Used by the UI to skip
+    duplicate files before any AI work; _step_publish enforces the same guard."""
+    data = request.get_json(silent=True) or {}
+    store_id = data.get("store_id")
+    titles = data.get("titles")
+    if not store_id or not isinstance(titles, list):
+        return jsonify({"error": "store_id and titles are required"}), 400
+
+    with db.get_cursor() as cur:
+        cur.execute(
+            """SELECT id, title, handle FROM synced_articles
+               WHERE store_id = %s AND article_type = 'news'""",
+            (store_id,),
+        )
+        existing = [dict(r) for r in cur.fetchall()]
+
+    duplicates = []
+    accepted = []
+    for idx, title in enumerate(titles):
+        match = next((a for a in existing if _titles_match(title, a["title"])), None)
+        if match:
+            duplicates.append({
+                "index": idx, "title": title, "duplicate_of": match["title"],
+                "article_id": match["id"], "handle": match.get("handle") or "",
+                "in_batch": False,
+            })
+            continue
+        prev = next((t for t in accepted if _titles_match(title, t)), None)
+        if prev is not None:
+            duplicates.append({
+                "index": idx, "title": title, "duplicate_of": prev,
+                "article_id": None, "handle": "", "in_batch": True,
+            })
+            continue
+        accepted.append(title)
+    return jsonify({"duplicates": duplicates})
+
+
+@news_bp.route("/api/news/articles/<int:article_id>", methods=["DELETE"])
+def delete_news_article(article_id):
+    """Delete a news article from Shopify and the local cache, then refresh the hub."""
+    with db.get_cursor() as cur:
+        cur.execute(
+            "SELECT * FROM synced_articles WHERE id = %s AND article_type = 'news'",
+            (article_id,),
+        )
+        article = cur.fetchone()
+    if not article:
+        return jsonify({"error": "News article not found"}), 404
+
+    store, client = _get_store_client(article["store_id"])
+    if not client:
+        return jsonify({"error": "Store not found"}), 404
+
+    try:
+        client.delete_article(article["shopify_id"])
+    except Exception as e:
+        # Already gone on Shopify is fine to clean up locally; real failures surface.
+        if not any(t in str(e).lower() for t in ("does not exist", "not found", "invalid id", "no longer exists")):
+            logger.exception("Shopify delete failed for news article %s: %s", article_id, e)
+            return jsonify({"error": f"Shopify delete failed: {e}"}), 502
+
+    with db.get_cursor() as cur:
+        cur.execute("DELETE FROM synced_articles WHERE id = %s", (article_id,))
+
+    _regen_news_hub_async(article["store_id"], client, store)
+    _regen_blog_landings_async(article["store_id"], client, store)
+    return jsonify({"ok": True, "success": True})
 
 
 # ── Regenerate images on a published article ────────────────────

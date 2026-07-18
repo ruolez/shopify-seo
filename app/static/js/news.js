@@ -84,7 +84,27 @@ function parseNewsMarkdown(text) {
         while ((m = bareRe.exec(sourcesText)) !== null) push(m[1], "");
     }
 
-    return { article, sources };
+    // First "# Heading" is the story title — used for the duplicate-import check.
+    const titleLine = articleLines.find((l) => /^#\s+\S/.test(l.trim()));
+    const title = titleLine ? titleLine.trim().replace(/^#\s+/, "").trim() : "";
+
+    return { article, sources, title };
+}
+
+// Ask the server which of these titles already exist as published news articles
+// (fuzzy match). Returns the duplicates array; [] when the check can't run.
+async function checkDuplicateTitles(titles) {
+    if (!storeId || !titles.some((t) => t)) return [];
+    try {
+        const res = await apiRequest("/api/news/check-duplicates", {
+            method: "POST",
+            body: { store_id: storeId, titles },
+        });
+        return res.duplicates || [];
+    } catch (e) {
+        // Non-fatal — the publish step enforces the same guard server-side.
+        return [];
+    }
 }
 
 function readFileText(file) {
@@ -106,7 +126,7 @@ async function loadSingleMarkdown(file) {
         showToast(e.message, "error");
         return;
     }
-    const { article, sources } = parseNewsMarkdown(text);
+    const { article, sources, title } = parseNewsMarkdown(text);
     if (!article) {
         showToast("Could not read any article text from that file.", "error");
         return;
@@ -121,6 +141,15 @@ async function loadSingleMarkdown(file) {
         status.textContent = `Loaded “${file.name}” — article + ${sources.length} source${sources.length === 1 ? "" : "s"}.`;
     }
     showToast(`Imported article and ${sources.length} source${sources.length === 1 ? "" : "s"}.`, "success");
+
+    const dups = await checkDuplicateTitles([title]);
+    if (dups.length) {
+        if (status) status.textContent += ` ⚠ Possible duplicate of “${dups[0].duplicate_of}”.`;
+        showToast(
+            `Possible duplicate: “${dups[0].duplicate_of}” is already published. Publishing will be blocked — delete it first or change the headline.`,
+            "warning",
+        );
+    }
 }
 
 async function importNewsMarkdownFiles(event) {
@@ -138,12 +167,13 @@ async function importNewsMarkdownFiles(event) {
     // Multiple files → batch auto-publish.
     batchItems = [];
     for (const file of files) {
-        let item = { name: file.name, source_text: "", sources: [], ok: false, error: "" };
+        let item = { name: file.name, source_text: "", sources: [], title: "", ok: false, error: "" };
         try {
-            const { article, sources } = parseNewsMarkdown(await readFileText(file));
+            const { article, sources, title } = parseNewsMarkdown(await readFileText(file));
             if (article) {
                 item.source_text = article;
                 item.sources = sources;
+                item.title = title;
                 item.ok = true;
             } else {
                 item.error = "no article text";
@@ -153,6 +183,25 @@ async function importNewsMarkdownFiles(event) {
         }
         batchItems.push(item);
     }
+
+    // Duplicate guard: skip files whose title matches a published article or an
+    // earlier file in this same batch.
+    const dups = await checkDuplicateTitles(batchItems.map((i) => (i.ok ? i.title : "")));
+    let skippedDups = 0;
+    dups.forEach((d) => {
+        const item = batchItems[d.index];
+        if (item && item.ok) {
+            item.ok = false;
+            item.error = d.in_batch
+                ? `duplicate of “${d.duplicate_of}” in this batch`
+                : `already published as “${d.duplicate_of}”`;
+            skippedDups++;
+        }
+    });
+    if (skippedDups) {
+        showToast(`${skippedDups} file${skippedDups === 1 ? "" : "s"} skipped — duplicate title${skippedDups === 1 ? "" : "s"} of already-published news.`, "warning");
+    }
+
     renderBatchList();
     show("news-batch", true);
     const ready = batchItems.filter((i) => i.ok).length;
@@ -762,6 +811,7 @@ async function loadNewsArticles() {
                 <td>${a.published_at ? formatDate(a.published_at) : "—"}</td>
                 <td style="white-space:nowrap;">
                     <button class="btn btn-secondary btn-sm" onclick="openManage(${i})"><span class="material-symbols-rounded">image</span> Images</button>
+                    <button class="btn btn-secondary btn-sm" style="margin-left:6px;color:var(--error);" title="Delete article" onclick="deleteNewsArticle(${i}, this)"><span class="material-symbols-rounded">delete</span></button>
                     <a class="news-link" href="${escapeAttr(url)}" target="_blank" rel="noopener" style="margin-left:10px;">View ↗</a>
                 </td>
             </tr>`;
@@ -771,6 +821,21 @@ async function loadNewsArticles() {
             <tbody>${rows}</tbody></table></div>`;
     } catch (e) {
         container.innerHTML = `<p style="color:var(--error);">${escapeHtml(e.message)}</p>`;
+    }
+}
+
+async function deleteNewsArticle(index, btn) {
+    const a = publishedArticles[index];
+    if (!a) return;
+    if (!confirm(`Delete “${a.title || "Untitled"}” from Shopify and this list? This cannot be undone.`)) return;
+    if (btn) btn.disabled = true;
+    try {
+        await apiRequest(`/api/news/articles/${a.id}`, { method: "DELETE" });
+        showToast("Article deleted — News hub is updating", "success");
+        loadNewsArticles();
+    } catch (e) {
+        if (btn) btn.disabled = false;
+        showToast(`Delete failed: ${e.message}`, "error");
     }
 }
 
