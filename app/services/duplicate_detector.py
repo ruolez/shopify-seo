@@ -1,4 +1,5 @@
-"""Detect duplicate SEO titles / meta descriptions across synced products and collections.
+"""Detect duplicate SEO titles / meta descriptions across items of any page type
+(products, collections, blog/news articles, pages).
 
 Pure functions (no DB access) so they stay unit-testable. Callers pass a flat list
 of item dicts already loaded from the DB.

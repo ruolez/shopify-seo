@@ -35,6 +35,7 @@ from app.routes.keyword_strategy_routes import keyword_strategy_bp
 from app.routes.news_routes import news_bp
 from app.routes.homepage_routes import homepage_bp
 from app.routes.ai_seo_routes import ai_seo_bp
+from app.routes.duplicates_routes import duplicates_bp
 
 app = Flask(__name__)
 app.secret_key = SECRET_KEY
@@ -64,6 +65,7 @@ app.register_blueprint(keyword_strategy_bp)
 app.register_blueprint(news_bp)
 app.register_blueprint(homepage_bp)
 app.register_blueprint(ai_seo_bp)
+app.register_blueprint(duplicates_bp)
 
 PUBLIC_PATHS = {"/login", "/api/login", "/health", "/static", "/api/gsc/auth/callback"}
 

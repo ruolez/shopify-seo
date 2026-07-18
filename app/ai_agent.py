@@ -2921,6 +2921,8 @@ def run_task(task_type, task_input, store_id=None):
                     "vendor": it.get("vendor") or "",
                     "product_type": it.get("product_type") or "",
                     "handle": it.get("handle") or "",
+                    "blog_title": it.get("blog_title") or "",
+                    "summary": (it.get("summary") or "")[:200],
                 }
                 for it in group_items
             ],

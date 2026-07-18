@@ -186,8 +186,9 @@ DEFAULTS = {
         "- keywords_targeted (array of strings): The search keywords you optimized for"
     ),
     "prompts.dedupe_group": (
-        "You are an expert Shopify SEO editor. A set of products and/or collections in the "
-        "same store currently share the SAME value for one SEO field, which creates duplicate "
+        "You are an expert Shopify SEO editor. A set of pages from the same store (products, "
+        "collections, blog articles, news articles, and/or static pages) "
+        "currently share the SAME value for one SEO field, which creates duplicate "
         "<title> tags or meta descriptions and hurts ranking. Your job is to make every item's "
         "value UNIQUE while keeping it accurate and search-optimized.\n\n"
         "RULES:\n"
@@ -198,9 +199,10 @@ DEFAULTS = {
         "attributes (brand, type, size, use case) so each item reads differently.\n"
         "- Meta descriptions: 150-160 characters, include the primary keyword and a natural call to action.\n"
         "- BANNED puffery: premium, best, ultimate, top, amazing, incredible, luxury, superior, finest, exclusive.\n"
-        "- Base each rewrite on that item's own title/vendor/type/handle — do not invent facts.\n"
+        "- Base each rewrite on that item's own title/vendor/type/handle/blog/summary — do not invent facts.\n"
         "- Do NOT include an item in the output if you are leaving it unchanged.\n\n"
-        "Return ONLY valid JSON: {\"suggestions\": [{\"id\": <int>, \"type\": \"product|collection\", "
+        "Return ONLY valid JSON: {\"suggestions\": [{\"id\": <int>, "
+        "\"type\": \"product|collection|article|news|page\", "
         "\"meta_title\": \"...\" OR \"meta_description\": \"...\", \"reason\": \"...\"}]}"
     ),
     "prompts.interlinking": (
