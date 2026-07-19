@@ -55,6 +55,7 @@
 
                 <div class="tabs">
                     <button class="tab active" data-tab="create">Create News</button>
+                    <button class="tab" data-tab="scheduled">Scheduled</button>
                     <button class="tab" data-tab="published">Published</button>
                 </div>
 
@@ -82,11 +83,16 @@
 
                             <!-- Batch auto-publish (shown when multiple files are selected) -->
                             <div id="news-batch" class="form-group" style="display:none;">
-                                <label>Batch auto-publish <span style="color: var(--on-surface-secondary); font-weight: normal;">— each article is analyzed, illustrated, linked, and published automatically.</span></label>
+                                <label>Batch auto-publish <span style="color: var(--on-surface-secondary); font-weight: normal;">— each article is analyzed, illustrated, linked, and published automatically. Or schedule: articles are prepared now and published at each date/time.</span></label>
                                 <div id="news-batch-list" style="margin: 6px 0;"></div>
-                                <button class="btn btn-primary" id="news-batch-btn" onclick="startBatch()">
-                                    <span class="material-symbols-rounded">auto_awesome</span> <span id="news-batch-label">Auto-Publish</span>
-                                </button>
+                                <div style="display:flex; gap:8px; flex-wrap:wrap;">
+                                    <button class="btn btn-primary" id="news-batch-btn" onclick="startBatch()">
+                                        <span class="material-symbols-rounded">auto_awesome</span> <span id="news-batch-label">Auto-Publish</span>
+                                    </button>
+                                    <button class="btn btn-secondary" id="news-schedule-btn" onclick="startScheduledBatch()">
+                                        <span class="material-symbols-rounded">schedule_send</span> <span id="news-schedule-label">Schedule</span>
+                                    </button>
+                                </div>
                                 <div id="news-batch-status" style="margin-top: 12px;"></div>
                             </div>
                             <div class="form-group">
@@ -212,6 +218,11 @@
                             </div>
                         </div>
                     </div>
+                </div>
+
+                <!-- Scheduled -->
+                <div class="tab-panel" id="tab-scheduled">
+                    <div id="news-scheduled-container"><p style="color: var(--on-surface-secondary);">Loading…</p></div>
                 </div>
 
                 <!-- Published -->

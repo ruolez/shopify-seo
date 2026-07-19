@@ -670,6 +670,12 @@ class Database:
                 EXCEPTION WHEN duplicate_column THEN NULL;
                 END $$
             """)
+            cur.execute("""
+                DO $$ BEGIN
+                    ALTER TABLE news_sessions ADD COLUMN scheduled_for TIMESTAMP;
+                EXCEPTION WHEN duplicate_column THEN NULL;
+                END $$
+            """)
             # Backfill: any article without an explicit type is a blog post.
             cur.execute(
                 "UPDATE synced_articles SET article_type = 'blog' WHERE article_type IS NULL"
@@ -697,6 +703,15 @@ class Database:
                     "error = COALESCE(error, 'Interrupted — server restarted'), completed_at = NOW() "
                     "WHERE status IN ('pending', 'running'); "
                     "EXCEPTION WHEN undefined_table THEN NULL; END $$"
+                )
+                # News sessions in a transient pipeline state are dead too.
+                # 'scheduled' is a resting state (awaiting its publish time) and
+                # must survive restarts untouched.
+                cur.execute(
+                    "UPDATE news_sessions SET status = 'failed', "
+                    "error = COALESCE(error, 'Interrupted — server restarted'), updated_at = NOW() "
+                    "WHERE status IN ('analyzing', 'auto_queued', 'auto_analyzing', 'auto_hero', "
+                    "'auto_inline', 'auto_links', 'auto_publishing')"
                 )
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS news_hub_pages (

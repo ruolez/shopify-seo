@@ -226,24 +226,49 @@ function batchChip(item) {
         const url = `${storeBaseUrl}/blogs/news/${item.handle || ""}`;
         return `<span style="color:var(--success);">✓ Published — <a href="${escapeAttr(url)}" target="_blank">view →</a></span>`;
     }
+    if (s === "scheduled") return `<span class="news-badge news-badge--ok">✓ Scheduled</span>`;
     if (s === "failed") return `<span style="color:var(--error);">Failed: ${escapeHtml(item.error || "error")}</span>`;
     return `<span>${escapeHtml(AUTO_STAGES[s] || "Working…")}</span>`;
 }
 
+// datetime-local value ("YYYY-MM-DDTHH:MM") from local date parts — toISOString
+// would shift to UTC and show the wrong wall-clock time in the input.
+function toLocalInputValue(date) {
+    const p = (n) => String(n).padStart(2, "0");
+    return `${date.getFullYear()}-${p(date.getMonth() + 1)}-${p(date.getDate())}T${p(date.getHours())}:${p(date.getMinutes())}`;
+}
+
+// Default schedule for the k-th ready article: (tomorrow + k days) at 09:00
+// local — a staggered daily cadence the user can override per article.
+function defaultScheduleFor(k) {
+    const d = new Date();
+    d.setDate(d.getDate() + 1 + k);
+    d.setHours(9, 0, 0, 0);
+    return toLocalInputValue(d);
+}
+
 function renderBatchList() {
     const list = document.getElementById("news-batch-list");
+    let readyIdx = 0;
     list.innerHTML = batchItems
-        .map(
-            (item, i) => `<div style="display:flex; justify-content:space-between; gap:12px; padding:8px 0; border-bottom:1px solid var(--outline);">
+        .map((item, i) => {
+            const when = item.ok
+                ? `<input type="datetime-local" id="batch-when-${i}" class="form-control" style="max-width:210px; flex:none;" value="${defaultScheduleFor(readyIdx++)}" title="Publish date/time (used by Schedule)">`
+                : "";
+            return `<div style="display:flex; align-items:center; justify-content:space-between; gap:12px; padding:8px 0; border-bottom:1px solid var(--outline);">
                 <span style="font-weight:500; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${escapeHtml(item.name)}</span>
+                ${when}
                 <span id="batch-chip-${i}" style="font-size:13px; flex:none;">${batchChip(item)}</span>
-            </div>`,
-        )
+            </div>`;
+        })
         .join("");
     const ready = batchItems.filter((i) => i.ok).length;
     const btn = document.getElementById("news-batch-btn");
     btn.disabled = ready === 0;
     btn.querySelector("#news-batch-label").textContent = `Auto-Publish ${ready} article${ready === 1 ? "" : "s"}`;
+    const schedBtn = document.getElementById("news-schedule-btn");
+    schedBtn.disabled = ready === 0;
+    schedBtn.querySelector("#news-schedule-label").textContent = `Schedule ${ready} article${ready === 1 ? "" : "s"}`;
 }
 
 async function startBatch() {
@@ -253,6 +278,7 @@ async function startBatch() {
 
     const btn = document.getElementById("news-batch-btn");
     btn.disabled = true;
+    document.getElementById("news-schedule-btn").disabled = true;
     const status = document.getElementById("news-batch-status");
     status.innerHTML = `<div class="spinner" style="width:20px;height:20px;border-width:2px;"></div> Queuing ${ready.length} articles…`;
     try {
@@ -271,6 +297,50 @@ async function startBatch() {
     } catch (e) {
         status.innerHTML = `<p style="color: var(--error);">${escapeHtml(e.message)}</p>`;
         btn.disabled = false;
+        document.getElementById("news-schedule-btn").disabled = false;
+    }
+}
+
+// Schedule flow: the AI pipeline (analyze → images → links) runs now; each
+// session then waits as 'scheduled' until its date/time, when the server-side
+// scheduler publishes it — no browser needed at publish time.
+async function startScheduledBatch() {
+    if (!storeId) return showToast("No store found. Add a store first.", "error");
+    const ready = batchItems.filter((i) => i.ok);
+    if (!ready.length) return showToast("No valid articles to schedule.", "error");
+
+    const articles = [];
+    for (const item of ready) {
+        const input = document.getElementById(`batch-when-${batchItems.indexOf(item)}`);
+        const when = input && input.value ? new Date(input.value) : null;
+        if (!when || isNaN(when.getTime())) {
+            return showToast(`Pick a publish date/time for “${item.name}”.`, "error");
+        }
+        articles.push({
+            source_text: item.source_text,
+            source_urls: item.sources,
+            scheduled_at: when.toISOString(),
+        });
+    }
+
+    const btn = document.getElementById("news-schedule-btn");
+    btn.disabled = true;
+    document.getElementById("news-batch-btn").disabled = true;
+    const status = document.getElementById("news-batch-status");
+    status.innerHTML = `<div class="spinner" style="width:20px;height:20px;border-width:2px;"></div> Scheduling ${ready.length} articles…`;
+    try {
+        const res = await apiRequest("/api/news/schedule-batch", {
+            method: "POST",
+            body: { store_id: storeId, articles },
+        });
+        (res.sessions || []).forEach((sid, idx) => {
+            if (ready[idx]) ready[idx].sessionId = sid;
+        });
+        pollBatch();
+    } catch (e) {
+        status.innerHTML = `<p style="color: var(--error);">${escapeHtml(e.message)}</p>`;
+        btn.disabled = false;
+        document.getElementById("news-batch-btn").disabled = false;
     }
 }
 
@@ -306,11 +376,17 @@ function pollBatch() {
             const chip = document.getElementById(`batch-chip-${batchItems.indexOf(item)}`);
             if (chip) chip.innerHTML = batchChip(item);
         });
-        const done = tracked.filter((i) => i.status === "published" || i.status === "failed").length;
+        const done = tracked.filter((i) => ["published", "scheduled", "failed"].includes(i.status)).length;
         const published = tracked.filter((i) => i.status === "published").length;
+        const scheduled = tracked.filter((i) => i.status === "scheduled").length;
         if (done >= tracked.length) {
-            status.innerHTML = `<p style="color: var(--success);">Done — ${published}/${tracked.length} published.</p>`;
-            loadNewsArticles();
+            const parts = [];
+            if (published) parts.push(`${published} published`);
+            if (scheduled) parts.push(`${scheduled} scheduled`);
+            const failed = tracked.length - published - scheduled;
+            if (failed) parts.push(`${failed} failed`);
+            status.innerHTML = `<p style="color: var(--success);">Done — ${parts.join(", ")}.</p>`;
+            if (published) loadNewsArticles();
         } else {
             status.innerHTML = `<div class="spinner" style="width:20px;height:20px;border-width:2px;"></div> ${done}/${tracked.length} done…`;
             setTimeout(poll, 2000);
@@ -339,6 +415,7 @@ function switchTab(name) {
     document.querySelectorAll(".tab-panel").forEach((p) => p.classList.remove("active"));
     document.getElementById("tab-" + name).classList.add("active");
     if (name === "published") loadNewsArticles();
+    if (name === "scheduled") loadScheduledSessions();
 }
 
 async function loadCategories() {
@@ -782,6 +859,138 @@ function resetCreate() {
     show("news-step-review", false);
     show("news-step-paste", true);
     switchTab("create");
+}
+
+// ── Scheduled list ───────────────────────────────────────────────
+
+let scheduledSessions = [];
+let scheduledRefreshTimer = null;
+
+function scheduledTitle(row) {
+    if (row.headline) return row.headline;
+    const m = (row.source_preview || "").match(/^#\s+(\S.*)$/m);
+    return m ? m[1].trim() : "(processing…)";
+}
+
+function scheduledChip(row) {
+    const s = row.status;
+    if (s === "scheduled") return `<span class="news-badge news-badge--ok">Ready</span>`;
+    if (s === "failed") return `<span class="news-badge news-badge--fail" title="${escapeAttr(row.error || "")}">Failed</span> <span style="font-size:12px;color:var(--error);">${escapeHtml(row.error || "")}</span>`;
+    if (s === "auto_publishing") return `<span class="news-badge news-badge--pending">Publishing…</span>`;
+    return `<span class="news-badge news-badge--pending">${escapeHtml(AUTO_STAGES[s] || "Preparing…")}</span>`;
+}
+
+async function loadScheduledSessions() {
+    const container = document.getElementById("news-scheduled-container");
+    if (!storeId) { container.innerHTML = `<p>No store found.</p>`; return; }
+    let rows;
+    try {
+        const res = await apiRequest(`/api/news/scheduled?store_id=${storeId}`);
+        rows = res.sessions || [];
+    } catch (e) {
+        container.innerHTML = `<p style="color:var(--error);">${escapeHtml(e.message)}</p>`;
+        return;
+    }
+    scheduledSessions = rows;
+    if (!rows.length) {
+        container.innerHTML = `<div class="card"><p style="color:var(--on-surface-secondary);">Nothing scheduled. Upload several .md files in the “Create News” tab and pick a date/time for each.</p></div>`;
+        return;
+    }
+    const body = rows.map((row, i) => {
+        const canAct = row.status === "scheduled" || row.status === "failed";
+        const whenInput = `<span style="display:inline-flex; gap:6px; align-items:center;">
+            <input type="datetime-local" id="sched-when-${i}" class="form-control" style="max-width:200px;" value="${toLocalInputValue(new Date(row.scheduled_for))}" ${row.status === "auto_publishing" ? "disabled" : ""}>
+            <button class="icon-btn" title="Save new time" onclick="rescheduleSession(${i})" ${row.status === "auto_publishing" ? "disabled" : ""}><span class="material-symbols-rounded">save</span></button>
+        </span>`;
+        return `<tr>
+            <td>${escapeHtml(scheduledTitle(row))}</td>
+            <td style="white-space:nowrap;">${whenInput}</td>
+            <td>${scheduledChip(row)}</td>
+            <td style="white-space:nowrap;">
+                <button class="btn btn-secondary btn-sm" onclick="publishScheduledNow(${i}, this)" ${canAct ? "" : "disabled"}>
+                    <span class="material-symbols-rounded">publish</span> ${row.status === "failed" ? "Retry now" : "Publish now"}
+                </button>
+                <button class="btn btn-secondary btn-sm" style="margin-left:6px;color:var(--error);" title="Cancel scheduled article" onclick="cancelScheduled(${i}, this)" ${canAct || row.status === "auto_queued" ? "" : "disabled"}>
+                    <span class="material-symbols-rounded">delete</span>
+                </button>
+            </td>
+        </tr>`;
+    }).join("");
+    container.innerHTML = `<div class="table-container"><table class="data-table">
+        <thead><tr><th>Title</th><th>Publish at</th><th>Status</th><th></th></tr></thead>
+        <tbody>${body}</tbody></table></div>`;
+
+    // Keep refreshing while any session is still being prepared or publishing.
+    clearTimeout(scheduledRefreshTimer);
+    const transient = rows.some((r) => r.status !== "scheduled" && r.status !== "failed");
+    const panel = document.getElementById("tab-scheduled");
+    if (transient && panel && panel.classList.contains("active")) {
+        scheduledRefreshTimer = setTimeout(loadScheduledSessions, 5000);
+    }
+}
+
+async function rescheduleSession(index) {
+    const row = scheduledSessions[index];
+    const input = document.getElementById(`sched-when-${index}`);
+    if (!row || !input) return;
+    const when = input.value ? new Date(input.value) : null;
+    if (!when || isNaN(when.getTime())) return showToast("Pick a valid date/time.", "error");
+    try {
+        await apiRequest(`/api/news/scheduled/${row.id}`, {
+            method: "PATCH",
+            body: { scheduled_at: when.toISOString() },
+        });
+        showToast("Publish time updated.", "success");
+        loadScheduledSessions();
+    } catch (e) {
+        showToast(`Reschedule failed: ${e.message}`, "error");
+    }
+}
+
+async function publishScheduledNow(index, btn) {
+    const row = scheduledSessions[index];
+    if (!row) return;
+    if (btn) btn.disabled = true;
+    try {
+        await apiRequest(`/api/news/scheduled/${row.id}/publish-now`, { method: "POST" });
+    } catch (e) {
+        if (btn) btn.disabled = false;
+        return showToast(`Publish failed: ${e.message}`, "error");
+    }
+    const poll = async () => {
+        let r;
+        try {
+            const res = await apiRequest("/api/news/session-status", { method: "POST", body: { ids: [row.id] } });
+            r = (res.sessions || [])[0];
+        } catch { /* transient — keep polling */ }
+        if (r && r.status === "published") {
+            showToast("Article published — News hub is updating.", "success");
+            loadScheduledSessions();
+            return;
+        }
+        if (r && r.status === "failed") {
+            showToast(`Publish failed: ${r.error || "unknown error"}`, "error");
+            loadScheduledSessions();
+            return;
+        }
+        setTimeout(poll, 2000);
+    };
+    poll();
+}
+
+async function cancelScheduled(index, btn) {
+    const row = scheduledSessions[index];
+    if (!row) return;
+    if (!confirm(`Cancel “${scheduledTitle(row)}”? The prepared article is discarded and will not be published.`)) return;
+    if (btn) btn.disabled = true;
+    try {
+        await apiRequest(`/api/news/scheduled/${row.id}`, { method: "DELETE" });
+        showToast("Scheduled article cancelled.", "success");
+        loadScheduledSessions();
+    } catch (e) {
+        if (btn) btn.disabled = false;
+        showToast(`Cancel failed: ${e.message}`, "error");
+    }
 }
 
 // ── Published list ───────────────────────────────────────────────

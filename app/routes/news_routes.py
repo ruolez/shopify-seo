@@ -232,8 +232,13 @@ def _step_analyze(session_id, store_id):
     return result
 
 
-def _step_hero(session, client):
-    """Generate + upload the hero image and persist hero_image_url. Returns the URL; raises on failure."""
+def _step_hero(session, client, permanent=False):
+    """Generate + upload the hero image and persist hero_image_url. Returns the URL; raises on failure.
+
+    permanent=True registers the image as a Shopify File and stores its final CDN url —
+    required for scheduled sessions, where the default staged-upload url would expire
+    before the delayed publish consumes it.
+    """
     from app.services.image_generator import generate_blog_image_ai
 
     edited = session.get("edited_result") or session.get("analyze_result") or {}
@@ -245,9 +250,12 @@ def _step_hero(session, client):
     if not result:
         raise Exception("Hero image generation returned no result")
     image_bytes, filename, alt_text, width, height = result
-    mime = "image/webp" if filename.endswith(".webp") else "image/jpeg"
-    staged = client.staged_upload_create(filename, mime, len(image_bytes), resource="IMAGE")
-    resource_url = client.upload_staged_file(staged, image_bytes, content_type=mime)
+    if permanent:
+        resource_url = _upload_image_to_cdn(client, image_bytes, filename, alt_text)
+    else:
+        mime = "image/webp" if filename.endswith(".webp") else "image/jpeg"
+        staged = client.staged_upload_create(filename, mime, len(image_bytes), resource="IMAGE")
+        resource_url = client.upload_staged_file(staged, image_bytes, content_type=mime)
     with db.get_cursor() as cur:
         cur.execute(
             "UPDATE news_sessions SET hero_image_url = %s, updated_at = NOW() WHERE id = %s",
@@ -517,12 +525,15 @@ def _step_publish(session, store, client, is_published=True, regen_hub=True):
     }
 
 
-def _run_auto_pipeline(session_id, store_id, store, client, regen_hub=True):
+def _run_auto_pipeline(session_id, store_id, store, client, regen_hub=True, publish=True):
     """Run the full auto pipeline for one session: analyze → hero → inline → links → publish.
 
     Updates the session 'status' for UI progress. Image/link steps are best-effort; analyze and
     publish are fatal (raise). Returns the publish result dict. Batch callers pass regen_hub=False
     and regenerate the hub once after the whole batch.
+
+    publish=False stops after the link step and parks the session in 'scheduled' — the
+    news scheduler publishes it when scheduled_for arrives.
     """
     def _set_status(status):
         with db.get_cursor() as cur:
@@ -535,10 +546,11 @@ def _run_auto_pipeline(session_id, store_id, store, client, regen_hub=True):
     _set_status("auto_analyzing")
     _step_analyze(session_id, store_id)
 
-    # 2. Hero image (best-effort)
+    # 2. Hero image (best-effort). Scheduled sessions need a permanent CDN url —
+    # a staged-upload url would expire before the delayed publish.
     _set_status("auto_hero")
     try:
-        _step_hero(_fetch_session(session_id), client)
+        _step_hero(_fetch_session(session_id), client, permanent=not publish)
     except Exception as e:
         logger.warning("Auto: hero image failed, continuing: %s", e)
 
@@ -560,6 +572,9 @@ def _run_auto_pipeline(session_id, store_id, store, client, regen_hub=True):
         logger.warning("Auto: linking failed, continuing: %s", e)
 
     # 5. Publish live (fatal). _step_publish sets session status to 'published'.
+    if not publish:
+        _set_status("scheduled")
+        return None
     _set_status("auto_publishing")
     return _step_publish(_fetch_session(session_id), store, client, True, regen_hub=regen_hub)
 
@@ -1277,6 +1292,163 @@ def news_session_status():
         )
         rows = [dict(r) for r in cur.fetchall()]
     return jsonify({"sessions": rows})
+
+
+# ── Scheduled publishing ────────────────────────────────────────
+
+def _parse_scheduled_at(value):
+    """ISO-8601 string (with Z or offset) → naive UTC datetime. Raises ValueError."""
+    dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return dt
+
+
+@news_bp.route("/api/news/schedule-batch", methods=["POST"])
+def news_schedule_batch():
+    """Schedule multiple articles: run the AI pipeline now (analyze → images → links),
+    then park each session as 'scheduled' until its per-article scheduled_at, when the
+    news scheduler publishes it. Past datetimes publish on the next scheduler tick."""
+    data = request.get_json(silent=True) or {}
+    store_id = data.get("store_id")
+    articles = data.get("articles")
+    if not store_id or not isinstance(articles, list) or not articles:
+        return jsonify({"error": "store_id and a non-empty articles list are required"}), 400
+
+    parsed = []
+    for i, art in enumerate(articles):
+        source_text = (art.get("source_text") or "").strip() if isinstance(art, dict) else ""
+        if not source_text:
+            return jsonify({"error": f"Article {i + 1} has no source_text"}), 400
+        try:
+            scheduled_for = _parse_scheduled_at(art.get("scheduled_at"))
+        except (ValueError, TypeError):
+            return jsonify({"error": f"Article {i + 1} has a missing or invalid scheduled_at"}), 400
+        parsed.append((source_text, _normalize_sources(art), scheduled_for))
+
+    store, client = _get_store_client(store_id)
+    if not client:
+        return jsonify({"error": "Store not found"}), 404
+
+    session_ids = []
+    for source_text, sources, scheduled_for in parsed:
+        with db.get_cursor() as cur:
+            cur.execute(
+                """INSERT INTO news_sessions (store_id, status, source_text, source_url, source_urls, scheduled_for)
+                   VALUES (%s, 'auto_queued', %s, %s, %s, %s) RETURNING id""",
+                (store_id, source_text, sources[0]["url"] if sources else "", json.dumps(sources), scheduled_for),
+            )
+            session_ids.append(cur.fetchone()["id"])
+
+    def _run():
+        for sid in session_ids:
+            try:
+                _run_auto_pipeline(sid, store_id, store, client, regen_hub=False, publish=False)
+            except Exception as e:
+                logger.exception("news_schedule_batch: session %s failed: %s", sid, e)
+                with db.get_cursor() as cur:
+                    cur.execute(
+                        "UPDATE news_sessions SET status = 'failed', error = %s, updated_at = NOW() WHERE id = %s",
+                        (str(e), sid),
+                    )
+
+    threading.Thread(target=_run, daemon=True).start()
+    return jsonify({"sessions": session_ids})
+
+
+@news_bp.route("/api/news/scheduled", methods=["GET"])
+def list_scheduled_sessions():
+    """List scheduled sessions (processing, ready, or failed) for a store."""
+    store_id = request.args.get("store_id", type=int)
+    if not store_id:
+        return jsonify({"error": "store_id is required"}), 400
+    with db.get_cursor() as cur:
+        cur.execute(
+            """SELECT id, status, scheduled_for, error, created_at, updated_at, article_handle,
+                      COALESCE(edited_result->>'headline', analyze_result->>'headline') AS headline,
+                      LEFT(source_text, 200) AS source_preview
+               FROM news_sessions
+               WHERE store_id = %s AND scheduled_for IS NOT NULL AND status != 'published'
+               ORDER BY scheduled_for""",
+            (store_id,),
+        )
+        rows = [dict(r) for r in cur.fetchall()]
+    return jsonify({"sessions": rows})
+
+
+@news_bp.route("/api/news/scheduled/<int:session_id>", methods=["PATCH"])
+def reschedule_session(session_id):
+    """Change a scheduled session's publish time."""
+    data = request.get_json(silent=True) or {}
+    try:
+        scheduled_for = _parse_scheduled_at(data.get("scheduled_at"))
+    except (ValueError, TypeError):
+        return jsonify({"error": "A valid scheduled_at is required"}), 400
+    with db.get_cursor() as cur:
+        cur.execute(
+            """UPDATE news_sessions SET scheduled_for = %s, updated_at = NOW()
+               WHERE id = %s AND scheduled_for IS NOT NULL
+                 AND status NOT IN ('published', 'auto_publishing')""",
+            (scheduled_for, session_id),
+        )
+        if cur.rowcount == 0:
+            return jsonify({"error": "Session is publishing or already published"}), 409
+    return jsonify({"success": True})
+
+
+@news_bp.route("/api/news/scheduled/<int:session_id>/publish-now", methods=["POST"])
+def publish_scheduled_now(session_id):
+    """Publish a scheduled (or failed — retry) session immediately."""
+    # Atomic claim — identical guard to the scheduler tick, so the two can
+    # never double-publish the same session.
+    with db.get_cursor() as cur:
+        cur.execute(
+            """UPDATE news_sessions SET status = 'auto_publishing', updated_at = NOW()
+               WHERE id = %s AND scheduled_for IS NOT NULL AND status IN ('scheduled', 'failed')
+               RETURNING store_id""",
+            (session_id,),
+        )
+        row = cur.fetchone()
+    if not row:
+        return jsonify({"error": "Session is not ready to publish"}), 409
+
+    store, client = _get_store_client(row["store_id"])
+    if not client:
+        with db.get_cursor() as cur:
+            cur.execute(
+                "UPDATE news_sessions SET status = 'failed', error = 'Store not found', updated_at = NOW() WHERE id = %s",
+                (session_id,),
+            )
+        return jsonify({"error": "Store not found"}), 404
+
+    def _run():
+        try:
+            _step_publish(_fetch_session(session_id), store, client, True, regen_hub=True)
+        except Exception as e:
+            logger.exception("publish_scheduled_now: session %s failed: %s", session_id, e)
+            with db.get_cursor() as cur:
+                cur.execute(
+                    "UPDATE news_sessions SET status = 'failed', error = %s, updated_at = NOW() WHERE id = %s",
+                    (str(e), session_id),
+                )
+
+    threading.Thread(target=_run, daemon=True).start()
+    return jsonify({"success": True})
+
+
+@news_bp.route("/api/news/scheduled/<int:session_id>", methods=["DELETE"])
+def cancel_scheduled_session(session_id):
+    """Cancel a scheduled session. Disallowed mid-processing or once publishing."""
+    with db.get_cursor() as cur:
+        cur.execute(
+            """DELETE FROM news_sessions
+               WHERE id = %s AND scheduled_for IS NOT NULL
+                 AND status IN ('scheduled', 'failed', 'auto_queued')""",
+            (session_id,),
+        )
+        if cur.rowcount == 0:
+            return jsonify({"error": "Session is still processing or already published"}), 409
+    return jsonify({"success": True})
 
 
 # ── Theme template install / status / revert ────────────────────
