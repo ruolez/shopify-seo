@@ -945,6 +945,7 @@ AI_TASK_META = {
     "ai_seo_scan": ("AI SEO Scan", "/ai-seo"),
     "article_seo": ("Article SEO Analysis", "/blog"),
     "article_research": ("Article Research", "/blog"),
+    "topic_discovery": ("Topic Discovery", "/blog"),
     "article_outline": ("Article Outline", "/blog"),
     "article_generate": ("Article Generation", "/blog"),
     "article_refresh_links": ("Article Link Refresh", "/blog"),

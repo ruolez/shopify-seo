@@ -35,6 +35,8 @@ def get_ai_config():
             "image_model": config.get("image_model") or "google/gemini-2.5-flash-image",
             "has_gsc_client_id": bool(config.get("gsc_client_id_enc")),
             "has_gsc_client_secret": bool(config.get("gsc_client_secret_enc")),
+            "topic_research_model": config.get("topic_research_model") or "",
+            "topic_suggestion_count": int(config.get("topic_suggestion_count") or 3),
         }
     )
 
@@ -46,6 +48,11 @@ def save_ai_config():
     model = (data.get("model") or "anthropic/claude-sonnet-4").strip()
     daily_budget = data.get("daily_budget", 10.00)
     image_model = (data.get("image_model") or "google/gemini-2.5-flash-image").strip()
+    topic_research_model = (data.get("topic_research_model") or "").strip() or None
+    try:
+        topic_suggestion_count = max(1, min(int(data.get("topic_suggestion_count") or 3), 10))
+    except (TypeError, ValueError):
+        topic_suggestion_count = 3
 
     with db.get_cursor() as cur:
         cur.execute("SELECT id FROM ai_config ORDER BY id LIMIT 1")
@@ -55,19 +62,22 @@ def save_ai_config():
             if api_key:
                 key_enc = encrypt_value(api_key)
                 cur.execute(
-                    "UPDATE ai_config SET api_key_enc=%s, model=%s, daily_budget=%s, image_model=%s, updated_at=NOW() WHERE id=%s",
-                    (key_enc, model, daily_budget, image_model, existing["id"]),
+                    "UPDATE ai_config SET api_key_enc=%s, model=%s, daily_budget=%s, image_model=%s, "
+                    "topic_research_model=%s, topic_suggestion_count=%s, updated_at=NOW() WHERE id=%s",
+                    (key_enc, model, daily_budget, image_model, topic_research_model, topic_suggestion_count, existing["id"]),
                 )
             else:
                 cur.execute(
-                    "UPDATE ai_config SET model=%s, daily_budget=%s, image_model=%s, updated_at=NOW() WHERE id=%s",
-                    (model, daily_budget, image_model, existing["id"]),
+                    "UPDATE ai_config SET model=%s, daily_budget=%s, image_model=%s, "
+                    "topic_research_model=%s, topic_suggestion_count=%s, updated_at=NOW() WHERE id=%s",
+                    (model, daily_budget, image_model, topic_research_model, topic_suggestion_count, existing["id"]),
                 )
         else:
             key_enc = encrypt_value(api_key) if api_key else None
             cur.execute(
-                "INSERT INTO ai_config (api_key_enc, model, daily_budget, image_model) VALUES (%s, %s, %s, %s)",
-                (key_enc, model, daily_budget, image_model),
+                "INSERT INTO ai_config (api_key_enc, model, daily_budget, image_model, topic_research_model, topic_suggestion_count) "
+                "VALUES (%s, %s, %s, %s, %s, %s)",
+                (key_enc, model, daily_budget, image_model, topic_research_model, topic_suggestion_count),
             )
 
     return jsonify({"ok": True})

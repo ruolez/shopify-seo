@@ -147,6 +147,29 @@
                 </div>
 
                 <div class="tab-panel" id="tab-create">
+                    <div class="card" id="topic-research-card" style="margin-bottom: 24px;">
+                        <div style="display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; flex-wrap: wrap;">
+                            <div>
+                                <h3 style="margin: 0;">Research Topics</h3>
+                                <p style="margin: 4px 0 0; font-size: 13px; color: var(--on-surface-secondary);">
+                                    Let AI analyze your market, competitors, and existing blog to suggest what to write next.
+                                </p>
+                            </div>
+                            <button class="btn btn-primary" id="topic-research-btn" onclick="startTopicResearch()">
+                                <span class="material-symbols-rounded">travel_explore</span>
+                                Research Topics
+                            </button>
+                        </div>
+                        <div id="topic-research-progress" style="display: none; margin-top: 16px;">
+                            <div class="loading-spinner"><div class="spinner"></div><p id="topic-research-status">Researching market and competitors... this can take a few minutes.</p></div>
+                        </div>
+                        <div id="topic-suggestions-container" style="margin-top: 16px;"></div>
+                        <details id="topic-history" style="margin-top: 16px; display: none;">
+                            <summary style="cursor: pointer; font-size: 13px; color: var(--on-surface-secondary);">Past research runs</summary>
+                            <div id="topic-history-list" style="margin-top: 12px;"></div>
+                        </details>
+                    </div>
+
                     <div id="wizard-container">
                         <div class="wizard-steps-enhanced">
                             <div class="wizard-step-enhanced active" data-step="1">

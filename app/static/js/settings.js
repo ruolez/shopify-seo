@@ -38,12 +38,14 @@ document.getElementById("ai-form").addEventListener("submit", async (e) => {
 
 document.getElementById("test-ai-btn").addEventListener("click", testAIConnection);
 
-async function loadOpenRouterModels(savedModel) {
+async function loadOpenRouterModels(savedModel, savedTopicModel) {
     const select = document.getElementById("ai-model");
+    const topicSelect = document.getElementById("ai-topic-model");
     try {
         const data = await apiRequest("/api/settings/ai/models");
         if (data.models && data.models.length > 0) {
             select.innerHTML = "";
+            topicSelect.innerHTML = '<option value="">Same as Text AI Model</option>';
             data.models.forEach((model) => {
                 const option = document.createElement("option");
                 option.value = model.id;
@@ -51,11 +53,13 @@ async function loadOpenRouterModels(savedModel) {
                 const completionPrice = model.pricing.completion.toFixed(2);
                 option.textContent = `${model.name} — $${promptPrice} / $${completionPrice} per M tokens`;
                 select.appendChild(option);
+                topicSelect.appendChild(option.cloneNode(true));
             });
             if (savedModel) {
                 select.value = savedModel;
                 if (!select.value) select.value = data.models[0].id;
             }
+            topicSelect.value = savedTopicModel || "";
         } else {
             fallbackToTextInput(select, savedModel);
         }
@@ -104,10 +108,11 @@ async function loadAIConfig() {
     try {
         const config = await apiRequest("/api/settings/ai");
         await Promise.all([
-            loadOpenRouterModels(config.model),
+            loadOpenRouterModels(config.model, config.topic_research_model),
             loadImageModels(config.image_model),
         ]);
         document.getElementById("ai-budget").value = config.daily_budget;
+        document.getElementById("ai-topic-count").value = config.topic_suggestion_count || 3;
         const status = document.getElementById("key-status");
         if (config.has_key) {
             status.textContent = "API key is configured. Leave blank to keep existing key.";
@@ -125,6 +130,8 @@ async function saveAIConfig() {
         model: document.getElementById("ai-model").value,
         daily_budget: parseFloat(document.getElementById("ai-budget").value),
         image_model: document.getElementById("ai-image-model").value,
+        topic_research_model: document.getElementById("ai-topic-model").value,
+        topic_suggestion_count: parseInt(document.getElementById("ai-topic-count").value, 10) || 3,
     };
     try {
         await apiRequest("/api/settings/ai", { method: "POST", body: data });
@@ -280,7 +287,7 @@ const PROMPT_GROUPS = {
     "Product Prompts": ["prompts.product_seo", "prompts.product_description", "prompts.product_title", "prompts.product_discovery"],
     "Collection Prompts": ["prompts.collection_seo", "prompts.collection_description", "prompts.collection_title"],
     "Brand Prompts": ["prompts.brand_seo", "prompts.brand_description", "prompts.brand_logo"],
-    "Article Prompts": ["prompts.article_seo", "prompts.article_body", "prompts.article_research", "prompts.article_discovery", "prompts.article_outline", "prompts.article_generate", "prompts.article_summary", "prompts.article_refresh_links", "prompts.blog_seo_suggestions"],
+    "Article Prompts": ["prompts.article_seo", "prompts.article_body", "prompts.topic_discovery", "prompts.article_research", "prompts.article_discovery", "prompts.article_outline", "prompts.article_generate", "prompts.article_summary", "prompts.article_refresh_links", "prompts.blog_seo_suggestions"],
     "Landing Page Prompts": ["prompts.landing_page_seo", "prompts.landing_page_generate", "prompts.landing_page_rewrite"],
     "Cannibalization Prompts": ["prompts.cannibalization_analysis", "prompts.cannibalization_fix"],
     "Content Gap Prompts": ["prompts.content_gap_analysis", "prompts.content_brief_generation", "prompts.intent_classification"],

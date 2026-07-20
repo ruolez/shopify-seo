@@ -1371,6 +1371,53 @@ class Database:
                 END $$
             """)
 
+            # Blog topic discovery: AI market research runs + suggested topics
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS topic_research_runs (
+                    id SERIAL PRIMARY KEY,
+                    store_id INTEGER REFERENCES stores(id) ON DELETE CASCADE,
+                    task_id INTEGER REFERENCES ai_tasks(id) ON DELETE SET NULL,
+                    status VARCHAR(50) DEFAULT 'pending',
+                    market_summary TEXT,
+                    rejected_topics JSONB DEFAULT '[]',
+                    error TEXT,
+                    created_at TIMESTAMP DEFAULT NOW(),
+                    completed_at TIMESTAMP
+                )
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS topic_suggestions (
+                    id SERIAL PRIMARY KEY,
+                    run_id INTEGER REFERENCES topic_research_runs(id) ON DELETE CASCADE,
+                    store_id INTEGER REFERENCES stores(id) ON DELETE CASCADE,
+                    position INTEGER DEFAULT 0,
+                    topic VARCHAR(500) NOT NULL,
+                    h1 VARCHAR(500),
+                    meta_title VARCHAR(255),
+                    meta_description TEXT,
+                    url_slug VARCHAR(255),
+                    keywords JSONB DEFAULT '{}',
+                    search_intent VARCHAR(30),
+                    rationale TEXT,
+                    cannibalization_note TEXT,
+                    target_products JSONB DEFAULT '[]',
+                    target_collections JSONB DEFAULT '[]',
+                    target_articles JSONB DEFAULT '[]',
+                    status VARCHAR(20) DEFAULT 'suggested',
+                    wizard_session_id INTEGER REFERENCES article_wizard_sessions(id) ON DELETE SET NULL,
+                    created_at TIMESTAMP DEFAULT NOW(),
+                    updated_at TIMESTAMP DEFAULT NOW()
+                )
+            """)
+            for _ddl in [
+                "ALTER TABLE ai_config ADD COLUMN topic_research_model VARCHAR(100)",
+                "ALTER TABLE ai_config ADD COLUMN topic_suggestion_count INTEGER DEFAULT 3",
+                "ALTER TABLE topic_suggestions ADD COLUMN opportunity_type VARCHAR(20) DEFAULT 'quick_win'",
+            ]:
+                cur.execute(
+                    f"DO $$ BEGIN {_ddl}; EXCEPTION WHEN duplicate_column THEN NULL; END $$"
+                )
+
             cur.execute("SELECT pg_advisory_unlock(1)")
 
 

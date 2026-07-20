@@ -1321,6 +1321,171 @@ def wizard_research(session_id):
     return jsonify({"task_id": task_id})
 
 
+# ── Topic Discovery: AI market research for "what should I write next?" ──
+
+
+@blog_bp.route("/api/blog/topics/research", methods=["POST"])
+def topic_research_start():
+    data = request.get_json(silent=True) or {}
+    store_id = data.get("store_id")
+    if not store_id:
+        return jsonify({"error": "store_id is required"}), 400
+
+    with db.get_cursor() as cur:
+        cur.execute("SELECT topic_suggestion_count FROM ai_config ORDER BY id LIMIT 1")
+        cfg = cur.fetchone()
+        count = int((cfg or {}).get("topic_suggestion_count") or 3)
+
+        cur.execute(
+            "INSERT INTO topic_research_runs (store_id, status) VALUES (%s, 'pending') RETURNING id",
+            (store_id,),
+        )
+        run_id = cur.fetchone()["id"]
+        cur.execute(
+            """INSERT INTO ai_tasks (store_id, task_type, status, input)
+            VALUES (%s, 'topic_discovery', 'pending', %s) RETURNING id""",
+            (store_id, json.dumps({"run_id": run_id, "store_id": store_id, "count": count})),
+        )
+        task_id = cur.fetchone()["id"]
+        cur.execute(
+            "UPDATE topic_research_runs SET task_id = %s WHERE id = %s",
+            (task_id, run_id),
+        )
+
+    def run_discovery():
+        try:
+            with db.get_cursor() as cur:
+                cur.execute("UPDATE ai_tasks SET status = 'running' WHERE id = %s", (task_id,))
+                cur.execute("UPDATE topic_research_runs SET status = 'running' WHERE id = %s", (run_id,))
+            from app.ai_agent import run_task as ai_run_task
+            from app.services.task_runner import is_failed_result
+
+            result = ai_run_task(
+                "topic_discovery",
+                {"run_id": run_id, "store_id": store_id, "count": count},
+                store_id=store_id,
+            )
+            if is_failed_result(result):
+                error = (result or {}).get("error") or "Topic discovery failed"
+                with db.get_cursor() as cur:
+                    cur.execute(
+                        "UPDATE topic_research_runs SET status = 'failed', error = %s, completed_at = NOW() WHERE id = %s",
+                        (error, run_id),
+                    )
+                    cur.execute(
+                        "UPDATE ai_tasks SET status = 'failed', error = %s, result = %s, completed_at = NOW() WHERE id = %s",
+                        (error, json.dumps(result), task_id),
+                    )
+                return
+
+            with db.get_cursor() as cur:
+                for i, s in enumerate(result.get("suggestions", [])):
+                    cur.execute(
+                        """INSERT INTO topic_suggestions
+                            (run_id, store_id, position, topic, h1, meta_title, meta_description,
+                             url_slug, keywords, search_intent, opportunity_type, rationale, cannibalization_note,
+                             target_products, target_collections, target_articles)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                        (
+                            run_id, store_id, i,
+                            s.get("topic"), s.get("h1"), s.get("meta_title"), s.get("meta_description"),
+                            s.get("url_slug"), json.dumps(s.get("keywords") or {}),
+                            s.get("search_intent"), s.get("opportunity_type") or "quick_win",
+                            s.get("rationale"), s.get("cannibalization_note"),
+                            json.dumps(s.get("target_products") or []),
+                            json.dumps(s.get("target_collections") or []),
+                            json.dumps(s.get("target_articles") or []),
+                        ),
+                    )
+                cur.execute(
+                    """UPDATE topic_research_runs SET status = 'completed', market_summary = %s,
+                        rejected_topics = %s, completed_at = NOW() WHERE id = %s""",
+                    (result.get("market_summary"), json.dumps(result.get("rejected_topics") or []), run_id),
+                )
+                cur.execute(
+                    "UPDATE ai_tasks SET status = 'completed', result = %s, completed_at = NOW() WHERE id = %s",
+                    (json.dumps(result), task_id),
+                )
+        except Exception as e:
+            logger.exception("Topic discovery failed: %s", e)
+            with db.get_cursor() as cur:
+                cur.execute(
+                    "UPDATE topic_research_runs SET status = 'failed', error = %s, completed_at = NOW() WHERE id = %s",
+                    (str(e), run_id),
+                )
+                cur.execute(
+                    "UPDATE ai_tasks SET status = 'failed', error = %s, completed_at = NOW() WHERE id = %s",
+                    (str(e), task_id),
+                )
+
+    thread = threading.Thread(target=run_discovery, daemon=True)
+    thread.start()
+    return jsonify({"run_id": run_id, "task_id": task_id})
+
+
+@blog_bp.route("/api/blog/topics", methods=["GET"])
+def topic_research_list():
+    store_id = request.args.get("store_id")
+    if not store_id:
+        return jsonify({"error": "store_id is required"}), 400
+
+    with db.get_cursor() as cur:
+        # Fail runs orphaned by a worker restart (daemon threads don't survive).
+        cur.execute(
+            """UPDATE topic_research_runs r SET status = 'failed',
+                error = COALESCE(r.error, 'Interrupted — worker restarted'), completed_at = NOW()
+            WHERE r.store_id = %s AND r.status IN ('pending', 'running')
+              AND (r.created_at < NOW() - INTERVAL '30 minutes'
+                   OR EXISTS (SELECT 1 FROM ai_tasks t WHERE t.id = r.task_id AND t.status = 'failed'))""",
+            (store_id,),
+        )
+        cur.execute(
+            """SELECT id, task_id, status, market_summary, rejected_topics, error, created_at, completed_at
+            FROM topic_research_runs WHERE store_id = %s ORDER BY created_at DESC LIMIT 20""",
+            (store_id,),
+        )
+        runs = [dict(r) for r in cur.fetchall()]
+        run_ids = [r["id"] for r in runs]
+        suggestions_by_run = {}
+        if run_ids:
+            cur.execute(
+                "SELECT * FROM topic_suggestions WHERE run_id = ANY(%s) ORDER BY run_id, position",
+                (run_ids,),
+            )
+            for s in cur.fetchall():
+                suggestions_by_run.setdefault(s["run_id"], []).append(dict(s))
+
+    for r in runs:
+        r["created_at"] = r["created_at"].isoformat() if r.get("created_at") else None
+        r["completed_at"] = r["completed_at"].isoformat() if r.get("completed_at") else None
+        r["suggestions"] = suggestions_by_run.get(r["id"], [])
+        for s in r["suggestions"]:
+            s["created_at"] = s["created_at"].isoformat() if s.get("created_at") else None
+            s["updated_at"] = s["updated_at"].isoformat() if s.get("updated_at") else None
+
+    return jsonify({"runs": runs})
+
+
+@blog_bp.route("/api/blog/topics/suggestions/<int:suggestion_id>", methods=["PATCH"])
+def topic_suggestion_update(suggestion_id):
+    data = request.get_json(silent=True) or {}
+    status = data.get("status")
+    wizard_session_id = data.get("wizard_session_id")
+    if status not in ("suggested", "used", "dismissed"):
+        return jsonify({"error": "status must be suggested, used, or dismissed"}), 400
+
+    with db.get_cursor() as cur:
+        cur.execute(
+            """UPDATE topic_suggestions SET status = %s,
+                wizard_session_id = COALESCE(%s, wizard_session_id), updated_at = NOW()
+            WHERE id = %s""",
+            (status, wizard_session_id, suggestion_id),
+        )
+        if cur.rowcount == 0:
+            return jsonify({"error": "Suggestion not found"}), 404
+    return jsonify({"ok": True})
+
+
 @blog_bp.route("/api/blog/wizard/<int:session_id>/keywords", methods=["PUT"])
 def wizard_update_keywords(session_id):
     data = request.json or {}

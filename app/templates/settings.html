@@ -59,6 +59,19 @@
                                 </select>
                                 <small style="color: var(--on-surface-secondary); font-size: 12px;">Used for AI-powered collection image generation</small>
                             </div>
+                            <div class="form-row">
+                                <div class="form-group">
+                                    <label for="ai-topic-model">Topic Research Model</label>
+                                    <select id="ai-topic-model" class="form-control">
+                                        <option value="">Same as Text AI Model</option>
+                                    </select>
+                                    <small style="color: var(--on-surface-secondary); font-size: 12px;">Used for blog topic discovery research</small>
+                                </div>
+                                <div class="form-group">
+                                    <label for="ai-topic-count">Topic suggestions per run</label>
+                                    <input type="number" id="ai-topic-count" class="form-control" min="1" max="10" value="3">
+                                </div>
+                            </div>
                             <div class="form-actions">
                                 <button type="submit" class="btn btn-primary">Save Configuration</button>
                                 <button type="button" class="btn btn-secondary" id="test-ai-btn">Test Connection</button>

@@ -604,10 +604,266 @@ async function getFirstStoreId() {
     }
 }
 
+// ── Topic Discovery ──────────────────────────────────────────────
+
+let topicRunsCache = [];
+
+const TOPIC_INTENT_COLORS = {
+    Informational: "#1a73e8",
+    Commercial: "#1e8e3e",
+    Transactional: "#f9ab00",
+    Navigational: "#9334e6",
+};
+
+async function loadTopicSuggestions() {
+    const storeId = await getFirstStoreId();
+    if (!storeId) return;
+    try {
+        const { runs } = await apiRequest(`/api/blog/topics?store_id=${storeId}`);
+        topicRunsCache = runs || [];
+        renderTopicRuns();
+    } catch (err) {
+        console.error("Failed to load topic suggestions", err);
+    }
+}
+
+function renderTopicRuns() {
+    const container = document.getElementById("topic-suggestions-container");
+    const history = document.getElementById("topic-history");
+    const historyList = document.getElementById("topic-history-list");
+    if (!container) return;
+
+    const completed = topicRunsCache.filter((r) => r.status === "completed");
+    const latest = completed[0];
+
+    if (!latest) {
+        container.innerHTML = "";
+        history.style.display = "none";
+        return;
+    }
+
+    container.innerHTML = renderTopicRun(latest, false);
+
+    const older = completed.slice(1);
+    if (older.length) {
+        history.style.display = "";
+        historyList.innerHTML = older.map((r) => renderTopicRun(r, true)).join("");
+    } else {
+        history.style.display = "none";
+    }
+}
+
+function renderTopicRun(run, isHistory) {
+    const date = run.created_at ? new Date(run.created_at).toLocaleString() : "";
+    let html = `<div class="topic-run" style="${isHistory ? "margin-bottom: 16px; padding-top: 12px; border-top: 1px solid var(--outline);" : ""}">`;
+    html += `<p style="font-size: 12px; color: var(--on-surface-secondary); margin: 0 0 8px;">Run from ${escapeHtml(date)}</p>`;
+    if (run.market_summary) {
+        html += `<p style="font-size: 13px; margin: 0 0 12px; padding: 10px 12px; background: var(--primary-light); border-radius: 8px;">${escapeHtml(run.market_summary)}</p>`;
+    }
+    html += (run.suggestions || []).map((s) => renderTopicSuggestion(s)).join("");
+    const rejected = run.rejected_topics || [];
+    if (rejected.length) {
+        html += `<details style="margin-top: 8px;"><summary style="cursor: pointer; font-size: 13px; color: var(--on-surface-secondary);">Ruled out (${rejected.length})</summary><ul style="font-size: 13px; color: var(--on-surface-secondary); margin: 8px 0 0;">`;
+        html += rejected.map((r) => `<li><strong>${escapeHtml(r.topic)}</strong> — ${escapeHtml(r.reason)}</li>`).join("");
+        html += `</ul></details>`;
+    }
+    html += `</div>`;
+    return html;
+}
+
+function renderTopicSuggestion(s) {
+    const kw = s.keywords || {};
+    const intentColor = TOPIC_INTENT_COLORS[s.search_intent] || "#5f6368";
+    const muted = s.status !== "suggested";
+
+    const kwGroup = (label, words) => {
+        if (!words || !words.length) return "";
+        return `<div style="margin-top: 4px; font-size: 12px;"><span style="color: var(--on-surface-secondary); text-transform: uppercase; font-size: 10px; letter-spacing: 0.5px;">${label}</span> ${words.map((w) => `<span class="badge badge-info" style="margin: 2px;">${escapeHtml(w)}</span>`).join("")}</div>`;
+    };
+
+    let html = `<div class="card" style="margin-bottom: 12px; ${muted ? "opacity: 0.55;" : ""}" data-suggestion-id="${s.id}">`;
+    html += `<div style="display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; flex-wrap: wrap;">`;
+    html += `<div style="flex: 1; min-width: 260px;">`;
+    html += `<div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">`;
+    html += `<h4 style="margin: 0;">${escapeHtml(s.h1 || s.topic)}</h4>`;
+    html += `<span class="badge" style="background: ${intentColor}; color: #fff;">${escapeHtml(s.search_intent || "")}</span>`;
+    if (s.opportunity_type === "foundation") {
+        html += `<span class="badge" style="background: transparent; border: 1px solid var(--primary); color: var(--primary);">Foundation</span>`;
+    } else {
+        html += `<span class="badge" style="background: transparent; border: 1px solid var(--success); color: var(--success);">Quick Win</span>`;
+    }
+    if (s.status === "used") html += `<span class="badge" style="background: var(--success); color: #fff;">Used</span>`;
+    if (s.status === "dismissed") html += `<span class="badge" style="background: var(--on-surface-secondary); color: #fff;">Dismissed</span>`;
+    html += `</div>`;
+    if (s.meta_title) {
+        html += `<p style="margin: 8px 0 0; font-size: 13px;"><strong>Meta title</strong> <span style="color: var(--on-surface-secondary);">(${s.meta_title.length}/60)</span>: ${escapeHtml(s.meta_title)}</p>`;
+    }
+    if (s.meta_description) {
+        html += `<p style="margin: 4px 0 0; font-size: 13px;"><strong>Meta description</strong> <span style="color: var(--on-surface-secondary);">(${s.meta_description.length}/155)</span>: ${escapeHtml(s.meta_description)}</p>`;
+    }
+    if (s.url_slug) {
+        html += `<p style="margin: 4px 0 0; font-size: 13px;"><strong>Slug</strong>: /blogs/news/${escapeHtml(s.url_slug)}</p>`;
+    }
+    if (kw.primary) {
+        html += `<div style="margin-top: 8px; font-size: 12px;"><span style="color: var(--on-surface-secondary); text-transform: uppercase; font-size: 10px; letter-spacing: 0.5px;">Primary</span> <span class="badge badge-info" style="margin: 2px; font-weight: 700;">${escapeHtml(kw.primary)}</span></div>`;
+    }
+    html += kwGroup("Informational", kw.informational);
+    html += kwGroup("Commercial", kw.commercial);
+    html += kwGroup("Transactional", kw.transactional);
+    html += kwGroup("Navigational", kw.navigational);
+    if (s.rationale) {
+        html += `<p style="margin: 10px 0 0; font-size: 13px; color: var(--on-surface-secondary);"><strong>Why:</strong> ${escapeHtml(s.rationale)}</p>`;
+    }
+    if (s.cannibalization_note) {
+        html += `<p style="margin: 4px 0 0; font-size: 13px; color: var(--on-surface-secondary);"><strong>Overlap guard:</strong> ${escapeHtml(s.cannibalization_note)}</p>`;
+    }
+    const links = [
+        ...(s.target_articles || []).map((t) => ({ t, icon: "article" })),
+        ...(s.target_collections || []).map((t) => ({ t, icon: "category" })),
+        ...(s.target_products || []).map((t) => ({ t, icon: "sell" })),
+    ];
+    if (links.length) {
+        html += `<div style="margin-top: 8px; font-size: 12px;"><span style="color: var(--on-surface-secondary); text-transform: uppercase; font-size: 10px; letter-spacing: 0.5px;">Link to</span> `;
+        html += links.map((l) => `<span class="badge badge-info" style="margin: 2px;"><span class="material-symbols-rounded" style="font-size: 12px; vertical-align: middle;">${l.icon}</span> ${escapeHtml(l.t)}</span>`).join("");
+        html += `</div>`;
+    }
+    html += `</div>`;
+    html += `<div style="display: flex; flex-direction: column; gap: 8px;">`;
+    if (s.status === "suggested") {
+        html += `<button class="btn btn-sm btn-primary" onclick="useTopicSuggestion(${s.id})"><span class="material-symbols-rounded">edit_note</span> Use this topic</button>`;
+        html += `<button class="btn btn-sm btn-secondary" onclick="dismissTopicSuggestion(${s.id})">Dismiss</button>`;
+    }
+    html += `<button class="btn btn-sm btn-secondary" onclick="copyTopicKeywords(${s.id})"><span class="material-symbols-rounded">content_copy</span> Copy keywords</button>`;
+    html += `</div></div></div>`;
+    return html;
+}
+
+async function startTopicResearch() {
+    const btn = document.getElementById("topic-research-btn");
+    const storeId = await getFirstStoreId();
+    if (!storeId) { showToast("No store found", "error"); return; }
+
+    btn.disabled = true;
+    document.getElementById("topic-research-progress").style.display = "";
+    try {
+        const { task_id } = await apiRequest("/api/blog/topics/research", {
+            method: "POST",
+            body: { store_id: storeId },
+        });
+        pollTopicResearchTask(task_id);
+    } catch (err) {
+        btn.disabled = false;
+        document.getElementById("topic-research-progress").style.display = "none";
+        showToast(err.message, "error");
+    }
+}
+
+function pollTopicResearchTask(taskId) {
+    let errors = 0;
+    const finish = () => {
+        document.getElementById("topic-research-btn").disabled = false;
+        document.getElementById("topic-research-progress").style.display = "none";
+    };
+    const poll = async () => {
+        try {
+            const task = await apiRequest(`/api/tasks/${taskId}`);
+            if (task.status === "completed") {
+                finish();
+                showToast("Topic research complete", "success");
+                loadTopicSuggestions();
+            } else if (task.status === "failed") {
+                finish();
+                showToast(`Topic research failed: ${task.error || "Unknown error"}`, "error");
+            } else {
+                setTimeout(poll, 3000);
+            }
+        } catch (err) {
+            errors += 1;
+            if (errors >= 5) {
+                finish();
+                showToast(err.message, "error");
+            } else {
+                setTimeout(poll, 5000);
+            }
+        }
+    };
+    poll();
+}
+
+function findTopicSuggestion(id) {
+    for (const run of topicRunsCache) {
+        for (const s of run.suggestions || []) {
+            if (s.id === id) return s;
+        }
+    }
+    return null;
+}
+
+function flattenTopicKeywords(kw) {
+    const out = [];
+    if (kw.primary) out.push(kw.primary);
+    for (const group of ["informational", "commercial", "transactional", "navigational"]) {
+        for (const w of kw[group] || []) {
+            if (!out.includes(w)) out.push(w);
+        }
+    }
+    return out;
+}
+
+async function useTopicSuggestion(id) {
+    const s = findTopicSuggestion(id);
+    if (!s) return;
+    document.getElementById("wizard-topic").value = s.topic || s.h1 || "";
+    document.getElementById("wizard-keywords").value = flattenTopicKeywords(s.keywords || {}).join("\n");
+    try {
+        await apiRequest(`/api/blog/topics/suggestions/${id}`, { method: "PATCH", body: { status: "used" } });
+        s.status = "used";
+        renderTopicRuns();
+    } catch (err) {
+        showToast(err.message, "error");
+    }
+    showWizardStep(1);
+    showToast("Topic loaded into the wizard — review keywords and start research", "success");
+    document.getElementById("wizard-container").scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+async function dismissTopicSuggestion(id) {
+    try {
+        await apiRequest(`/api/blog/topics/suggestions/${id}`, { method: "PATCH", body: { status: "dismissed" } });
+        const s = findTopicSuggestion(id);
+        if (s) s.status = "dismissed";
+        renderTopicRuns();
+    } catch (err) {
+        showToast(err.message, "error");
+    }
+}
+
+function copyTopicKeywords(id) {
+    const s = findTopicSuggestion(id);
+    if (!s) return;
+    const kw = s.keywords || {};
+    const lines = [];
+    if (kw.primary) lines.push(`PRIMARY: ${kw.primary}`);
+    const groups = [
+        ["INFORMATIONAL", kw.informational],
+        ["COMMERCIAL", kw.commercial],
+        ["TRANSACTIONAL", kw.transactional],
+        ["NAVIGATIONAL", kw.navigational],
+    ];
+    for (const [label, words] of groups) {
+        if (words && words.length) lines.push(`${label}: ${words.join(", ")}`);
+    }
+    navigator.clipboard.writeText(lines.join("\n")).then(
+        () => showToast("Keywords copied", "success"),
+        () => showToast("Copy failed", "error")
+    );
+}
+
 // ── Wizard ───────────────────────────────────────────────────────
 
 async function initWizard() {
     showWizardStep(1);
+    loadTopicSuggestions();
 }
 
 function showWizardStep(step) {

@@ -853,6 +853,126 @@ ARTICLE_TOOL_DEFINITIONS = [
     },
 ]
 
+TOPIC_DISCOVERY_TOOL_DEFINITIONS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "search_web",
+            "description": (
+                "Search the web via Brave Search. Returns ranked results with title, url, "
+                "description, and domain. Use for market research, competitor discovery, "
+                "and validating SERP difficulty for candidate topics."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "The search query",
+                    },
+                    "count": {
+                        "type": "integer",
+                        "description": "Number of results to return (default 10, max 20)",
+                        "default": 10,
+                    },
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_store_overview",
+            "description": (
+                "Get a store inventory overview: product-type distribution with counts, "
+                "top vendors, total active product count, and collections with product counts. "
+                "Use to build the coverage-vs-inventory matrix."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "store_id": {
+                        "type": "integer",
+                        "description": "The database ID of the store",
+                    },
+                },
+                "required": ["store_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_store_products",
+            "description": (
+                "Search the store's ACTIVE products by keyword (matches title, product type, "
+                "vendor, tags). Use to verify inventory depth (SKU counts) for a candidate "
+                "topic or brand before recommending it."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "store_id": {
+                        "type": "integer",
+                        "description": "The database ID of the store",
+                    },
+                    "query": {
+                        "type": "string",
+                        "description": "Keyword to search for (brand, product type, flavor, etc.)",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max results (default 20, max 50)",
+                        "default": 20,
+                    },
+                },
+                "required": ["store_id", "query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_existing_articles",
+            "description": (
+                "Get all existing blog articles for the store (title, handle, tags, published "
+                "state). Use for gap analysis and to pick internal-link targets."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "store_id": {
+                        "type": "integer",
+                        "description": "The database ID of the store",
+                    },
+                },
+                "required": ["store_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_keyword_opportunities",
+            "description": (
+                "Get striking-distance keywords (positions 4-20) and CTR opportunity keywords for a store. "
+                "Useful for finding quick-win SEO improvements."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "store_id": {
+                        "type": "integer",
+                        "description": "The database ID of the store",
+                    },
+                },
+                "required": ["store_id"],
+            },
+        },
+    },
+]
+
 LANDING_PAGE_TOOL_DEFINITIONS = [
     {
         "type": "function",
@@ -1267,6 +1387,101 @@ def _handle_discovery_tool_call(name, args, store_id):
 
 
 
+def _handle_topic_tool_call(name, args):
+    if name == "search_web":
+        from app.services.serp_scraper import brave_search
+        query = (args.get("query") or "").strip()
+        if not query:
+            return {"error": "query is required"}
+        count = min(int(args.get("count") or 10), 20)
+        results = brave_search(query, count)
+        if results is None:
+            return {
+                "error": (
+                    "Web search unavailable (Brave API key missing or request failed). "
+                    "Proceed using store data and existing-article gap analysis only."
+                )
+            }
+        return {"results": results}
+
+    if name == "get_store_overview":
+        store_id = args["store_id"]
+        with db.get_cursor() as cur:
+            cur.execute(
+                "SELECT COALESCE(product_type, '(none)') AS product_type, COUNT(*) AS count "
+                "FROM synced_products WHERE store_id = %s AND status = 'ACTIVE' "
+                "GROUP BY product_type ORDER BY count DESC",
+                (store_id,),
+            )
+            types = [dict(r) for r in cur.fetchall()]
+            cur.execute(
+                "SELECT COALESCE(vendor, '(none)') AS vendor, COUNT(*) AS count "
+                "FROM synced_products WHERE store_id = %s AND status = 'ACTIVE' "
+                "GROUP BY vendor ORDER BY count DESC LIMIT 20",
+                (store_id,),
+            )
+            vendors = [dict(r) for r in cur.fetchall()]
+            cur.execute(
+                "SELECT COUNT(*) AS total FROM synced_products "
+                "WHERE store_id = %s AND status = 'ACTIVE'",
+                (store_id,),
+            )
+            total = cur.fetchone()["total"]
+            cur.execute(
+                "SELECT title, handle, products_count FROM synced_collections "
+                "WHERE store_id = %s ORDER BY products_count DESC NULLS LAST LIMIT 100",
+                (store_id,),
+            )
+            collections = [dict(r) for r in cur.fetchall()]
+        return {
+            "total_active_products": total,
+            "product_types": types,
+            "top_vendors": vendors,
+            "collections": collections,
+        }
+
+    if name == "search_store_products":
+        store_id = args["store_id"]
+        query = (args.get("query") or "").strip()
+        if not query:
+            return {"error": "query is required"}
+        limit = min(int(args.get("limit") or 20), 50)
+        like = f"%{query}%"
+        with db.get_cursor() as cur:
+            cur.execute(
+                "SELECT id, title, handle, product_type, vendor FROM synced_products "
+                "WHERE store_id = %s AND status = 'ACTIVE' AND "
+                "(title ILIKE %s OR product_type ILIKE %s OR vendor ILIKE %s OR tags ILIKE %s) "
+                "ORDER BY title LIMIT %s",
+                (store_id, like, like, like, like, limit),
+            )
+            products = [dict(r) for r in cur.fetchall()]
+            cur.execute(
+                "SELECT COUNT(*) AS total FROM synced_products "
+                "WHERE store_id = %s AND status = 'ACTIVE' AND "
+                "(title ILIKE %s OR product_type ILIKE %s OR vendor ILIKE %s OR tags ILIKE %s)",
+                (store_id, like, like, like, like),
+            )
+            total = cur.fetchone()["total"]
+        return {"total_matching": total, "products": products}
+
+    if name == "get_existing_articles":
+        store_id = args["store_id"]
+        with db.get_cursor() as cur:
+            cur.execute(
+                "SELECT title, handle, tags, is_published FROM synced_articles "
+                "WHERE store_id = %s ORDER BY published_at DESC NULLS LAST LIMIT 300",
+                (store_id,),
+            )
+            articles = [dict(r) for r in cur.fetchall()]
+        return {"count": len(articles), "articles": articles}
+
+    if name == "get_keyword_opportunities":
+        return _handle_tool_call(name, args)
+
+    return {"error": f"Unknown topic discovery tool: {name}"}
+
+
 def _get_ai_config():
     with db.get_cursor() as cur:
         cur.execute("SELECT * FROM ai_config ORDER BY id LIMIT 1")
@@ -1277,6 +1492,8 @@ def _get_ai_config():
         "api_key": decrypt_value(config["api_key_enc"]),
         "model": config.get("model") or "anthropic/claude-sonnet-4",
         "image_model": config.get("image_model") or "google/gemini-2.5-flash-image",
+        "topic_research_model": config.get("topic_research_model") or None,
+        "topic_suggestion_count": int(config.get("topic_suggestion_count") or 3),
     }
 
 
@@ -4729,6 +4946,207 @@ def run_task(task_type, task_input, store_id=None):
             f"Perform an SEO audit of store ID {store_id}. "
             "Get the store summary and identify key areas for improvement."
         )
+
+    elif task_type == "topic_discovery":
+        from datetime import datetime
+
+        td_store_id = task_input.get("store_id") or store_id
+        if not td_store_id:
+            return {"error": "store_id is required for topic discovery"}
+
+        try:
+            td_count = int(task_input.get("count") or config["topic_suggestion_count"])
+        except (TypeError, ValueError):
+            td_count = 3
+        td_count = max(1, min(td_count, 10))
+        td_model = config.get("topic_research_model") or config["model"]
+
+        with db.get_cursor() as cur:
+            cur.execute("SELECT name, domain FROM stores WHERE id = %s", (td_store_id,))
+            td_store = cur.fetchone()
+            cur.execute(
+                "SELECT COALESCE(product_type, '(none)') AS product_type, COUNT(*) AS count "
+                "FROM synced_products WHERE store_id = %s AND status = 'ACTIVE' "
+                "GROUP BY product_type ORDER BY count DESC LIMIT 50",
+                (td_store_id,),
+            )
+            td_types = cur.fetchall()
+            cur.execute(
+                "SELECT COALESCE(vendor, '(none)') AS vendor, COUNT(*) AS count "
+                "FROM synced_products WHERE store_id = %s AND status = 'ACTIVE' "
+                "GROUP BY vendor ORDER BY count DESC LIMIT 25",
+                (td_store_id,),
+            )
+            td_vendors = cur.fetchall()
+            cur.execute(
+                "SELECT title, handle FROM synced_articles WHERE store_id = %s "
+                "ORDER BY published_at DESC NULLS LAST LIMIT 300",
+                (td_store_id,),
+            )
+            td_articles = cur.fetchall()
+            cur.execute(
+                "SELECT topic, status FROM topic_suggestions WHERE store_id = %s "
+                "ORDER BY created_at DESC LIMIT 100",
+                (td_store_id,),
+            )
+            td_prior = cur.fetchall()
+
+        if not td_store:
+            return {"error": "Store not found"}
+
+        td_profile = "\n".join(
+            f"- {t['product_type']}: {t['count']} products" for t in td_types
+        )
+        td_vendor_block = ", ".join(f"{v['vendor']} ({v['count']})" for v in td_vendors)
+        td_article_block = "\n".join(
+            f"- {a['title']} (/{a['handle']})" for a in td_articles
+        ) or "(no blog articles yet)"
+        td_prior_block = "\n".join(
+            f"- \"{p['topic']}\" ({p['status']})" for p in td_prior
+        )
+
+        td_user_prompt = (
+            f"Current date: {datetime.now().strftime('%B %Y')}\n\n"
+            f"STORE: {td_store['name']} ({td_store['domain']}), store ID {td_store_id}\n\n"
+            f"PRODUCT CATEGORY INVENTORY (product type: count of active products):\n{td_profile}\n\n"
+            f"TOP VENDORS/BRANDS: {td_vendor_block}\n\n"
+            f"EXISTING BLOG ARTICLES ({len(td_articles)} total):\n{td_article_block}\n"
+        )
+        if td_prior_block:
+            td_user_prompt += (
+                "\nPREVIOUSLY SUGGESTED TOPICS - DO NOT REPEAT OR CLOSELY PARAPHRASE ANY OF THESE:\n"
+                + td_prior_block + "\n"
+            )
+        td_user_prompt += (
+            f"\nResearch the market with your tools (search_web, get_keyword_opportunities, "
+            f"search_store_products, get_store_overview), validate winnability and inventory "
+            f"depth for every candidate, then return exactly {td_count} suggestion(s) as JSON."
+        )
+
+        td_messages = [
+            {"role": "system", "content": get_setting("prompts.topic_discovery", DEFAULTS["prompts.topic_discovery"])},
+            {"role": "user", "content": td_user_prompt},
+        ]
+
+        td_content = ""
+        td_search_calls = 0
+        td_nudged = False
+        for _ in range(20):
+            response = client.chat.completions.create(
+                model=td_model,
+                messages=td_messages,
+                tools=TOPIC_DISCOVERY_TOOL_DEFINITIONS,
+                temperature=0.4,
+            )
+            choice = response.choices[0]
+            if choice.message.tool_calls:
+                td_messages.append(choice.message)
+                for tool_call in choice.message.tool_calls:
+                    fn_name = tool_call.function.name
+                    try:
+                        fn_args = json.loads(tool_call.function.arguments or "{}")
+                    except (json.JSONDecodeError, TypeError):
+                        td_messages.append({
+                            "role": "tool",
+                            "tool_call_id": tool_call.id,
+                            "content": json.dumps({"error": "Invalid tool arguments (malformed JSON). Retry with valid JSON."}),
+                        })
+                        continue
+                    fn_args.setdefault("store_id", td_store_id)
+                    result = _handle_topic_tool_call(fn_name, fn_args)
+                    if fn_name == "search_web" and "error" not in result:
+                        td_search_calls += 1
+                    td_messages.append({
+                        "role": "tool",
+                        "tool_call_id": tool_call.id,
+                        "content": json.dumps(result, default=str),
+                    })
+            else:
+                content = choice.message.content or ""
+                # Refuse a final answer produced without any real web research —
+                # rationales citing "SERP analysis" would be fabricated.
+                if td_search_calls == 0 and not td_nudged:
+                    td_nudged = True
+                    td_messages.append({"role": "assistant", "content": content})
+                    td_messages.append({
+                        "role": "user",
+                        "content": (
+                            "STOP - you have not run a single search_web query, so any claims "
+                            "about SERPs, competitors, or market demand are unverified. Run real "
+                            "search_web queries now: market sweeps for the top categories AND a "
+                            "SERP winnability check on each candidate's primary keyword. Then "
+                            "return the final JSON with evidence-based rationales."
+                        ),
+                    })
+                    continue
+                td_content = content
+                break
+
+        td_result = None
+        try:
+            start = td_content.find("{")
+            end = td_content.rfind("}") + 1
+            if start >= 0 and end > start:
+                td_result = json.loads(td_content[start:end])
+        except (json.JSONDecodeError, ValueError):
+            pass
+        if not td_result or not isinstance(td_result.get("suggestions"), list):
+            return {"error": "Topic discovery did not return valid suggestions", "raw_response": td_content[:2000]}
+
+        valid_intents = {"Informational", "Navigational", "Commercial", "Transactional"}
+        suggestions = []
+        for s in td_result.get("suggestions", []):
+            if not isinstance(s, dict) or not (s.get("topic") or "").strip():
+                continue
+            kw = s.get("keywords")
+            if isinstance(kw, list):
+                kw = {
+                    "primary": str(kw[0]) if kw else "",
+                    "informational": [],
+                    "commercial": [str(k) for k in kw[1:]],
+                    "transactional": [],
+                    "navigational": [],
+                }
+            elif not isinstance(kw, dict):
+                kw = {"primary": "", "informational": [], "commercial": [], "transactional": [], "navigational": []}
+            kw.setdefault("primary", "")
+            for group in ("informational", "commercial", "transactional", "navigational"):
+                if not isinstance(kw.get(group), list):
+                    kw[group] = []
+            slug = re.sub(r"[^a-z0-9]+", "-", (s.get("url_slug") or "").lower()).strip("-")
+            intent = s.get("search_intent") or "Informational"
+            if intent not in valid_intents:
+                intent = intent.capitalize() if intent.capitalize() in valid_intents else "Informational"
+            suggestions.append({
+                "topic": str(s["topic"]).strip()[:500],
+                "h1": (s.get("h1") or "").strip()[:500],
+                "meta_title": (s.get("meta_title") or "").strip()[:60],
+                "meta_description": (s.get("meta_description") or "").strip()[:155],
+                "url_slug": slug[:255],
+                "keywords": kw,
+                "search_intent": intent,
+                "opportunity_type": s.get("opportunity_type") if s.get("opportunity_type") in ("quick_win", "foundation") else "quick_win",
+                "rationale": (s.get("rationale") or "").strip(),
+                "cannibalization_note": (s.get("cannibalization_note") or "").strip(),
+                "target_products": s.get("target_products") if isinstance(s.get("target_products"), list) else [],
+                "target_collections": s.get("target_collections") if isinstance(s.get("target_collections"), list) else [],
+                "target_articles": s.get("target_articles") if isinstance(s.get("target_articles"), list) else [],
+            })
+        if not suggestions:
+            return {"error": "Topic discovery returned no usable suggestions", "raw_response": td_content[:2000]}
+
+        rejected = td_result.get("rejected_topics")
+        if not isinstance(rejected, list):
+            rejected = []
+        return {
+            "market_summary": (td_result.get("market_summary") or "").strip(),
+            "rejected_topics": [
+                {"topic": str(r.get("topic") or ""), "reason": str(r.get("reason") or "")}
+                for r in rejected if isinstance(r, dict)
+            ],
+            "suggestions": suggestions,
+        }
+
     else:
         raise ValueError(f"Unknown task type: {task_type}")
 
