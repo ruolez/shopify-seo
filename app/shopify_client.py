@@ -103,6 +103,30 @@ class ShopifyClient:
             return [str(t).strip() for t in tags if str(t).strip()]
         return []
 
+    def get_orders(self, query_filter=None, cursor=None, limit=50):
+        """One page of orders with the customer journey summary used for
+        revenue attribution. Requires the read_orders scope."""
+        query = """
+        query getOrders($limit: Int!, $cursor: String, $q: String) {
+            orders(first: $limit, after: $cursor, query: $q, sortKey: CREATED_AT) {
+                pageInfo { hasNextPage endCursor }
+                nodes {
+                    id
+                    name
+                    createdAt
+                    test
+                    currentTotalPriceSet { shopMoney { amount currencyCode } }
+                    customerJourneySummary {
+                        firstVisit { landingPage referrerUrl source sourceType utmParameters { source medium } occurredAt }
+                        lastVisit { landingPage referrerUrl source sourceType utmParameters { source medium } occurredAt }
+                    }
+                }
+            }
+        }
+        """
+        data = self._graphql(query, {"limit": limit, "cursor": cursor, "q": query_filter})
+        return data.get("orders", {})
+
     def test_connection(self):
         query = "{ shop { name id myshopifyDomain primaryDomain { host url } } }"
         data = self._graphql(query)

@@ -22,7 +22,7 @@ document.addEventListener("DOMContentLoaded", () => {
 function loadDashboard() {
     // Reset store-scoped widgets so a store switch never shows stale data
     // from the previous store while the new requests are in flight.
-    for (const id of ["trend-card", "queue-card", "ctr-card", "impact-card", "movers-card", "ops-row", "dash-freshness", "changes-card"]) {
+    for (const id of ["trend-card", "queue-card", "ctr-card", "impact-card", "movers-card", "ops-row", "dash-freshness", "changes-card", "revenue-card", "kpi-revenue-card"]) {
         document.getElementById(id).style.display = "none";
     }
     loadOverview().then(() => {
@@ -34,6 +34,7 @@ function loadDashboard() {
         loadMovers();
         loadOps();
         loadChanges();
+        loadRevenue();
     });
 }
 
@@ -545,5 +546,68 @@ async function loadChanges() {
         apiRequest(`/api/dashboard/changes/seen?store_id=${dashStoreId}`, { method: "POST", body: "{}" }).catch(() => {});
     } catch {
         // Feed unavailable — card stays hidden
+    }
+}
+
+async function loadRevenue() {
+    try {
+        if (!dashStoreId) return;
+        const data = await apiRequest(`/api/dashboard/revenue?store_id=${dashStoreId}&days=28`);
+        const kpiCard = document.getElementById("kpi-revenue-card");
+
+        if (!data.available) {
+            if (data.scope_missing) {
+                kpiCard.style.display = "";
+                document.getElementById("kpi-revenue").textContent = "—";
+                document.getElementById("kpi-revenue-sub").innerHTML =
+                    'Token needs <code>read_orders</code> scope';
+            }
+            return;
+        }
+
+        // KPI card
+        kpiCard.style.display = "";
+        document.getElementById("kpi-revenue").textContent =
+            `$${Math.round(data.organic_revenue).toLocaleString()}`;
+        let sub = `${data.organic_orders} orders${data.aov ? ` · $${data.aov.toFixed(0)} AOV` : ""}`;
+        if (data.pct_change !== null && data.pct_change !== undefined) {
+            const up = data.pct_change >= 0;
+            sub += ` <span class="${up ? "delta-up" : "delta-down"}">${up ? "▲" : "▼"} ${Math.abs(data.pct_change).toFixed(1)}%</span>`;
+        }
+        document.getElementById("kpi-revenue-sub").innerHTML = sub;
+
+        if (!data.trend || !data.trend.length) return;
+
+        // Widget: trend chart + top pages + attribution split
+        const colors = chartColors();
+        setChart("revenue", () => makeTimeSeriesChart(document.getElementById("revenue-chart"), {
+            labels: data.trend.map((d) => d.date.slice(5)),
+            datasets: [{
+                label: "Organic revenue",
+                data: data.trend.map((d) => d.revenue),
+                borderColor: colors.success,
+                backgroundColor: hexToRgba(colors.success, 0.12),
+                fill: true, borderWidth: 1.5, pointRadius: 0, tension: 0.3,
+            }],
+        }));
+
+        const split = data.attribution_split || {};
+        const splitOrder = ["organic", "paid", "referral", "direct", "ai", "unknown"];
+        document.getElementById("revenue-split").textContent = splitOrder
+            .filter((k) => split[k])
+            .map((k) => `${k}: $${Math.round(split[k].revenue).toLocaleString()}`)
+            .join(" · ");
+
+        let pages = '<div style="font-size:11px;font-weight:600;color:var(--on-surface-secondary);padding:6px 0;">TOP LANDING PAGES</div>';
+        for (const pg of data.top_pages || []) {
+            pages += `<div style="display:flex;justify-content:space-between;gap:8px;padding:4px 0;border-bottom:1px solid var(--outline);">
+                <span style="min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;" title="/${escapeHtml(pg.landing_path)}">${escapeHtml(pg.title || "/" + pg.landing_path)}</span>
+                <span style="white-space:nowrap;color:var(--success);">$${Math.round(pg.revenue).toLocaleString()}</span>
+            </div>`;
+        }
+        document.getElementById("revenue-top-pages").innerHTML = pages;
+        document.getElementById("revenue-card").style.display = "";
+    } catch {
+        // Revenue not available — cards stay hidden
     }
 }

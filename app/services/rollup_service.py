@@ -221,6 +221,13 @@ class NightlyScheduler:
                 maybe_run_weekly_visibility(store_id)
             except Exception as e:
                 logger.error("Weekly visibility check failed for store %s: %s", store_id, str(e))
+            # Order pull for revenue attribution — a missing read_orders
+            # scope logs one warning per day and the widget shows setup help.
+            try:
+                from app.services.revenue_service import pull_orders
+                pull_orders(store_id)
+            except Exception as e:
+                logger.error("Order pull failed for store %s: %s", store_id, str(e))
 
 
 _scheduler = None

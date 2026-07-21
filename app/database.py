@@ -734,6 +734,30 @@ class Database:
                 EXCEPTION WHEN duplicate_column THEN NULL;
                 END $$
             """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS organic_orders (
+                    id SERIAL PRIMARY KEY,
+                    store_id INTEGER REFERENCES stores(id) ON DELETE CASCADE,
+                    order_gid VARCHAR(100) NOT NULL,
+                    order_name VARCHAR(50),
+                    created_at TIMESTAMP NOT NULL,
+                    total_price NUMERIC(12,2) DEFAULT 0,
+                    currency VARCHAR(10),
+                    attribution VARCHAR(20) DEFAULT 'unknown',
+                    landing_page TEXT,
+                    landing_path VARCHAR(500),
+                    referrer_url TEXT,
+                    source VARCHAR(200),
+                    source_type VARCHAR(50),
+                    journey JSONB DEFAULT '{}',
+                    pulled_at TIMESTAMP DEFAULT NOW(),
+                    UNIQUE(store_id, order_gid)
+                )
+            """)
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_organic_orders_store_created
+                ON organic_orders(store_id, created_at)
+            """)
             # Backfill: any article without an explicit type is a blog post.
             cur.execute(
                 "UPDATE synced_articles SET article_type = 'blog' WHERE article_type IS NULL"

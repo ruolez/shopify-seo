@@ -77,6 +77,27 @@ def dashboard_changes_seen():
     return jsonify({"ok": True})
 
 
+@dashboard_bp.route("/api/dashboard/revenue")
+def dashboard_revenue():
+    store_id = _resolve_store_id()
+    days = min(request.args.get("days", 28, type=int), 90)
+    if not store_id:
+        return jsonify({"available": False})
+    from app.services.revenue_service import get_revenue
+    return jsonify(get_revenue(store_id, days))
+
+
+@dashboard_bp.route("/api/dashboard/revenue/pull", methods=["POST"])
+def dashboard_revenue_pull():
+    store_id = _resolve_store_id()
+    if not store_id:
+        return jsonify({"error": "No store"}), 400
+    from app.services.revenue_service import pull_orders
+    result = pull_orders(store_id)
+    status = 400 if result.get("error") else 200
+    return jsonify(result), status
+
+
 @dashboard_bp.route("/api/dashboard/ops")
 def dashboard_ops():
     store_id = _resolve_store_id()
