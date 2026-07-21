@@ -156,24 +156,24 @@ body {
 }
 
 .nav-section-label {
-    font-size: 9px;
+    font-size: 10px;
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.1em;
     color: var(--on-surface-secondary);
     padding: 5px 8px 1px;
-    opacity: 0.6;
+    opacity: 0.7;
 }
 
 .nav-item {
     display: flex;
     align-items: center;
-    gap: 7px;
-    padding: 5px 8px;
+    gap: 8px;
+    padding: 6px 8px;
     border-radius: 5px;
-    color: var(--on-surface-secondary);
+    color: var(--on-surface);
     text-decoration: none;
-    font-size: 11.5px;
+    font-size: 13px;
     font-weight: 500;
     transition: all 0.15s cubic-bezier(0.4, 0, 0.2, 1);
     cursor: pointer;
@@ -192,7 +192,7 @@ body {
 }
 
 .nav-item .material-symbols-rounded {
-    font-size: 16px;
+    font-size: 18px;
     opacity: 0.7;
 }
 
@@ -3910,6 +3910,11 @@ thead th.row-num-col {
     --group-tint: color-mix(in srgb, var(--group-accent, var(--primary)) 13%, transparent);
 }
 
+/* Accent mixes need more saturation to register on dark surfaces. */
+[data-theme="dark"] .nav-group {
+    --group-tint: color-mix(in srgb, var(--group-accent, var(--primary)) 24%, transparent);
+}
+
 .nav-group[data-group="optimize"] { --group-accent: #0d9488; }
 .nav-group[data-group="content"]  { --group-accent: #7c3aed; }
 .nav-group[data-group="research"] { --group-accent: #2563eb; }
@@ -3929,7 +3934,7 @@ thead th.row-num-col {
     border: none;
     cursor: pointer;
     font: inherit;
-    font-size: 9px;
+    font-size: 10px;
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.1em;
@@ -3972,10 +3977,15 @@ thead th.row-num-col {
     max-height: 0;
 }
 
-/* Group-tinted icons make each section scannable; text stays neutral. */
+/* Group-tinted icons make each section scannable; text stays neutral until
+   hover/active, where it picks up the group accent. */
 .nav-group .nav-item .material-symbols-rounded {
     color: var(--group-accent);
-    opacity: 0.65;
+    opacity: 0.85;
+}
+
+[data-theme="dark"] .nav-group .nav-item .material-symbols-rounded {
+    opacity: 1;
 }
 
 .nav-group .nav-item:hover .material-symbols-rounded,
@@ -3986,6 +3996,7 @@ thead th.row-num-col {
 /* Items sit on the group's dim card — hover needs the elevated surface. */
 .nav-group .nav-item:hover {
     background: var(--surface);
+    color: var(--group-accent);
 }
 
 .nav-group .nav-item.active:hover {
