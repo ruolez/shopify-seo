@@ -11,12 +11,15 @@ let wizardPollTimer = null;
 document.addEventListener("DOMContentLoaded", () => {
     initBlogTabs();
     setupModalDismiss("article-modal", closeArticleModal);
+    setupModalDismiss("scheduled-preview-modal", closeScheduledPreview);
 });
 
 document.addEventListener("keydown", (e) => {
     if (e.key === "Escape") {
         const modal = document.getElementById("article-modal");
         if (modal && modal.classList.contains("active")) closeArticleModal();
+        const preview = document.getElementById("scheduled-preview-modal");
+        if (preview && preview.classList.contains("active")) closeScheduledPreview();
     }
 });
 
@@ -33,6 +36,7 @@ function initBlogTabs() {
 
             if (tab.dataset.tab === "articles") loadArticles();
             if (tab.dataset.tab === "create") initWizard();
+            if (tab.dataset.tab === "scheduled") initScheduledTab();
         });
     });
 
@@ -694,6 +698,7 @@ function renderTopicSuggestion(s) {
     }
     if (s.status === "used") html += `<span class="badge" style="background: var(--success); color: #fff;">Used</span>`;
     if (s.status === "dismissed") html += `<span class="badge" style="background: var(--on-surface-secondary); color: #fff;">Dismissed</span>`;
+    if (s.status === "scheduled") html += `<span class="badge" style="background: var(--primary); color: #fff;">Scheduled</span>`;
     html += `</div>`;
     if (s.meta_title) {
         html += `<p style="margin: 8px 0 0; font-size: 13px;"><strong>Meta title</strong> <span style="color: var(--on-surface-secondary);">(${s.meta_title.length}/60)</span>: ${escapeHtml(s.meta_title)}</p>`;
@@ -730,7 +735,8 @@ function renderTopicSuggestion(s) {
     html += `</div>`;
     html += `<div style="display: flex; flex-direction: column; gap: 8px;">`;
     if (s.status === "suggested") {
-        html += `<button class="btn btn-sm btn-primary" onclick="useTopicSuggestion(${s.id})"><span class="material-symbols-rounded">edit_note</span> Use this topic</button>`;
+        html += `<button class="btn btn-sm btn-primary" onclick="scheduleTopicSuggestion(${s.id})"><span class="material-symbols-rounded">event</span> Schedule</button>`;
+        html += `<button class="btn btn-sm btn-secondary" onclick="useTopicSuggestion(${s.id})"><span class="material-symbols-rounded">edit_note</span> Use this topic</button>`;
         html += `<button class="btn btn-sm btn-secondary" onclick="dismissTopicSuggestion(${s.id})">Dismiss</button>`;
     }
     html += `<button class="btn btn-sm btn-secondary" onclick="copyTopicKeywords(${s.id})"><span class="material-symbols-rounded">content_copy</span> Copy keywords</button>`;
@@ -2855,3 +2861,252 @@ document.addEventListener("click", (e) => {
         if (d) d.style.display = "none";
     }
 });
+
+// ── Scheduled Posts ──────────────────────────────────────────────
+
+let scheduledPosts = [];
+let scheduledPostsTimer = null;
+
+const SCHEDULED_STAGES = {
+    auto_queued: "Queued",
+    auto_researching: "Researching…",
+    auto_outlining: "Outlining…",
+    auto_generating: "Writing…",
+    auto_image: "Image…",
+    auto_publishing: "Publishing…",
+};
+
+// datetime-local value ("YYYY-MM-DDTHH:MM") from local date parts — toISOString
+// would shift to UTC and show the wrong wall-clock time in the input.
+function toLocalInputValue(date) {
+    const p = (n) => String(n).padStart(2, "0");
+    return `${date.getFullYear()}-${p(date.getMonth() + 1)}-${p(date.getDate())}T${p(date.getHours())}:${p(date.getMinutes())}`;
+}
+
+// Cadence HH:MM is stored in UTC; the inputs show local wall-clock time.
+function utcTimeToLocal(hhmm) {
+    const [h, m] = String(hhmm || "09:00").split(":").map(Number);
+    const d = new Date();
+    d.setUTCHours(h, m, 0, 0);
+    const p = (n) => String(n).padStart(2, "0");
+    return `${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+function localTimeToUtc(hhmm) {
+    const [h, m] = String(hhmm || "09:00").split(":").map(Number);
+    const d = new Date();
+    d.setHours(h, m, 0, 0);
+    const p = (n) => String(n).padStart(2, "0");
+    return `${p(d.getUTCHours())}:${p(d.getUTCMinutes())}`;
+}
+
+function initScheduledTab() {
+    loadScheduleSettings();
+    loadScheduledPosts();
+}
+
+function renderNextSlot(iso) {
+    const el = document.getElementById("schedule-next-slot");
+    if (el && iso) el.textContent = `Next open slot: ${new Date(iso).toLocaleString()}`;
+}
+
+async function loadScheduleSettings() {
+    const storeId = await getFirstStoreId();
+    if (!storeId) return;
+    try {
+        const s = await apiRequest(`/api/blog/schedule-settings?store_id=${storeId}`);
+        document.getElementById("schedule-interval-days").value = s.interval_days;
+        document.getElementById("schedule-publish-time").value = utcTimeToLocal(s.publish_time);
+        renderNextSlot(s.next_slot);
+    } catch (err) {
+        console.error("Failed to load schedule settings", err);
+    }
+}
+
+async function saveScheduleSettings() {
+    const storeId = await getFirstStoreId();
+    if (!storeId) return showToast("No store found", "error");
+    const intervalDays = parseInt(document.getElementById("schedule-interval-days").value, 10);
+    if (!intervalDays || intervalDays < 1) return showToast("Interval must be at least 1 day", "error");
+    const localTime = document.getElementById("schedule-publish-time").value || "09:00";
+    try {
+        const res = await apiRequest("/api/blog/schedule-settings", {
+            method: "PUT",
+            body: { store_id: storeId, interval_days: intervalDays, publish_time: localTimeToUtc(localTime) },
+        });
+        renderNextSlot(res.next_slot);
+        showToast("Cadence saved", "success");
+    } catch (err) {
+        showToast(err.message, "error");
+    }
+}
+
+async function scheduleTopicSuggestion(id) {
+    const s = findTopicSuggestion(id);
+    if (!s) return;
+    const storeId = await getFirstStoreId();
+    if (!storeId) return showToast("No store found", "error");
+    try {
+        const res = await apiRequest("/api/blog/schedule-from-suggestion", {
+            method: "POST",
+            body: { store_id: storeId, suggestion_id: id },
+        });
+        s.status = "scheduled";
+        renderTopicRuns();
+        showToast(`Scheduled for ${new Date(res.scheduled_for).toLocaleString()} — writing starts now`, "success");
+    } catch (err) {
+        showToast(err.message, "error");
+    }
+}
+
+function scheduledPostChip(row) {
+    const s = row.status;
+    if (s === "scheduled") return `<span class="badge" style="background: var(--success); color: #fff;">Ready</span>`;
+    if (s === "failed") return `<span class="badge" style="background: var(--error); color: #fff;" title="${escapeAttr(row.error || "")}">Failed</span> <span style="font-size:12px;color:var(--error);">${escapeHtml(row.error || "")}</span>`;
+    return `<span class="badge" style="background: var(--primary); color: #fff;">${escapeHtml(SCHEDULED_STAGES[s] || "Working…")}</span>`;
+}
+
+async function loadScheduledPosts() {
+    const container = document.getElementById("blog-scheduled-container");
+    const storeId = await getFirstStoreId();
+    if (!storeId) { container.innerHTML = `<div class="card"><p>No store found.</p></div>`; return; }
+    let rows;
+    try {
+        const res = await apiRequest(`/api/blog/scheduled?store_id=${storeId}`);
+        rows = res.sessions || [];
+    } catch (e) {
+        container.innerHTML = `<div class="card"><p style="color:var(--error);">${escapeHtml(e.message)}</p></div>`;
+        return;
+    }
+    scheduledPosts = rows;
+    if (!rows.length) {
+        container.innerHTML = `<div class="card"><p style="color:var(--on-surface-secondary);">Nothing scheduled. Approve a topic with “Schedule” in the Create Post tab and it will be written and queued automatically.</p></div>`;
+        return;
+    }
+    const body = rows.map((row, i) => {
+        const canAct = row.status === "scheduled" || row.status === "failed";
+        const busy = row.status === "auto_publishing";
+        const whenInput = `<span style="display:inline-flex; gap:6px; align-items:center;">
+            <input type="datetime-local" id="blog-sched-when-${i}" class="form-control" style="max-width:200px;" value="${toLocalInputValue(new Date(row.scheduled_for))}" ${busy ? "disabled" : ""}>
+            <button class="icon-btn" title="Save new time" onclick="rescheduleBlogPost(${i})" ${busy ? "disabled" : ""}><span class="material-symbols-rounded">save</span></button>
+        </span>`;
+        return `<tr>
+            <td>${escapeHtml(row.title || row.topic || "(processing…)")}</td>
+            <td style="white-space:nowrap;">${whenInput}</td>
+            <td>${scheduledPostChip(row)}</td>
+            <td style="white-space:nowrap;">
+                <button class="btn btn-secondary btn-sm" onclick="previewScheduledPost(${i})" ${canAct ? "" : "disabled"}>
+                    <span class="material-symbols-rounded">visibility</span> Preview
+                </button>
+                <button class="btn btn-secondary btn-sm" style="margin-left:6px;" onclick="publishBlogNow(${i}, this)" ${canAct ? "" : "disabled"}>
+                    <span class="material-symbols-rounded">publish</span> ${row.status === "failed" ? "Retry now" : "Publish now"}
+                </button>
+                <button class="btn btn-secondary btn-sm" style="margin-left:6px;color:var(--error);" title="Cancel scheduled post" onclick="cancelScheduledPost(${i}, this)" ${canAct || row.status === "auto_queued" ? "" : "disabled"}>
+                    <span class="material-symbols-rounded">delete</span>
+                </button>
+            </td>
+        </tr>`;
+    }).join("");
+    container.innerHTML = `<div class="table-container"><table class="data-table">
+        <thead><tr><th>Title</th><th>Publish at</th><th>Status</th><th></th></tr></thead>
+        <tbody>${body}</tbody></table></div>`;
+
+    // Keep refreshing while any session is still being prepared or publishing.
+    clearTimeout(scheduledPostsTimer);
+    const transient = rows.some((r) => r.status !== "scheduled" && r.status !== "failed");
+    const panel = document.getElementById("tab-scheduled");
+    if (transient && panel && panel.classList.contains("active")) {
+        scheduledPostsTimer = setTimeout(loadScheduledPosts, 5000);
+    }
+}
+
+async function rescheduleBlogPost(index) {
+    const row = scheduledPosts[index];
+    const input = document.getElementById(`blog-sched-when-${index}`);
+    if (!row || !input) return;
+    const when = input.value ? new Date(input.value) : null;
+    if (!when || isNaN(when.getTime())) return showToast("Pick a valid date/time.", "error");
+    try {
+        await apiRequest(`/api/blog/scheduled/${row.id}`, {
+            method: "PATCH",
+            body: { scheduled_at: when.toISOString() },
+        });
+        showToast("Publish time updated.", "success");
+        loadScheduledPosts();
+    } catch (e) {
+        showToast(`Reschedule failed: ${e.message}`, "error");
+    }
+}
+
+async function publishBlogNow(index, btn) {
+    const row = scheduledPosts[index];
+    if (!row) return;
+    if (btn) btn.disabled = true;
+    let res;
+    try {
+        res = await apiRequest(`/api/blog/scheduled/${row.id}/publish-now`, { method: "POST" });
+    } catch (e) {
+        if (btn) btn.disabled = false;
+        return showToast(`Publish failed: ${e.message}`, "error");
+    }
+    if (res.resumed) {
+        showToast("Resuming preparation — the post will park as Ready, then publish.", "info");
+        return loadScheduledPosts();
+    }
+    const poll = async () => {
+        let s;
+        try {
+            s = await apiRequest(`/api/blog/wizard/${row.id}`);
+        } catch { /* transient — keep polling */ }
+        if (s && s.status === "published") {
+            showToast("Post published.", "success");
+            return loadScheduledPosts();
+        }
+        if (s && s.status === "failed") {
+            showToast(`Publish failed: ${s.error || "unknown error"}`, "error");
+            return loadScheduledPosts();
+        }
+        setTimeout(poll, 2000);
+    };
+    poll();
+}
+
+async function cancelScheduledPost(index, btn) {
+    const row = scheduledPosts[index];
+    if (!row) return;
+    if (!confirm(`Cancel “${row.title || row.topic}”? The prepared post is discarded and the idea returns to the suggestion pool.`)) return;
+    if (btn) btn.disabled = true;
+    try {
+        await apiRequest(`/api/blog/scheduled/${row.id}`, { method: "DELETE" });
+        showToast("Scheduled post cancelled.", "success");
+        loadScheduledPosts();
+        loadTopicSuggestions();
+    } catch (e) {
+        if (btn) btn.disabled = false;
+        showToast(`Cancel failed: ${e.message}`, "error");
+    }
+}
+
+async function previewScheduledPost(index) {
+    const row = scheduledPosts[index];
+    if (!row) return;
+    let s;
+    try {
+        s = await apiRequest(`/api/blog/wizard/${row.id}`);
+    } catch (e) {
+        return showToast(e.message, "error");
+    }
+    const art = s.generated_article || {};
+    document.getElementById("scheduled-preview-title").textContent = art.title || s.topic || "Scheduled Post";
+    let html = "";
+    if (art.meta_title) html += `<p style="font-size:13px;"><strong>Meta title:</strong> ${escapeHtml(art.meta_title)}</p>`;
+    if (art.meta_description) html += `<p style="font-size:13px;"><strong>Meta description:</strong> ${escapeHtml(art.meta_description)}</p>`;
+    if (s.featured_image_url) html += `<img src="${escapeAttr(s.featured_image_url)}" alt="" style="max-width:320px;border-radius:8px;margin:8px 0;">`;
+    html += art.body_html ? `<div style="margin-top:12px;">${art.body_html}</div>` : `<p style="color:var(--on-surface-secondary);">Article not generated yet.</p>`;
+    document.getElementById("scheduled-preview-content").innerHTML = html;
+    document.getElementById("scheduled-preview-modal").classList.add("active");
+}
+
+function closeScheduledPreview() {
+    document.getElementById("scheduled-preview-modal").classList.remove("active");
+}

@@ -133,6 +133,8 @@ with app.app_context():
         init_competitor_scheduler()
         from app.services.news_scheduler import init_scheduler as init_news_scheduler
         init_news_scheduler()
+        from app.services.blog_scheduler import init_scheduler as init_blog_scheduler
+        init_blog_scheduler()
         from app.services.rollup_service import init_scheduler as init_rollup_scheduler
         init_rollup_scheduler()
         # AI visibility tracking is manual-only: the scheduler fired a full

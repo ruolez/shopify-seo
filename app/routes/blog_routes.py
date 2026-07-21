@@ -3,6 +3,7 @@ import logging
 import re
 import threading
 import time
+from datetime import datetime, time as dt_time, timedelta, timezone
 
 from flask import Blueprint, jsonify, render_template, request
 
@@ -1218,6 +1219,247 @@ def remove_hero_image():
     return jsonify({"ok": True, "success": True})
 
 
+# ── Wizard pipeline steps ───────────────────────────────────────
+# Each step persists its artifact and raises on failure; status transitions
+# and ai_tasks bookkeeping stay with the callers (manual routes / auto runner).
+
+
+def _fetch_wizard_session(session_id):
+    with db.get_cursor() as cur:
+        cur.execute("SELECT * FROM article_wizard_sessions WHERE id = %s", (session_id,))
+        return cur.fetchone()
+
+
+def _wizard_step_research(session):
+    from app.ai_agent import run_task as ai_run_task
+
+    result = ai_run_task(
+        "article_research",
+        {
+            "session_id": session["id"],
+            "topic": session["topic"],
+            "keywords": session["target_keywords"],
+            "store_id": session["store_id"],
+        },
+        store_id=session["store_id"],
+    )
+    with db.get_cursor() as cur:
+        cur.execute(
+            "UPDATE article_wizard_sessions SET research_data = %s, updated_at = NOW() WHERE id = %s",
+            (json.dumps(result), session["id"]),
+        )
+    return result
+
+
+def _wizard_step_outline(session):
+    from app.ai_agent import run_task as ai_run_task
+
+    result = ai_run_task(
+        "article_outline",
+        {
+            "session_id": session["id"],
+            "topic": session["topic"],
+            "keywords": session["target_keywords"],
+            "research_data": session["research_data"],
+            "store_id": session["store_id"],
+        },
+        store_id=session["store_id"],
+    )
+    with db.get_cursor() as cur:
+        cur.execute(
+            "UPDATE article_wizard_sessions SET outline_data = %s, updated_at = NOW() WHERE id = %s",
+            (json.dumps(result), session["id"]),
+        )
+    return result
+
+
+def _wizard_step_generate(session):
+    from app.ai_agent import run_task as ai_run_task
+
+    result = ai_run_task(
+        "article_generate",
+        {
+            "session_id": session["id"],
+            "topic": session["topic"],
+            "keywords": session["target_keywords"],
+            "outline_data": session["outline_data"],
+            "research_data": session["research_data"],
+            "store_id": session["store_id"],
+        },
+        store_id=session["store_id"],
+    )
+    with db.get_cursor() as cur:
+        cur.execute(
+            "UPDATE article_wizard_sessions SET generated_article = %s, updated_at = NOW() WHERE id = %s",
+            (json.dumps(result), session["id"]),
+        )
+    return result
+
+
+def _wizard_step_image(session, client, permanent=False):
+    from app.services.image_generator import generate_blog_image_ai
+
+    generated = session.get("generated_article") or {}
+    title = generated.get("title") or session["topic"]
+    keywords = session.get("target_keywords") or []
+
+    product_titles = []
+    target_product_ids = session.get("target_product_ids") or []
+    if target_product_ids:
+        with db.get_cursor() as cur:
+            cur.execute(
+                "SELECT title FROM synced_products WHERE id = ANY(%s)",
+                (target_product_ids,),
+            )
+            product_titles = [r["title"] for r in cur.fetchall()]
+
+    result = generate_blog_image_ai(title, keywords=keywords, product_titles=product_titles)
+    if not result:
+        raise Exception("Image generation returned no result")
+    image_bytes, filename, alt_text, width, height = result
+
+    if permanent:
+        # Scheduled sessions publish later — staged-upload urls expire before
+        # the delayed publish, so register the file for a permanent CDN url.
+        from app.routes.news_routes import _upload_image_to_cdn
+
+        image_url = _upload_image_to_cdn(client, image_bytes, filename, alt_text)
+    else:
+        mime = "image/webp" if filename.endswith(".webp") else "image/jpeg"
+        staged = client.staged_upload_create(filename, mime, len(image_bytes), resource="IMAGE")
+        image_url = client.upload_staged_file(staged, image_bytes, content_type=mime)
+
+    with db.get_cursor() as cur:
+        cur.execute(
+            "UPDATE article_wizard_sessions SET featured_image_url = %s, updated_at = NOW() WHERE id = %s",
+            (image_url, session["id"]),
+        )
+    return {"image_url": image_url, "alt_text": alt_text, "width": width, "height": height}
+
+
+def _wizard_step_publish(session, store, client, is_published=True):
+    """Create/update the Shopify article for a wizard session, persist it to
+    synced_articles, and mark the session published. Raises on Shopify errors."""
+    session_id = session["id"]
+    generated = session.get("generated_article") or {}
+
+    # Always publish to News blog
+    with db.get_cursor() as cur:
+        cur.execute(
+            "SELECT * FROM synced_blogs WHERE store_id = %s AND handle = 'news'",
+            (session["store_id"],),
+        )
+        blog = cur.fetchone()
+
+    if not blog:
+        blog_result = client.create_blog("News")
+        with db.get_cursor() as cur:
+            cur.execute(
+                """INSERT INTO synced_blogs (store_id, shopify_id, title, handle, synced_at)
+                VALUES (%s, %s, %s, %s, NOW())
+                ON CONFLICT (store_id, shopify_id) DO UPDATE SET
+                    title = EXCLUDED.title, handle = EXCLUDED.handle, synced_at = NOW()
+                RETURNING *""",
+                (session["store_id"], blog_result["shopify_id"], blog_result["title"], blog_result.get("handle", "news")),
+            )
+            blog = cur.fetchone()
+
+    blog_id = blog["id"]
+
+    fields = {
+        "title": generated.get("title", session["topic"]),
+        "body": generated.get("body_html", ""),
+        "summary": generated.get("summary", ""),
+        "tags": generated.get("tags", []),
+        "meta_title": generated.get("meta_title", ""),
+        "meta_description": generated.get("meta_description", ""),
+        "is_published": is_published,
+    }
+
+    handle = (generated.get("handle") or "").strip()
+    if handle:
+        fields["handle"] = handle
+
+    if session.get("featured_image_url"):
+        fields["image_url"] = session["featured_image_url"]
+        fields["image_alt"] = generated.get("title", session["topic"])
+
+    existing_article_id = session.get("shopify_article_id")
+    if existing_article_id:
+        # Re-save: update the article this session already created rather than
+        # creating a duplicate (which would collide on handle).
+        raw = client.update_article(existing_article_id, fields)
+        result = {
+            "shopify_id": raw.get("id") or existing_article_id,
+            "title": raw.get("title", ""),
+            "handle": raw.get("handle", ""),
+            "image_url": fields.get("image_url", ""),
+            "image_alt": fields.get("image_alt", ""),
+        }
+    else:
+        try:
+            result = client.create_article(blog["shopify_id"], fields)
+        except Exception as create_err:
+            # A pre-existing article already owns this handle — let Shopify
+            # auto-generate a unique one instead of failing the whole save.
+            if "Handle has already been taken" in str(create_err):
+                fields.pop("handle", None)
+                result = client.create_article(blog["shopify_id"], fields)
+            else:
+                raise
+
+    cdn_image_url = result.get("image_url", "")
+    if not cdn_image_url or "shopify-staged-uploads" in cdn_image_url:
+        cdn_image_url = fields.get("image_url", "")
+    if "shopify-staged-uploads" in (cdn_image_url or ""):
+        cdn_image_url = ""
+
+    with db.get_cursor() as cur:
+        cur.execute(
+            """INSERT INTO synced_articles
+                (store_id, blog_id, shopify_id, shopify_blog_id, title, handle,
+                 body, summary, tags, meta_title, meta_description,
+                 image_url, image_alt, is_published, article_type, synced_at,
+                 published_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'blog', NOW(),
+                    CASE WHEN %s THEN NOW() END)
+            ON CONFLICT (store_id, shopify_id) DO UPDATE SET
+                title = EXCLUDED.title, handle = EXCLUDED.handle,
+                body = EXCLUDED.body, article_type = 'blog', synced_at = NOW(),
+                published_at = COALESCE(synced_articles.published_at, EXCLUDED.published_at)
+            RETURNING id""",
+            (
+                session["store_id"],
+                blog_id,
+                result["shopify_id"],
+                blog["shopify_id"],
+                fields["title"],
+                result.get("handle", ""),
+                fields["body"],
+                fields["summary"],
+                ", ".join(fields["tags"]) if isinstance(fields["tags"], list) else fields["tags"],
+                fields["meta_title"],
+                fields["meta_description"],
+                cdn_image_url,
+                result.get("image_alt", "") or fields.get("image_alt", ""),
+                is_published,
+                is_published,
+            ),
+        )
+        article_row = cur.fetchone()
+
+        cur.execute(
+            "UPDATE article_wizard_sessions SET status = 'published', current_step = 6, shopify_article_id = %s, updated_at = NOW() WHERE id = %s",
+            (result["shopify_id"], session_id),
+        )
+
+    # Auto-regenerate landing page for this blog
+    if is_published:
+        _regen_landing_async(session["store_id"], blog_id, client, store)
+
+    return {"article_id": article_row["id"], "shopify_id": result["shopify_id"]}
+
+
 @blog_bp.route("/api/blog/wizard/start", methods=["POST"])
 def wizard_start():
     data = request.get_json(silent=True) or {}
@@ -1284,21 +1526,11 @@ def wizard_research(session_id):
         try:
             with db.get_cursor() as cur:
                 cur.execute("UPDATE ai_tasks SET status = 'running' WHERE id = %s", (task_id,))
-            from app.ai_agent import run_task as ai_run_task
-            result = ai_run_task(
-                "article_research",
-                {
-                    "session_id": session_id,
-                    "topic": session["topic"],
-                    "keywords": session["target_keywords"],
-                    "store_id": session["store_id"],
-                },
-                store_id=session["store_id"],
-            )
+            result = _wizard_step_research(session)
             with db.get_cursor() as cur:
                 cur.execute(
-                    "UPDATE article_wizard_sessions SET research_data = %s, status = 'researched', updated_at = NOW() WHERE id = %s",
-                    (json.dumps(result), session_id),
+                    "UPDATE article_wizard_sessions SET status = 'researched', updated_at = NOW() WHERE id = %s",
+                    (session_id,),
                 )
                 cur.execute(
                     "UPDATE ai_tasks SET status = 'completed', result = %s, completed_at = NOW() WHERE id = %s",
@@ -1471,8 +1703,8 @@ def topic_suggestion_update(suggestion_id):
     data = request.get_json(silent=True) or {}
     status = data.get("status")
     wizard_session_id = data.get("wizard_session_id")
-    if status not in ("suggested", "used", "dismissed"):
-        return jsonify({"error": "status must be suggested, used, or dismissed"}), 400
+    if status not in ("suggested", "used", "dismissed", "scheduled"):
+        return jsonify({"error": "status must be suggested, used, dismissed, or scheduled"}), 400
 
     with db.get_cursor() as cur:
         cur.execute(
@@ -1484,6 +1716,326 @@ def topic_suggestion_update(suggestion_id):
         if cur.rowcount == 0:
             return jsonify({"error": "Suggestion not found"}), 404
     return jsonify({"ok": True})
+
+
+# ── Scheduled publishing from approved topic suggestions ────────
+# Approving a suggestion runs the wizard pipeline unattended, parks the session
+# in 'scheduled', and the blog scheduler publishes it when scheduled_for arrives.
+
+
+def _parse_scheduled_at(value):
+    """ISO-8601 string (with Z or offset) → naive UTC datetime. Raises ValueError."""
+    dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return dt
+
+
+def _iso_utc(dt):
+    return dt.replace(tzinfo=timezone.utc).isoformat()
+
+
+def _get_schedule_settings(store_id):
+    with db.get_cursor() as cur:
+        cur.execute(
+            "SELECT interval_days, publish_time FROM blog_schedule_settings WHERE store_id = %s",
+            (store_id,),
+        )
+        row = cur.fetchone()
+    interval_days = int(row["interval_days"]) if row and row["interval_days"] else 7
+    publish_time = row["publish_time"] if row and row["publish_time"] else dt_time(9, 0)
+    return interval_days, publish_time
+
+
+def _next_open_slot(store_id):
+    """Next publish slot from the store's cadence: last upcoming slot + interval,
+    or the first upcoming cadence time if the queue is empty. Naive UTC. Failed
+    sessions keep holding their slot so a retry doesn't shift the queue."""
+    interval_days, publish_time = _get_schedule_settings(store_id)
+    with db.get_cursor() as cur:
+        cur.execute(
+            """SELECT MAX(scheduled_for) AS last_slot FROM article_wizard_sessions
+               WHERE store_id = %s AND scheduled_for IS NOT NULL
+                 AND scheduled_for >= (NOW() AT TIME ZONE 'utc') AND status != 'published'""",
+            (store_id,),
+        )
+        row = cur.fetchone()
+    last_slot = row["last_slot"] if row else None
+    if last_slot:
+        return datetime.combine((last_slot + timedelta(days=interval_days)).date(), publish_time)
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    candidate = datetime.combine(now.date(), publish_time)
+    if candidate <= now:
+        candidate += timedelta(days=1)
+    return candidate
+
+
+def _flatten_topic_keywords(kw):
+    """Primary + grouped keywords → flat deduped list (port of blog.js flattenTopicKeywords)."""
+    kw = kw or {}
+    out = []
+    if kw.get("primary"):
+        out.append(kw["primary"])
+    for group in ("informational", "commercial", "transactional", "navigational"):
+        for w in kw.get(group) or []:
+            if w not in out:
+                out.append(w)
+    return out
+
+
+def _run_blog_auto_pipeline(session_id, store, client):
+    """Run the wizard pipeline unattended: research → outline → generate →
+    featured image, then park in 'scheduled' for the blog scheduler. Resumable —
+    steps whose artifact already exists are skipped, so retrying a failed session
+    continues where it stopped. Image is best-effort; the rest are fatal (raise)."""
+
+    def _set_status(status):
+        with db.get_cursor() as cur:
+            cur.execute(
+                "UPDATE article_wizard_sessions SET status = %s, updated_at = NOW() WHERE id = %s",
+                (status, session_id),
+            )
+
+    session = _fetch_wizard_session(session_id)
+    if not session.get("research_data"):
+        _set_status("auto_researching")
+        _wizard_step_research(session)
+        session = _fetch_wizard_session(session_id)
+    if not session.get("outline_data"):
+        _set_status("auto_outlining")
+        _wizard_step_outline(session)
+        session = _fetch_wizard_session(session_id)
+    if not session.get("generated_article"):
+        _set_status("auto_generating")
+        _wizard_step_generate(session)
+        session = _fetch_wizard_session(session_id)
+    if not session.get("featured_image_url"):
+        _set_status("auto_image")
+        try:
+            # Permanent CDN url — a staged-upload url would expire before the
+            # delayed publish.
+            _wizard_step_image(session, client, permanent=True)
+        except Exception as e:
+            logger.warning("Blog auto pipeline: image failed, continuing: %s", e)
+    _set_status("scheduled")
+
+
+def _spawn_blog_auto_pipeline(session_id, store, client):
+    def _run():
+        try:
+            _run_blog_auto_pipeline(session_id, store, client)
+        except Exception as e:
+            logger.exception("Blog auto pipeline: session %s failed: %s", session_id, e)
+            with db.get_cursor() as cur:
+                cur.execute(
+                    "UPDATE article_wizard_sessions SET status = 'failed', error = %s, updated_at = NOW() WHERE id = %s",
+                    (str(e), session_id),
+                )
+
+    threading.Thread(target=_run, daemon=True).start()
+
+
+@blog_bp.route("/api/blog/schedule-from-suggestion", methods=["POST"])
+def schedule_from_suggestion():
+    data = request.get_json(silent=True) or {}
+    store_id = data.get("store_id")
+    suggestion_id = data.get("suggestion_id")
+    if not store_id or not suggestion_id:
+        return jsonify({"error": "store_id and suggestion_id are required"}), 400
+
+    with db.get_cursor() as cur:
+        cur.execute(
+            "SELECT * FROM topic_suggestions WHERE id = %s AND store_id = %s",
+            (suggestion_id, store_id),
+        )
+        suggestion = cur.fetchone()
+    if not suggestion:
+        return jsonify({"error": "Suggestion not found"}), 404
+    if suggestion["status"] != "suggested":
+        return jsonify({"error": "Suggestion is already used, dismissed, or scheduled"}), 409
+
+    store, client = _get_store_client(store_id)
+    if not client:
+        return jsonify({"error": "Store not found"}), 404
+
+    if data.get("scheduled_at"):
+        try:
+            scheduled_for = _parse_scheduled_at(data["scheduled_at"])
+        except (ValueError, TypeError):
+            return jsonify({"error": "Invalid scheduled_at"}), 400
+    else:
+        scheduled_for = _next_open_slot(store_id)
+
+    topic = suggestion.get("topic") or suggestion.get("h1") or ""
+    keywords = _flatten_topic_keywords(suggestion.get("keywords"))
+
+    with db.get_cursor() as cur:
+        cur.execute(
+            """INSERT INTO article_wizard_sessions
+                (store_id, topic, target_keywords, status, current_step, scheduled_for)
+            VALUES (%s, %s, %s, 'auto_queued', 1, %s) RETURNING id""",
+            (store_id, topic, json.dumps(keywords), scheduled_for),
+        )
+        session_id = cur.fetchone()["id"]
+        cur.execute(
+            "UPDATE topic_suggestions SET status = 'scheduled', wizard_session_id = %s, updated_at = NOW() WHERE id = %s",
+            (session_id, suggestion_id),
+        )
+
+    _spawn_blog_auto_pipeline(session_id, store, client)
+    return jsonify({"session_id": session_id, "scheduled_for": _iso_utc(scheduled_for)})
+
+
+@blog_bp.route("/api/blog/scheduled", methods=["GET"])
+def list_scheduled_posts():
+    """List scheduled blog sessions (processing, ready, or failed) for a store."""
+    store_id = request.args.get("store_id", type=int)
+    if not store_id:
+        return jsonify({"error": "store_id is required"}), 400
+    with db.get_cursor() as cur:
+        cur.execute(
+            """SELECT id, status, scheduled_for, error, created_at, updated_at, topic,
+                      COALESCE(generated_article->>'title', topic) AS title,
+                      (featured_image_url IS NOT NULL) AS has_image
+               FROM article_wizard_sessions
+               WHERE store_id = %s AND scheduled_for IS NOT NULL AND status != 'published'
+               ORDER BY scheduled_for""",
+            (store_id,),
+        )
+        rows = [dict(r) for r in cur.fetchall()]
+    return jsonify({"sessions": rows})
+
+
+@blog_bp.route("/api/blog/scheduled/<int:session_id>", methods=["PATCH"])
+def reschedule_blog_post(session_id):
+    """Change a scheduled blog session's publish time."""
+    data = request.get_json(silent=True) or {}
+    try:
+        scheduled_for = _parse_scheduled_at(data.get("scheduled_at"))
+    except (ValueError, TypeError):
+        return jsonify({"error": "A valid scheduled_at is required"}), 400
+    with db.get_cursor() as cur:
+        cur.execute(
+            """UPDATE article_wizard_sessions SET scheduled_for = %s, updated_at = NOW()
+               WHERE id = %s AND scheduled_for IS NOT NULL
+                 AND status NOT IN ('published', 'auto_publishing')""",
+            (scheduled_for, session_id),
+        )
+        if cur.rowcount == 0:
+            return jsonify({"error": "Session is publishing or already published"}), 409
+    return jsonify({"success": True})
+
+
+@blog_bp.route("/api/blog/scheduled/<int:session_id>/publish-now", methods=["POST"])
+def publish_blog_now(session_id):
+    """Publish a ready session immediately, or resume a failed one from the
+    first missing pipeline artifact."""
+    session = _fetch_wizard_session(session_id)
+    if not session or not session.get("scheduled_for"):
+        return jsonify({"error": "Session not found"}), 404
+
+    ready = bool(session.get("generated_article"))
+    # Atomic claim — same guard as the scheduler tick, so the two can never
+    # double-publish the same session.
+    with db.get_cursor() as cur:
+        cur.execute(
+            """UPDATE article_wizard_sessions SET status = %s, error = NULL, updated_at = NOW()
+               WHERE id = %s AND status IN ('scheduled', 'failed') RETURNING store_id""",
+            ("auto_publishing" if ready else "auto_queued", session_id),
+        )
+        row = cur.fetchone()
+    if not row:
+        return jsonify({"error": "Session is not ready to publish"}), 409
+
+    store, client = _get_store_client(row["store_id"])
+    if not client:
+        with db.get_cursor() as cur:
+            cur.execute(
+                "UPDATE article_wizard_sessions SET status = 'failed', error = 'Store not found', updated_at = NOW() WHERE id = %s",
+                (session_id,),
+            )
+        return jsonify({"error": "Store not found"}), 404
+
+    if ready:
+        def _run():
+            try:
+                _wizard_step_publish(_fetch_wizard_session(session_id), store, client, True)
+            except Exception as e:
+                logger.exception("publish_blog_now: session %s failed: %s", session_id, e)
+                with db.get_cursor() as cur:
+                    cur.execute(
+                        "UPDATE article_wizard_sessions SET status = 'failed', error = %s, updated_at = NOW() WHERE id = %s",
+                        (str(e), session_id),
+                    )
+
+        threading.Thread(target=_run, daemon=True).start()
+    else:
+        # Failed mid-pipeline: resume; the session parks 'scheduled' and an
+        # overdue slot publishes on the next scheduler tick (≤60s later).
+        _spawn_blog_auto_pipeline(session_id, store, client)
+    return jsonify({"success": True, "resumed": not ready})
+
+
+@blog_bp.route("/api/blog/scheduled/<int:session_id>", methods=["DELETE"])
+def cancel_scheduled_post(session_id):
+    """Cancel a scheduled post; the suggestion returns to the idea pool.
+    Disallowed mid-processing or once publishing."""
+    with db.get_cursor() as cur:
+        # Look the suggestion up first — deleting the session would SET NULL
+        # its wizard_session_id and lose the link.
+        cur.execute("SELECT id FROM topic_suggestions WHERE wizard_session_id = %s", (session_id,))
+        sugg = cur.fetchone()
+        cur.execute(
+            """DELETE FROM article_wizard_sessions
+               WHERE id = %s AND scheduled_for IS NOT NULL
+                 AND status IN ('scheduled', 'failed', 'auto_queued')""",
+            (session_id,),
+        )
+        if cur.rowcount == 0:
+            return jsonify({"error": "Session is still processing or already published"}), 409
+        if sugg:
+            cur.execute(
+                "UPDATE topic_suggestions SET status = 'suggested', wizard_session_id = NULL, updated_at = NOW() WHERE id = %s",
+                (sugg["id"],),
+            )
+    return jsonify({"success": True})
+
+
+@blog_bp.route("/api/blog/schedule-settings", methods=["GET"])
+def get_schedule_settings():
+    store_id = request.args.get("store_id", type=int)
+    if not store_id:
+        return jsonify({"error": "store_id is required"}), 400
+    interval_days, publish_time = _get_schedule_settings(store_id)
+    return jsonify({
+        "interval_days": interval_days,
+        "publish_time": publish_time.strftime("%H:%M"),
+        "next_slot": _iso_utc(_next_open_slot(store_id)),
+    })
+
+
+@blog_bp.route("/api/blog/schedule-settings", methods=["PUT"])
+def save_schedule_settings():
+    data = request.get_json(silent=True) or {}
+    store_id = data.get("store_id")
+    if not store_id:
+        return jsonify({"error": "store_id is required"}), 400
+    try:
+        interval_days = max(1, int(data.get("interval_days") or 7))
+        hours, minutes = str(data.get("publish_time") or "09:00").split(":")
+        publish_time = dt_time(int(hours), int(minutes))
+    except (ValueError, TypeError):
+        return jsonify({"error": "interval_days must be a number and publish_time HH:MM"}), 400
+    with db.get_cursor() as cur:
+        cur.execute(
+            """INSERT INTO blog_schedule_settings (store_id, interval_days, publish_time, updated_at)
+               VALUES (%s, %s, %s, NOW())
+               ON CONFLICT (store_id) DO UPDATE SET
+                   interval_days = EXCLUDED.interval_days,
+                   publish_time = EXCLUDED.publish_time, updated_at = NOW()""",
+            (store_id, interval_days, publish_time),
+        )
+    return jsonify({"success": True, "next_slot": _iso_utc(_next_open_slot(store_id))})
 
 
 @blog_bp.route("/api/blog/wizard/<int:session_id>/keywords", methods=["PUT"])
@@ -1568,17 +2120,6 @@ def wizard_generate_image(session_id):
 
     generated = session.get("generated_article") or {}
     title = generated.get("title") or session["topic"]
-    keywords = session.get("target_keywords") or []
-
-    product_titles = []
-    target_product_ids = session.get("target_product_ids") or []
-    if target_product_ids:
-        with db.get_cursor() as cur:
-            cur.execute(
-                "SELECT title FROM synced_products WHERE id = ANY(%s)",
-                (target_product_ids,),
-            )
-            product_titles = [r["title"] for r in cur.fetchall()]
 
     with db.get_cursor() as cur:
         cur.execute(
@@ -1598,26 +2139,15 @@ def wizard_generate_image(session_id):
         try:
             with db.get_cursor() as cur:
                 cur.execute("UPDATE ai_tasks SET status = 'running' WHERE id = %s", (task_id,))
-
-            from app.services.image_generator import generate_blog_image_ai
-            result = generate_blog_image_ai(title, keywords=keywords, product_titles=product_titles)
-            if not result:
-                raise Exception("Image generation returned no result")
-
-            image_bytes, filename, alt_text, width, height = result
-
-            mime = "image/webp" if filename.endswith(".webp") else "image/jpeg"
-            staged = client.staged_upload_create(filename, mime, len(image_bytes), resource="IMAGE")
-            resource_url = client.upload_staged_file(staged, image_bytes, content_type=mime)
-
+            result = _wizard_step_image(session, client)
             with db.get_cursor() as cur:
                 cur.execute(
-                    "UPDATE article_wizard_sessions SET featured_image_url = %s, status = 'generated', updated_at = NOW() WHERE id = %s",
-                    (resource_url, session_id),
+                    "UPDATE article_wizard_sessions SET status = 'generated', updated_at = NOW() WHERE id = %s",
+                    (session_id,),
                 )
                 cur.execute(
                     "UPDATE ai_tasks SET status = 'completed', result = %s, completed_at = NOW() WHERE id = %s",
-                    (json.dumps({"image_url": resource_url, "alt_text": alt_text, "width": width, "height": height}), task_id),
+                    (json.dumps(result), task_id),
                 )
         except Exception as e:
             logger.exception("Blog image generation failed: %s", e)
@@ -1668,22 +2198,11 @@ def wizard_outline(session_id):
         try:
             with db.get_cursor() as cur:
                 cur.execute("UPDATE ai_tasks SET status = 'running' WHERE id = %s", (task_id,))
-            from app.ai_agent import run_task as ai_run_task
-            result = ai_run_task(
-                "article_outline",
-                {
-                    "session_id": session_id,
-                    "topic": session["topic"],
-                    "keywords": session["target_keywords"],
-                    "research_data": session["research_data"],
-                    "store_id": session["store_id"],
-                },
-                store_id=session["store_id"],
-            )
+            result = _wizard_step_outline(session)
             with db.get_cursor() as cur:
                 cur.execute(
-                    "UPDATE article_wizard_sessions SET outline_data = %s, status = 'outlined', updated_at = NOW() WHERE id = %s",
-                    (json.dumps(result), session_id),
+                    "UPDATE article_wizard_sessions SET status = 'outlined', updated_at = NOW() WHERE id = %s",
+                    (session_id,),
                 )
                 cur.execute(
                     "UPDATE ai_tasks SET status = 'completed', result = %s, completed_at = NOW() WHERE id = %s",
@@ -1752,23 +2271,11 @@ def wizard_generate(session_id):
         try:
             with db.get_cursor() as cur:
                 cur.execute("UPDATE ai_tasks SET status = 'running' WHERE id = %s", (task_id,))
-            from app.ai_agent import run_task as ai_run_task
-            result = ai_run_task(
-                "article_generate",
-                {
-                    "session_id": session_id,
-                    "topic": session["topic"],
-                    "keywords": session["target_keywords"],
-                    "outline_data": session["outline_data"],
-                    "research_data": session["research_data"],
-                    "store_id": session["store_id"],
-                },
-                store_id=session["store_id"],
-            )
+            result = _wizard_step_generate(session)
             with db.get_cursor() as cur:
                 cur.execute(
-                    "UPDATE article_wizard_sessions SET generated_article = %s, status = 'generated', current_step = 5, updated_at = NOW() WHERE id = %s",
-                    (json.dumps(result), session_id),
+                    "UPDATE article_wizard_sessions SET status = 'generated', current_step = 5, updated_at = NOW() WHERE id = %s",
+                    (session_id,),
                 )
                 cur.execute(
                     "UPDATE ai_tasks SET status = 'completed', result = %s, completed_at = NOW() WHERE id = %s",
@@ -1821,135 +2328,19 @@ def wizard_publish(session_id):
     if not session:
         return jsonify({"error": "Session not found"}), 404
 
-    generated = session.get("generated_article") or {}
-    blog_id = session.get("blog_id")
-
     store, client = _get_store_client(session["store_id"])
     if not client:
         return jsonify({"error": "Store not found"}), 404
 
-    # Always publish to News blog
-    blog = None
-    with db.get_cursor() as cur:
-        cur.execute(
-            "SELECT * FROM synced_blogs WHERE store_id = %s AND handle = 'news'",
-            (session["store_id"],),
-        )
-        blog = cur.fetchone()
-
-    if not blog:
-        blog_result = client.create_blog("News")
-        with db.get_cursor() as cur:
-            cur.execute(
-                """INSERT INTO synced_blogs (store_id, shopify_id, title, handle, synced_at)
-                VALUES (%s, %s, %s, %s, NOW())
-                ON CONFLICT (store_id, shopify_id) DO UPDATE SET
-                    title = EXCLUDED.title, handle = EXCLUDED.handle, synced_at = NOW()
-                RETURNING *""",
-                (session["store_id"], blog_result["shopify_id"], blog_result["title"], blog_result.get("handle", "news")),
-            )
-            blog = cur.fetchone()
-
-    blog_id = blog["id"]
-
-    fields = {
-        "title": generated.get("title", session["topic"]),
-        "body": generated.get("body_html", ""),
-        "summary": generated.get("summary", ""),
-        "tags": generated.get("tags", []),
-        "meta_title": generated.get("meta_title", ""),
-        "meta_description": generated.get("meta_description", ""),
-        "is_published": is_published,
-    }
-
-    handle = (generated.get("handle") or "").strip()
-    if handle:
-        fields["handle"] = handle
-
-    if session.get("featured_image_url"):
-        fields["image_url"] = session["featured_image_url"]
-        fields["image_alt"] = generated.get("title", session["topic"])
-
-    existing_article_id = session.get("shopify_article_id")
     try:
-        if existing_article_id:
-            # Re-save: update the article this session already created rather than
-            # creating a duplicate (which would collide on handle).
-            raw = client.update_article(existing_article_id, fields)
-            result = {
-                "shopify_id": raw.get("id") or existing_article_id,
-                "title": raw.get("title", ""),
-                "handle": raw.get("handle", ""),
-                "image_url": fields.get("image_url", ""),
-                "image_alt": fields.get("image_alt", ""),
-            }
-        else:
-            try:
-                result = client.create_article(blog["shopify_id"], fields)
-            except Exception as create_err:
-                # A pre-existing article already owns this handle — let Shopify
-                # auto-generate a unique one instead of failing the whole save.
-                if "Handle has already been taken" in str(create_err):
-                    fields.pop("handle", None)
-                    result = client.create_article(blog["shopify_id"], fields)
-                else:
-                    raise
+        result = _wizard_step_publish(session, store, client, is_published)
     except Exception as e:
         logger.exception("Wizard publish failed for session %s: %s", session_id, e)
         return jsonify({"error": f"Shopify rejected the article: {e}"}), 502
 
-    cdn_image_url = result.get("image_url", "")
-    if not cdn_image_url or "shopify-staged-uploads" in cdn_image_url:
-        cdn_image_url = fields.get("image_url", "")
-    if "shopify-staged-uploads" in (cdn_image_url or ""):
-        cdn_image_url = ""
-
-    with db.get_cursor() as cur:
-        cur.execute(
-            """INSERT INTO synced_articles
-                (store_id, blog_id, shopify_id, shopify_blog_id, title, handle,
-                 body, summary, tags, meta_title, meta_description,
-                 image_url, image_alt, is_published, article_type, synced_at,
-                 published_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'blog', NOW(),
-                    CASE WHEN %s THEN NOW() END)
-            ON CONFLICT (store_id, shopify_id) DO UPDATE SET
-                title = EXCLUDED.title, handle = EXCLUDED.handle,
-                body = EXCLUDED.body, article_type = 'blog', synced_at = NOW(),
-                published_at = COALESCE(synced_articles.published_at, EXCLUDED.published_at)
-            RETURNING id""",
-            (
-                session["store_id"],
-                blog_id,
-                result["shopify_id"],
-                blog["shopify_id"],
-                fields["title"],
-                result.get("handle", ""),
-                fields["body"],
-                fields["summary"],
-                ", ".join(fields["tags"]) if isinstance(fields["tags"], list) else fields["tags"],
-                fields["meta_title"],
-                fields["meta_description"],
-                cdn_image_url,
-                result.get("image_alt", "") or fields.get("image_alt", ""),
-                is_published,
-                is_published,
-            ),
-        )
-        article_row = cur.fetchone()
-
-        cur.execute(
-            "UPDATE article_wizard_sessions SET status = 'published', current_step = 6, shopify_article_id = %s, updated_at = NOW() WHERE id = %s",
-            (result["shopify_id"], session_id),
-        )
-
-    # Auto-regenerate landing page for this blog
-    if is_published:
-        _regen_landing_async(session["store_id"], blog_id, client, store)
-
     return jsonify({
         "success": True,
-        "article_id": article_row["id"],
+        "article_id": result["article_id"],
         "shopify_id": result["shopify_id"],
     })
 

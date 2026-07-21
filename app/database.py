@@ -548,6 +548,26 @@ class Database:
                 END $$
             """)
             cur.execute("""
+                DO $$ BEGIN
+                    ALTER TABLE article_wizard_sessions ADD COLUMN scheduled_for TIMESTAMP;
+                EXCEPTION WHEN duplicate_column THEN NULL;
+                END $$
+            """)
+            cur.execute("""
+                DO $$ BEGIN
+                    ALTER TABLE article_wizard_sessions ADD COLUMN error TEXT;
+                EXCEPTION WHEN duplicate_column THEN NULL;
+                END $$
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS blog_schedule_settings (
+                    store_id INTEGER PRIMARY KEY REFERENCES stores(id) ON DELETE CASCADE,
+                    interval_days INTEGER DEFAULT 7,
+                    publish_time TIME DEFAULT '09:00',
+                    updated_at TIMESTAMP DEFAULT NOW()
+                )
+            """)
+            cur.execute("""
                 CREATE TABLE IF NOT EXISTS blog_landing_pages (
                     id SERIAL PRIMARY KEY,
                     store_id INTEGER REFERENCES stores(id) ON DELETE CASCADE,
@@ -794,6 +814,15 @@ class Database:
                     "error = COALESCE(error, 'Interrupted — server restarted'), updated_at = NOW() "
                     "WHERE status IN ('analyzing', 'auto_queued', 'auto_analyzing', 'auto_hero', "
                     "'auto_inline', 'auto_links', 'auto_publishing')"
+                )
+                # Scheduled blog pipeline sessions in a transient state are dead too.
+                # 'scheduled' is a resting state and survives restarts; the
+                # scheduled_for guard keeps manual wizard sessions untouched.
+                cur.execute(
+                    "UPDATE article_wizard_sessions SET status = 'failed', "
+                    "error = COALESCE(error, 'Interrupted — server restarted'), updated_at = NOW() "
+                    "WHERE scheduled_for IS NOT NULL AND status IN ('auto_queued', 'auto_researching', "
+                    "'auto_outlining', 'auto_generating', 'auto_image', 'auto_publishing')"
                 )
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS news_hub_pages (
