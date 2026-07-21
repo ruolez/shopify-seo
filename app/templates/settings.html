@@ -125,6 +125,38 @@
                             </div>
                         </form>
                     </div>
+                    <div class="card" style="max-width: 640px; margin-top: 24px;">
+                        <div class="card-header">
+                            <h3>Dashboard Automation</h3>
+                        </div>
+                        <p style="color: var(--on-surface-secondary); font-size: 13px; margin: 0 0 16px;">
+                            Nightly snapshot, anomaly and gap scans always run (free). The weekly AI visibility
+                            run spends OpenRouter credits and is off by default.
+                        </p>
+                        <form id="dash-automation-form">
+                            <div class="form-group" style="display:flex;align-items:center;gap:10px;">
+                                <input type="checkbox" id="dash-weekly-visibility" style="width:auto;">
+                                <label for="dash-weekly-visibility" style="margin:0;">Run AI visibility tracking weekly (paid)</label>
+                            </div>
+                            <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;">
+                                <div class="form-group">
+                                    <label for="dash-anomaly-drop">Click drop alert (%)</label>
+                                    <input type="number" id="dash-anomaly-drop" class="form-control" min="5" max="95">
+                                </div>
+                                <div class="form-group">
+                                    <label for="dash-anomaly-clicks">Min weekly clicks</label>
+                                    <input type="number" id="dash-anomaly-clicks" class="form-control" min="1">
+                                </div>
+                                <div class="form-group">
+                                    <label for="dash-anomaly-volume">Min keyword volume</label>
+                                    <input type="number" id="dash-anomaly-volume" class="form-control" min="0">
+                                </div>
+                            </div>
+                            <div class="form-actions">
+                                <button type="submit" class="btn btn-primary">Save Dashboard Settings</button>
+                            </div>
+                        </form>
+                    </div>
                 </div>
 
                 <!-- Tab 2: AI Prompts -->

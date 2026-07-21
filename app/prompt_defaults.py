@@ -1,4 +1,11 @@
 DEFAULTS = {
+    # --- Dashboard automation ---
+    "dashboard.weekly_visibility_enabled": False,
+    "dashboard.anomaly": {
+        "clicks_drop_pct": 30,
+        "min_weekly_clicks": 10,
+        "min_keyword_volume": 50,
+    },
     # --- AI Prompts ---
     "prompts.product_seo": (
         "You are an expert Shopify SEO consultant. Your job is to analyze product data "

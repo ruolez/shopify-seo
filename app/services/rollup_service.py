@@ -209,6 +209,18 @@ class NightlyScheduler:
                 take_store_snapshot(store_id, today)
             except Exception as e:
                 logger.error("Snapshot failed for store %s: %s", store_id, str(e))
+                continue
+            # Once per day, alongside the snapshot: anomaly + gap scans and
+            # the opt-in weekly paid runs.
+            from app.services.anomaly_service import maybe_run_weekly_visibility, run_nightly_scans
+            try:
+                run_nightly_scans(store_id)
+            except Exception as e:
+                logger.error("Nightly scans failed for store %s: %s", store_id, str(e))
+            try:
+                maybe_run_weekly_visibility(store_id)
+            except Exception as e:
+                logger.error("Weekly visibility check failed for store %s: %s", store_id, str(e))
 
 
 _scheduler = None

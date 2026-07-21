@@ -71,6 +71,14 @@
                     <div style="height:260px;padding:0 8px 8px;"><canvas id="trend-chart"></canvas></div>
                 </div>
 
+                <!-- Since-you-were-here feed: anomalies, closures, activity -->
+                <div id="changes-card" class="card" style="display:none;margin-bottom:24px;">
+                    <div class="card-header" style="display:flex;align-items:center;justify-content:space-between;">
+                        <h3><span class="material-symbols-rounded" style="vertical-align:middle;font-size:20px;">notifications</span> Since You Were Here <span id="changes-note" style="font-weight:400;font-size:12px;color:var(--on-surface-secondary);"></span></h3>
+                    </div>
+                    <div id="dash-changes" style="padding:0 16px 12px;"></div>
+                </div>
+
                 <!-- Unified action queue: one prioritized to-do list across all engines -->
                 <div id="queue-card" class="card" style="display:none;margin-bottom:24px;">
                     <div class="card-header" style="display:flex;align-items:center;justify-content:space-between;">

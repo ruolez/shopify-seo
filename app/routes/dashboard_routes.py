@@ -61,6 +61,22 @@ def dashboard_movers():
     return jsonify(dashboard_service.get_rank_movers(store_id, limit))
 
 
+@dashboard_bp.route("/api/dashboard/changes")
+def dashboard_changes():
+    store_id = _resolve_store_id()
+    if not store_id:
+        return jsonify({"since": None, "items": [], "counts_by_type": {}})
+    return jsonify(dashboard_service.get_changes_feed(store_id))
+
+
+@dashboard_bp.route("/api/dashboard/changes/seen", methods=["POST"])
+def dashboard_changes_seen():
+    store_id = _resolve_store_id()
+    if store_id:
+        dashboard_service.mark_changes_seen(store_id)
+    return jsonify({"ok": True})
+
+
 @dashboard_bp.route("/api/dashboard/ops")
 def dashboard_ops():
     store_id = _resolve_store_id()

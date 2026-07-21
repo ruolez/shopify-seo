@@ -695,6 +695,13 @@ def get_ops(store_id):
             (store_id,),
         )
         published_month = int(cur.fetchone()["cnt"] or 0)
+        cur.execute(
+            """SELECT COUNT(*) AS cnt FROM content_gaps
+               WHERE store_id = %s AND status = 'addressed'
+                 AND addressed_at >= date_trunc('month', NOW())""",
+            (store_id,),
+        )
+        gaps_closed_month = int(cur.fetchone()["cnt"] or 0)
 
     completed_7d = int(t["completed_7d"] or 0)
     failed_7d = int(t["failed_7d"] or 0)
@@ -721,9 +728,65 @@ def get_ops(store_id):
             "news_drafts": int(news["drafts"] or 0),
             "topics_accepted": topics_accepted,
             "published_this_month": published_month,
+            "gaps_closed_this_month": gaps_closed_month,
         },
         "coverage": get_coverage(store_id),
     }
+
+
+def get_changes_feed(store_id, limit=30):
+    """Everything that happened since the user last looked, floor 24h
+    (a refresh never wipes the feed mid-read), cap 30 days."""
+    from app.settings_manager import get_setting
+
+    now = datetime.now(timezone.utc)
+    last_visit = None
+    raw = get_setting(f"dashboard_last_visit_{store_id}")
+    if raw:
+        try:
+            last_visit = datetime.fromisoformat(raw)
+            if last_visit.tzinfo is None:
+                last_visit = last_visit.replace(tzinfo=timezone.utc)
+        except ValueError:
+            pass
+
+    since = last_visit if last_visit else now - timedelta(days=7)
+    since = min(since, now - timedelta(hours=24))
+    since = max(since, now - timedelta(days=30))
+
+    with db.get_cursor() as cur:
+        cur.execute(
+            """SELECT id, event_type, severity, subject, payload, status, created_at
+               FROM dashboard_events
+               WHERE store_id = %s AND created_at >= %s AND status <> 'resolved'
+               ORDER BY created_at DESC LIMIT %s""",
+            (store_id, since.replace(tzinfo=None), limit),
+        )
+        rows = cur.fetchall()
+
+    counts = {}
+    items = []
+    for r in rows:
+        counts[r["event_type"]] = counts.get(r["event_type"], 0) + 1
+        payload = r["payload"]
+        if isinstance(payload, str):
+            payload = json.loads(payload)
+        items.append(
+            {
+                "id": r["id"],
+                "event_type": r["event_type"],
+                "severity": r["severity"],
+                "subject": r["subject"],
+                "payload": payload or {},
+                "created_at": r["created_at"].isoformat(),
+            }
+        )
+    return {"since": since.isoformat(), "items": items, "counts_by_type": counts}
+
+
+def mark_changes_seen(store_id):
+    from app.settings_manager import set_setting
+    set_setting(f"dashboard_last_visit_{store_id}", datetime.now(timezone.utc).isoformat())
 
 
 def get_rank_movers(store_id, limit=10):

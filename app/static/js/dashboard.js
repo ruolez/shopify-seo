@@ -22,7 +22,7 @@ document.addEventListener("DOMContentLoaded", () => {
 function loadDashboard() {
     // Reset store-scoped widgets so a store switch never shows stale data
     // from the previous store while the new requests are in flight.
-    for (const id of ["trend-card", "queue-card", "ctr-card", "impact-card", "movers-card", "ops-row", "dash-freshness"]) {
+    for (const id of ["trend-card", "queue-card", "ctr-card", "impact-card", "movers-card", "ops-row", "dash-freshness", "changes-card"]) {
         document.getElementById(id).style.display = "none";
     }
     loadOverview().then(() => {
@@ -33,6 +33,7 @@ function loadDashboard() {
         loadImpact();
         loadMovers();
         loadOps();
+        loadChanges();
     });
 }
 
@@ -433,7 +434,8 @@ async function loadOps() {
             pipelineRow("Scheduled news", p.news_scheduled ?? 0, "/news") +
             pipelineRow("Drafts in progress", p.news_drafts ?? 0, "/news") +
             pipelineRow("Accepted topics waiting", p.topics_accepted ?? 0, "/blog") +
-            pipelineRow("Published this month", p.published_this_month ?? 0, "/blog");
+            pipelineRow("Published this month", p.published_this_month ?? 0, "/blog") +
+            pipelineRow("Gaps closed this month", p.gaps_closed_this_month ?? 0, "/content-gaps");
 
         // Coverage bars
         const c = data.coverage || {};
@@ -479,5 +481,69 @@ async function loadOps() {
         document.getElementById("ops-row").style.display = "grid";
     } catch {
         // Ops data unavailable — row stays hidden
+    }
+}
+
+const CHANGE_EVENT_META = {
+    anomaly_clicks_drop: ["trending_down", "var(--error)", "Traffic drop"],
+    anomaly_keyword_dropout: ["keyboard_double_arrow_down", "var(--warning)", "Keyword dropout"],
+    gap_closed: ["task_alt", "var(--success)", "Gap closed"],
+    seo_applied: ["auto_fix_high", "var(--primary)", "Optimization applied"],
+    article_published: ["article", "var(--primary)", "Article published"],
+    visibility_run: ["psychology", "var(--primary)", "AI visibility"],
+    competitor_check: ["groups", "var(--warning)", "Competitors"],
+};
+
+function changeDetail(item) {
+    const p = item.payload || {};
+    switch (item.event_type) {
+        case "anomaly_clicks_drop":
+            return `clicks ${p.prev_clicks} → ${p.cur_clicks} (−${p.drop_pct}%) week over week`;
+        case "anomaly_keyword_dropout":
+            return `position ${p.previous_position} → ${p.position ?? "lost"}${p.volume ? ` · ${p.volume.toLocaleString()}/mo` : ""}${p.impressions ? ` · ${p.impressions.toLocaleString()} impressions` : ""}`;
+        case "gap_closed":
+            return `now ranking at position ${p.position}`;
+        case "seo_applied":
+            return p.change_type || "changes applied";
+        case "visibility_run":
+            return `${Math.round((p.share_of_voice || 0) * 100)}% share of voice`;
+        case "competitor_check":
+            return `${p.alerts} new ranking alerts`;
+        default:
+            return "";
+    }
+}
+
+async function loadChanges() {
+    try {
+        if (!dashStoreId) return;
+        const data = await apiRequest(`/api/dashboard/changes?store_id=${dashStoreId}`);
+        if (!data.items || !data.items.length) return;
+
+        document.getElementById("changes-note").textContent =
+            data.since ? `since ${formatRelativeTime(data.since)}` : "";
+
+        let html = "";
+        for (const item of data.items) {
+            const [icon, color, label] = CHANGE_EVENT_META[item.event_type] || ["info", "var(--on-surface-secondary)", item.event_type];
+            const detail = changeDetail(item);
+            const subject = (item.subject || "").replace(/^https?:\/\/[^/]+/, "");
+            html += `<div style="display:flex;align-items:center;gap:10px;padding:7px 0;border-bottom:1px solid var(--outline);">
+                <span class="material-symbols-rounded" style="font-size:18px;color:${color};">${icon}</span>
+                <div style="flex:1;min-width:0;">
+                    <div style="font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;"><strong>${label}:</strong> ${escapeHtml(subject)}</div>
+                    ${detail ? `<div style="font-size:11px;color:var(--on-surface-secondary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(detail)}</div>` : ""}
+                </div>
+                <span style="font-size:11px;color:var(--on-surface-secondary);white-space:nowrap;">${formatRelativeTime(item.created_at)}</span>
+            </div>`;
+        }
+        document.getElementById("dash-changes").innerHTML = html;
+        document.getElementById("changes-card").style.display = "";
+
+        // Advance the marker only after the feed rendered — a failed load
+        // must not swallow unseen events.
+        apiRequest(`/api/dashboard/changes/seen?store_id=${dashStoreId}`, { method: "POST", body: "{}" }).catch(() => {});
+    } catch {
+        // Feed unavailable — card stays hidden
     }
 }

@@ -710,6 +710,30 @@ class Database:
                     UNIQUE(store_id, snapshot_date)
                 )
             """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS dashboard_events (
+                    id SERIAL PRIMARY KEY,
+                    store_id INTEGER REFERENCES stores(id) ON DELETE CASCADE,
+                    event_type VARCHAR(50) NOT NULL,
+                    severity VARCHAR(20) DEFAULT 'info',
+                    subject VARCHAR(500),
+                    dedup_key VARCHAR(300) NOT NULL,
+                    payload JSONB DEFAULT '{}',
+                    status VARCHAR(20) DEFAULT 'open',
+                    created_at TIMESTAMP DEFAULT NOW(),
+                    UNIQUE(store_id, dedup_key)
+                )
+            """)
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_dashboard_events_store_created
+                ON dashboard_events(store_id, created_at)
+            """)
+            cur.execute("""
+                DO $$ BEGIN
+                    ALTER TABLE content_gaps ADD COLUMN addressed_at TIMESTAMP;
+                EXCEPTION WHEN duplicate_column THEN NULL;
+                END $$
+            """)
             # Backfill: any article without an explicit type is a blog post.
             cur.execute(
                 "UPDATE synced_articles SET article_type = 'blog' WHERE article_type IS NULL"

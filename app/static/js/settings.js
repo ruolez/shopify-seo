@@ -620,3 +620,43 @@ window.resetList = async function (key) {
         showToast(`Failed to reset: ${err.message}`, "error");
     }
 };
+
+// --- Dashboard automation settings ---
+async function loadDashboardAutomation() {
+    try {
+        const vis = await apiRequest("/api/settings/custom/dashboard.weekly_visibility_enabled");
+        document.getElementById("dash-weekly-visibility").checked = vis.value === true;
+        const anomaly = await apiRequest("/api/settings/custom/dashboard.anomaly");
+        const a = anomaly.value || {};
+        document.getElementById("dash-anomaly-drop").value = a.clicks_drop_pct ?? 30;
+        document.getElementById("dash-anomaly-clicks").value = a.min_weekly_clicks ?? 10;
+        document.getElementById("dash-anomaly-volume").value = a.min_keyword_volume ?? 50;
+    } catch {
+        // Defaults shown if load fails
+    }
+}
+
+document.getElementById("dash-automation-form")?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    try {
+        await apiRequest("/api/settings/custom/dashboard.weekly_visibility_enabled", {
+            method: "POST",
+            body: JSON.stringify({ value: document.getElementById("dash-weekly-visibility").checked }),
+        });
+        await apiRequest("/api/settings/custom/dashboard.anomaly", {
+            method: "POST",
+            body: JSON.stringify({
+                value: {
+                    clicks_drop_pct: parseInt(document.getElementById("dash-anomaly-drop").value, 10) || 30,
+                    min_weekly_clicks: parseInt(document.getElementById("dash-anomaly-clicks").value, 10) || 10,
+                    min_keyword_volume: parseInt(document.getElementById("dash-anomaly-volume").value, 10) || 0,
+                },
+            }),
+        });
+        showToast("Dashboard settings saved", "success");
+    } catch (err) {
+        showToast(err.message || "Failed to save dashboard settings", "error");
+    }
+});
+
+loadDashboardAutomation();
