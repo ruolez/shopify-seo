@@ -2953,7 +2953,11 @@ async function scheduleTopicSuggestion(id) {
         });
         s.status = "scheduled";
         renderTopicRuns();
-        showToast(`Scheduled for ${new Date(res.scheduled_for).toLocaleString()} — writing starts now`, "success");
+        showToast(`Scheduled for ${new Date(res.scheduled_for).toLocaleString()} — writing the article now`, "success");
+        // Show the work happening: the Scheduled tab live-refreshes the row
+        // through Researching… → Outlining… → Writing… → Image… → Ready.
+        const schedTab = document.querySelector('.tab[data-tab="scheduled"]');
+        if (schedTab) schedTab.click();
     } catch (err) {
         showToast(err.message, "error");
     }

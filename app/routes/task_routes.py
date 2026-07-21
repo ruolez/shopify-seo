@@ -954,6 +954,7 @@ AI_TASK_META = {
     "blog_hero_image": ("Blog Hero Image", "/blog"),
     "blog_image": ("Blog Image", "/blog"),
     "blog_seo_suggestions": ("Blog SEO Suggestions", "/blog"),
+    "scheduled_blog_post": ("Scheduled Blog Post", "/blog"),
     "brand_seo": ("Brand SEO", "/brands"),
     "home_page_generate": ("Home Page Generation", "/home-page"),
     "home_carousel_image": ("Home Carousel Image", "/home-page"),

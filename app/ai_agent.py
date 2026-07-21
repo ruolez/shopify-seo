@@ -593,6 +593,48 @@ def _split_keywords(keywords):
     secondary = keywords[1:] if len(keywords) > 1 else []
     return primary, secondary
 
+
+def _fix_internal_link_handles(body_html, store_id):
+    """Repair AI-mangled internal product/collection link handles (e.g.
+    '16-oz.-bag' written from the title instead of the real '16-oz-bag')
+    by matching hrefs against the store's synced handles."""
+    if not body_html or not store_id:
+        return body_html
+
+    def norm(h):
+        return re.sub(r"[^a-z0-9]", "", h.lower())
+
+    with db.get_cursor() as cur:
+        cur.execute(
+            "SELECT handle FROM synced_products WHERE store_id = %s AND handle IS NOT NULL AND handle != ''",
+            (store_id,),
+        )
+        product_handles = [r["handle"] for r in cur.fetchall()]
+        cur.execute(
+            "SELECT handle FROM synced_collections WHERE store_id = %s AND handle IS NOT NULL AND handle != ''",
+            (store_id,),
+        )
+        collection_handles = [r["handle"] for r in cur.fetchall()]
+
+    exact = {"products": set(product_handles), "collections": set(collection_handles)}
+    fuzzy = {
+        "products": {norm(h): h for h in product_handles},
+        "collections": {norm(h): h for h in collection_handles},
+    }
+
+    def repl(m):
+        kind, handle = m.group(1), m.group(2)
+        if handle in exact[kind]:
+            return m.group(0)
+        fixed = fuzzy[kind].get(norm(handle))
+        if fixed:
+            logger.info("Fixed mangled %s link handle: %s -> %s", kind, handle, fixed)
+            return f'href="/{kind}/{fixed}"'
+        return m.group(0)
+
+    return re.sub(r'href="/(products|collections)/([^"?#]+)"', repl, body_html)
+
+
 TOOL_DEFINITIONS = [
     {
         "type": "function",
@@ -4711,13 +4753,25 @@ def run_task(task_type, task_input, store_id=None):
             if research_data.get("content_angle_suggestions"):
                 user_parts.append(f"Content Angles: {', '.join(research_data['content_angle_suggestions'])}")
         if products:
-            user_parts.append("Products Available for Linking:\n" + "\n".join(
-                f"- {p['title']}: /products/{p['handle']}" for p in products[:20]
-            ))
+            product_lines = "\n".join(f"- {p['title']}: /products/{p['handle']}" for p in products[:20])
+            if target_product_ids:
+                user_parts.append(
+                    "Hand-Picked Products (deliberately selected for this article — EVERY one "
+                    "must appear in internal_link_plan, each linked once in its most relevant section):\n"
+                    + product_lines
+                )
+            else:
+                user_parts.append("Products Available for Linking:\n" + product_lines)
         if collections:
-            user_parts.append("Collections Available for Linking:\n" + "\n".join(
-                f"- {c['title']}: /collections/{c['handle']}" for c in collections[:15]
-            ))
+            collection_lines = "\n".join(f"- {c['title']}: /collections/{c['handle']}" for c in collections[:15])
+            if target_collection_ids:
+                user_parts.append(
+                    "Hand-Picked Collections (deliberately selected for this article — EVERY one "
+                    "must appear in internal_link_plan, each linked once in its most relevant section):\n"
+                    + collection_lines
+                )
+            else:
+                user_parts.append("Collections Available for Linking:\n" + collection_lines)
 
         response = client.chat.completions.create(
             model=config["model"],
@@ -4831,13 +4885,23 @@ def run_task(task_type, task_input, store_id=None):
                 user_parts.append(f"INTERNAL LINK PLAN:\n{link_plan}")
 
         if products:
-            user_parts.append("PRODUCTS FOR LINKING:\n" + "\n".join(
-                f"- {p['title']}: /products/{p['handle']}" for p in products[:20]
-            ))
+            product_lines = "\n".join(f"- {p['title']}: /products/{p['handle']}" for p in products[:20])
+            if target_product_ids:
+                user_parts.append(
+                    "REQUIRED PRODUCT LINKS (hand-picked for this article — link EVERY product "
+                    "below exactly once, with natural anchor text where most relevant):\n" + product_lines
+                )
+            else:
+                user_parts.append("PRODUCTS FOR LINKING:\n" + product_lines)
         if collections:
-            user_parts.append("COLLECTIONS FOR LINKING:\n" + "\n".join(
-                f"- {c['title']}: /collections/{c['handle']}" for c in collections[:15]
-            ))
+            collection_lines = "\n".join(f"- {c['title']}: /collections/{c['handle']}" for c in collections[:15])
+            if target_collection_ids:
+                user_parts.append(
+                    "REQUIRED COLLECTION LINKS (hand-picked for this article — link EVERY collection "
+                    "below exactly once, with natural anchor text where most relevant):\n" + collection_lines
+                )
+            else:
+                user_parts.append("COLLECTIONS FOR LINKING:\n" + collection_lines)
         if other_articles:
             user_parts.append("OTHER ARTICLES FOR CROSS-LINKING:\n" + "\n".join(
                 f"- {a['title']}: /blogs/{a['blog_handle']}/{a['handle']}" for a in other_articles[:10]
@@ -4858,6 +4922,7 @@ def run_task(task_type, task_input, store_id=None):
         body_content = re.sub(r"^```(?:html)?\s*\n?", "", body_content)
         body_content = re.sub(r"\n?```\s*$", "", body_content)
         body_content = _sanitize_description(body_content)
+        body_content = _fix_internal_link_handles(body_content, gen_store_id)
 
         # Count stats
         text_only = re.sub(r"<[^>]+>", "", body_content)

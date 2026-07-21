@@ -1783,6 +1783,57 @@ def _flatten_topic_keywords(kw):
     return out
 
 
+def _resolve_product_targets(store_id, names):
+    """Suggestion product names → synced_products ids (the manual wizard resolves
+    these through the linking search UI; the auto pipeline resolves them here).
+    Exact case-insensitive match first, then substring."""
+    ids = []
+    with db.get_cursor() as cur:
+        for name in names or []:
+            name = (name or "").strip() if isinstance(name, str) else ""
+            if not name:
+                continue
+            cur.execute(
+                "SELECT id FROM synced_products WHERE store_id = %s AND status = 'ACTIVE' AND title ILIKE %s LIMIT 1",
+                (store_id, name),
+            )
+            row = cur.fetchone()
+            if not row:
+                cur.execute(
+                    "SELECT id FROM synced_products WHERE store_id = %s AND status = 'ACTIVE' AND title ILIKE %s ORDER BY LENGTH(title) LIMIT 1",
+                    (store_id, f"%{name}%"),
+                )
+                row = cur.fetchone()
+            if row and row["id"] not in ids:
+                ids.append(row["id"])
+    return ids
+
+
+def _resolve_collection_targets(store_id, names):
+    """Suggestion collection names → synced_collections ids (only collections
+    with a live handle, mirroring the wizard's collection search)."""
+    ids = []
+    with db.get_cursor() as cur:
+        for name in names or []:
+            name = (name or "").strip() if isinstance(name, str) else ""
+            if not name:
+                continue
+            cur.execute(
+                "SELECT id FROM synced_collections WHERE store_id = %s AND handle IS NOT NULL AND handle != '' AND title ILIKE %s LIMIT 1",
+                (store_id, name),
+            )
+            row = cur.fetchone()
+            if not row:
+                cur.execute(
+                    "SELECT id FROM synced_collections WHERE store_id = %s AND handle IS NOT NULL AND handle != '' AND title ILIKE %s ORDER BY LENGTH(title) LIMIT 1",
+                    (store_id, f"%{name}%"),
+                )
+                row = cur.fetchone()
+            if row and row["id"] not in ids:
+                ids.append(row["id"])
+    return ids
+
+
 def _run_blog_auto_pipeline(session_id, store, client):
     """Run the wizard pipeline unattended: research → outline → generate →
     featured image, then park in 'scheduled' for the blog scheduler. Resumable —
@@ -1821,15 +1872,35 @@ def _run_blog_auto_pipeline(session_id, store, client):
 
 
 def _spawn_blog_auto_pipeline(session_id, store, client):
+    # One ai_tasks row per pipeline run so the Tasks panel shows the
+    # background writing; per-step tasks stay a manual-wizard concern.
+    session = _fetch_wizard_session(session_id)
+    with db.get_cursor() as cur:
+        cur.execute(
+            """INSERT INTO ai_tasks (store_id, task_type, status, input)
+            VALUES (%s, 'scheduled_blog_post', 'running', %s) RETURNING id""",
+            (session["store_id"], json.dumps({"session_id": session_id, "topic": session["topic"]})),
+        )
+        task_id = cur.fetchone()["id"]
+
     def _run():
         try:
             _run_blog_auto_pipeline(session_id, store, client)
+            with db.get_cursor() as cur:
+                cur.execute(
+                    "UPDATE ai_tasks SET status = 'completed', result = %s, completed_at = NOW() WHERE id = %s",
+                    (json.dumps({"session_id": session_id, "status": "scheduled"}), task_id),
+                )
         except Exception as e:
             logger.exception("Blog auto pipeline: session %s failed: %s", session_id, e)
             with db.get_cursor() as cur:
                 cur.execute(
                     "UPDATE article_wizard_sessions SET status = 'failed', error = %s, updated_at = NOW() WHERE id = %s",
                     (str(e), session_id),
+                )
+                cur.execute(
+                    "UPDATE ai_tasks SET status = 'failed', error = %s, completed_at = NOW() WHERE id = %s",
+                    (str(e), task_id),
                 )
 
     threading.Thread(target=_run, daemon=True).start()
@@ -1868,13 +1939,17 @@ def schedule_from_suggestion():
 
     topic = suggestion.get("topic") or suggestion.get("h1") or ""
     keywords = _flatten_topic_keywords(suggestion.get("keywords"))
+    product_ids = _resolve_product_targets(store_id, suggestion.get("target_products"))
+    collection_ids = _resolve_collection_targets(store_id, suggestion.get("target_collections"))
 
     with db.get_cursor() as cur:
         cur.execute(
             """INSERT INTO article_wizard_sessions
-                (store_id, topic, target_keywords, status, current_step, scheduled_for)
-            VALUES (%s, %s, %s, 'auto_queued', 1, %s) RETURNING id""",
-            (store_id, topic, json.dumps(keywords), scheduled_for),
+                (store_id, topic, target_keywords, target_product_ids, target_collection_ids,
+                 status, current_step, scheduled_for)
+            VALUES (%s, %s, %s, %s, %s, 'auto_queued', 1, %s) RETURNING id""",
+            (store_id, topic, json.dumps(keywords), json.dumps(product_ids),
+             json.dumps(collection_ids), scheduled_for),
         )
         session_id = cur.fetchone()["id"]
         cur.execute(
