@@ -21,7 +21,10 @@
                 </div>
             </div>
             <div class="page-content">
-                <div id="dash-store-line" style="display:none;margin-bottom:16px;font-size:13px;color:var(--on-surface-secondary);"></div>
+                <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:16px;">
+                    <div id="dash-store-line" style="display:none;font-size:13px;color:var(--on-surface-secondary);"></div>
+                    <div id="dash-freshness" style="display:none;font-size:11px;color:var(--on-surface-secondary);gap:10px;flex-wrap:wrap;align-items:center;"></div>
+                </div>
 
                 <div class="stats-grid" id="kpi-grid">
                     <div class="stat-card">
@@ -98,6 +101,22 @@
                             </thead>
                             <tbody id="dash-ctr-rows"></tbody>
                         </table>
+                    </div>
+                </div>
+
+                <!-- Operational cards: content pipeline, coverage, AI ops -->
+                <div id="ops-row" style="display:none;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:24px;margin-bottom:24px;">
+                    <div class="card" style="margin-bottom:0;">
+                        <div class="card-header"><h3><span class="material-symbols-rounded" style="vertical-align:middle;font-size:20px;">edit_note</span> Content Pipeline</h3></div>
+                        <div id="dash-pipeline" style="padding:0 16px 12px;font-size:13px;"></div>
+                    </div>
+                    <div class="card" style="margin-bottom:0;">
+                        <div class="card-header"><h3><span class="material-symbols-rounded" style="vertical-align:middle;font-size:20px;">fact_check</span> SEO Coverage</h3></div>
+                        <div id="dash-coverage" style="padding:0 16px 12px;font-size:13px;"></div>
+                    </div>
+                    <div class="card" style="margin-bottom:0;">
+                        <div class="card-header"><h3><span class="material-symbols-rounded" style="vertical-align:middle;font-size:20px;">smart_toy</span> AI Operations</h3></div>
+                        <div id="dash-aiops" style="padding:0 16px 12px;font-size:13px;"></div>
                     </div>
                 </div>
 

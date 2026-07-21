@@ -525,6 +525,190 @@ def build_action_queue(store_id, limit=15):
     return {"items": items[:limit], "total_by_source": counts}
 
 
+def get_coverage(store_id):
+    """Completeness percentages over ACTIVE products. Shared by the ops
+    widget and the daily snapshot rollup so the two can never drift."""
+    with db.get_cursor() as cur:
+        cur.execute(
+            """SELECT COUNT(*) AS total,
+                      COUNT(*) FILTER (WHERE char_length(COALESCE(meta_title, '')) BETWEEN 20 AND 75) AS meta_title_ok,
+                      COUNT(*) FILTER (WHERE char_length(COALESCE(meta_description, '')) BETWEEN 100 AND 200) AS meta_desc_ok
+               FROM synced_products WHERE store_id = %s AND status = 'ACTIVE'""",
+            (store_id,),
+        )
+        p = cur.fetchone()
+        total = int(p["total"] or 0)
+
+        cur.execute(
+            """SELECT COUNT(*) FILTER (WHERE COALESCE(img->>'alt', '') <> '') AS with_alt, COUNT(*) AS total
+               FROM synced_products sp, jsonb_array_elements(sp.images) img
+               WHERE sp.store_id = %s AND sp.status = 'ACTIVE' AND jsonb_typeof(sp.images) = 'array'""",
+            (store_id,),
+        )
+        img = cur.fetchone()
+
+        cur.execute(
+            """SELECT COUNT(DISTINCT sp.id) AS cnt FROM synced_products sp
+               JOIN schema_markup sm ON sm.store_id = sp.store_id
+                    AND sm.resource_type = 'product' AND sm.resource_id = sp.shopify_id
+                    AND sm.pushed_to_shopify = TRUE
+               WHERE sp.store_id = %s AND sp.status = 'ACTIVE'""",
+            (store_id,),
+        )
+        schema_cnt = int(cur.fetchone()["cnt"] or 0)
+
+        cur.execute(
+            """SELECT COUNT(DISTINCT sp.id) AS cnt FROM synced_products sp
+               JOIN content_keyword_map ckm ON ckm.store_id = sp.store_id
+                    AND ckm.item_type = 'product' AND ckm.item_id = sp.id
+               WHERE sp.store_id = %s AND sp.status = 'ACTIVE'""",
+            (store_id,),
+        )
+        kw_cnt = int(cur.fetchone()["cnt"] or 0)
+
+        cur.execute(
+            "SELECT COUNT(*) AS total, COUNT(*) FILTER (WHERE status = 'published') AS published FROM aeo_assets WHERE store_id = %s",
+            (store_id,),
+        )
+        aeo = cur.fetchone()
+
+    def pct(n, d):
+        return round(n / d * 100, 1) if d else None
+
+    return {
+        "products_total": total,
+        "meta_title_pct": pct(int(p["meta_title_ok"] or 0), total),
+        "meta_desc_pct": pct(int(p["meta_desc_ok"] or 0), total),
+        "alt_text_pct": pct(int(img["with_alt"] or 0), int(img["total"] or 0)),
+        "schema_pushed_pct": pct(schema_cnt, total),
+        "keyword_mapped_pct": pct(kw_cnt, total),
+        "aeo_assets": {"published": int(aeo["published"] or 0), "total": int(aeo["total"] or 0)},
+    }
+
+
+# Staleness thresholds (hours): source -> (ok_under, stale_under); beyond is "old"
+_FRESHNESS_LEVELS = {
+    "sync": (24, 72),
+    "gsc_pull": (24, 72),
+    "semrush_import": (14 * 24, 30 * 24),
+    "visibility_run": (8 * 24, 14 * 24),
+    "competitor_check": (8 * 24, 14 * 24),
+}
+
+
+def get_ops(store_id):
+    now = datetime.now(timezone.utc)
+
+    def freshness_entry(source, at):
+        if not at:
+            return {"at": None, "age_hours": None, "level": "none"}
+        if at.tzinfo is None:
+            at = at.replace(tzinfo=timezone.utc)
+        age = (now - at).total_seconds() / 3600
+        ok, stale = _FRESHNESS_LEVELS[source]
+        level = "ok" if age < ok else "stale" if age < stale else "old"
+        return {"at": at.isoformat(), "age_hours": round(age, 1), "level": level}
+
+    with db.get_cursor() as cur:
+        cur.execute("SELECT last_synced_at FROM stores WHERE id = %s", (store_id,))
+        row = cur.fetchone()
+        sync_at = row["last_synced_at"] if row else None
+
+        cur.execute(
+            "SELECT MAX(completed_at) AS at FROM gsc_data_pulls WHERE store_id = %s AND status = 'completed'",
+            (store_id,),
+        )
+        gsc_at = cur.fetchone()["at"]
+
+        cur.execute("SELECT MAX(created_at) AS at FROM semrush_imports WHERE store_id = %s", (store_id,))
+        semrush_at = cur.fetchone()["at"]
+
+        cur.execute(
+            "SELECT MAX(completed_at) AS at FROM ai_tracking_runs WHERE store_id = %s AND status = 'completed'",
+            (store_id,),
+        )
+        vis_at = cur.fetchone()["at"]
+
+        cur.execute(
+            "SELECT MAX(completed_at) AS at FROM competitor_check_runs WHERE store_id = %s",
+            (store_id,),
+        )
+        comp_at = cur.fetchone()["at"]
+
+        cur.execute(
+            """SELECT COUNT(*) FILTER (WHERE created_at >= NOW() - INTERVAL '7 days') AS tasks_7d,
+                      COUNT(*) FILTER (WHERE created_at >= NOW() - INTERVAL '7 days' AND status = 'failed') AS failed_7d,
+                      COUNT(*) FILTER (WHERE created_at >= NOW() - INTERVAL '7 days' AND status = 'completed') AS completed_7d,
+                      COUNT(*) FILTER (WHERE status IN ('pending','running')) AS running
+               FROM ai_tasks WHERE store_id = %s""",
+            (store_id,),
+        )
+        t = cur.fetchone()
+        cur.execute(
+            "SELECT COUNT(*) AS running FROM bulk_tasks WHERE store_id = %s AND status IN ('pending','running')",
+            (store_id,),
+        )
+        bulk_running = int(cur.fetchone()["running"] or 0)
+
+        cur.execute(
+            """SELECT COALESCE(SUM(cost_estimate), 0) AS spend FROM ai_tracking_runs
+               WHERE store_id = %s AND completed_at::date = CURRENT_DATE""",
+            (store_id,),
+        )
+        spend_today = float(cur.fetchone()["spend"] or 0)
+        cur.execute("SELECT daily_budget FROM ai_config ORDER BY id LIMIT 1")
+        budget_row = cur.fetchone()
+
+        cur.execute(
+            """SELECT COUNT(*) FILTER (WHERE status = 'scheduled') AS scheduled,
+                      COUNT(*) FILTER (WHERE status NOT IN ('scheduled','published') AND COALESCE(status,'') NOT LIKE 'auto%%') AS drafts
+               FROM news_sessions WHERE store_id = %s""",
+            (store_id,),
+        )
+        news = cur.fetchone()
+        cur.execute(
+            "SELECT COUNT(*) AS cnt FROM topic_suggestions WHERE store_id = %s AND status = 'accepted'",
+            (store_id,),
+        )
+        topics_accepted = int(cur.fetchone()["cnt"] or 0)
+        cur.execute(
+            """SELECT COUNT(*) AS cnt FROM synced_articles
+               WHERE store_id = %s AND is_published = TRUE
+                 AND published_at >= date_trunc('month', NOW())""",
+            (store_id,),
+        )
+        published_month = int(cur.fetchone()["cnt"] or 0)
+
+    completed_7d = int(t["completed_7d"] or 0)
+    failed_7d = int(t["failed_7d"] or 0)
+    finished = completed_7d + failed_7d
+
+    return {
+        "freshness": {
+            "sync": freshness_entry("sync", sync_at),
+            "gsc_pull": freshness_entry("gsc_pull", gsc_at),
+            "semrush_import": freshness_entry("semrush_import", semrush_at),
+            "visibility_run": freshness_entry("visibility_run", vis_at),
+            "competitor_check": freshness_entry("competitor_check", comp_at),
+        },
+        "ai_ops": {
+            "tasks_7d": int(t["tasks_7d"] or 0),
+            "failed_7d": failed_7d,
+            "success_rate_7d": round(completed_7d / finished * 100, 1) if finished else None,
+            "running": int(t["running"] or 0) + bulk_running,
+            "spend_today": round(spend_today, 2),
+            "daily_budget": float(budget_row["daily_budget"]) if budget_row and budget_row["daily_budget"] is not None else None,
+        },
+        "pipeline": {
+            "news_scheduled": int(news["scheduled"] or 0),
+            "news_drafts": int(news["drafts"] or 0),
+            "topics_accepted": topics_accepted,
+            "published_this_month": published_month,
+        },
+        "coverage": get_coverage(store_id),
+    }
+
+
 def get_rank_movers(store_id, limit=10):
     with db.get_cursor() as cur:
         cur.execute(

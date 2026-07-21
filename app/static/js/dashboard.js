@@ -22,7 +22,7 @@ document.addEventListener("DOMContentLoaded", () => {
 function loadDashboard() {
     // Reset store-scoped widgets so a store switch never shows stale data
     // from the previous store while the new requests are in flight.
-    for (const id of ["trend-card", "queue-card", "ctr-card", "impact-card", "movers-card"]) {
+    for (const id of ["trend-card", "queue-card", "ctr-card", "impact-card", "movers-card", "ops-row", "dash-freshness"]) {
         document.getElementById(id).style.display = "none";
     }
     loadOverview().then(() => {
@@ -32,6 +32,7 @@ function loadDashboard() {
         loadCtrOpportunities();
         loadImpact();
         loadMovers();
+        loadOps();
     });
 }
 
@@ -392,5 +393,91 @@ async function loadMovers() {
         document.getElementById("movers-card").style.display = "";
     } catch {
         // No movers data — card stays hidden
+    }
+}
+
+const FRESHNESS_LABELS = {
+    sync: ["Store sync", "/stores"],
+    gsc_pull: ["GSC pull", "/gsc"],
+    semrush_import: ["Semrush", "/semrush"],
+    visibility_run: ["AI visibility", "/ai-seo"],
+    competitor_check: ["Competitors", "/competitors"],
+};
+
+async function loadOps() {
+    try {
+        if (!dashStoreId) return;
+        const data = await apiRequest(`/api/dashboard/ops?store_id=${dashStoreId}`);
+        if (!data || !data.freshness) return;
+
+        // Freshness strip
+        const dotColor = { ok: "var(--success)", stale: "var(--warning)", old: "var(--error)", none: "var(--outline)" };
+        let fresh = "";
+        for (const [key, entry] of Object.entries(data.freshness)) {
+            const [label, href] = FRESHNESS_LABELS[key] || [key, "#"];
+            const age = entry.at ? formatRelativeTime(entry.at) : "never";
+            fresh += `<a href="${href}" style="display:inline-flex;align-items:center;gap:4px;color:inherit;white-space:nowrap;" title="${label}: ${age}">
+                <span style="width:7px;height:7px;border-radius:50%;background:${dotColor[entry.level] || dotColor.none};display:inline-block;"></span>
+                ${label} ${age}</a>`;
+        }
+        const freshEl = document.getElementById("dash-freshness");
+        freshEl.innerHTML = fresh;
+        freshEl.style.display = "flex";
+
+        // Content pipeline
+        const p = data.pipeline || {};
+        const pipelineRow = (label, value, href) =>
+            `<div style="display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid var(--outline);">
+                <a href="${href}" style="color:inherit;">${label}</a><strong>${value}</strong></div>`;
+        document.getElementById("dash-pipeline").innerHTML =
+            pipelineRow("Scheduled news", p.news_scheduled ?? 0, "/news") +
+            pipelineRow("Drafts in progress", p.news_drafts ?? 0, "/news") +
+            pipelineRow("Accepted topics waiting", p.topics_accepted ?? 0, "/blog") +
+            pipelineRow("Published this month", p.published_this_month ?? 0, "/blog");
+
+        // Coverage bars
+        const c = data.coverage || {};
+        const bar = (label, pct, href) => {
+            if (pct === null || pct === undefined) {
+                return `<div style="padding:5px 0;"><a href="${href}" style="color:var(--on-surface-secondary);">${label}: no data</a></div>`;
+            }
+            const color = pct >= 90 ? "var(--success)" : pct >= 60 ? "var(--warning)" : "var(--error)";
+            return `<div style="padding:5px 0;">
+                <div style="display:flex;justify-content:space-between;font-size:12px;"><a href="${href}" style="color:inherit;">${label}</a><span>${pct}%</span></div>
+                <div style="height:5px;background:var(--outline);border-radius:3px;margin-top:3px;"><div style="height:5px;width:${Math.min(pct, 100)}%;background:${color};border-radius:3px;"></div></div>
+            </div>`;
+        };
+        const aeo = c.aeo_assets || {};
+        document.getElementById("dash-coverage").innerHTML =
+            bar("Meta titles", c.meta_title_pct, "/seo") +
+            bar("Meta descriptions", c.meta_desc_pct, "/seo") +
+            bar("Image alt text", c.alt_text_pct, "/seo") +
+            bar("Schema pushed", c.schema_pushed_pct, "/ai-seo") +
+            bar("Keywords mapped", c.keyword_mapped_pct, "/keyword-strategy") +
+            `<div style="padding:5px 0;font-size:12px;display:flex;justify-content:space-between;"><a href="/ai-seo" style="color:inherit;">AEO assets</a><span>${aeo.published ?? 0}/${aeo.total ?? 0} published</span></div>`;
+
+        // AI operations
+        const a = data.ai_ops || {};
+        const successHtml = a.success_rate_7d !== null && a.success_rate_7d !== undefined
+            ? `<span style="color:${a.success_rate_7d >= 90 ? "var(--success)" : "var(--warning)"};">${a.success_rate_7d}%</span>`
+            : "—";
+        const failedHtml = a.failed_7d
+            ? `<a href="/settings" style="color:var(--error);font-weight:600;">${a.failed_7d}</a>`
+            : "0";
+        const spendHtml = a.daily_budget
+            ? `$${(a.spend_today ?? 0).toFixed(2)} / $${a.daily_budget.toFixed(0)} <span style="color:var(--on-surface-secondary);font-size:11px;">(visibility runs)</span>`
+            : `$${(a.spend_today ?? 0).toFixed(2)}`;
+        const aiRow = (label, html) =>
+            `<div style="display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid var(--outline);"><span>${label}</span><strong>${html}</strong></div>`;
+        document.getElementById("dash-aiops").innerHTML =
+            aiRow("Tasks (7 days)", (a.tasks_7d ?? 0).toLocaleString()) +
+            aiRow("Success rate", successHtml) +
+            aiRow("Failed (7 days)", failedHtml) +
+            aiRow("Running now", a.running ?? 0) +
+            aiRow("AI spend today", spendHtml);
+
+        document.getElementById("ops-row").style.display = "grid";
+    } catch {
+        // Ops data unavailable — row stays hidden
     }
 }

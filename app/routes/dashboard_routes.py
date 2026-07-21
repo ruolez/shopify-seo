@@ -61,6 +61,14 @@ def dashboard_movers():
     return jsonify(dashboard_service.get_rank_movers(store_id, limit))
 
 
+@dashboard_bp.route("/api/dashboard/ops")
+def dashboard_ops():
+    store_id = _resolve_store_id()
+    if not store_id:
+        return jsonify({})
+    return jsonify(dashboard_service.get_ops(store_id))
+
+
 @dashboard_bp.route("/api/dashboard/trends")
 def dashboard_trends():
     store_id = _resolve_store_id()
