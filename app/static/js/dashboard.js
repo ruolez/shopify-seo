@@ -1,19 +1,61 @@
 let dashStoreId = null;
 
-document.addEventListener("DOMContentLoaded", async () => {
-    try {
-        const stores = await apiRequest("/api/stores");
-        if (stores.length) dashStoreId = stores[0].id;
-    } catch {}
-    loadStats();
-    loadGSCSummary();
-    loadTopPriorities();
+document.addEventListener("DOMContentLoaded", () => {
+    loadDashboard();
+    document.getElementById("store-switcher").addEventListener("change", async (e) => {
+        const storeId = parseInt(e.target.value, 10);
+        try {
+            await apiRequest("/api/session/active-store", {
+                method: "POST",
+                body: JSON.stringify({ store_id: storeId }),
+            });
+        } catch {
+            showToast("Failed to switch store", "error");
+            return;
+        }
+        dashStoreId = storeId;
+        loadDashboard();
+    });
 });
 
-async function loadStats() {
+function loadDashboard() {
+    // Reset store-scoped widgets so a store switch never shows stale data
+    // from the previous store while the new requests are in flight.
+    document.getElementById("gsc-summary").style.display = "none";
+    document.getElementById("dash-insights").style.display = "none";
+    const prio = document.getElementById("dash-priorities");
+    if (prio) {
+        prio.innerHTML = "";
+        prio.closest(".card").style.display = "none";
+    }
+    loadOverview().then(() => {
+        // Widgets below depend on the resolved store id from the overview.
+        loadGSCSummary();
+        loadTopPriorities();
+    });
+}
+
+function renderStoreSwitcher(stores, activeId) {
+    const sel = document.getElementById("store-switcher");
+    if (!stores || stores.length < 2) {
+        sel.style.display = "none";
+        return;
+    }
+    sel.innerHTML = stores
+        .map((s) => `<option value="${s.id}" ${s.id === activeId ? "selected" : ""}>${escapeHtml(s.name)}</option>`)
+        .join("");
+    sel.style.display = "";
+}
+
+async function loadOverview() {
     try {
-        const url = dashStoreId ? `/api/dashboard/stats?store_id=${dashStoreId}` : "/api/dashboard/stats";
+        const url = dashStoreId ? `/api/dashboard/overview?store_id=${dashStoreId}` : "/api/dashboard/overview";
         const stats = await apiRequest(url);
+
+        dashStoreId = stats.store ? stats.store.id : null;
+        renderStoreSwitcher(stats.stores, dashStoreId);
+
+        const counts = stats.counts || {};
 
         // Store identity + sync freshness
         if (stats.store && stats.store.name) {
@@ -27,16 +69,18 @@ async function loadStats() {
             line.style.display = "";
         }
 
-        document.getElementById("stat-products").textContent = stats.products.toLocaleString();
-        if (stats.active_products !== undefined && stats.active_products !== stats.products) {
-            document.getElementById("stat-products-sub").textContent = `${stats.active_products.toLocaleString()} active`;
+        document.getElementById("stat-products").textContent = (counts.products ?? 0).toLocaleString();
+        if (counts.active_products !== undefined && counts.active_products !== counts.products) {
+            document.getElementById("stat-products-sub").textContent = `${counts.active_products.toLocaleString()} active`;
         }
-        document.getElementById("stat-collections").textContent = stats.collections.toLocaleString();
-        document.getElementById("stat-articles").textContent = (stats.articles ?? 0).toLocaleString();
+        document.getElementById("stat-collections").textContent = (counts.collections ?? 0).toLocaleString();
+        document.getElementById("stat-articles").textContent = (counts.articles ?? 0).toLocaleString();
 
-        document.getElementById("stat-seo").textContent = stats.avg_seo_score;
+        document.getElementById("stat-seo").textContent = stats.score_pending ? "…" : stats.avg_seo_score;
         const dist = stats.score_distribution;
-        if (dist) {
+        if (stats.score_pending) {
+            document.getElementById("stat-seo-sub").textContent = "Pending nightly snapshot";
+        } else if (dist) {
             document.getElementById("stat-seo-sub").textContent =
                 `${dist.good} good · ${dist.fair} fair · ${dist.poor} poor`;
         }

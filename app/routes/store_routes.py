@@ -1,4 +1,4 @@
-from flask import Blueprint, jsonify, render_template, request
+from flask import Blueprint, jsonify, render_template, request, session
 
 from app.auth import decrypt_value, encrypt_value
 from app.database import db
@@ -38,6 +38,31 @@ def list_stores():
             }
         )
     return jsonify(result)
+
+
+@store_bp.route("/api/session/active-store", methods=["POST"])
+def set_active_store():
+    data = request.get_json(silent=True) or {}
+    store_id = data.get("store_id")
+    with db.get_cursor() as cur:
+        cur.execute(
+            "SELECT id, name, shop_name, primary_domain FROM stores WHERE id = %s AND is_active = TRUE",
+            (store_id,),
+        )
+        store = cur.fetchone()
+    if not store:
+        return jsonify({"error": "Store not found"}), 404
+    session["active_store_id"] = store["id"]
+    return jsonify(
+        {
+            "ok": True,
+            "store": {
+                "id": store["id"],
+                "name": store.get("shop_name") or store["name"],
+                "domain": store.get("primary_domain"),
+            },
+        }
+    )
 
 
 @store_bp.route("/api/stores", methods=["POST"])
