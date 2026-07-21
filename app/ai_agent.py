@@ -1516,6 +1516,21 @@ def _handle_topic_tool_call(name, args):
                 (store_id,),
             )
             articles = [dict(r) for r in cur.fetchall()]
+            # Queued/in-progress wizard articles aren't in synced_articles until
+            # they publish — include them so cannibalization checks see them.
+            cur.execute(
+                "SELECT COALESCE(generated_article->>'title', topic) AS title "
+                "FROM article_wizard_sessions WHERE store_id = %s AND status != 'published' "
+                "AND topic IS NOT NULL AND topic != '' "
+                "AND updated_at > NOW() - INTERVAL '90 days' "
+                "ORDER BY updated_at DESC LIMIT 50",
+                (store_id,),
+            )
+            for r in cur.fetchall():
+                articles.append({
+                    "title": r["title"], "handle": None, "tags": None,
+                    "is_published": False, "status": "queued",
+                })
         return {"count": len(articles), "articles": articles}
 
     if name == "get_keyword_opportunities":
@@ -5055,6 +5070,17 @@ def run_task(task_type, task_input, store_id=None):
                 (td_store_id,),
             )
             td_prior = cur.fetchall()
+            # Wizard sessions only reach synced_articles at publish time —
+            # queued/scheduled/in-progress articles must still count as coverage.
+            cur.execute(
+                "SELECT COALESCE(generated_article->>'title', topic) AS title "
+                "FROM article_wizard_sessions WHERE store_id = %s AND status != 'published' "
+                "AND topic IS NOT NULL AND topic != '' "
+                "AND updated_at > NOW() - INTERVAL '90 days' "
+                "ORDER BY updated_at DESC LIMIT 50",
+                (td_store_id,),
+            )
+            td_queued = cur.fetchall()
 
         if not td_store:
             return {"error": "Store not found"}
@@ -5069,6 +5095,7 @@ def run_task(task_type, task_input, store_id=None):
         td_prior_block = "\n".join(
             f"- \"{p['topic']}\" ({p['status']})" for p in td_prior
         )
+        td_queued_block = "\n".join(f"- {q['title']}" for q in td_queued)
 
         td_user_prompt = (
             f"Current date: {datetime.now().strftime('%B %Y')}\n\n"
@@ -5077,6 +5104,13 @@ def run_task(task_type, task_input, store_id=None):
             f"TOP VENDORS/BRANDS: {td_vendor_block}\n\n"
             f"EXISTING BLOG ARTICLES ({len(td_articles)} total):\n{td_article_block}\n"
         )
+        if td_queued_block:
+            td_user_prompt += (
+                "\nARTICLES ALREADY QUEUED OR IN PROGRESS (scheduled or being written, "
+                "not yet live — treat these exactly like existing blog articles; do not "
+                "suggest the same or closely overlapping topics):\n"
+                + td_queued_block + "\n"
+            )
         if td_prior_block:
             td_user_prompt += (
                 "\nPREVIOUSLY SUGGESTED TOPICS - DO NOT REPEAT OR CLOSELY PARAPHRASE ANY OF THESE:\n"
