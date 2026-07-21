@@ -1,4 +1,5 @@
 let dashStoreId = null;
+const dashCharts = {};
 
 document.addEventListener("DOMContentLoaded", () => {
     loadDashboard();
@@ -21,7 +22,7 @@ document.addEventListener("DOMContentLoaded", () => {
 function loadDashboard() {
     // Reset store-scoped widgets so a store switch never shows stale data
     // from the previous store while the new requests are in flight.
-    document.getElementById("gsc-summary").style.display = "none";
+    document.getElementById("trend-card").style.display = "none";
     document.getElementById("dash-insights").style.display = "none";
     const prio = document.getElementById("dash-priorities");
     if (prio) {
@@ -30,9 +31,18 @@ function loadDashboard() {
     }
     loadOverview().then(() => {
         // Widgets below depend on the resolved store id from the overview.
-        loadGSCSummary();
+        loadTrends();
         loadTopPriorities();
     });
+}
+
+function setChart(key, make) {
+    if (dashCharts[key]) {
+        dashCharts[key].destroy();
+        delete dashCharts[key];
+    }
+    const chart = make();
+    if (chart) dashCharts[key] = chart;
 }
 
 function renderStoreSwitcher(stores, activeId) {
@@ -55,48 +65,179 @@ async function loadOverview() {
         dashStoreId = stats.store ? stats.store.id : null;
         renderStoreSwitcher(stats.stores, dashStoreId);
 
-        const counts = stats.counts || {};
-
-        // Store identity + sync freshness
+        // Store identity + sync freshness + inventory line
+        const line = document.getElementById("dash-store-line");
         if (stats.store && stats.store.name) {
-            const line = document.getElementById("dash-store-line");
             const synced = stats.store.last_synced_at
                 ? `Last synced ${formatRelativeTime(stats.store.last_synced_at)}`
                 : "Never synced";
+            const c = stats.counts || {};
+            const inventory = `${(c.products ?? 0).toLocaleString()} products · ${(c.collections ?? 0).toLocaleString()} collections · ${(c.articles ?? 0).toLocaleString()} articles`;
             line.innerHTML = `<strong>${escapeHtml(stats.store.name)}</strong>` +
                 (stats.store.domain ? ` · ${escapeHtml(stats.store.domain)}` : "") +
-                ` · ${escapeHtml(synced)}`;
+                ` · ${escapeHtml(synced)} · ${escapeHtml(inventory)}`;
             line.style.display = "";
+        } else {
+            line.style.display = "none";
         }
 
-        document.getElementById("stat-products").textContent = (counts.products ?? 0).toLocaleString();
-        if (counts.active_products !== undefined && counts.active_products !== counts.products) {
-            document.getElementById("stat-products-sub").textContent = `${counts.active_products.toLocaleString()} active`;
-        }
-        document.getElementById("stat-collections").textContent = (counts.collections ?? 0).toLocaleString();
-        document.getElementById("stat-articles").textContent = (counts.articles ?? 0).toLocaleString();
-
-        document.getElementById("stat-seo").textContent = stats.score_pending ? "…" : stats.avg_seo_score;
-        const dist = stats.score_distribution;
-        if (stats.score_pending) {
-            document.getElementById("stat-seo-sub").textContent = "Pending nightly snapshot";
-        } else if (dist) {
-            document.getElementById("stat-seo-sub").textContent =
-                `${dist.good} good · ${dist.fair} fair · ${dist.poor} poor`;
-        }
-
-        document.getElementById("stat-tasks").textContent = (stats.ai_tasks_30d ?? 0).toLocaleString();
-        if (stats.tasks_running > 0) {
-            document.getElementById("stat-tasks-sub").innerHTML =
-                `<span class="delta-up">${stats.tasks_running} running now</span>`;
-        }
+        renderKpis(stats.kpis || {}, stats);
 
         if (stats.insights) {
             renderInsights(stats.insights);
         }
     } catch (err) {
-        showToast("Failed to load dashboard stats", "error");
+        showToast("Failed to load dashboard", "error");
     }
+}
+
+function renderKpis(kpis, stats) {
+    const colors = chartColors();
+
+    // Organic clicks
+    const clicksEl = document.getElementById("kpi-clicks");
+    if (kpis.clicks_28d) {
+        clicksEl.textContent = kpis.clicks_28d.value.toLocaleString();
+        renderDelta(document.getElementById("kpi-clicks-delta"), kpis.clicks_28d.pct_change);
+        setChart("kpi-clicks", () => makeSparkline(document.getElementById("kpi-clicks-spark"), kpis.clicks_28d.spark));
+    } else {
+        clicksEl.textContent = "—";
+        document.getElementById("kpi-clicks-delta").innerHTML =
+            '<a href="/gsc" style="color:var(--primary);">Connect GSC</a>';
+    }
+
+    // Avg position (lower = better)
+    const posEl = document.getElementById("kpi-position");
+    if (kpis.avg_position_28d && kpis.avg_position_28d.value !== null) {
+        posEl.textContent = kpis.avg_position_28d.value.toFixed(1);
+        const ch = kpis.avg_position_28d.change;
+        const deltaEl = document.getElementById("kpi-position-delta");
+        if (ch !== null && ch !== undefined) {
+            const improved = ch <= 0;
+            deltaEl.innerHTML = `<span class="${improved ? "delta-up" : "delta-down"}">${improved ? "▲" : "▼"} ${Math.abs(ch).toFixed(1)} vs prev period</span>`;
+        } else {
+            deltaEl.textContent = "";
+        }
+        setChart("kpi-position", () => makeSparkline(
+            document.getElementById("kpi-position-spark"),
+            kpis.avg_position_28d.spark.map((v) => (v === null ? null : -v)),
+            { color: colors.warning }
+        ));
+    } else {
+        posEl.textContent = "—";
+    }
+
+    // SEO score
+    const scoreEl = document.getElementById("kpi-score");
+    if (stats.score_pending) {
+        scoreEl.textContent = "…";
+        document.getElementById("kpi-score-sub").textContent = "Pending nightly snapshot";
+    } else if (kpis.seo_score) {
+        scoreEl.textContent = kpis.seo_score.value;
+        const sub = document.getElementById("kpi-score-sub");
+        const dist = stats.score_distribution;
+        let html = dist ? `${dist.good} good · ${dist.fair} fair · ${dist.poor} poor` : "";
+        const ch = kpis.seo_score.change_30d;
+        if (ch !== null && ch !== undefined && ch !== 0) {
+            const up = ch > 0;
+            html += ` <span class="${up ? "delta-up" : "delta-down"}">${up ? "▲" : "▼"} ${Math.abs(ch).toFixed(1)} (30d)</span>`;
+        }
+        sub.innerHTML = html;
+        setChart("kpi-score", () => makeSparkline(document.getElementById("kpi-score-spark"), kpis.seo_score.spark, { color: colors.success }));
+    } else if (stats.avg_seo_score) {
+        scoreEl.textContent = stats.avg_seo_score;
+    }
+
+    // Keywords
+    const kwEl = document.getElementById("kpi-keywords");
+    if (kpis.keywords) {
+        kwEl.textContent = kpis.keywords.total.toLocaleString();
+        const delta = kpis.keywords.striking_change;
+        const deltaHtml = delta
+            ? ` <span class="${delta > 0 ? "delta-up" : "delta-down"}">${delta > 0 ? "+" : ""}${delta}</span>`
+            : "";
+        document.getElementById("kpi-keywords-sub").innerHTML =
+            `${kpis.keywords.top10} top 10 · ${kpis.keywords.striking} striking${deltaHtml}`;
+    } else {
+        kwEl.textContent = "—";
+        document.getElementById("kpi-keywords-sub").innerHTML =
+            '<a href="/semrush" style="color:var(--primary);">Import keywords</a>';
+    }
+
+    // AI visibility
+    const visEl = document.getElementById("kpi-visibility");
+    if (kpis.ai_visibility) {
+        const v = kpis.ai_visibility;
+        visEl.textContent = `${Math.round(v.mention_rate * 100)}%`;
+        let sub = `${Math.round(v.share_of_voice * 100)}% share of voice`;
+        if (v.delta_vs_prev_run !== null && v.delta_vs_prev_run !== undefined && v.delta_vs_prev_run !== 0) {
+            const up = v.delta_vs_prev_run > 0;
+            const pts = Math.abs(Math.round(v.delta_vs_prev_run * 100));
+            sub += ` <span class="${up ? "delta-up" : "delta-down"}">${up ? "▲" : "▼"} ${pts}pp</span>`;
+        }
+        if (v.last_run_at) sub += ` · ${formatRelativeTime(v.last_run_at)}`;
+        document.getElementById("kpi-visibility-sub").innerHTML = sub;
+    } else {
+        visEl.textContent = "—";
+        document.getElementById("kpi-visibility-sub").innerHTML =
+            '<a href="/ai-seo" style="color:var(--primary);">Run tracking</a>';
+    }
+}
+
+async function loadTrends() {
+    try {
+        if (!dashStoreId) return;
+        const data = await apiRequest(`/api/dashboard/trends?store_id=${dashStoreId}&days=90`);
+        if (!data.gsc_daily || !data.gsc_daily.length) return;
+
+        const colors = chartColors();
+        const labels = data.gsc_daily.map((d) => d.date.slice(5)); // MM-DD
+        const dateIndex = {};
+        data.gsc_daily.forEach((d, i) => { dateIndex[d.date] = i; });
+        const markers = (data.events || [])
+            .filter((e) => dateIndex[e.date] !== undefined)
+            .map((e) => ({ index: dateIndex[e.date], label: `${e.count} optimized` }));
+
+        const totalOptimized = (data.events || []).reduce((n, e) => n + e.count, 0);
+        document.getElementById("trend-note").textContent =
+            `Last 90 days${totalOptimized ? ` · ${totalOptimized} optimizations applied (dashed lines)` : ""}`;
+
+        setChart("trend", () => makeTimeSeriesChart(document.getElementById("trend-chart"), {
+            labels,
+            markers,
+            datasets: [
+                {
+                    label: "Clicks",
+                    data: data.gsc_daily.map((d) => d.clicks),
+                    borderColor: colors.primary,
+                    backgroundColor: hexToRgba(colors.primary, 0.10),
+                    fill: true, borderWidth: 1.5, pointRadius: 0, tension: 0.3, yAxisID: "y",
+                },
+                {
+                    label: "Impressions",
+                    data: data.gsc_daily.map((d) => d.impressions),
+                    borderColor: colors.text,
+                    borderWidth: 1, pointRadius: 0, tension: 0.3, yAxisID: "y1", hidden: true,
+                },
+            ],
+        }));
+        // Secondary axis for impressions when toggled on via legend
+        const chart = dashCharts["trend"];
+        chart.options.scales.y1 = { position: "right", display: "auto", ticks: { color: colors.text, maxTicksLimit: 5 }, grid: { display: false } };
+        chart.update();
+
+        document.getElementById("trend-card").style.display = "";
+    } catch {
+        // GSC not connected or no data — card stays hidden
+    }
+}
+
+function renderDelta(el, pct, invert = false) {
+    if (pct === null || pct === undefined || !isFinite(pct)) { el.textContent = ""; return; }
+    const up = pct >= 0;
+    const good = invert ? !up : up;
+    const arrow = up ? "▲" : "▼";
+    el.innerHTML = `<span class="${good ? "delta-up" : "delta-down"}">${arrow} ${Math.abs(pct).toFixed(1)}% vs prev period</span>`;
 }
 
 function renderInsights(insights) {
@@ -208,55 +349,6 @@ function renderInsights(insights) {
     html += '</div>';
     container.innerHTML = html;
     container.style.display = "";
-}
-
-function renderDelta(el, pct, invert = false) {
-    if (pct === null || pct === undefined || !isFinite(pct)) { el.textContent = ""; return; }
-    const up = pct >= 0;
-    const good = invert ? !up : up;
-    const arrow = up ? "▲" : "▼";
-    el.innerHTML = `<span class="${good ? "delta-up" : "delta-down"}">${arrow} ${Math.abs(pct).toFixed(1)}% vs prev period</span>`;
-}
-
-async function loadGSCSummary() {
-    try {
-        if (!dashStoreId) return;
-        const status = await apiRequest(`/api/gsc/status?store_id=${dashStoreId}`);
-        if (!status.connected || !status.property) return;
-
-        const today = new Date();
-        const dateTo = new Date(today);
-        dateTo.setDate(dateTo.getDate() - 3);
-        const dateFrom = new Date(dateTo);
-        dateFrom.setDate(dateFrom.getDate() - 27); // 28-day window inclusive
-        const df = dateFrom.toISOString().split("T")[0];
-        const dt = dateTo.toISOString().split("T")[0];
-
-        const data = await apiRequest(`/api/gsc/overview?store_id=${dashStoreId}&date_from=${df}&date_to=${dt}`);
-        document.getElementById("dash-gsc-window").textContent = `${df} → ${dt}`;
-        document.getElementById("dash-gsc-clicks").textContent = Math.round(data.total_clicks).toLocaleString();
-        document.getElementById("dash-gsc-impressions").textContent = Math.round(data.total_impressions).toLocaleString();
-        document.getElementById("dash-gsc-ctr").textContent = (data.avg_ctr * 100).toFixed(1) + "%";
-        document.getElementById("dash-gsc-position").textContent = data.avg_position.toFixed(1);
-
-        if (data.changes) {
-            renderDelta(document.getElementById("dash-gsc-clicks-delta"), data.changes.clicks_pct);
-            renderDelta(document.getElementById("dash-gsc-impressions-delta"), data.changes.impressions_pct);
-            const ctrEl = document.getElementById("dash-gsc-ctr-delta");
-            if (data.changes.ctr !== null && data.changes.ctr !== undefined) {
-                const up = data.changes.ctr >= 0;
-                ctrEl.innerHTML = `<span class="${up ? "delta-up" : "delta-down"}">${up ? "▲" : "▼"} ${(Math.abs(data.changes.ctr) * 100).toFixed(2)}pp</span>`;
-            }
-            const posEl = document.getElementById("dash-gsc-position-delta");
-            if (data.changes.position !== null && data.changes.position !== undefined) {
-                const improved = data.changes.position <= 0; // lower position = better
-                posEl.innerHTML = `<span class="${improved ? "delta-up" : "delta-down"}">${improved ? "▲" : "▼"} ${Math.abs(data.changes.position).toFixed(1)}</span>`;
-            }
-        }
-        document.getElementById("gsc-summary").style.display = "";
-    } catch {
-        // GSC not connected or error — leave hidden
-    }
 }
 
 async function loadTopPriorities() {

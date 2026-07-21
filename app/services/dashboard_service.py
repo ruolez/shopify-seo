@@ -93,8 +93,185 @@ def get_overview(store_id):
             result["insights"] = get_store_insights(store_id)
         except Exception as e:
             logger.warning("Dashboard insights failed: %s", e)
+        try:
+            result["kpis"] = _get_kpis(store_id, score)
+        except Exception as e:
+            logger.warning("Dashboard KPIs failed: %s", e)
 
     return result
+
+
+def _get_kpis(store_id, score_summary):
+    kpis = {}
+    end = gsc_data_end_date()
+    cur_start = end - timedelta(days=27)
+    prev_start = end - timedelta(days=55)
+
+    with db.get_cursor() as cur:
+        cur.execute(
+            """SELECT date, SUM(clicks) AS clicks, SUM(impressions) AS impressions,
+                      SUM(position * impressions) / NULLIF(SUM(impressions), 0) AS position
+               FROM gsc_daily_metrics
+               WHERE store_id = %s AND date >= %s AND date <= %s
+               GROUP BY date ORDER BY date""",
+            (store_id, prev_start.isoformat(), end.isoformat()),
+        )
+        daily = cur.fetchall()
+
+    if daily:
+        by_date = {r["date"]: r for r in daily}
+        cur_days = [cur_start + timedelta(days=i) for i in range(28)]
+        spark_clicks, spark_pos = [], []
+        for d in cur_days:
+            r = by_date.get(d)
+            spark_clicks.append(int(r["clicks"] or 0) if r else 0)
+            spark_pos.append(round(float(r["position"]), 1) if r and r["position"] is not None else None)
+
+        def window(rows):
+            clicks = sum(int(r["clicks"] or 0) for r in rows)
+            impr = sum(int(r["impressions"] or 0) for r in rows)
+            pos_w = sum(float(r["position"]) * int(r["impressions"] or 0) for r in rows if r["position"] is not None)
+            return clicks, impr, (pos_w / impr if impr else None)
+
+        cur_rows = [r for r in daily if r["date"] >= cur_start]
+        prev_rows = [r for r in daily if r["date"] < cur_start]
+        c_clicks, _c_impr, c_pos = window(cur_rows)
+        p_clicks, _p_impr, p_pos = window(prev_rows)
+
+        kpis["clicks_28d"] = {
+            "value": c_clicks,
+            "pct_change": round((c_clicks - p_clicks) / p_clicks * 100, 1) if p_clicks else None,
+            "spark": spark_clicks,
+        }
+        kpis["avg_position_28d"] = {
+            "value": round(c_pos, 1) if c_pos is not None else None,
+            "change": round(c_pos - p_pos, 1) if c_pos is not None and p_pos is not None else None,
+            "spark": spark_pos,
+        }
+
+    with db.get_cursor() as cur:
+        cur.execute(
+            """SELECT recorded_at::date AS date, AVG(score) AS avg_score
+               FROM seo_score_history
+               WHERE store_id = %s AND item_type = 'product'
+                 AND recorded_at >= NOW() - INTERVAL '90 days'
+               GROUP BY recorded_at::date ORDER BY date""",
+            (store_id,),
+        )
+        score_days = cur.fetchall()
+    if score_summary and score_days:
+        baseline = next(
+            (r for r in score_days if (score_days[-1]["date"] - r["date"]).days <= 30),
+            score_days[0],
+        )
+        kpis["seo_score"] = {
+            "value": score_summary["avg"],
+            "change_30d": round(float(score_days[-1]["avg_score"]) - float(baseline["avg_score"]), 1)
+            if baseline is not score_days[-1] else None,
+            "spark": [round(float(r["avg_score"]), 1) for r in score_days],
+        }
+
+    with db.get_cursor() as cur:
+        cur.execute(
+            """SELECT COUNT(*) AS total,
+                      COUNT(*) FILTER (WHERE position <= 10) AS top10,
+                      COUNT(*) FILTER (WHERE position BETWEEN 4 AND 20) AS striking,
+                      COUNT(*) FILTER (WHERE previous_position BETWEEN 4 AND 20) AS striking_prev
+               FROM semrush_keywords
+               WHERE store_id = %s AND position IS NOT NULL""",
+            (store_id,),
+        )
+        kw = cur.fetchone()
+    if kw and int(kw["total"] or 0) > 0:
+        kpis["keywords"] = {
+            "total": int(kw["total"]),
+            "top10": int(kw["top10"]),
+            "striking": int(kw["striking"]),
+            "striking_change": int(kw["striking"]) - int(kw["striking_prev"]),
+        }
+
+    with db.get_cursor() as cur:
+        cur.execute(
+            """SELECT brand_mention_rate, share_of_voice, avg_rank, completed_at
+               FROM ai_tracking_runs
+               WHERE store_id = %s AND status = 'completed'
+               ORDER BY id DESC LIMIT 2""",
+            (store_id,),
+        )
+        runs = cur.fetchall()
+    if runs:
+        latest = runs[0]
+        prev = runs[1] if len(runs) > 1 else None
+        kpis["ai_visibility"] = {
+            "mention_rate": float(latest["brand_mention_rate"] or 0),
+            "share_of_voice": float(latest["share_of_voice"] or 0),
+            "delta_vs_prev_run": round(
+                float(latest["brand_mention_rate"] or 0) - float(prev["brand_mention_rate"] or 0), 3
+            ) if prev else None,
+            "last_run_at": latest["completed_at"].isoformat() if latest["completed_at"] else None,
+        }
+
+    return kpis
+
+
+def get_trends(store_id, days=90):
+    end = gsc_data_end_date()
+    start = end - timedelta(days=days - 1)
+
+    with db.get_cursor() as cur:
+        cur.execute(
+            """SELECT date, SUM(clicks) AS clicks, SUM(impressions) AS impressions,
+                      SUM(position * impressions) / NULLIF(SUM(impressions), 0) AS position
+               FROM gsc_daily_metrics
+               WHERE store_id = %s AND date >= %s AND date <= %s
+               GROUP BY date ORDER BY date""",
+            (store_id, start.isoformat(), end.isoformat()),
+        )
+        gsc_rows = cur.fetchall()
+
+        cur.execute(
+            """SELECT created_at::date AS date, item_type, item_id, change_type
+               FROM seo_change_events
+               WHERE store_id = %s AND created_at >= %s
+               ORDER BY created_at""",
+            (store_id, start.isoformat()),
+        )
+        events = cur.fetchall()
+
+        titles = {}
+        for item_type, table in (("product", "synced_products"), ("collection", "synced_collections")):
+            ids = [e["item_id"] for e in events if e["item_type"] == item_type]
+            if ids:
+                cur.execute(f"SELECT id, title FROM {table} WHERE id = ANY(%s)", (ids,))
+                titles[item_type] = {r["id"]: r["title"] for r in cur.fetchall()}
+
+    gsc_daily = [
+        {
+            "date": r["date"].isoformat(),
+            "clicks": int(r["clicks"] or 0),
+            "impressions": int(r["impressions"] or 0),
+            "position": round(float(r["position"]), 1) if r["position"] is not None else None,
+        }
+        for r in gsc_rows
+    ]
+
+    events_by_date = {}
+    for e in events:
+        d = e["date"].isoformat()
+        entry = events_by_date.setdefault(d, {"date": d, "count": 0, "items": []})
+        entry["count"] += 1
+        title = titles.get(e["item_type"], {}).get(e["item_id"])
+        if title and len(entry["items"]) < 8:
+            entry["items"].append({"title": title, "change_type": e["change_type"]})
+
+    from app.services.gsc_service import get_score_trends
+    score_daily = get_score_trends(store_id, start.isoformat(), (end + timedelta(days=1)).isoformat(), item_type="product")
+
+    return {
+        "gsc_daily": gsc_daily,
+        "score_daily": [{"date": r["date"], "avg_score": r["avg_score"]} for r in score_daily],
+        "events": sorted(events_by_date.values(), key=lambda x: x["date"]),
+    }
 
 
 def _get_score_summary(store_id):

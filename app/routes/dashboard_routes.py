@@ -22,3 +22,12 @@ def dashboard_page():
 def dashboard_overview():
     store_id = _resolve_store_id()
     return jsonify(dashboard_service.get_overview(store_id))
+
+
+@dashboard_bp.route("/api/dashboard/trends")
+def dashboard_trends():
+    store_id = _resolve_store_id()
+    days = min(request.args.get("days", 90, type=int), 365)
+    if not store_id:
+        return jsonify({"gsc_daily": [], "score_daily": [], "events": []})
+    return jsonify(dashboard_service.get_trends(store_id, days))

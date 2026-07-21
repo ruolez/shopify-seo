@@ -23,69 +23,53 @@
             <div class="page-content">
                 <div id="dash-store-line" style="display:none;margin-bottom:16px;font-size:13px;color:var(--on-surface-secondary);"></div>
 
-                <div class="stats-grid" id="stats-grid">
+                <div class="stats-grid" id="kpi-grid">
                     <div class="stat-card">
-                        <div class="stat-icon green"><span class="material-symbols-rounded">inventory_2</span></div>
-                        <div class="stat-value" id="stat-products">—</div>
-                        <div class="stat-label">Products</div>
-                        <div class="stat-sub" id="stat-products-sub"></div>
+                        <div class="stat-icon blue"><span class="material-symbols-rounded">ads_click</span></div>
+                        <div class="stat-value" id="kpi-clicks">—</div>
+                        <div class="stat-label">Organic Clicks (28d)</div>
+                        <div class="stat-sub" id="kpi-clicks-delta"></div>
+                        <div style="height:34px;margin-top:6px;"><canvas id="kpi-clicks-spark"></canvas></div>
                     </div>
                     <div class="stat-card">
-                        <div class="stat-icon blue"><span class="material-symbols-rounded">folder</span></div>
-                        <div class="stat-value" id="stat-collections">—</div>
-                        <div class="stat-label">Collections</div>
-                    </div>
-                    <div class="stat-card">
-                        <div class="stat-icon blue"><span class="material-symbols-rounded">article</span></div>
-                        <div class="stat-value" id="stat-articles">—</div>
-                        <div class="stat-label">Articles</div>
+                        <div class="stat-icon blue"><span class="material-symbols-rounded">trending_up</span></div>
+                        <div class="stat-value" id="kpi-position">—</div>
+                        <div class="stat-label">Avg Position (28d)</div>
+                        <div class="stat-sub" id="kpi-position-delta"></div>
+                        <div style="height:34px;margin-top:6px;"><canvas id="kpi-position-spark"></canvas></div>
                     </div>
                     <div class="stat-card">
                         <div class="stat-icon orange"><span class="material-symbols-rounded">speed</span></div>
-                        <div class="stat-value" id="stat-seo">—</div>
-                        <div class="stat-label">Avg SEO Score</div>
-                        <div class="stat-sub" id="stat-seo-sub"></div>
+                        <div class="stat-value" id="kpi-score">—</div>
+                        <div class="stat-label">SEO Score</div>
+                        <div class="stat-sub" id="kpi-score-sub"></div>
+                        <div style="height:34px;margin-top:6px;"><canvas id="kpi-score-spark"></canvas></div>
                     </div>
                     <div class="stat-card">
-                        <div class="stat-icon blue"><span class="material-symbols-rounded">smart_toy</span></div>
-                        <div class="stat-value" id="stat-tasks">—</div>
-                        <div class="stat-label">AI Tasks (30 days)</div>
-                        <div class="stat-sub" id="stat-tasks-sub"></div>
+                        <div class="stat-icon green"><span class="material-symbols-rounded">label</span></div>
+                        <div class="stat-value" id="kpi-keywords">—</div>
+                        <div class="stat-label">Ranking Keywords</div>
+                        <div class="stat-sub" id="kpi-keywords-sub"></div>
                     </div>
+                    <div class="stat-card">
+                        <div class="stat-icon blue"><span class="material-symbols-rounded">psychology</span></div>
+                        <div class="stat-value" id="kpi-visibility">—</div>
+                        <div class="stat-label">AI Visibility</div>
+                        <div class="stat-sub" id="kpi-visibility-sub"></div>
+                    </div>
+                </div>
+
+                <!-- 90-day search performance with optimization markers -->
+                <div id="trend-card" class="card" style="display:none;margin-bottom:24px;">
+                    <div class="card-header" style="display:flex;align-items:center;justify-content:space-between;">
+                        <h3>Search Performance <span id="trend-note" style="font-weight:400;font-size:12px;color:var(--on-surface-secondary);"></span></h3>
+                        <a href="/gsc" class="btn btn-secondary btn-sm">View Details</a>
+                    </div>
+                    <div style="height:260px;padding:0 8px 8px;"><canvas id="trend-chart"></canvas></div>
                 </div>
 
                 <!-- Insights from all data sources (shown if data available) -->
                 <div id="dash-insights" style="display: none; margin-bottom: 24px;"></div>
-
-                <!-- GSC Summary (shown if connected) -->
-                <div id="gsc-summary" class="card" style="display: none; margin-bottom: 24px;">
-                    <div class="card-header" style="display: flex; align-items: center; justify-content: space-between;">
-                        <h3>Search Console <span id="dash-gsc-window" style="font-weight:400;font-size:12px;color:var(--on-surface-secondary);"></span></h3>
-                        <a href="/gsc" class="btn btn-secondary btn-sm">View Details</a>
-                    </div>
-                    <div class="metric-cards" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px;">
-                        <div style="padding: 12px;">
-                            <div class="metric-label">Clicks</div>
-                            <div style="font-size: 22px; font-weight: 700;" id="dash-gsc-clicks">—</div>
-                            <div class="stat-sub" id="dash-gsc-clicks-delta"></div>
-                        </div>
-                        <div style="padding: 12px;">
-                            <div class="metric-label">Impressions</div>
-                            <div style="font-size: 22px; font-weight: 700;" id="dash-gsc-impressions">—</div>
-                            <div class="stat-sub" id="dash-gsc-impressions-delta"></div>
-                        </div>
-                        <div style="padding: 12px;">
-                            <div class="metric-label">Avg CTR</div>
-                            <div style="font-size: 22px; font-weight: 700;" id="dash-gsc-ctr">—</div>
-                            <div class="stat-sub" id="dash-gsc-ctr-delta"></div>
-                        </div>
-                        <div style="padding: 12px;">
-                            <div class="metric-label">Avg Position</div>
-                            <div style="font-size: 22px; font-weight: 700;" id="dash-gsc-position">—</div>
-                            <div class="stat-sub" id="dash-gsc-position-delta"></div>
-                        </div>
-                    </div>
-                </div>
 
                 <!-- Top SEO Priorities (shown if data available) -->
                 <div class="card" style="display: none; margin-bottom: 24px;">
