@@ -676,6 +676,40 @@ class Database:
                 EXCEPTION WHEN duplicate_column THEN NULL;
                 END $$
             """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS store_daily_snapshot (
+                    id SERIAL PRIMARY KEY,
+                    store_id INTEGER REFERENCES stores(id) ON DELETE CASCADE,
+                    snapshot_date DATE NOT NULL,
+                    products_total INTEGER DEFAULT 0,
+                    products_active INTEGER DEFAULT 0,
+                    collections_total INTEGER DEFAULT 0,
+                    articles_total INTEGER DEFAULT 0,
+                    avg_seo_score NUMERIC(5,1),
+                    score_good INTEGER DEFAULT 0,
+                    score_fair INTEGER DEFAULT 0,
+                    score_poor INTEGER DEFAULT 0,
+                    meta_title_pct NUMERIC(5,1),
+                    meta_desc_pct NUMERIC(5,1),
+                    alt_text_pct NUMERIC(5,1),
+                    schema_pushed_pct NUMERIC(5,1),
+                    keyword_mapped_pct NUMERIC(5,1),
+                    technical_issues INTEGER DEFAULT 0,
+                    fixable_issues INTEGER DEFAULT 0,
+                    orphan_pages INTEGER DEFAULT 0,
+                    broken_links INTEGER DEFAULT 0,
+                    semrush_keywords INTEGER DEFAULT 0,
+                    semrush_top10 INTEGER DEFAULT 0,
+                    semrush_striking INTEGER DEFAULT 0,
+                    content_gaps_new INTEGER DEFAULT 0,
+                    content_gaps_addressed INTEGER DEFAULT 0,
+                    aeo_assets_published INTEGER DEFAULT 0,
+                    gsc_clicks_7d INTEGER DEFAULT 0,
+                    gsc_position_7d NUMERIC(6,1),
+                    created_at TIMESTAMP DEFAULT NOW(),
+                    UNIQUE(store_id, snapshot_date)
+                )
+            """)
             # Backfill: any article without an explicit type is a blog post.
             cur.execute(
                 "UPDATE synced_articles SET article_type = 'blog' WHERE article_type IS NULL"

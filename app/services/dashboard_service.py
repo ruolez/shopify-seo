@@ -179,11 +179,28 @@ def _get_kpis(store_id, score_summary):
         )
         kw = cur.fetchone()
     if kw and int(kw["total"] or 0) > 0:
+        # Prefer snapshot history for the striking-distance delta (a real
+        # 7-day comparison); fall back to Semrush previous_position (delta
+        # vs whenever the last CSV import happened).
+        striking_change = None
+        with db.get_cursor() as cur:
+            cur.execute(
+                """SELECT semrush_striking FROM store_daily_snapshot
+                   WHERE store_id = %s AND semrush_striking > 0
+                     AND snapshot_date <= CURRENT_DATE - 7
+                   ORDER BY snapshot_date DESC LIMIT 1""",
+                (store_id,),
+            )
+            week_ago = cur.fetchone()
+        if week_ago:
+            striking_change = int(kw["striking"]) - int(week_ago["semrush_striking"])
+        else:
+            striking_change = int(kw["striking"]) - int(kw["striking_prev"])
         kpis["keywords"] = {
             "total": int(kw["total"]),
             "top10": int(kw["top10"]),
             "striking": int(kw["striking"]),
-            "striking_change": int(kw["striking"]) - int(kw["striking_prev"]),
+            "striking_change": striking_change,
         }
 
     with db.get_cursor() as cur:
