@@ -24,6 +24,24 @@ def dashboard_overview():
     return jsonify(dashboard_service.get_overview(store_id))
 
 
+@dashboard_bp.route("/api/dashboard/action-queue")
+def dashboard_action_queue():
+    store_id = _resolve_store_id()
+    limit = min(request.args.get("limit", 15, type=int), 50)
+    if not store_id:
+        return jsonify({"items": [], "total_by_source": {}})
+    return jsonify(dashboard_service.build_action_queue(store_id, limit))
+
+
+@dashboard_bp.route("/api/dashboard/ctr-opportunities")
+def dashboard_ctr_opportunities():
+    store_id = _resolve_store_id()
+    limit = min(request.args.get("limit", 10, type=int), 50)
+    if not store_id:
+        return jsonify({"items": []})
+    return jsonify({"items": dashboard_service.get_ctr_opportunities(store_id, limit)})
+
+
 @dashboard_bp.route("/api/dashboard/trends")
 def dashboard_trends():
     store_id = _resolve_store_id()

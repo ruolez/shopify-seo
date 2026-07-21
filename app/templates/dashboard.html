@@ -68,16 +68,37 @@
                     <div style="height:260px;padding:0 8px 8px;"><canvas id="trend-chart"></canvas></div>
                 </div>
 
-                <!-- Insights from all data sources (shown if data available) -->
-                <div id="dash-insights" style="display: none; margin-bottom: 24px;"></div>
-
-                <!-- Top SEO Priorities (shown if data available) -->
-                <div class="card" style="display: none; margin-bottom: 24px;">
-                    <div class="card-header" style="display: flex; align-items: center; justify-content: space-between;">
-                        <h3><span class="material-symbols-rounded" style="vertical-align: middle; font-size: 20px;">priority_high</span> Top SEO Priorities</h3>
+                <!-- Unified action queue: one prioritized to-do list across all engines -->
+                <div id="queue-card" class="card" style="display:none;margin-bottom:24px;">
+                    <div class="card-header" style="display:flex;align-items:center;justify-content:space-between;">
+                        <h3><span class="material-symbols-rounded" style="vertical-align:middle;font-size:20px;">checklist</span> Action Queue <span id="queue-note" style="font-weight:400;font-size:12px;color:var(--on-surface-secondary);"></span></h3>
                         <a href="/seo?tab=priorities" class="btn btn-secondary btn-sm">View All</a>
                     </div>
-                    <div id="dash-priorities" style="padding: 0 16px 12px;"></div>
+                    <div id="dash-queue" style="padding:0 16px 12px;"></div>
+                </div>
+
+                <!-- CTR opportunities: top-10 rankings underperforming the expected CTR curve -->
+                <div id="ctr-card" class="card" style="display:none;margin-bottom:24px;">
+                    <div class="card-header" style="display:flex;align-items:center;justify-content:space-between;">
+                        <h3><span class="material-symbols-rounded" style="vertical-align:middle;font-size:20px;">mouse</span> CTR Opportunities</h3>
+                        <a href="/gsc" class="btn btn-secondary btn-sm">Search Console</a>
+                    </div>
+                    <div style="padding:0 16px 12px;overflow-x:auto;">
+                        <table style="width:100%;font-size:13px;border-collapse:collapse;">
+                            <thead>
+                                <tr style="text-align:left;color:var(--on-surface-secondary);font-size:11px;">
+                                    <th style="padding:6px 8px;">Query</th>
+                                    <th style="padding:6px 8px;">Target</th>
+                                    <th style="padding:6px 8px;text-align:right;">Pos</th>
+                                    <th style="padding:6px 8px;text-align:right;">Impressions</th>
+                                    <th style="padding:6px 8px;text-align:right;">CTR</th>
+                                    <th style="padding:6px 8px;text-align:right;">Expected</th>
+                                    <th style="padding:6px 8px;text-align:right;">Est. gain</th>
+                                </tr>
+                            </thead>
+                            <tbody id="dash-ctr-rows"></tbody>
+                        </table>
+                    </div>
                 </div>
 
                 <div class="card">

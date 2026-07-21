@@ -90,10 +90,6 @@ def get_overview(store_id):
 
     if store:
         try:
-            result["insights"] = get_store_insights(store_id)
-        except Exception as e:
-            logger.warning("Dashboard insights failed: %s", e)
-        try:
             result["kpis"] = _get_kpis(store_id, score)
         except Exception as e:
             logger.warning("Dashboard KPIs failed: %s", e)
@@ -321,6 +317,212 @@ def _query_score_summary(store_id):
         "avg": round(float(row["avg"])),
         "distribution": {"good": row["good"], "fair": row["fair"], "poor": row["poor"]},
     }
+
+
+def _brand_tokens(store):
+    """Strings that identify navigational/brand queries. Kept conservative —
+    a generic word from the shop name (e.g. 'tobacco') must never be used
+    as a brand marker or it would exclude the whole catalog's queries."""
+    tokens = set()
+    name = (store.get("shop_name") or store.get("name") or "").lower().strip()
+    if name:
+        tokens.add(name)
+        tokens.add(name.replace(" ", ""))
+        first = name.split()[0]
+        if any(ch.isdigit() for ch in first) or len(first) >= 5:
+            tokens.add(first)
+    domain = (store.get("primary_domain") or store.get("domain") or "").lower()
+    label = domain.split("//")[-1].replace("www.", "").split(".")[0]
+    if len(label) >= 4:
+        tokens.add(label)
+    return tokens
+
+
+def get_ctr_opportunities(store_id, limit=10, min_impressions=200):
+    """Queries ranking in the top 10 whose CTR trails the expected curve for
+    their position — the cheapest wins on the site (meta title rewrites)."""
+    from app.services.seo_analyzer import _expected_ctr
+    from app.services.url_utils import url_path_key
+
+    end = gsc_data_end_date()
+    start = end - timedelta(days=27)
+
+    with db.get_cursor() as cur:
+        cur.execute(
+            "SELECT name, shop_name, domain, primary_domain FROM stores WHERE id = %s",
+            (store_id,),
+        )
+        store = cur.fetchone()
+        if not store:
+            return []
+        cur.execute(
+            """SELECT query, page, SUM(impressions) AS impressions, SUM(clicks) AS clicks,
+                      SUM(position * impressions) / NULLIF(SUM(impressions), 0) AS position
+               FROM gsc_daily_metrics
+               WHERE store_id = %s AND date >= %s AND date <= %s
+               GROUP BY query, page
+               HAVING SUM(impressions) >= %s
+                  AND SUM(position * impressions) / NULLIF(SUM(impressions), 0) <= 10
+               ORDER BY SUM(impressions) DESC
+               LIMIT 200""",
+            (store_id, start.isoformat(), end.isoformat(), min_impressions),
+        )
+        rows = cur.fetchall()
+
+    brand = _brand_tokens(dict(store))
+    candidates = []
+    for r in rows:
+        query = r["query"] or ""
+        if any(t in query.lower() for t in brand):
+            continue
+        impressions = int(r["impressions"] or 0)
+        actual = int(r["clicks"] or 0) / impressions if impressions else 0
+        position = float(r["position"])
+        expected = _expected_ctr(position)
+        if actual >= expected * 0.8:
+            continue
+        candidates.append(
+            {
+                "query": query,
+                "page": r["page"],
+                "path_key": url_path_key(r["page"]),
+                "position": round(position, 1),
+                "impressions": impressions,
+                "actual_ctr": round(actual, 4),
+                "expected_ctr": round(expected, 4),
+                "est_clicks_gain": int((expected - actual) * impressions),
+            }
+        )
+
+    candidates.sort(key=lambda c: c["est_clicks_gain"], reverse=True)
+    candidates = candidates[:limit]
+
+    # Batch-resolve pages to synced items so rows deep-link into the fix UI.
+    handles = {"product": {}, "collection": {}}
+    for c in candidates:
+        parts = c["path_key"].split("/")
+        if len(parts) == 2 and parts[0] == "products":
+            handles["product"][parts[1]] = None
+        elif len(parts) == 2 and parts[0] == "collections":
+            handles["collection"][parts[1]] = None
+    with db.get_cursor() as cur:
+        for item_type, table in (("product", "synced_products"), ("collection", "synced_collections")):
+            if handles[item_type]:
+                cur.execute(
+                    f"SELECT id, handle, title FROM {table} WHERE store_id = %s AND handle = ANY(%s)",
+                    (store_id, list(handles[item_type].keys())),
+                )
+                for row in cur.fetchall():
+                    handles[item_type][row["handle"]] = {"id": row["id"], "title": row["title"]}
+
+    for c in candidates:
+        parts = c["path_key"].split("/")
+        c["matched_item"] = None
+        if len(parts) == 2 and parts[0] in ("products", "collections"):
+            item_type = "product" if parts[0] == "products" else "collection"
+            match = handles[item_type].get(parts[1])
+            if match:
+                c["matched_item"] = {"item_type": item_type, **match}
+        del c["path_key"]
+    return candidates
+
+
+def build_action_queue(store_id, limit=15):
+    """One prioritized to-do list merged from every analysis engine,
+    ranked by estimated click gain."""
+    items = []
+    counts = {}
+
+    try:
+        from app.services.seo_priority_service import get_priority_ranked_items
+        priorities = get_priority_ranked_items(store_id, item_type="product", limit=10)
+    except Exception as e:
+        logger.warning("Action queue: priorities failed: %s", e)
+        priorities = []
+    for p in priorities:
+        severity = "high" if p["priority_score"] >= 80 else "med" if p["priority_score"] >= 60 else "low"
+        action = p.get("recommended_action") or p.get("top_opportunity") or "Optimize on-page SEO"
+        items.append(
+            {
+                "source": "priority",
+                "severity": severity,
+                "title": p["title"],
+                "detail": action + (" · cannibalization risk" if p.get("cannibalization_warning") else ""),
+                "href": f"/seo?optimize={p['item_type']}&id={p['id']}&action={action}",
+                "est_clicks_gain": p.get("potential_clicks_gain"),
+                "item_type": p["item_type"],
+                "item_id": p["id"],
+            }
+        )
+    counts["priority"] = len(priorities)
+
+    try:
+        ctr = get_ctr_opportunities(store_id, limit=5)
+    except Exception as e:
+        logger.warning("Action queue: CTR scan failed: %s", e)
+        ctr = []
+    for c in ctr:
+        matched = c.get("matched_item")
+        href = f"/seo?optimize={matched['item_type']}&id={matched['id']}" if matched else "/gsc"
+        target = matched["title"] if matched else c["page"]
+        items.append(
+            {
+                "source": "ctr",
+                "severity": "med",
+                "title": f'Rewrite meta title for "{c["query"]}"',
+                "detail": f"{target} · pos {c['position']} · CTR {c['actual_ctr'] * 100:.1f}% vs {c['expected_ctr'] * 100:.1f}% expected",
+                "href": href,
+                "est_clicks_gain": c["est_clicks_gain"],
+                "item_type": matched["item_type"] if matched else None,
+                "item_id": matched["id"] if matched else None,
+            }
+        )
+    counts["ctr"] = len(ctr)
+
+    insights = get_store_insights(store_id)
+
+    def summary_row(source, severity, title, detail, href):
+        items.append(
+            {
+                "source": source, "severity": severity, "title": title, "detail": detail,
+                "href": href, "est_clicks_gain": None, "item_type": None, "item_id": None,
+            }
+        )
+
+    cann = insights.get("cannibalization_count", 0)
+    counts["cannibalization"] = cann
+    if cann:
+        summary_row("cannibalization", "high", f"{cann} keyword cannibalization issue{'s' if cann != 1 else ''}",
+                    "Queries ranking on multiple pages", "/gsc")
+
+    tech = insights.get("technical_seo") or {}
+    counts["technical"] = tech.get("total_issues", 0)
+    if tech.get("total_issues"):
+        summary_row("technical", "med", f"{tech['total_issues']} technical SEO issues",
+                    f"{tech.get('fixable_issues', 0)} auto-fixable", "/technical-seo")
+
+    gaps = insights.get("content_gaps") or {}
+    counts["gaps"] = gaps.get("new", 0)
+    if gaps.get("new"):
+        summary_row("gaps", "low", f"{gaps['new']} new content gap{'s' if gaps['new'] != 1 else ''}",
+                    f"{gaps.get('total', 0)} total opportunities", "/content-gaps")
+
+    alerts = insights.get("unread_competitor_alerts", 0)
+    counts["competitor"] = alerts
+    if alerts:
+        summary_row("competitor", "med", f"{alerts} unread competitor alert{'s' if alerts != 1 else ''}",
+                    "Ranking changes on tracked keywords", "/competitors")
+
+    il = insights.get("interlinking") or {}
+    orphans = il.get("orphan_products", 0) + il.get("orphan_collections", 0)
+    counts["links"] = orphans + il.get("broken_links", 0)
+    if counts["links"]:
+        summary_row("links", "low", f"{orphans} orphan pages · {il.get('broken_links', 0)} broken links",
+                    f"{il.get('under_linked', 0)} under-linked", "/interlinking")
+
+    severity_rank = {"high": 0, "med": 1, "low": 2}
+    items.sort(key=lambda i: (-(i["est_clicks_gain"] or 0), severity_rank[i["severity"]]))
+    return {"items": items[:limit], "total_by_source": counts}
 
 
 def get_store_insights(store_id):

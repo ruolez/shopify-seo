@@ -22,17 +22,14 @@ document.addEventListener("DOMContentLoaded", () => {
 function loadDashboard() {
     // Reset store-scoped widgets so a store switch never shows stale data
     // from the previous store while the new requests are in flight.
-    document.getElementById("trend-card").style.display = "none";
-    document.getElementById("dash-insights").style.display = "none";
-    const prio = document.getElementById("dash-priorities");
-    if (prio) {
-        prio.innerHTML = "";
-        prio.closest(".card").style.display = "none";
+    for (const id of ["trend-card", "queue-card", "ctr-card"]) {
+        document.getElementById(id).style.display = "none";
     }
     loadOverview().then(() => {
         // Widgets below depend on the resolved store id from the overview.
         loadTrends();
-        loadTopPriorities();
+        loadActionQueue();
+        loadCtrOpportunities();
     });
 }
 
@@ -82,10 +79,6 @@ async function loadOverview() {
         }
 
         renderKpis(stats.kpis || {}, stats);
-
-        if (stats.insights) {
-            renderInsights(stats.insights);
-        }
     } catch (err) {
         showToast("Failed to load dashboard", "error");
     }
@@ -240,144 +233,77 @@ function renderDelta(el, pct, invert = false) {
     el.innerHTML = `<span class="${good ? "delta-up" : "delta-down"}">${arrow} ${Math.abs(pct).toFixed(1)}% vs prev period</span>`;
 }
 
-function renderInsights(insights) {
-    const container = document.getElementById("dash-insights");
-    if (!container) return;
+const QUEUE_SOURCE_LABELS = {
+    priority: "SEO", ctr: "CTR", cannibalization: "Cannibal", technical: "Technical",
+    gaps: "Gaps", competitor: "Competitor", links: "Links",
+};
 
-    let html = '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px;">';
-
-    // AI visibility (latest tracking run)
-    if (insights.ai_visibility) {
-        const v = insights.ai_visibility;
-        const rate = Math.round((v.brand_mention_rate || 0) * 100);
-        const sov = Math.round((v.share_of_voice || 0) * 100);
-        const rank = v.avg_rank !== null && v.avg_rank !== undefined ? `Avg rank ${v.avg_rank.toFixed(1)}` : "Not yet ranked";
-        const when = v.completed_at ? formatRelativeTime(v.completed_at) : "";
-        html += `<a href="/ai-seo" class="insight-card insight-clickable">
-            <div class="insight-icon" style="color:var(--primary);"><span class="material-symbols-rounded">psychology</span></div>
-            <div class="insight-label">AI Visibility</div>
-            <div class="insight-value">${rate}% mentions</div>
-            <div class="insight-detail">${sov}% share of voice · ${escapeHtml(rank)}${when ? ` · ${escapeHtml(when)}` : ""}</div>
-        </a>`;
-    }
-
-    // Semrush summary
-    if (insights.semrush) {
-        const sr = insights.semrush;
-        html += `<a href="/semrush" class="insight-card insight-clickable">
-            <div class="insight-icon" style="color:var(--primary);"><span class="material-symbols-rounded">search</span></div>
-            <div class="insight-label">Semrush Keywords</div>
-            <div class="insight-value">${sr.total_keywords.toLocaleString()}</div>
-            <div class="insight-detail">Avg pos: ${sr.avg_position} · Striking distance: ${sr.striking_count}</div>
-        </a>`;
-    }
-
-    // Keyword strategy corpus
-    if (insights.keywords) {
-        html += `<a href="/keyword-strategy" class="insight-card insight-clickable">
-            <div class="insight-icon" style="color:var(--primary);"><span class="material-symbols-rounded">label</span></div>
-            <div class="insight-label">Master Keywords</div>
-            <div class="insight-value">${insights.keywords.total.toLocaleString()}</div>
-            <div class="insight-detail">${insights.keywords.manual} manually curated</div>
-        </a>`;
-    }
-
-    // Cannibalization — the fixer UI lives on the Search Console page
-    if (insights.cannibalization_count > 0) {
-        html += `<a href="/gsc" class="insight-card insight-clickable" style="border-color:var(--error);">
-            <div class="insight-icon" style="color:var(--error);"><span class="material-symbols-rounded">warning</span></div>
-            <div class="insight-label">Cannibalization Issues</div>
-            <div class="insight-value" style="color:var(--error);">${insights.cannibalization_count}</div>
-            <div class="insight-detail">Keywords ranking on multiple pages</div>
-        </a>`;
-    }
-
-    // Competitor alerts
-    if (insights.unread_competitor_alerts > 0) {
-        html += `<a href="/competitors" class="insight-card insight-clickable" style="border-color:var(--warning);">
-            <div class="insight-icon" style="color:var(--warning);"><span class="material-symbols-rounded">groups</span></div>
-            <div class="insight-label">Competitor Alerts</div>
-            <div class="insight-value" style="color:var(--warning);">${insights.unread_competitor_alerts}</div>
-            <div class="insight-detail">Unread ranking changes</div>
-        </a>`;
-    }
-
-    // Content gaps
-    if (insights.content_gaps && insights.content_gaps.new > 0) {
-        html += `<a href="/content-gaps" class="insight-card insight-clickable">
-            <div class="insight-icon" style="color:var(--primary);"><span class="material-symbols-rounded">lightbulb</span></div>
-            <div class="insight-label">Content Gaps</div>
-            <div class="insight-value">${insights.content_gaps.new}</div>
-            <div class="insight-detail">${insights.content_gaps.total} total opportunities</div>
-        </a>`;
-    }
-
-    // Technical SEO
-    if (insights.technical_seo && insights.technical_seo.total_issues > 0) {
-        html += `<a href="/technical-seo" class="insight-card insight-clickable">
-            <div class="insight-icon" style="color:var(--warning);"><span class="material-symbols-rounded">build</span></div>
-            <div class="insight-label">Technical Issues</div>
-            <div class="insight-value">${insights.technical_seo.total_issues}</div>
-            <div class="insight-detail">${insights.technical_seo.fixable_issues} auto-fixable</div>
-        </a>`;
-    }
-
-    // Interlinking
-    if (insights.interlinking) {
-        const il = insights.interlinking;
-        const orphans = il.orphan_products + il.orphan_collections;
-        if (orphans > 0 || il.broken_links > 0) {
-            html += `<a href="/interlinking" class="insight-card insight-clickable">
-                <div class="insight-icon" style="color:var(--on-surface-secondary);"><span class="material-symbols-rounded">link</span></div>
-                <div class="insight-label">Link Health</div>
-                <div class="insight-value">${orphans} orphans</div>
-                <div class="insight-detail">${il.under_linked} under-linked · ${il.broken_links} broken</div>
-            </a>`;
-        }
-    }
-
-    // Recent optimizations
-    if (insights.recent_optimizations > 0) {
-        html += `<a href="/seo?tab=priorities" class="insight-card insight-clickable">
-            <div class="insight-icon" style="color:var(--success);"><span class="material-symbols-rounded">auto_fix_high</span></div>
-            <div class="insight-label">Recent Optimizations</div>
-            <div class="insight-value">${insights.recent_optimizations}</div>
-            <div class="insight-detail">Last 30 days</div>
-        </a>`;
-    }
-
-    html += '</div>';
-    container.innerHTML = html;
-    container.style.display = "";
-}
-
-async function loadTopPriorities() {
+async function loadActionQueue() {
     try {
         if (!dashStoreId) return;
+        const data = await apiRequest(`/api/dashboard/action-queue?store_id=${dashStoreId}&limit=15`);
+        const container = document.getElementById("dash-queue");
+        const card = document.getElementById("queue-card");
 
-        const items = await apiRequest(`/api/seo/priorities?store_id=${dashStoreId}&type=product&limit=5`);
-        const container = document.getElementById("dash-priorities");
-        if (!container || !items.length) return;
+        const totals = data.total_by_source || {};
+        const totalCount = Object.values(totals).reduce((a, b) => a + b, 0);
+        document.getElementById("queue-note").textContent = totalCount ? `${totalCount} open items` : "";
 
-        let html = "";
-        for (const item of items) {
-            const prioClass = item.priority_score >= 80 ? "badge-error" : item.priority_score >= 60 ? "badge-warning" : "badge-info";
-            const actionParam = encodeURIComponent(item.recommended_action || '');
-            const optimizeUrl = `/seo?optimize=${item.item_type}&id=${item.id}&action=${actionParam}`;
-            const cannibalIcon = item.cannibalization_warning ? '<span class="material-symbols-rounded" style="font-size:14px;color:var(--error);vertical-align:middle;" title="Cannibalization risk">warning</span> ' : '';
-            html += `<div style="display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--outline);cursor:pointer;" onclick="window.location='${optimizeUrl}'">
-                <span class="badge ${prioClass}" style="min-width:32px;text-align:center;">${item.priority_score}</span>
-                <div style="flex:1;min-width:0;">
-                    <div style="font-weight:600;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${cannibalIcon}${escapeHtml(item.title)}</div>
-                    <div style="font-size:11px;color:var(--on-surface-secondary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(item.recommended_action || item.top_opportunity || '')}</div>
-                </div>
-                <a href="${optimizeUrl}" class="action-icon" title="Optimize" onclick="event.stopPropagation()"><span class="material-symbols-rounded" style="font-size:18px;">arrow_forward</span></a>
-            </div>`;
+        if (!data.items.length) {
+            container.innerHTML = `<div style="padding:16px 0;color:var(--on-surface-secondary);font-size:13px;">
+                <span class="material-symbols-rounded" style="vertical-align:middle;color:var(--success);">check_circle</span>
+                All clear — no outstanding actions.</div>`;
+            card.style.display = "";
+            return;
         }
 
+        const sevBadge = { high: "badge-error", med: "badge-warning", low: "badge-info" };
+        let html = "";
+        for (const item of data.items) {
+            const gain = item.est_clicks_gain
+                ? `<span style="font-size:11px;color:var(--success);white-space:nowrap;">+${item.est_clicks_gain} clicks/mo</span>`
+                : "";
+            html += `<div style="display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--outline);cursor:pointer;" onclick="window.location='${item.href}'">
+                <span class="badge ${sevBadge[item.severity] || "badge-info"}" style="min-width:64px;text-align:center;">${QUEUE_SOURCE_LABELS[item.source] || item.source}</span>
+                <div style="flex:1;min-width:0;">
+                    <div style="font-weight:600;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(item.title)}</div>
+                    <div style="font-size:11px;color:var(--on-surface-secondary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(item.detail || "")}</div>
+                </div>
+                ${gain}
+                <a href="${item.href}" class="action-icon" title="Open" onclick="event.stopPropagation()"><span class="material-symbols-rounded" style="font-size:18px;">arrow_forward</span></a>
+            </div>`;
+        }
         container.innerHTML = html;
-        container.closest(".card").style.display = "";
+        card.style.display = "";
     } catch {
-        // No priorities available
+        // Queue unavailable — card stays hidden
+    }
+}
+
+async function loadCtrOpportunities() {
+    try {
+        if (!dashStoreId) return;
+        const data = await apiRequest(`/api/dashboard/ctr-opportunities?store_id=${dashStoreId}&limit=10`);
+        if (!data.items || !data.items.length) return;
+
+        let html = "";
+        for (const c of data.items) {
+            const target = c.matched_item
+                ? `<a href="/seo?optimize=${c.matched_item.item_type}&id=${c.matched_item.id}" style="color:var(--primary);">${escapeHtml(c.matched_item.title)}</a>`
+                : `<span style="color:var(--on-surface-secondary);">${escapeHtml(c.page.replace(/^https?:\/\/[^/]+/, ""))}</span>`;
+            html += `<tr style="border-top:1px solid var(--outline);">
+                <td style="padding:6px 8px;font-weight:500;">${escapeHtml(c.query)}</td>
+                <td style="padding:6px 8px;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${target}</td>
+                <td style="padding:6px 8px;text-align:right;">${c.position}</td>
+                <td style="padding:6px 8px;text-align:right;">${c.impressions.toLocaleString()}</td>
+                <td style="padding:6px 8px;text-align:right;color:var(--error);">${(c.actual_ctr * 100).toFixed(1)}%</td>
+                <td style="padding:6px 8px;text-align:right;">${(c.expected_ctr * 100).toFixed(1)}%</td>
+                <td style="padding:6px 8px;text-align:right;color:var(--success);">+${c.est_clicks_gain}/mo</td>
+            </tr>`;
+        }
+        document.getElementById("dash-ctr-rows").innerHTML = html;
+        document.getElementById("ctr-card").style.display = "";
+    } catch {
+        // No CTR data — card stays hidden
     }
 }
