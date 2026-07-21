@@ -664,7 +664,14 @@ function renderTopicRun(run, isHistory) {
     if (run.market_summary) {
         html += `<p style="font-size: 13px; margin: 0 0 12px; padding: 10px 12px; background: var(--primary-light); border-radius: 8px;">${escapeHtml(run.market_summary)}</p>`;
     }
-    html += (run.suggestions || []).map((s) => renderTopicSuggestion(s)).join("");
+    // Scheduled suggestions leave the research area — they live in the
+    // Scheduled tab now (and reappear here if the scheduled post is cancelled).
+    const visible = (run.suggestions || []).filter((s) => s.status !== "scheduled");
+    const scheduledCount = (run.suggestions || []).length - visible.length;
+    html += visible.map((s) => renderTopicSuggestion(s)).join("");
+    if (scheduledCount) {
+        html += `<p style="font-size: 13px; color: var(--on-surface-secondary); margin: 4px 0 8px;">${scheduledCount} suggestion${scheduledCount > 1 ? "s" : ""} moved to the <a href="#" onclick="document.querySelector('.tab[data-tab=\\'scheduled\\']').click(); return false;">Scheduled tab</a>.</p>`;
+    }
     const rejected = run.rejected_topics || [];
     if (rejected.length) {
         html += `<details style="margin-top: 8px;"><summary style="cursor: pointer; font-size: 13px; color: var(--on-surface-secondary);">Ruled out (${rejected.length})</summary><ul style="font-size: 13px; color: var(--on-surface-secondary); margin: 8px 0 0;">`;
