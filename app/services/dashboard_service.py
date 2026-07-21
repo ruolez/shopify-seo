@@ -525,6 +525,55 @@ def build_action_queue(store_id, limit=15):
     return {"items": items[:limit], "total_by_source": counts}
 
 
+def get_rank_movers(store_id, limit=10):
+    with db.get_cursor() as cur:
+        cur.execute(
+            """SELECT keyword, position, previous_position,
+                      (previous_position - position) AS change,
+                      search_volume, url
+               FROM semrush_keywords
+               WHERE store_id = %s AND position IS NOT NULL AND previous_position IS NOT NULL
+                 AND position <> previous_position
+               ORDER BY ABS(previous_position - position) * GREATEST(COALESCE(search_volume, 1), 1) DESC
+               LIMIT 80""",
+            (store_id,),
+        )
+        rows = cur.fetchall()
+
+        cur.execute(
+            """SELECT keyword, competitor_domain, competitor_position, our_position, alert_type, created_at
+               FROM competitor_alerts
+               WHERE store_id = %s AND is_read = FALSE
+               ORDER BY created_at DESC LIMIT %s""",
+            (store_id, limit),
+        )
+        alerts = cur.fetchall()
+
+    def fmt(r):
+        return {
+            "keyword": r["keyword"],
+            "position": r["position"],
+            "previous_position": r["previous_position"],
+            "change": r["change"],
+            "volume": r["search_volume"],
+            "url": r["url"],
+        }
+
+    up = [fmt(r) for r in rows if r["change"] > 0][:limit]
+    down = [fmt(r) for r in rows if r["change"] < 0][:limit]
+    competitor_gains = [
+        {
+            "keyword": a["keyword"],
+            "competitor": a["competitor_domain"],
+            "their_position": a["competitor_position"],
+            "our_position": a["our_position"],
+            "alert_type": a["alert_type"],
+        }
+        for a in alerts
+    ]
+    return {"up": up, "down": down, "competitor_gains": competitor_gains}
+
+
 def get_store_insights(store_id):
     """Aggregate insights from all data sources for the dashboard."""
     today = datetime.now(timezone.utc).date()

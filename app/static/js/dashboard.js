@@ -22,7 +22,7 @@ document.addEventListener("DOMContentLoaded", () => {
 function loadDashboard() {
     // Reset store-scoped widgets so a store switch never shows stale data
     // from the previous store while the new requests are in flight.
-    for (const id of ["trend-card", "queue-card", "ctr-card"]) {
+    for (const id of ["trend-card", "queue-card", "ctr-card", "impact-card", "movers-card"]) {
         document.getElementById(id).style.display = "none";
     }
     loadOverview().then(() => {
@@ -30,6 +30,8 @@ function loadDashboard() {
         loadTrends();
         loadActionQueue();
         loadCtrOpportunities();
+        loadImpact();
+        loadMovers();
     });
 }
 
@@ -305,5 +307,90 @@ async function loadCtrOpportunities() {
         document.getElementById("ctr-card").style.display = "";
     } catch {
         // No CTR data — card stays hidden
+    }
+}
+
+const IMPACT_BADGES = {
+    improved: ["badge-success", "Improved"],
+    declined: ["badge-error", "Declined"],
+    flat: ["badge-info", "Flat"],
+    collecting: ["badge-warning", "Collecting"],
+    insufficient: ["badge-info", "Low data"],
+};
+
+async function loadImpact() {
+    try {
+        if (!dashStoreId) return;
+        const data = await apiRequest(`/api/dashboard/impact?store_id=${dashStoreId}&limit=8`);
+        if (!data.items || !data.items.length) return;
+
+        const s = data.summary || {};
+        document.getElementById("impact-summary").textContent =
+            `${s.events_30d ?? 0} changes (30d) · ${s.improved ?? 0} improved · ${s.declined ?? 0} declined`;
+
+        let html = "";
+        for (const item of data.items) {
+            const [badgeClass, badgeText] = IMPACT_BADGES[item.status] || ["badge-info", item.status];
+            let detail;
+            if (item.status === "collecting") {
+                detail = `${item.post_days_available} of 7 days of post-change data`;
+            } else if (item.status === "insufficient") {
+                detail = "Too little search data before the change";
+            } else {
+                const clicks = item.clicks_change_pct !== null
+                    ? `clicks/day ${item.pre.clicks_per_day} → ${item.post.clicks_per_day} (${item.clicks_change_pct > 0 ? "+" : ""}${item.clicks_change_pct}%)`
+                    : `clicks/day ${item.pre.clicks_per_day} → ${item.post.clicks_per_day}`;
+                const pos = item.position_change !== null
+                    ? ` · pos ${item.pre.position} → ${item.post.position}`
+                    : "";
+                detail = clicks + pos;
+            }
+            html += `<div style="display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--outline);">
+                <span class="badge ${badgeClass}" style="min-width:74px;text-align:center;">${badgeText}</span>
+                <div style="flex:1;min-width:0;">
+                    <div style="font-weight:600;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(item.title)}</div>
+                    <div style="font-size:11px;color:var(--on-surface-secondary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(item.change_type || "optimized")} · ${formatRelativeTime(item.changed_at)} · ${escapeHtml(detail)}</div>
+                </div>
+            </div>`;
+        }
+        document.getElementById("dash-impact").innerHTML = html;
+        document.getElementById("impact-card").style.display = "";
+    } catch {
+        // No impact data — card stays hidden
+    }
+}
+
+async function loadMovers() {
+    try {
+        if (!dashStoreId) return;
+        const data = await apiRequest(`/api/dashboard/movers?store_id=${dashStoreId}&limit=5`);
+        const hasData = (data.up && data.up.length) || (data.down && data.down.length) || (data.competitor_gains && data.competitor_gains.length);
+        if (!hasData) return;
+
+        const row = (m, up) => `<div style="display:flex;align-items:center;gap:8px;padding:5px 0;font-size:12px;">
+            <span class="${up ? "delta-up" : "delta-down"}" style="min-width:34px;">${up ? "▲" : "▼"} ${Math.abs(m.change)}</span>
+            <span style="flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;" title="${escapeHtml(m.keyword)}">${escapeHtml(m.keyword)}</span>
+            <span style="color:var(--on-surface-secondary);white-space:nowrap;">${m.previous_position} → ${m.position}${m.volume ? ` · ${m.volume.toLocaleString()}/mo` : ""}</span>
+        </div>`;
+
+        let html = '<div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;">';
+        html += `<div><div style="font-size:11px;font-weight:600;color:var(--on-surface-secondary);padding:6px 0;">WINNERS</div>${(data.up || []).map((m) => row(m, true)).join("") || '<div style="font-size:12px;color:var(--on-surface-secondary);">None</div>'}</div>`;
+        html += `<div><div style="font-size:11px;font-weight:600;color:var(--on-surface-secondary);padding:6px 0;">LOSERS</div>${(data.down || []).map((m) => row(m, false)).join("") || '<div style="font-size:12px;color:var(--on-surface-secondary);">None</div>'}</div>`;
+        html += "</div>";
+
+        if (data.competitor_gains && data.competitor_gains.length) {
+            html += '<div style="font-size:11px;font-weight:600;color:var(--on-surface-secondary);padding:10px 0 4px;">COMPETITOR ALERTS</div>';
+            for (const g of data.competitor_gains.slice(0, 4)) {
+                html += `<div style="display:flex;align-items:center;gap:8px;padding:4px 0;font-size:12px;">
+                    <span style="flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(g.keyword)}</span>
+                    <span style="color:var(--on-surface-secondary);white-space:nowrap;">${escapeHtml(g.competitor || "")} #${g.their_position ?? "?"} vs us #${g.our_position ?? "—"}</span>
+                </div>`;
+            }
+        }
+
+        document.getElementById("dash-movers").innerHTML = html;
+        document.getElementById("movers-card").style.display = "";
+    } catch {
+        // No movers data — card stays hidden
     }
 }

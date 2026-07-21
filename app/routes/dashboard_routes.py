@@ -42,6 +42,25 @@ def dashboard_ctr_opportunities():
     return jsonify({"items": dashboard_service.get_ctr_opportunities(store_id, limit)})
 
 
+@dashboard_bp.route("/api/dashboard/impact")
+def dashboard_impact():
+    store_id = _resolve_store_id()
+    limit = min(request.args.get("limit", 10, type=int), 50)
+    if not store_id:
+        return jsonify({"items": [], "summary": {}})
+    from app.services.impact_service import get_optimization_impact
+    return jsonify(get_optimization_impact(store_id, days=60, limit=limit))
+
+
+@dashboard_bp.route("/api/dashboard/movers")
+def dashboard_movers():
+    store_id = _resolve_store_id()
+    limit = min(request.args.get("limit", 10, type=int), 25)
+    if not store_id:
+        return jsonify({"up": [], "down": [], "competitor_gains": []})
+    return jsonify(dashboard_service.get_rank_movers(store_id, limit))
+
+
 @dashboard_bp.route("/api/dashboard/trends")
 def dashboard_trends():
     store_id = _resolve_store_id()

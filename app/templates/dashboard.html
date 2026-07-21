@@ -101,6 +101,24 @@
                     </div>
                 </div>
 
+                <!-- Optimization impact + rank movers -->
+                <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:24px;margin-bottom:24px;">
+                    <div id="impact-card" class="card" style="display:none;margin-bottom:0;">
+                        <div class="card-header" style="display:flex;align-items:center;justify-content:space-between;">
+                            <h3><span class="material-symbols-rounded" style="vertical-align:middle;font-size:20px;">query_stats</span> Optimization Impact</h3>
+                            <span id="impact-summary" style="font-weight:400;font-size:12px;color:var(--on-surface-secondary);"></span>
+                        </div>
+                        <div id="dash-impact" style="padding:0 16px 12px;"></div>
+                    </div>
+                    <div id="movers-card" class="card" style="display:none;margin-bottom:0;">
+                        <div class="card-header" style="display:flex;align-items:center;justify-content:space-between;">
+                            <h3><span class="material-symbols-rounded" style="vertical-align:middle;font-size:20px;">swap_vert</span> Rank Movers</h3>
+                            <a href="/semrush" class="btn btn-secondary btn-sm">Keywords</a>
+                        </div>
+                        <div id="dash-movers" style="padding:0 16px 12px;"></div>
+                    </div>
+                </div>
+
                 <div class="card">
                     <div class="card-header">
                         <h3>Quick Actions</h3>
