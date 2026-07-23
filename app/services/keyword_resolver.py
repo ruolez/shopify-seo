@@ -1,0 +1,455 @@
+"""Demand-grounded keyword resolution.
+
+One resolution per item, blending every keyword signal in the system:
+on-page n-grams (relevance anchor), the page's real GSC queries, Semrush
+keywords (URL-matched, semantic fallback), and Keyword Strategy mappings.
+Candidates are scored relevance x demand x opportunity with a
+cannibalization penalty; a manually assigned keyword (keyword_assignments
+status accepted/applied) always wins the primary slot.
+
+Without any demand data the ranking degenerates to relevance order, which
+matches the old pure-n-gram behavior — a safe fallback.
+"""
+
+import logging
+import math
+import re
+from datetime import datetime, timedelta, timezone
+from urllib.parse import urlparse
+
+from app.database import db
+from app.prompt_defaults import DEFAULTS
+from app.services.technical_seo_analyzer import _extract_keywords, _keyword_in_text, _strip_html
+from app.settings_manager import get_setting
+
+logger = logging.getLogger(__name__)
+
+
+def _norm(kw):
+    return re.sub(r"\s+", " ", (kw or "").strip().lower())
+
+
+def _rules():
+    return get_setting("rules.keyword_resolution", DEFAULTS["rules.keyword_resolution"])
+
+
+def _item_table(item_type):
+    return "synced_products" if item_type == "product" else "synced_collections"
+
+
+def _url_path(item_type, handle):
+    prefix = "products" if item_type == "product" else "collections"
+    return f"{prefix}/{handle}"
+
+
+def build_prefetch(store_id, item_type, item_ids):
+    """Batch the store-level queries for bulk resolution loops."""
+    rules = _rules()
+    today = datetime.now(timezone.utc).date()
+    date_from = (today - timedelta(days=rules.get("gsc_days", 30))).isoformat()
+    date_to = (today - timedelta(days=3)).isoformat()
+
+    with db.get_cursor() as cur:
+        cur.execute("SELECT gsc_property FROM gsc_credentials WHERE store_id = %s", (store_id,))
+        cred = cur.fetchone()
+    base_url = (cred["gsc_property"] or "").rstrip("/") if cred and cred.get("gsc_property") else ""
+
+    with db.get_cursor() as cur:
+        cur.execute(
+            f"SELECT id, handle FROM {_item_table(item_type)} WHERE id = ANY(%s)",
+            (list(item_ids),),
+        )
+        handles = {r["id"]: r["handle"] for r in cur.fetchall()}
+
+    gsc_pages = {}
+    if base_url and handles:
+        page_urls = [f"{base_url}/{_url_path(item_type, h)}" for h in handles.values() if h]
+        with db.get_cursor() as cur:
+            cur.execute(
+                """SELECT page, query,
+                          SUM(clicks) as clicks,
+                          SUM(impressions) as impressions,
+                          SUM(position * impressions) / NULLIF(SUM(impressions), 0) as position
+                   FROM gsc_daily_metrics
+                   WHERE store_id = %s AND page = ANY(%s) AND date >= %s AND date <= %s
+                   GROUP BY page, query
+                   HAVING SUM(impressions) > 0""",
+                (store_id, page_urls, date_from, date_to),
+            )
+            for r in cur.fetchall():
+                gsc_pages.setdefault(r["page"], []).append(r)
+        for rows in gsc_pages.values():
+            rows.sort(key=lambda r: float(r["clicks"] or 0), reverse=True)
+
+    with db.get_cursor() as cur:
+        cur.execute(
+            """SELECT keyword, position, search_volume, cpc, url
+               FROM semrush_keywords
+               WHERE store_id = %s AND url IS NOT NULL AND url != ''
+               ORDER BY search_volume DESC NULLS LAST
+               LIMIT 500""",
+            (store_id,),
+        )
+        semrush = cur.fetchall()
+
+    strategy = {}
+    assignments = {}
+    with db.get_cursor() as cur:
+        cur.execute(
+            """SELECT ckm.item_id, ckm.is_primary, ckm.relevance_score,
+                      mk.keyword, mk.search_volume, mk.intent
+               FROM content_keyword_map ckm
+               JOIN master_keywords mk ON mk.id = ckm.master_keyword_id
+               WHERE ckm.store_id = %s AND ckm.item_type = %s AND ckm.item_id = ANY(%s)
+               ORDER BY ckm.relevance_score DESC NULLS LAST""",
+            (store_id, item_type, list(item_ids)),
+        )
+        for r in cur.fetchall():
+            bucket = strategy.setdefault(r["item_id"], [])
+            if len(bucket) < 30:
+                bucket.append(r)
+
+        cur.execute(
+            """SELECT ka.assigned_item_id, ka.status, ka.updated_at,
+                      mk.keyword, mk.search_volume, mk.intent
+               FROM keyword_assignments ka
+               JOIN master_keywords mk ON mk.id = ka.master_keyword_id
+               WHERE ka.store_id = %s AND ka.assigned_item_type = %s
+                 AND ka.assigned_item_id = ANY(%s)
+                 AND ka.status IN ('accepted', 'applied')
+               ORDER BY ka.updated_at DESC""",
+            (store_id, item_type, list(item_ids)),
+        )
+        for r in cur.fetchall():
+            assignments.setdefault(r["assigned_item_id"], []).append(r)
+
+    return {
+        "base_url": base_url,
+        "handles": handles,
+        "gsc_pages": gsc_pages,
+        "semrush": semrush,
+        "strategy": strategy,
+        "assignments": assignments,
+        "date_from": date_from,
+        "date_to": date_to,
+    }
+
+
+def _semantic_semrush_matches(item, semrush_rows):
+    """Relevance-score unmapped Semrush keywords against the item's identity
+    (vendor / product_type / handle phrases) — mirrors the ai_agent fallback."""
+    identity_phrases = []
+    vendor = (item.get("vendor") or "").lower().strip()
+    ptype = (item.get("product_type") or "").lower().strip()
+    if vendor and len(vendor) > 2:
+        identity_phrases.append(vendor)
+    if ptype and len(ptype) > 2:
+        identity_phrases.append(ptype)
+
+    generic_words = {"the", "and", "for", "with", "pack", "packs", "box", "can", "cans",
+                     "100", "1pk", "5pk", "10pk", "pre", "priced", "new", "best", "buy",
+                     "shop", "online", "sale", "product"}
+    handle_str = (item.get("handle") or "").replace("-", " ").lower()
+    hw = handle_str.split()
+    handle_words = [w for w in hw if len(w) > 2 and w not in generic_words]
+    handle_bigrams = [f"{hw[i]} {hw[i+1]}" for i in range(len(hw) - 1)
+                      if hw[i] not in generic_words and hw[i + 1] not in generic_words]
+
+    scored = []
+    seen = set()
+    for r in semrush_rows:
+        kw = _norm(r.get("keyword"))
+        vol = int(r.get("search_volume") or 0)
+        if not kw or vol <= 0 or kw in seen:
+            continue
+        rel = 0
+        identity_match = any(p in kw for p in identity_phrases)
+        bigram_match = any(bg in kw for bg in handle_bigrams)
+        word_matches = sum(1 for w in handle_words if w in kw)
+        if identity_match:
+            rel += 10
+        if bigram_match:
+            rel += 5
+        rel += word_matches * 2
+        if not identity_match and not bigram_match and word_matches < 2:
+            continue
+        if rel >= 5:
+            scored.append((rel, vol, r))
+            seen.add(kw)
+    scored.sort(key=lambda x: (x[0], x[1]), reverse=True)
+    return [s[2] for s in scored[:15]]
+
+
+def _relevance(candidate, fields, rel_rules):
+    """0..1 — where does this keyword actually appear on the page?"""
+    kw = candidate["keyword"]
+    points = 0
+    for field_name, weight in (
+        ("title", rel_rules.get("title", 40)),
+        ("meta_title", rel_rules.get("meta_title", 15)),
+        ("handle", rel_rules.get("handle", 15)),
+        ("body_first_100", rel_rules.get("body_first_100", 15)),
+        ("meta_description", rel_rules.get("meta_description", 10)),
+        ("body", rel_rules.get("body", 5)),
+    ):
+        if _keyword_in_text(kw, fields.get(field_name) or ""):
+            points += weight
+    conf = candidate.get("confidence") or 0
+    points += min(conf, 20) * rel_rules.get("ngram_confidence_scale", 2.0)
+    ckm_rel = candidate.get("ckm_relevance")
+    if ckm_rel:
+        points = max(points, float(ckm_rel))
+    return min(points, 100) / 100.0
+
+
+def resolve_item_keywords(store_id, item_type, item_id, item=None, prefetch=None):
+    """Full keyword resolution for one item. Returns
+    {primary, on_page_primary, candidates, resolved_at} or a shell when the
+    item has no resolvable keywords at all."""
+    rules = _rules()
+
+    if item is None:
+        with db.get_cursor() as cur:
+            cur.execute(f"SELECT * FROM {_item_table(item_type)} WHERE id = %s", (item_id,))
+            item = cur.fetchone()
+    if not item:
+        return None
+    item = dict(item)
+
+    if prefetch is None:
+        prefetch = build_prefetch(store_id, item_type, [item_id])
+
+    handle = item.get("handle") or prefetch["handles"].get(item_id) or ""
+    page_url = f"{prefetch['base_url']}/{_url_path(item_type, handle)}" if prefetch["base_url"] and handle else ""
+
+    body_text = _strip_html(item.get("description") or "")
+    body_words = body_text.split()
+    fields = {
+        "title": item.get("title") or "",
+        "meta_title": item.get("meta_title") or item.get("title") or "",
+        "handle": handle.replace("-", " "),
+        "body_first_100": " ".join(body_words[:100]),
+        "meta_description": item.get("meta_description") or "",
+        "body": body_text,
+    }
+
+    # ── Candidate collection ─────────────────────────────────────────
+    candidates = {}
+
+    def get_cand(kw_display):
+        key = _norm(kw_display)
+        if not key:
+            return None
+        if key not in candidates:
+            candidates[key] = {
+                "keyword": key,
+                "confidence": 0,
+                "sources": [],
+                "volume": None,
+                "gsc_clicks": None,
+                "gsc_impressions": None,
+                "gsc_position": None,
+                "semrush_position": None,
+                "intent": None,
+                "ckm_relevance": None,
+                "cannibalization": None,
+                "manual": False,
+            }
+        return candidates[key]
+
+    def add_source(cand, source):
+        if source not in cand["sources"]:
+            cand["sources"].append(source)
+
+    # 1. On-page n-grams (relevance anchor)
+    on_page = _extract_keywords(item) or []
+    on_page_primary = on_page[0]["keyword"] if on_page else None
+    for kw in on_page:
+        cand = get_cand(kw["keyword"])
+        if cand is None:
+            continue
+        cand["confidence"] = max(cand["confidence"], float(kw.get("confidence") or 0))
+        if kw.get("packaging_only"):
+            cand["packaging_only"] = True
+        add_source(cand, "page")
+
+    # 2. GSC page queries
+    for r in (prefetch["gsc_pages"].get(page_url) or [])[:15]:
+        cand = get_cand(r["query"])
+        if cand is None:
+            continue
+        cand["gsc_clicks"] = float(r["clicks"] or 0)
+        cand["gsc_impressions"] = float(r["impressions"] or 0)
+        cand["gsc_position"] = round(float(r["position"] or 0), 1) if r["position"] else None
+        add_source(cand, "gsc")
+
+    # 3. Semrush URL-matched (4. semantic fallback when none)
+    url_matched = []
+    for r in prefetch["semrush"]:
+        url = r["url"] or ""
+        path = url.replace(prefetch["base_url"], "").strip("/") if prefetch["base_url"] else ""
+        if not path:
+            try:
+                path = urlparse(url).path.strip("/")
+            except Exception:
+                path = url
+        if path == _url_path(item_type, handle):
+            url_matched.append(r)
+        if len(url_matched) >= 20:
+            break
+    sr_rows = url_matched
+    sr_source = "semrush"
+    if not sr_rows:
+        sr_rows = _semantic_semrush_matches(item, prefetch["semrush"])
+        sr_source = "semrush_semantic"
+    for r in sr_rows:
+        cand = get_cand(r["keyword"])
+        if cand is None:
+            continue
+        vol = int(r.get("search_volume") or 0)
+        if vol:
+            cand["volume"] = max(cand["volume"] or 0, vol)
+        pos = r.get("position")
+        if pos not in (None, 0):
+            cand["semrush_position"] = float(pos)
+        add_source(cand, sr_source)
+
+    # 5. Keyword Strategy mappings + manual assignments
+    for r in prefetch["strategy"].get(item_id) or []:
+        cand = get_cand(r["keyword"])
+        if cand is None:
+            continue
+        if r.get("search_volume"):
+            cand["volume"] = max(cand["volume"] or 0, int(r["search_volume"]))
+        if r.get("intent"):
+            cand["intent"] = r["intent"]
+        if r.get("relevance_score") is not None:
+            cand["ckm_relevance"] = max(cand["ckm_relevance"] or 0, float(r["relevance_score"]))
+        add_source(cand, "strategy")
+
+    manual_kw = None
+    for r in prefetch["assignments"].get(item_id) or []:
+        cand = get_cand(r["keyword"])
+        if cand is None:
+            continue
+        cand["manual"] = True
+        if r.get("search_volume"):
+            cand["volume"] = max(cand["volume"] or 0, int(r["search_volume"]))
+        if r.get("intent"):
+            cand["intent"] = r["intent"]
+        add_source(cand, "strategy")
+        if manual_kw is None:  # rows are ordered updated_at DESC — first wins
+            manual_kw = _norm(r["keyword"])
+
+    if not candidates:
+        return {
+            "primary": None,
+            "on_page_primary": on_page_primary,
+            "candidates": [],
+            "resolved_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+    # ── Scoring ──────────────────────────────────────────────────────
+    rel_rules = rules.get("relevance", {})
+    dem = rules.get("demand", {})
+    opp = rules.get("opportunity", {})
+
+    for cand in candidates.values():
+        relevance = _relevance(cand, fields, rel_rules)
+        cand["relevance"] = round(relevance, 3)
+
+        vol_part = math.log1p(cand["volume"] or 0) / math.log1p(dem.get("volume_ref", 10000))
+        impr_part = math.log1p(cand["gsc_impressions"] or 0) / math.log1p(dem.get("impressions_ref", 1000))
+        demand = max(vol_part, impr_part)
+        if demand <= 0:
+            demand = dem.get("floor", 0.15)
+        demand = min(demand, dem.get("cap", 1.5))
+
+        pos = cand["gsc_position"] or cand["semrush_position"]
+        band = opp.get("striking_band", [4, 20])
+        if pos is None:
+            opportunity = 1.0
+        elif band[0] <= pos <= band[1]:
+            opportunity = opp.get("striking_mult", 1.3)
+        elif pos < band[0]:
+            opportunity = opp.get("top_mult", 1.1)
+        else:
+            opportunity = opp.get("beyond_mult", 0.9)
+
+        cand["score"] = round(100 * relevance * demand * opportunity, 1)
+
+    # ── Cannibalization (batched over top candidates with demand) ────
+    ranked = sorted(candidates.values(), key=lambda c: c["score"], reverse=True)
+    to_check = [c["keyword"] for c in ranked[:rules.get("max_candidates", 15)]
+                if c["volume"] or c["gsc_impressions"]]
+    if to_check and page_url:
+        try:
+            with db.get_cursor() as cur:
+                cur.execute(
+                    """SELECT LOWER(query) as q, page,
+                              SUM(position * impressions) / NULLIF(SUM(impressions), 0) as pos,
+                              SUM(impressions) as impr
+                       FROM gsc_daily_metrics
+                       WHERE store_id = %s AND LOWER(query) = ANY(%s)
+                         AND date >= %s AND date <= %s
+                       GROUP BY LOWER(query), page
+                       HAVING SUM(impressions) > 0""",
+                    (store_id, to_check, prefetch["date_from"], prefetch["date_to"]),
+                )
+                rows = cur.fetchall()
+            for r in rows:
+                if (r["page"] or "").rstrip("/") == page_url.rstrip("/"):
+                    continue
+                pos = float(r["pos"] or 0)
+                if pos and pos <= 10:
+                    cand = candidates.get(r["q"])
+                    if cand and (cand["cannibalization"] is None or pos < cand["cannibalization"]["position"]):
+                        cand["cannibalization"] = {"competing_url": r["page"], "position": round(pos, 1)}
+        except Exception:
+            logger.warning("Cannibalization check failed for %s %s", item_type, item_id)
+
+    penalty = rules.get("cannibalization_mult", 0.5)
+    for cand in candidates.values():
+        if cand["cannibalization"]:
+            cand["score"] = round(cand["score"] * penalty, 1)
+
+    # ── Primary selection ────────────────────────────────────────────
+    ranked = sorted(candidates.values(), key=lambda c: c["score"], reverse=True)
+    min_rel = rel_rules.get("min_relevance", 10) / 100.0
+
+    primary = None
+    note = None
+    if manual_kw and manual_kw in candidates:
+        primary = candidates[manual_kw]
+        best_auto = next((c for c in ranked if not c["manual"] and c["relevance"] >= min_rel), None)
+        if best_auto and best_auto["score"] > primary["score"]:
+            note = f"higher-scoring alternative: {best_auto['keyword']}"
+    else:
+        primary = next((c for c in ranked if c["relevance"] >= min_rel and not c.get("packaging_only")), None)
+        if primary is None:
+            primary = ranked[0] if ranked else None
+
+    final = []
+    if primary:
+        final.append(primary)
+    for c in ranked:
+        if primary and c["keyword"] == primary["keyword"]:
+            continue
+        final.append(c)
+        if len(final) >= rules.get("max_candidates", 15):
+            break
+
+    # detected_keywords-compatible entries: keyword + confidence stay; the
+    # confidence badge now reflects the resolved score.
+    for c in final:
+        c["confidence"] = c["score"]
+
+    result = {
+        "primary": primary,
+        "on_page_primary": on_page_primary,
+        "candidates": final,
+        "resolved_at": datetime.now(timezone.utc).isoformat(),
+    }
+    if note:
+        result["note"] = note
+    return result

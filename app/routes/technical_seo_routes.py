@@ -58,6 +58,65 @@ def _enrich_collection_data(collection_dict):
     return collection_dict
 
 
+def _resolve_and_analyze(item_type, item_dict, prefetch=None):
+    """Resolve demand-grounded keywords, run the technical analysis against the
+    resolved primary, and fold the resolution into the analysis payload."""
+    from app.services.keyword_resolver import resolve_item_keywords
+
+    item_dict = dict(item_dict)
+    if item_type == "collection":
+        item_dict = _enrich_collection_data(item_dict)
+
+    store_id = item_dict["store_id"]
+    resolution = None
+    try:
+        resolution = resolve_item_keywords(
+            store_id, item_type, item_dict["id"], item=item_dict, prefetch=prefetch
+        )
+    except Exception:
+        logger.warning("Keyword resolution failed for %s %s", item_type, item_dict.get("id"))
+
+    primary = (resolution or {}).get("primary")
+    primary_kw = primary["keyword"] if primary else None
+
+    if item_type == "product":
+        analysis = analyze_product_technical_seo(item_dict, primary_keyword=primary_kw)
+    else:
+        analysis = analyze_collection_technical_seo(item_dict, primary_keyword=primary_kw)
+
+    if resolution and resolution.get("candidates"):
+        analysis["detected_keywords"] = resolution["candidates"]
+    analysis["keyword_resolution"] = resolution
+    return analysis, resolution
+
+
+def _upsert_analysis(store_id, item_type, item_id, analysis, resolution):
+    with db.get_cursor() as cur:
+        cur.execute(
+            """INSERT INTO technical_seo_analyses
+            (store_id, item_type, item_id, score, detected_keywords, checks,
+             issues_count, fixable_count, keyword_resolution, updated_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+            ON CONFLICT (store_id, item_type, item_id) DO UPDATE SET
+                score = EXCLUDED.score,
+                detected_keywords = EXCLUDED.detected_keywords,
+                checks = EXCLUDED.checks,
+                issues_count = EXCLUDED.issues_count,
+                fixable_count = EXCLUDED.fixable_count,
+                keyword_resolution = EXCLUDED.keyword_resolution,
+                updated_at = NOW()
+            RETURNING id""",
+            (
+                store_id, item_type, item_id, analysis["score"],
+                json.dumps(analysis["detected_keywords"]),
+                json.dumps(analysis["checks"]),
+                analysis["issues_count"], analysis["fixable_count"],
+                json.dumps(resolution) if resolution else None,
+            ),
+        )
+        return cur.fetchone()["id"]
+
+
 @technical_seo_bp.route("/technical-seo")
 def technical_seo_page():
     # The page merged into the SEO section (Issues tab). The /api/technical-seo/*
@@ -222,38 +281,8 @@ def analyze_item():
     if not item:
         return jsonify({"error": f"{item_type} not found"}), 404
 
-    if item_type == "product":
-        analysis = analyze_product_technical_seo(dict(item))
-    else:
-        analysis = analyze_collection_technical_seo(_enrich_collection_data(dict(item)))
-
-    store_id = item["store_id"]
-    with db.get_cursor() as cur:
-        cur.execute(
-            """INSERT INTO technical_seo_analyses
-            (store_id, item_type, item_id, score, detected_keywords, checks, issues_count, fixable_count, updated_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NOW())
-            ON CONFLICT (store_id, item_type, item_id) DO UPDATE SET
-                score = EXCLUDED.score,
-                detected_keywords = EXCLUDED.detected_keywords,
-                checks = EXCLUDED.checks,
-                issues_count = EXCLUDED.issues_count,
-                fixable_count = EXCLUDED.fixable_count,
-                updated_at = NOW()
-            RETURNING id""",
-            (
-                store_id,
-                item_type,
-                item_id,
-                analysis["score"],
-                json.dumps(analysis["detected_keywords"]),
-                json.dumps(analysis["checks"]),
-                analysis["issues_count"],
-                analysis["fixable_count"],
-            ),
-        )
-        row = cur.fetchone()
-        analysis["analysis_id"] = row["id"]
+    analysis, resolution = _resolve_and_analyze(item_type, item)
+    analysis["analysis_id"] = _upsert_analysis(item["store_id"], item_type, item_id, analysis, resolution)
 
     return jsonify(analysis)
 
@@ -312,6 +341,19 @@ def _execute_bulk_analyze(bulk_task_id, item_type):
         )
         items = cur.fetchall()
 
+    # Batch the store-level demand-data queries once for the whole run
+    prefetch = None
+    if items:
+        try:
+            from app.services.keyword_resolver import build_prefetch
+            with db.get_cursor() as cur:
+                cur.execute(f"SELECT store_id FROM {table} WHERE id = %s", (items[0]["ref_id"],))
+                first = cur.fetchone()
+            if first:
+                prefetch = build_prefetch(first["store_id"], item_type, [r["ref_id"] for r in items])
+        except Exception:
+            logger.warning("Keyword prefetch failed for bulk task %s", bulk_task_id)
+
     for row in items:
         bti_id = row["bti_id"]
         ref_id = row["ref_id"]
@@ -329,34 +371,10 @@ def _execute_bulk_analyze(bulk_task_id, item_type):
                     (item.get("title") or "", bulk_task_id),
                 )
 
-            if item_type == "product":
-                analysis = analyze_product_technical_seo(dict(item))
-            else:
-                analysis = analyze_collection_technical_seo(_enrich_collection_data(dict(item)))
+            analysis, resolution = _resolve_and_analyze(item_type, item, prefetch=prefetch)
+            _upsert_analysis(item["store_id"], item_type, ref_id, analysis, resolution)
 
             with db.get_cursor() as cur:
-                cur.execute(
-                    """INSERT INTO technical_seo_analyses
-                    (store_id, item_type, item_id, score, detected_keywords, checks, issues_count, fixable_count, updated_at)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NOW())
-                    ON CONFLICT (store_id, item_type, item_id) DO UPDATE SET
-                        score = EXCLUDED.score,
-                        detected_keywords = EXCLUDED.detected_keywords,
-                        checks = EXCLUDED.checks,
-                        issues_count = EXCLUDED.issues_count,
-                        fixable_count = EXCLUDED.fixable_count,
-                        updated_at = NOW()""",
-                    (
-                        item["store_id"],
-                        item_type,
-                        ref_id,
-                        analysis["score"],
-                        json.dumps(analysis["detected_keywords"]),
-                        json.dumps(analysis["checks"]),
-                        analysis["issues_count"],
-                        analysis["fixable_count"],
-                    ),
-                )
                 cur.execute(
                     "UPDATE bulk_task_items SET status = 'completed', completed_at = NOW() WHERE id = %s",
                     (bti_id,),
@@ -681,29 +699,8 @@ def apply_fixes():
             updated_item = cur.fetchone()
 
         if updated_item:
-            if item_type == "product":
-                new_analysis = analyze_product_technical_seo(dict(updated_item))
-            else:
-                new_analysis = analyze_collection_technical_seo(_enrich_collection_data(dict(updated_item)))
-
-            store_id = updated_item["store_id"]
-            with db.get_cursor() as cur:
-                cur.execute(
-                    """UPDATE technical_seo_analyses SET
-                        score = %s, detected_keywords = %s, checks = %s,
-                        issues_count = %s, fixable_count = %s, updated_at = NOW()
-                    WHERE store_id = %s AND item_type = %s AND item_id = %s""",
-                    (
-                        new_analysis["score"],
-                        json.dumps(new_analysis["detected_keywords"]),
-                        json.dumps(new_analysis["checks"]),
-                        new_analysis["issues_count"],
-                        new_analysis["fixable_count"],
-                        store_id,
-                        item_type,
-                        item_id,
-                    ),
-                )
+            new_analysis, new_resolution = _resolve_and_analyze(item_type, updated_item)
+            _upsert_analysis(updated_item["store_id"], item_type, item_id, new_analysis, new_resolution)
 
             return jsonify({
                 "ok": True,
@@ -807,30 +804,9 @@ def _execute_bulk_fix_apply(bulk_task_id, item_type, only_fields=None):
             if not full_item:
                 raise ValueError(f"{item_type} {ref_id} not found")
 
-            if item_type == "product":
-                analysis = analyze_product_technical_seo(dict(full_item))
-            else:
-                analysis = analyze_collection_technical_seo(_enrich_collection_data(dict(full_item)))
-
+            analysis, resolution = _resolve_and_analyze(item_type, full_item)
             store_id = full_item["store_id"]
-            with db.get_cursor() as cur:
-                cur.execute(
-                    """INSERT INTO technical_seo_analyses
-                    (store_id, item_type, item_id, score, detected_keywords, checks, issues_count, fixable_count, updated_at)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NOW())
-                    ON CONFLICT (store_id, item_type, item_id) DO UPDATE SET
-                        score = EXCLUDED.score, detected_keywords = EXCLUDED.detected_keywords,
-                        checks = EXCLUDED.checks, issues_count = EXCLUDED.issues_count,
-                        fixable_count = EXCLUDED.fixable_count, updated_at = NOW()
-                    RETURNING id""",
-                    (
-                        store_id, item_type, ref_id,
-                        analysis["score"], json.dumps(analysis["detected_keywords"]),
-                        json.dumps(analysis["checks"]), analysis["issues_count"], analysis["fixable_count"],
-                    ),
-                )
-                analysis_row = cur.fetchone()
-                analysis_id = analysis_row["id"]
+            analysis_id = _upsert_analysis(store_id, item_type, ref_id, analysis, resolution)
 
             if only_fields:
                 relevant_fixable = sum(
@@ -962,26 +938,8 @@ def _execute_bulk_fix_apply(bulk_task_id, item_type, only_fields=None):
                         updated_item = cur.fetchone()
 
                     if updated_item:
-                        if item_type == "product":
-                            new_analysis = analyze_product_technical_seo(dict(updated_item))
-                        else:
-                            new_analysis = analyze_collection_technical_seo(_enrich_collection_data(dict(updated_item)))
-
-                        with db.get_cursor() as cur:
-                            cur.execute(
-                                """UPDATE technical_seo_analyses SET
-                                    score = %s, detected_keywords = %s, checks = %s,
-                                    issues_count = %s, fixable_count = %s, updated_at = NOW()
-                                WHERE store_id = %s AND item_type = %s AND item_id = %s""",
-                                (
-                                    new_analysis["score"],
-                                    json.dumps(new_analysis["detected_keywords"]),
-                                    json.dumps(new_analysis["checks"]),
-                                    new_analysis["issues_count"],
-                                    new_analysis["fixable_count"],
-                                    store_id, item_type, ref_id,
-                                ),
-                            )
+                        new_analysis, new_resolution = _resolve_and_analyze(item_type, updated_item)
+                        _upsert_analysis(store_id, item_type, ref_id, new_analysis, new_resolution)
 
                 except Exception as apply_err:
                     item_error = f"Apply to Shopify failed: {apply_err}"

@@ -341,9 +341,10 @@ def _count_headings(body_html):
     return len(re.findall(r"<h[2-6][^>]*>", body_html, re.IGNORECASE))
 
 
-def analyze_product_technical_seo(product):
+def analyze_product_technical_seo(product, primary_keyword=None):
     keywords = _extract_keywords(product)
-    if not keywords:
+    primary_kw = primary_keyword or (keywords[0]["keyword"] if keywords else None)
+    if not primary_kw:
         return {
             "score": 0,
             "detected_keywords": [],
@@ -351,8 +352,6 @@ def analyze_product_technical_seo(product):
             "issues_count": 0,
             "fixable_count": 0,
         }
-
-    primary_kw = keywords[0]["keyword"]
 
     title = product.get("title") or ""
     meta_title = product.get("meta_title") or ""
@@ -576,9 +575,10 @@ def analyze_product_technical_seo(product):
     }
 
 
-def analyze_collection_technical_seo(collection):
+def analyze_collection_technical_seo(collection, primary_keyword=None):
     keywords = _extract_keywords(collection)
-    if not keywords:
+    primary_kw = primary_keyword or (keywords[0]["keyword"] if keywords else None)
+    if not primary_kw:
         return {
             "score": 0,
             "detected_keywords": [],
@@ -586,8 +586,6 @@ def analyze_collection_technical_seo(collection):
             "issues_count": 0,
             "fixable_count": 0,
         }
-
-    primary_kw = keywords[0]["keyword"]
 
     title = collection.get("title") or ""
     meta_title = collection.get("meta_title") or ""

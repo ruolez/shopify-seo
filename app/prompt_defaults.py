@@ -1066,6 +1066,17 @@ DEFAULTS = {
             "summary": {"good": [50, 160]},
         },
     },
+    "rules.keyword_resolution": {
+        "relevance": {"title": 40, "meta_title": 15, "handle": 15, "body_first_100": 15,
+                      "meta_description": 10, "body": 5,
+                      "ngram_confidence_scale": 2.0, "min_relevance": 10},
+        "demand": {"volume_ref": 10000, "impressions_ref": 1000, "floor": 0.15, "cap": 1.5},
+        "opportunity": {"striking_band": [4, 20], "striking_mult": 1.3,
+                        "top_mult": 1.1, "beyond_mult": 0.9},
+        "cannibalization_mult": 0.5,
+        "max_candidates": 15,
+        "gsc_days": 30,
+    },
     "rules.technical_product": {
         "weights": {
             "title_has_keyword": 0.10,

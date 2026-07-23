@@ -497,6 +497,12 @@ class Database:
                     UNIQUE(store_id, item_type, item_id)
                 )
             """)
+            # Demand-grounded keyword resolution (primary, candidates, sources)
+            cur.execute("""
+                DO $$ BEGIN
+                    ALTER TABLE technical_seo_analyses ADD COLUMN keyword_resolution JSONB;
+                EXCEPTION WHEN duplicate_column THEN NULL; END $$
+            """)
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS synced_blogs (
                     id SERIAL PRIMARY KEY,
