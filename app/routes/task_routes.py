@@ -943,6 +943,7 @@ def list_tasks():
 
 AI_TASK_META = {
     "ai_seo_scan": ("AI SEO Scan", "/ai-seo"),
+    "feed_readiness_scan": ("Feed Readiness Audit", "/ai-seo"),
     "article_seo": ("Article SEO Analysis", "/blog"),
     "article_research": ("Article Research", "/blog"),
     "topic_discovery": ("Topic Discovery", "/blog"),
@@ -1029,6 +1030,7 @@ def active_tasks():
                    + (SELECT COUNT(*) FROM sync_jobs WHERE status IN ('pending','running'))
                    + (SELECT COUNT(*) FROM keyword_strategy_runs WHERE status IN ('pending','running'))
                    + (SELECT COUNT(*) FROM ai_tracking_runs WHERE status IN ('pending','running'))
+                   + (SELECT COUNT(*) FROM offsite_runs WHERE status IN ('pending','running'))
                    + (SELECT COUNT(*) FROM gsc_data_pulls WHERE status IN ('pending','running'))
                    + (SELECT COUNT(*) FROM semrush_imports WHERE status IN ('pending','running'))
                    AS active_count"""
@@ -1138,6 +1140,24 @@ def active_tasks():
             tasks.append({
                 "source": "ai_tracking", "id": r["id"], "label": "AI Visibility Tracking", "page": "/ai-seo",
                 "detail": None, "status": r["status"], "progress": None,
+                "current_item": None, "store_id": r["store_id"],
+                "started_at": _iso(r["started_at"]), "completed_at": _iso(r["completed_at"]),
+                "error": r["error"],
+            })
+
+        # 5b. offsite_runs (off-site visibility audits)
+        cur.execute(
+            """SELECT id, store_id, status, queries_run, error, started_at, completed_at
+               FROM offsite_runs
+               WHERE status IN ('pending','running')
+                  OR (status IN ('completed','failed') AND completed_at > NOW() - INTERVAL '24 hours')
+               ORDER BY id DESC LIMIT 20"""
+        )
+        for r in cur.fetchall():
+            detail = f"{r['queries_run']} queries" if r["queries_run"] else None
+            tasks.append({
+                "source": "offsite", "id": r["id"], "label": "Off-site Visibility Audit", "page": "/ai-seo",
+                "detail": detail, "status": r["status"], "progress": None,
                 "current_item": None, "store_id": r["store_id"],
                 "started_at": _iso(r["started_at"]), "completed_at": _iso(r["completed_at"]),
                 "error": r["error"],

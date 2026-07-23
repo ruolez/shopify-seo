@@ -47,6 +47,75 @@ def _domain_in(dom, dset):
     return any(dom == s or dom.endswith("." + s) for s in dset)
 
 
+def _offsite_brand_terms(store):
+    """Strict brand terms for off-site matching.
+
+    The tracker's loose terms include the bare store name — fine inside answers
+    to category-specific questions, but in open web search a short name like
+    "A2Z" matches every unrelated "A2Z Plumbing". Here we require the domain,
+    the domain token, or a spaced name+remainder variant derived from the
+    domain (a2z + tobacco -> "a2z tobacco"); a short single-word store name on
+    its own never counts.
+    Returns (terms, query_name) — query_name is the most human-readable strict
+    term, used to build the search queries.
+    """
+    host = (store.get("primary_domain") or store.get("domain") or "").replace("https://", "").replace("http://", "").strip("/").lower()
+    root = host.split(".")[0] if host else ""
+    name = (store.get("name") or "").strip().lower()
+    nn = re.sub(r"[^a-z0-9]", "", name)
+
+    terms = set()
+    if host:
+        terms.add(host)
+    if root and len(root) >= 6:
+        terms.add(root)
+    spaced = None
+    if nn and root.startswith(nn) and len(root) > len(nn):
+        spaced = f"{nn} {root[len(nn):]}"
+        terms.add(spaced)
+    # A name is specific enough on its own only if multi-word or reasonably long.
+    if name and (len(name.split()) >= 2 or len(name) >= 6):
+        terms.add(name)
+    terms = {t for t in terms if len(t) >= 6}
+    if not terms and host:
+        terms = {host}
+
+    query_name = spaced or (name if name in terms else None) or root or host
+    return terms, query_name
+
+
+_COMPOUND_RE_CACHE = {}
+
+
+def _brand_present(text, terms):
+    """True when the text refers to OUR brand.
+
+    Domain-derived terms match as plain substrings. Spaced name terms use a
+    negative lookahead so compound business names — "A2Z Tobacco & Vape",
+    "A2Z Tobacco and Vapes" (real, unrelated brick-and-mortar shops) — don't
+    count as us.
+    """
+    low = (text or "").lower()
+    for t in terms:
+        if "." in t or " " not in t:
+            if t in low:
+                return True
+        else:
+            rx = _COMPOUND_RE_CACHE.get(t)
+            if rx is None:
+                # "A2Z Tobacco & Vape", "A2Z Tobacco Station", "a2z tobacco vape
+                # shop" are other businesses — a compound suffix disqualifies.
+                rx = re.compile(
+                    re.escape(t)
+                    + r"(?!\s*(?:&|\+|and\s+vapes?\b|n\s+vapes?\b)"
+                    + r"|\s+(?:vapes?|station|shop|shops|mart|market|outlet|express|zone|stop|plus|city|hut|corner|depot)\b)"
+                )
+                _COMPOUND_RE_CACHE[t] = rx
+            if rx.search(low):
+                return True
+    return False
+
+
 def _top_categories(store_id, n=4):
     with db.get_cursor() as cur:
         cur.execute(
@@ -65,15 +134,22 @@ def _top_categories(store_id, n=4):
     return list(dict.fromkeys(cats))[:n]
 
 
-def build_query_set(store, categories):
-    """Bounded, deterministic (query, query_kind) list — ≤ MAX_QUERIES."""
-    name = (store.get("name") or "").strip()
+def build_query_set(store, categories, query_name=None):
+    """Bounded, deterministic (query, query_kind) list — ≤ MAX_QUERIES.
+
+    query_name is the strict brand phrase from _offsite_brand_terms (e.g.
+    "a2z tobacco", never a bare ambiguous "A2Z"); the domain is probed too.
+    """
+    name = query_name or (store.get("name") or "").strip()
+    host = (store.get("primary_domain") or store.get("domain") or "").replace("https://", "").replace("http://", "").strip("/").lower()
     queries = [
         (f'"{name}" reviews', "brand_reviews"),
         (f'site:reddit.com "{name}"', "reddit"),
         (f"{name} trustpilot", "review_platform"),
         (f'"{name}"', "brand_general"),
     ]
+    if host:
+        queries.append((f'"{host}"', "brand_general"))
     for cat in categories[:4]:
         queries.append((f"best {cat} online stores", "listicle"))
         queries.append((f"best place to buy {cat} online", "listicle"))
@@ -121,7 +197,7 @@ def _fetch_listicle_mentions(urls, brand_terms, competitors):
                 continue
             low = (resp.text or "").lower()
             out[url] = {
-                "brand": any(t in low for t in brand_terms),
+                "brand": _brand_present(low, brand_terms),
                 "competitors": [c["label"] for c in competitors if any(t in low for t in c["terms"])],
             }
         except Exception:
@@ -221,10 +297,11 @@ def run_offsite_audit(run_id, store_id):
         cur.execute("SELECT * FROM stores WHERE id = %s", (store_id,))
         store = dict(cur.fetchone())
     try:
-        brand_terms, store_host = _brand_terms(store)
+        _loose_terms, store_host = _brand_terms(store)
+        brand_terms, query_name = _offsite_brand_terms(store)
         competitors = _competitor_terms(store_id)
         categories = _top_categories(store_id)
-        queries = build_query_set(store, categories)
+        queries = build_query_set(store, categories, query_name)
 
         rows = []
         ran = 0
@@ -238,7 +315,7 @@ def run_offsite_audit(run_id, store_id):
             for r in results:
                 cls, comp_labels = classify_result(r, store_host, competitors)
                 text = f"{r.get('title') or ''} {r.get('description') or ''} {r.get('url') or ''}".lower()
-                brand_present = any(t in text for t in brand_terms)
+                brand_present = _brand_present(text, brand_terms)
                 row = {
                     "query": query, "query_kind": kind, "position": r.get("position"),
                     "title": r.get("title"), "url": r.get("url"), "domain": r.get("domain"),
