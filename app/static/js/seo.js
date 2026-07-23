@@ -1229,6 +1229,16 @@ async function viewImpact(itemId, itemType) {
     try {
         const data = await apiRequest(`/api/seo/impact?store_id=${storeId}&item_id=${itemId}&item_type=${itemType}`);
 
+        if (data.status === "no_history") {
+            document.getElementById("impact-modal-title").textContent = "Optimization Impact";
+            content.innerHTML = `<div class="modal-tab-empty">
+                <span class="material-symbols-rounded">history</span>
+                <p>No optimization history recorded for this item yet.</p>
+                <p style="font-size: 12px; margin-top: 6px;">Impact tracking starts with your next optimization — apply an AI fix or recommendation and check back after a few days of Search Console data.</p>
+            </div>`;
+            return;
+        }
+
         let html = '';
         document.getElementById("impact-modal-title").textContent = `Impact: ${data.item_title}`;
 

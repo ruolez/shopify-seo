@@ -500,6 +500,58 @@ def _execute_fix_task(task_id, analysis_id):
             )
 
 
+def _record_change_event(item_type, item, fixes, change_type):
+    """Best-effort optimization-history event so View Impact has data for
+    fixes applied outside the main SEO apply endpoints. Never blocks the fix."""
+    try:
+        from app.routes.seo_routes import (
+            _fetch_keyword_analysis,
+            _get_gsc_metrics_for_store,
+            _get_semrush_metrics_for_store,
+            _get_store_baselines,
+        )
+        from app.services.seo_analyzer import (
+            analyze_collection_seo,
+            analyze_product_seo,
+            analyze_search_performance,
+            compute_unified_score,
+        )
+
+        store_id = item["store_id"]
+        analyze_fn = analyze_product_seo if item_type == "product" else analyze_collection_seo
+        seo_before = analyze_fn(dict(item))
+        prefix = "products" if item_type == "product" else "collections"
+        path = f"{prefix}/{item.get('handle') or ''}"
+        gsc = _get_gsc_metrics_for_store(store_id).get(path, {})
+        sr = _get_semrush_metrics_for_store(store_id).get(path, {})
+        search_before = analyze_search_performance(
+            {k: gsc.get(k) for k in ("gsc_clicks", "gsc_impressions", "gsc_ctr", "gsc_position")},
+            {k: sr.get(k) for k in ("semrush_volume", "semrush_position", "semrush_keyword_count")},
+            _get_store_baselines(store_id),
+        )
+        kw = _fetch_keyword_analysis(store_id, item_type, item["id"])
+        unified = compute_unified_score(seo_before, kw["score"] if kw else None, search_before)
+
+        changes_map = {}
+        for f in fixes:
+            field = f.get("field")
+            if field:
+                changes_map[field] = {"new": str(f.get("value") or f.get("proposed_value") or "")[:200]}
+
+        with db.get_cursor() as cur:
+            cur.execute(
+                """INSERT INTO seo_change_events
+                   (store_id, item_type, item_id, change_type, changes_applied,
+                    seo_score_before, search_score_before, composite_score_before)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
+                (store_id, item_type, item["id"], change_type,
+                 json.dumps(changes_map) if changes_map else None,
+                 unified["content_score"], unified.get("search_score"), unified["seo_score"]),
+            )
+    except Exception:
+        logger.warning("Failed to record change event for %s %s", item_type, item.get("id"))
+
+
 @technical_seo_bp.route("/api/technical-seo/apply", methods=["POST"])
 def apply_fixes():
     data = request.get_json(silent=True) or {}
@@ -573,6 +625,10 @@ def apply_fixes():
                     updated_fields.append("image_alt")
 
         _enforce_meta_limits(shopify_fields)
+
+        # Snapshot before-state so View Impact has history for targeted fixes
+        if shopify_fields or media_updates:
+            _record_change_event(item_type, item, fixes, "technical_fix")
 
         if shopify_fields:
             if item_type == "product":
@@ -849,6 +905,13 @@ def _execute_bulk_fix_apply(bulk_task_id, item_type, only_fields=None):
                             media_updates = value
 
                     _enforce_meta_limits(shopify_fields)
+
+                    # Snapshot before-state so View Impact has history
+                    if shopify_fields or media_updates:
+                        _record_change_event(
+                            item_type, full_item, ai_fixes,
+                            "issue_fix" if only_fields else "technical_fix",
+                        )
 
                     if shopify_fields:
                         if item_type == "product":

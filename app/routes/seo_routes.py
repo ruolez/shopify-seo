@@ -902,7 +902,9 @@ def seo_impact():
         event = cur.fetchone()
 
     if not event:
-        return jsonify({"message": "No optimization history found"}), 404
+        # 200 with a status the modal renders — a 404 here made the button
+        # toast "Request failed" for items optimized before event tracking.
+        return jsonify({"status": "no_history"})
 
     change_date = event["created_at"]
     days_since = (datetime.now(timezone.utc) - change_date.replace(tzinfo=timezone.utc)).days
