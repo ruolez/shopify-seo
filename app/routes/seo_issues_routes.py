@@ -95,6 +95,12 @@ ISSUE_DEFS = {
         "fix_fields": [], "item_types": ("product",),
         "action_label": "Fix in Schema", "action_href": "/seo?tab=schema",
     },
+    "schema_stale": {
+        "label": "Pushed schema missing image",
+        "severity": "med", "source": "content", "fixable": False,
+        "fix_fields": [], "item_types": ("product",),
+        "action_label": "Fix in Schema", "action_href": "/seo?tab=schema",
+    },
     "meta_title_has_keyword": {
         "label": "Keyword missing from meta title",
         "severity": "med", "source": "keyword", "fixable": True,
@@ -260,13 +266,18 @@ def _scan_store(store_id):
 
         cur.execute(
             """
-            SELECT resource_id FROM schema_markup
+            SELECT resource_id, (schema_json::jsonb ? 'image') AS has_image
+            FROM schema_markup
             WHERE store_id = %s AND resource_type = 'product'
               AND schema_type = 'Product' AND pushed_to_shopify = TRUE
             """,
             (store_id,),
         )
-        schema_pushed = {str(r["resource_id"]) for r in cur.fetchall()}
+        _schema_rows = cur.fetchall()
+        schema_pushed = {str(r["resource_id"]) for r in _schema_rows}
+        # Pushed before the product had images → live merchant listings fail
+        # Google's required-image check until the schema is regenerated.
+        schema_imageless = {str(r["resource_id"]) for r in _schema_rows if not r["has_image"]}
 
     # Duplicate metas: group effective titles / non-empty descriptions across
     # both entity types in the rows already fetched (no extra queries).
@@ -328,8 +339,20 @@ def _scan_store(store_id):
         for key, detail in _live_issues_for_product(p, product_thresholds).items():
             add(key, "product", p, detail)
         duplicate_issues(p, "product")
-        if str(p["shopify_id"]) not in schema_pushed:
+        sid = str(p["shopify_id"])
+        if sid not in schema_pushed:
             add("schema_missing", "product", p, "No Product schema generated and pushed to Shopify")
+        elif sid in schema_imageless:
+            imgs = p.get("images")
+            if isinstance(imgs, str):
+                try:
+                    imgs = json.loads(imgs)
+                except (ValueError, TypeError):
+                    imgs = []
+            add("schema_stale", "product", p,
+                "Pushed schema has no image field — regenerate now that the product has images"
+                if imgs else
+                "Pushed schema has no image field — add a product image, then regenerate")
         keyword_issues(p, "product")
 
     for c in collections:

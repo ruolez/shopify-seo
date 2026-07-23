@@ -255,6 +255,12 @@ def validate_schema(schema):
 
     schema_type = schema.get("@type", "")
 
+    # Google Merchant listing requires an image on every offer-bearing entity;
+    # pushing image-less Product/ProductGroup schema produces one crawl error
+    # per variant (learned the hard way — see Semrush "image field is required").
+    if schema_type in ("Product", "ProductGroup") and not schema.get("image"):
+        errors.append(f"{schema_type}: Missing image (required for merchant listing rich results)")
+
     if schema_type == "Product":
         if not schema.get("name"):
             errors.append("Product: Missing name")
