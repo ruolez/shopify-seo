@@ -1684,7 +1684,29 @@ async function executeBulkPublishCollections(ids) {
     }
 }
 
-async function viewProduct(id) {
+/* Local tab switcher for the item detail modal — deliberately NOT UITabs
+ * (that's page-level and syncs ?tab=). Tab state resets on each open. */
+const MODAL_TABS = [
+    { id: "overview", label: "Overview" },
+    { id: "checks", label: "Checks" },
+    { id: "performance", label: "Performance" },
+    { id: "ai", label: "AI Optimize" },
+];
+
+function renderModalTabBar(active = "overview") {
+    return '<div class="modal-tabs">' + MODAL_TABS.map(t =>
+        `<button class="modal-tab${t.id === active ? " active" : ""}" data-mtab="${t.id}" onclick="switchModalTab('${t.id}')">${t.label}</button>`
+    ).join("") + "</div>";
+}
+
+function switchModalTab(id) {
+    const content = document.getElementById("product-detail-content");
+    if (!content) return;
+    content.querySelectorAll(".modal-tab").forEach(b => b.classList.toggle("active", b.dataset.mtab === id));
+    content.querySelectorAll(".modal-tab-panel").forEach(p => p.classList.toggle("active", p.dataset.mpanel === id));
+}
+
+async function viewProduct(id, opts = {}) {
     const modal = document.getElementById("product-modal");
     const content = document.getElementById("product-detail-content");
     content.innerHTML =
@@ -1710,9 +1732,12 @@ async function viewProduct(id) {
             html += renderKeywordChips(p.keyword_analysis.detected_keywords);
         }
 
-        html += '<div class="modal-two-col">';
+        const initialTab = opts.tab || "overview";
+        html += renderModalTabBar(initialTab);
 
-        // ── Left Column (Main) ──
+        // ── Overview tab ──
+        html += `<div class="modal-tab-panel${initialTab === "overview" ? " active" : ""}" data-mpanel="overview">`;
+        html += '<div class="modal-two-col">';
         html += '<div class="modal-col-main">';
 
         // SERP Preview
@@ -1750,18 +1775,10 @@ async function viewProduct(id) {
             html += '</div></div>';
         }
 
-        // Schema Markup
-        html += '<div id="product-schema-preview" style="margin-top: 24px; border-top: 1px solid var(--outline); padding-top: 16px;">';
-        html += '<h4 style="margin-bottom: 12px;"><span class="material-symbols-rounded" style="vertical-align: middle;">code</span> Schema Markup</h4>';
-        html += '<div id="product-schema-content"><div class="loading-spinner"><div class="spinner"></div><p>Generating schema preview...</p></div></div>';
-        html += '</div>';
-
         html += '</div>'; // end modal-col-main
 
-        // ── Right Column (Aside) ──
+        // ── Overview aside: info grid + tags ──
         html += '<div class="modal-col-aside">';
-
-        // Info grid
         html += `<div class="preview-info-grid">
             <div class="info-item"><span class="info-label">Status</span><span class="info-value">${statusBadge}</span></div>
             <div class="info-item"><span class="info-label">Vendor</span><span class="info-value">${escapeHtml(p.vendor || "—")}</span></div>
@@ -1769,8 +1786,26 @@ async function viewProduct(id) {
             <div class="info-item"><span class="info-label">Handle</span><span class="info-value mono">${escapeHtml(p.handle || "—")}</span></div>
             <div class="info-item"><span class="info-label">Store</span><span class="info-value">${escapeHtml(p.store_name || "—")}</span></div>
         </div>`;
+        if (p.tags) {
+            const tagList = p.tags.split(",").map(t => t.trim()).filter(Boolean);
+            if (tagList.length > 0) {
+                html += '<div class="preview-tags">';
+                for (const tag of tagList) {
+                    html += `<span class="chip-display">${escapeHtml(tag)}</span>`;
+                }
+                html += '</div>';
+            }
+        }
+        html += '</div>'; // end modal-col-aside
+        html += '</div>'; // end modal-two-col
+        html += '</div>'; // end overview panel
 
-        // GSC Metrics
+        // ── Checks tab ──
+        html += `<div class="modal-tab-panel${initialTab === "checks" ? " active" : ""}" data-mpanel="checks">${renderCheckGroups(p)}</div>`;
+
+        // ── Performance tab ──
+        html += `<div class="modal-tab-panel${initialTab === "performance" ? " active" : ""}" data-mpanel="performance">`;
+
         if (p.gsc_impressions != null) {
             html += `<div class="card" style="padding: 16px; margin-bottom: 16px; background: var(--surface-dim); border: 1px solid var(--outline);">
                 <h4 style="font-size: 13px; margin-bottom: 10px;"><span class="material-symbols-rounded" style="vertical-align: middle; font-size: 16px;">monitoring</span> Search Console (28d)</h4>
@@ -1783,7 +1818,6 @@ async function viewProduct(id) {
             </div>`;
         }
 
-        // Semrush Data
         if (p.semrush_volume != null) {
             html += `<div class="card" style="padding: 16px; margin-bottom: 16px; background: var(--surface-dim); border: 1px solid var(--outline);">
                 <h4 style="font-size: 13px; margin-bottom: 10px;"><span class="material-symbols-rounded" style="vertical-align: middle; font-size: 16px;">query_stats</span> Semrush Data</h4>
@@ -1795,16 +1829,8 @@ async function viewProduct(id) {
             </div>`;
         }
 
-        // Tags
-        if (p.tags) {
-            const tagList = p.tags.split(",").map(t => t.trim()).filter(Boolean);
-            if (tagList.length > 0) {
-                html += '<div class="preview-tags">';
-                for (const tag of tagList) {
-                    html += `<span class="chip-display">${escapeHtml(tag)}</span>`;
-                }
-                html += '</div>';
-            }
+        if (p.gsc_impressions == null && p.semrush_volume == null) {
+            html += '<p style="color: var(--on-surface-secondary); font-size: 13px; margin-bottom: 16px;">No search data for this product yet.</p>';
         }
 
         // Variants
@@ -1838,14 +1864,19 @@ async function viewProduct(id) {
             html += '</tbody></table></div></div>';
         }
 
-        html += '</div>'; // end modal-col-aside
-        html += '</div>'; // end modal-two-col
+        // Schema Markup
+        html += '<div id="product-schema-preview" style="margin-top: 24px; border-top: 1px solid var(--outline); padding-top: 16px;">';
+        html += '<h4 style="margin-bottom: 12px;"><span class="material-symbols-rounded" style="vertical-align: middle;">code</span> Schema Markup</h4>';
+        html += '<div id="product-schema-content"><div class="loading-spinner"><div class="spinner"></div><p>Generating schema preview...</p></div></div>';
+        html += '</div>';
 
-        // Check-by-check breakdown (completeness + keyword + search) replaces
-        // the old aside score-card — the hero at the top carries the scores.
-        html += renderCheckGroups(p);
+        html += '</div>'; // end performance panel
 
-        html += '<div id="ai-results-container"></div>';
+        // ── AI Optimize tab ──
+        html += `<div class="modal-tab-panel${initialTab === "ai" ? " active" : ""}" data-mpanel="ai"><div id="ai-results-container">
+            <div class="modal-tab-empty"><span class="material-symbols-rounded">smart_toy</span>
+            <p>No AI analysis yet. Run "Get AI Recommendations" below to get optimization suggestions.</p></div>
+        </div></div>`;
 
         // Sticky footer with action buttons
         html += `<div class="modal-sticky-footer">
@@ -1894,7 +1925,9 @@ async function analyzeProduct(productId, priorityContext) {
     const btn = typeof event !== "undefined" && event && event.target instanceof Element ? event.target.closest("button") : null;
     return guardButton(btn, async () => {
         const modal = document.getElementById("product-modal");
-        if (!modal.classList.contains("active")) {
+        // Re-render when closed OR showing a different item (work-session
+        // navigation keeps the modal open across items).
+        if (!modal.classList.contains("active") || currentProductId !== productId || currentItemType !== "product") {
             await viewProduct(productId);
         }
 
@@ -1908,6 +1941,7 @@ async function analyzeProduct(productId, priorityContext) {
                 ${contextNote}
                 <div class="loading-spinner"><div class="spinner"></div><p>AI is analyzing this product...</p></div>
             </div>`;
+        switchModalTab("ai");
 
         const taskInput = { product_id: productId };
         if (priorityContext) taskInput.priority_context = priorityContext;
@@ -2204,7 +2238,7 @@ async function applyChanges(productId) {
     }
 }
 
-async function viewCollection(id) {
+async function viewCollection(id, opts = {}) {
     try {
         const c = await apiRequest(`/api/seo/collections/${id}`);
         currentProductId = c.id;
@@ -2229,42 +2263,13 @@ async function viewCollection(id) {
             html += renderKeywordChips(c.keyword_analysis.detected_keywords);
         }
 
-        html += `<div class="preview-info-grid">
-            <div class="info-item"><span class="info-label">Type</span><span class="info-value">${typeBadge}</span></div>
-            <div class="info-item"><span class="info-label">Published</span><span class="info-value">${publishedBadge}</span></div>
-            <div class="info-item"><span class="info-label">Products</span><span class="info-value">${c.products_count != null ? c.products_count : "—"}</span></div>
-            <div class="info-item"><span class="info-label">Handle</span><span class="info-value mono">${escapeHtml(c.handle || "—")}</span></div>
-            <div class="info-item"><span class="info-label">Store</span><span class="info-value">${escapeHtml(c.store_name || "—")}</span></div>
-        </div>`;
+        const initialTab = opts.tab || "overview";
+        html += renderModalTabBar(initialTab);
 
-        // GSC Metrics
-        if (c.gsc_impressions != null) {
-            html += `<div class="card" style="padding: 16px; margin-bottom: 16px; background: var(--surface-dim); border: 1px solid var(--outline);">
-                <h4 style="font-size: 13px; margin-bottom: 10px;"><span class="material-symbols-rounded" style="vertical-align: middle; font-size: 16px;">monitoring</span> Search Console (28d)</h4>
-                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px;">
-                    <div><span style="font-size: 11px; color: var(--on-surface-secondary);">Clicks</span><div style="font-size: 18px; font-weight: 700;">${Math.round(c.gsc_clicks).toLocaleString()}</div></div>
-                    <div><span style="font-size: 11px; color: var(--on-surface-secondary);">Impressions</span><div style="font-size: 18px; font-weight: 700;">${Math.round(c.gsc_impressions).toLocaleString()}</div></div>
-                    <div><span style="font-size: 11px; color: var(--on-surface-secondary);">CTR</span><div style="font-size: 18px; font-weight: 700;">${(c.gsc_ctr * 100).toFixed(1)}%</div></div>
-                    <div><span style="font-size: 11px; color: var(--on-surface-secondary);">Avg Position</span><div style="font-size: 18px; font-weight: 700;">${renderPositionBadge(c.gsc_position)}</div></div>
-                </div>
-            </div>`;
-        }
-
-        // Semrush Data
-        if (c.semrush_volume != null) {
-            html += `<div class="card" style="padding: 16px; margin-bottom: 16px; background: var(--surface-dim); border: 1px solid var(--outline);">
-                <h4 style="font-size: 13px; margin-bottom: 10px;"><span class="material-symbols-rounded" style="vertical-align: middle; font-size: 16px;">query_stats</span> Semrush Data</h4>
-                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px;">
-                    <div><span style="font-size: 11px; color: var(--on-surface-secondary);">Monthly Volume</span><div style="font-size: 18px; font-weight: 700;">${c.semrush_volume.toLocaleString()}</div></div>
-                    <div><span style="font-size: 11px; color: var(--on-surface-secondary);">Best Position</span><div style="font-size: 18px; font-weight: 700;">${c.semrush_position != null ? renderPositionBadge(c.semrush_position) : '—'}</div></div>
-                    ${c.semrush_keyword_count ? `<div><span style="font-size: 11px; color: var(--on-surface-secondary);">Keywords</span><div style="font-size: 18px; font-weight: 700;">${c.semrush_keyword_count}</div></div>` : ''}
-                </div>
-            </div>`;
-        }
-
-        // Check-by-check breakdown (completeness + keyword + search) replaces
-        // the old score-card — the hero at the top carries the scores.
-        html += renderCheckGroups(c);
+        // ── Overview tab ──
+        html += `<div class="modal-tab-panel${initialTab === "overview" ? " active" : ""}" data-mpanel="overview">`;
+        html += '<div class="modal-two-col">';
+        html += '<div class="modal-col-main">';
 
         html += `
             <div class="form-group">
@@ -2298,7 +2303,65 @@ async function viewCollection(id) {
         </div>`;
         html += '</div>';
 
-        html += `<div style="margin-top: 20px; display: flex; gap: 8px; flex-wrap: wrap;">
+        html += '</div>'; // end modal-col-main
+
+        html += '<div class="modal-col-aside">';
+        html += `<div class="preview-info-grid">
+            <div class="info-item"><span class="info-label">Type</span><span class="info-value">${typeBadge}</span></div>
+            <div class="info-item"><span class="info-label">Published</span><span class="info-value">${publishedBadge}</span></div>
+            <div class="info-item"><span class="info-label">Products</span><span class="info-value">${c.products_count != null ? c.products_count : "—"}</span></div>
+            <div class="info-item"><span class="info-label">Handle</span><span class="info-value mono">${escapeHtml(c.handle || "—")}</span></div>
+            <div class="info-item"><span class="info-label">Store</span><span class="info-value">${escapeHtml(c.store_name || "—")}</span></div>
+        </div>`;
+        html += '</div>'; // end modal-col-aside
+        html += '</div>'; // end modal-two-col
+        html += '</div>'; // end overview panel
+
+        // ── Checks tab ──
+        html += `<div class="modal-tab-panel${initialTab === "checks" ? " active" : ""}" data-mpanel="checks">${renderCheckGroups(c)}</div>`;
+
+        // ── Performance tab ──
+        html += `<div class="modal-tab-panel${initialTab === "performance" ? " active" : ""}" data-mpanel="performance">`;
+
+        // GSC Metrics
+        if (c.gsc_impressions != null) {
+            html += `<div class="card" style="padding: 16px; margin-bottom: 16px; background: var(--surface-dim); border: 1px solid var(--outline);">
+                <h4 style="font-size: 13px; margin-bottom: 10px;"><span class="material-symbols-rounded" style="vertical-align: middle; font-size: 16px;">monitoring</span> Search Console (28d)</h4>
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px;">
+                    <div><span style="font-size: 11px; color: var(--on-surface-secondary);">Clicks</span><div style="font-size: 18px; font-weight: 700;">${Math.round(c.gsc_clicks).toLocaleString()}</div></div>
+                    <div><span style="font-size: 11px; color: var(--on-surface-secondary);">Impressions</span><div style="font-size: 18px; font-weight: 700;">${Math.round(c.gsc_impressions).toLocaleString()}</div></div>
+                    <div><span style="font-size: 11px; color: var(--on-surface-secondary);">CTR</span><div style="font-size: 18px; font-weight: 700;">${(c.gsc_ctr * 100).toFixed(1)}%</div></div>
+                    <div><span style="font-size: 11px; color: var(--on-surface-secondary);">Avg Position</span><div style="font-size: 18px; font-weight: 700;">${renderPositionBadge(c.gsc_position)}</div></div>
+                </div>
+            </div>`;
+        }
+
+        // Semrush Data
+        if (c.semrush_volume != null) {
+            html += `<div class="card" style="padding: 16px; margin-bottom: 16px; background: var(--surface-dim); border: 1px solid var(--outline);">
+                <h4 style="font-size: 13px; margin-bottom: 10px;"><span class="material-symbols-rounded" style="vertical-align: middle; font-size: 16px;">query_stats</span> Semrush Data</h4>
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px;">
+                    <div><span style="font-size: 11px; color: var(--on-surface-secondary);">Monthly Volume</span><div style="font-size: 18px; font-weight: 700;">${c.semrush_volume.toLocaleString()}</div></div>
+                    <div><span style="font-size: 11px; color: var(--on-surface-secondary);">Best Position</span><div style="font-size: 18px; font-weight: 700;">${c.semrush_position != null ? renderPositionBadge(c.semrush_position) : '—'}</div></div>
+                    ${c.semrush_keyword_count ? `<div><span style="font-size: 11px; color: var(--on-surface-secondary);">Keywords</span><div style="font-size: 18px; font-weight: 700;">${c.semrush_keyword_count}</div></div>` : ''}
+                </div>
+            </div>`;
+        }
+
+        if (c.gsc_impressions == null && c.semrush_volume == null) {
+            html += '<p style="color: var(--on-surface-secondary); font-size: 13px;">No search data for this collection yet.</p>';
+        }
+
+        html += '</div>'; // end performance panel
+
+        // ── AI Optimize tab ──
+        html += `<div class="modal-tab-panel${initialTab === "ai" ? " active" : ""}" data-mpanel="ai"><div id="ai-collection-results-container">
+            <div class="modal-tab-empty"><span class="material-symbols-rounded">smart_toy</span>
+            <p>No AI analysis yet. Run "Get AI Recommendations" below to get optimization suggestions.</p></div>
+        </div></div>`;
+
+        // Sticky footer — parity with the product modal
+        html += `<div class="modal-sticky-footer">
             <button class="btn btn-primary" onclick="analyzeCollection(${c.id})">
                 <span class="material-symbols-rounded">smart_toy</span>
                 Get AI Recommendations
@@ -2312,8 +2375,6 @@ async function viewCollection(id) {
                 View Impact
             </button>` : ''}
         </div>`;
-
-        html += '<div id="ai-collection-results-container"></div>';
 
         content.innerHTML = html;
 
@@ -2332,7 +2393,7 @@ async function analyzeCollection(collectionId, priorityContext) {
     const btn = typeof event !== "undefined" && event && event.target instanceof Element ? event.target.closest("button") : null;
     return guardButton(btn, async () => {
         const modal = document.getElementById("product-modal");
-        if (!modal.classList.contains("active")) {
+        if (!modal.classList.contains("active") || currentProductId !== collectionId || currentItemType !== "collection") {
             await viewCollection(collectionId);
         }
 
@@ -2346,6 +2407,7 @@ async function analyzeCollection(collectionId, priorityContext) {
                 ${contextNote}
                 <div class="loading-spinner"><div class="spinner"></div><p>AI is analyzing this collection...</p></div>
             </div>`;
+        switchModalTab("ai");
 
         const taskInput = { collection_id: collectionId };
         if (priorityContext) taskInput.priority_context = priorityContext;
@@ -2618,7 +2680,7 @@ async function optimizeProductTitle(productId) {
     const btn = typeof event !== "undefined" && event && event.target instanceof Element ? event.target.closest("button") : null;
     return guardButton(btn, async () => {
         const modal = document.getElementById("product-modal");
-        if (!modal.classList.contains("active")) {
+        if (!modal.classList.contains("active") || currentProductId !== productId || currentItemType !== "product") {
             await viewProduct(productId);
         }
 
@@ -2630,6 +2692,7 @@ async function optimizeProductTitle(productId) {
                 <h4><span class="material-symbols-rounded">title</span> Title Optimization</h4>
                 <div class="loading-spinner"><div class="spinner"></div><p>AI is optimizing the title...</p></div>
             </div>`;
+        switchModalTab("ai");
 
         try {
             const taskResp = await apiRequest("/api/tasks", {
@@ -2655,7 +2718,7 @@ async function optimizeCollectionTitle(collectionId) {
     const btn = typeof event !== "undefined" && event && event.target instanceof Element ? event.target.closest("button") : null;
     return guardButton(btn, async () => {
         const modal = document.getElementById("product-modal");
-        if (!modal.classList.contains("active")) {
+        if (!modal.classList.contains("active") || currentProductId !== collectionId || currentItemType !== "collection") {
             await viewCollection(collectionId);
         }
 
@@ -2667,6 +2730,7 @@ async function optimizeCollectionTitle(collectionId) {
                 <h4><span class="material-symbols-rounded">title</span> Title Optimization</h4>
                 <div class="loading-spinner"><div class="spinner"></div><p>AI is optimizing the title...</p></div>
             </div>`;
+        switchModalTab("ai");
 
         try {
             const taskResp = await apiRequest("/api/tasks", {

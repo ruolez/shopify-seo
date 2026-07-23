@@ -193,8 +193,8 @@ async function reanalyzeItemChecks(itemType, itemId) {
             body: { item_type: itemType, item_id: itemId },
         });
         showToast("Analysis updated", "success");
-        if (itemType === "product") viewProduct(itemId);
-        else viewCollection(itemId);
+        if (itemType === "product") viewProduct(itemId, { tab: "checks" });
+        else viewCollection(itemId, { tab: "checks" });
     } catch (err) {
         showToast("Analysis failed: " + err.message, "error");
     }
@@ -529,8 +529,9 @@ function initIssuesEvents() {
         const viewBtn = e.target.closest("[data-view-item]");
         if (viewBtn) {
             const [type, id] = viewBtn.dataset.viewItem.split(":");
-            if (type === "product") viewProduct(parseInt(id));
-            else viewCollection(parseInt(id));
+            // Coming from an issue row — land on the Checks tab
+            if (type === "product") viewProduct(parseInt(id), { tab: "checks" });
+            else viewCollection(parseInt(id), { tab: "checks" });
             return;
         }
         const analyzeBtn = e.target.closest("[data-issues-analyze-all]");
