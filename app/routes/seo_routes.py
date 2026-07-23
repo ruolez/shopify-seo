@@ -28,12 +28,76 @@ from app.services.seo_analyzer import (
     analyze_product_seo,
     analyze_search_performance,
     compute_composite_score,
+    compute_unified_score,
 )
 from app.shopify_client import ShopifyClient
 
 logger = logging.getLogger(__name__)
 
 seo_bp = Blueprint("seo", __name__)
+
+# Checks the keyword-alignment analyzer shares with the content analyzer —
+# excluded when counting keyword-pillar issues so they aren't double counted.
+CONTENT_DEDUP_CHECK_KEYS = {
+    "meta_title_length",
+    "meta_desc_length",
+    "description_word_count",
+    "image_alt_coverage",
+}
+
+
+def _count_unified_issues(seo_breakdown, tsa_checks):
+    """Issues across both pillars: content checks below their good band plus
+    keyword-analysis issues, minus the overlap (content path is canonical)."""
+    content_issues = sum(1 for c in (seo_breakdown or {}).values() if c["score"] < 100)
+    keyword_issues = 0
+    if tsa_checks:
+        keyword_issues = sum(
+            1 for k, c in tsa_checks.items()
+            if k not in CONTENT_DEDUP_CHECK_KEYS and c.get("issue")
+        )
+    return content_issues + keyword_issues
+
+
+def _fetch_keyword_analysis(store_id, item_type, item_id):
+    """Stored keyword-alignment analysis for the detail endpoints, or None."""
+    with db.get_cursor() as cur:
+        cur.execute(
+            """
+            SELECT score, detected_keywords, checks, issues_count, fixable_count,
+                   ai_fixes, updated_at
+            FROM technical_seo_analyses
+            WHERE store_id = %s AND item_type = %s AND item_id = %s
+            """,
+            (store_id, item_type, item_id),
+        )
+        row = cur.fetchone()
+    if not row:
+        return None
+    return {
+        "score": row["score"],
+        "detected_keywords": row["detected_keywords"],
+        "checks": row["checks"],
+        "issues_count": row["issues_count"],
+        "fixable_count": row["fixable_count"],
+        "ai_fixes": row["ai_fixes"],
+        "analyzed_at": row["updated_at"].isoformat() if row["updated_at"] else None,
+    }
+
+
+def _attach_unified_scores(item, seo, search_perf, kw):
+    """Set the unified-score response keys on a detail/list item in place."""
+    unified = compute_unified_score(seo, kw["score"] if kw else None, search_perf)
+    item["seo_score"] = unified["seo_score"]
+    item["on_page_score"] = unified["content_score"]
+    item["content_score"] = unified["content_score"]
+    item["keyword_score"] = unified["keyword_score"]
+    item["search_score"] = unified["search_score"]
+    item["search_breakdown"] = unified["search_breakdown"]
+    item["pillar_weights"] = unified["pillar_weights"]
+    item["issues_count"] = _count_unified_issues(seo["breakdown"], kw["checks"] if kw else None)
+    item["fixable_count"] = kw["fixable_count"] if kw else None
+    item["keyword_analysis"] = kw
 
 
 def _guard_ai_content_fields(data):
@@ -201,9 +265,13 @@ def list_products_seo():
     with db.get_cursor() as cur:
         cur.execute(
             f"""
-            SELECT sp.*, COALESCE(s.shop_name, s.name) as store_name
+            SELECT sp.*, COALESCE(s.shop_name, s.name) as store_name,
+                   tsa.score AS _kw_score, tsa.checks AS _kw_checks,
+                   tsa.updated_at AS _kw_analyzed_at
             FROM synced_products sp
             JOIN stores s ON s.id = sp.store_id
+            LEFT JOIN technical_seo_analyses tsa
+              ON tsa.store_id = sp.store_id AND tsa.item_type = 'product' AND tsa.item_id = sp.id
             {where_clause}
             {order_clause}
             """,
@@ -252,16 +320,21 @@ def list_products_seo():
             "semrush_keyword_count": item.get("semrush_keyword_count"),
         }
         search_perf = analyze_search_performance(gsc_for_scoring, sr_for_scoring, store_baselines.get(p["store_id"]))
-        composite = compute_composite_score(seo, search_perf)
+        unified = compute_unified_score(seo, p.get("_kw_score"), search_perf)
 
-        item["seo_score"] = composite["composite_score"]
-        item["on_page_score"] = composite["on_page_score"]
-        item["search_score"] = composite["search_score"]
-        item["search_breakdown"] = composite["search_breakdown"]
+        item["seo_score"] = unified["seo_score"]
+        item["on_page_score"] = unified["content_score"]
+        item["content_score"] = unified["content_score"]
+        item["keyword_score"] = unified["keyword_score"]
+        item["search_score"] = unified["search_score"]
+        item["search_breakdown"] = unified["search_breakdown"]
+        item["pillar_weights"] = unified["pillar_weights"]
+        item["issues_count"] = _count_unified_issues(seo["breakdown"], p.get("_kw_checks"))
+        item["keyword_analyzed_at"] = p["_kw_analyzed_at"].isoformat() if p.get("_kw_analyzed_at") else None
 
         result.append(item)
 
-    if sort_by in ("seo_score", "on_page_score", "search_score", "gsc_clicks", "gsc_impressions", "gsc_position", "semrush_volume", "semrush_position"):
+    if sort_by in ("seo_score", "on_page_score", "content_score", "keyword_score", "issues_count", "search_score", "gsc_clicks", "gsc_impressions", "gsc_position", "semrush_volume", "semrush_position"):
         reverse = sort_dir == "desc"
         result.sort(key=lambda x: x.get(sort_by) or 0, reverse=reverse)
 
@@ -1129,12 +1202,8 @@ def get_product_seo(product_id):
         "semrush_keyword_count": item.get("semrush_keyword_count"),
     }
     search_perf = analyze_search_performance(gsc_for_scoring, sr_for_scoring, baselines)
-    composite = compute_composite_score(seo, search_perf)
-
-    item["seo_score"] = composite["composite_score"]
-    item["on_page_score"] = composite["on_page_score"]
-    item["search_score"] = composite["search_score"]
-    item["search_breakdown"] = composite["search_breakdown"]
+    kw = _fetch_keyword_analysis(product["store_id"], "product", product_id)
+    _attach_unified_scores(item, seo, search_perf, kw)
 
     return jsonify(item)
 
@@ -1179,9 +1248,13 @@ def list_collections_seo():
     with db.get_cursor() as cur:
         cur.execute(
             f"""
-            SELECT sc.*, COALESCE(s.shop_name, s.name) as store_name
+            SELECT sc.*, COALESCE(s.shop_name, s.name) as store_name,
+                   tsa.score AS _kw_score, tsa.checks AS _kw_checks,
+                   tsa.updated_at AS _kw_analyzed_at
             FROM synced_collections sc
             JOIN stores s ON s.id = sc.store_id
+            LEFT JOIN technical_seo_analyses tsa
+              ON tsa.store_id = sc.store_id AND tsa.item_type = 'collection' AND tsa.item_id = sc.id
             {where_clause}
             {order_clause}
             """,
@@ -1232,16 +1305,21 @@ def list_collections_seo():
             "semrush_keyword_count": item.get("semrush_keyword_count"),
         }
         search_perf = analyze_search_performance(gsc_for_scoring, sr_for_scoring, store_baselines.get(c["store_id"]))
-        composite = compute_composite_score(seo, search_perf)
+        unified = compute_unified_score(seo, c.get("_kw_score"), search_perf)
 
-        item["seo_score"] = composite["composite_score"]
-        item["on_page_score"] = composite["on_page_score"]
-        item["search_score"] = composite["search_score"]
-        item["search_breakdown"] = composite["search_breakdown"]
+        item["seo_score"] = unified["seo_score"]
+        item["on_page_score"] = unified["content_score"]
+        item["content_score"] = unified["content_score"]
+        item["keyword_score"] = unified["keyword_score"]
+        item["search_score"] = unified["search_score"]
+        item["search_breakdown"] = unified["search_breakdown"]
+        item["pillar_weights"] = unified["pillar_weights"]
+        item["issues_count"] = _count_unified_issues(seo["breakdown"], c.get("_kw_checks"))
+        item["keyword_analyzed_at"] = c["_kw_analyzed_at"].isoformat() if c.get("_kw_analyzed_at") else None
 
         result.append(item)
 
-    if sort_by in ("seo_score", "on_page_score", "search_score", "gsc_clicks", "gsc_impressions", "gsc_position", "semrush_volume", "semrush_position"):
+    if sort_by in ("seo_score", "on_page_score", "content_score", "keyword_score", "issues_count", "search_score", "gsc_clicks", "gsc_impressions", "gsc_position", "semrush_volume", "semrush_position"):
         reverse = sort_dir == "desc"
         result.sort(key=lambda x: x.get(sort_by) or 0, reverse=reverse)
 
@@ -1410,12 +1488,8 @@ def get_collection_seo(collection_id):
         "semrush_keyword_count": item.get("semrush_keyword_count"),
     }
     search_perf = analyze_search_performance(gsc_for_scoring, sr_for_scoring, baselines)
-    composite = compute_composite_score(seo, search_perf)
-
-    item["seo_score"] = composite["composite_score"]
-    item["on_page_score"] = composite["on_page_score"]
-    item["search_score"] = composite["search_score"]
-    item["search_breakdown"] = composite["search_breakdown"]
+    kw = _fetch_keyword_analysis(collection["store_id"], "collection", collection_id)
+    _attach_unified_scores(item, seo, search_perf, kw)
 
     return jsonify(item)
 

@@ -3,6 +3,7 @@ import re
 from collections import Counter
 from app.settings_manager import get_setting
 from app.prompt_defaults import DEFAULTS
+from app.services.seo_rules import score_length, score_description_words, score_image_alt
 
 def _get_stop_words():
     words = get_setting("lists.stop_words", DEFAULTS["lists.stop_words"])
@@ -407,24 +408,17 @@ def analyze_product_technical_seo(product):
         "fix_type": "meta_title",
     }
 
+    # Shared completeness thresholds — same source of truth as seo_analyzer
+    content_thresholds = get_setting("rules.product_seo", DEFAULTS["rules.product_seo"])["thresholds"]
+
     # 4. Meta title length
     mt_len = len(effective_meta)
-    if 50 <= mt_len <= 60:
-        mt_score = 100
-        mt_detail = f"Meta title length optimal ({mt_len} chars)"
-    elif 40 <= mt_len <= 70:
-        mt_score = 60
-        mt_detail = f"Meta title length acceptable ({mt_len} chars), ideal is 50-60"
-    elif mt_len > 0:
-        mt_score = 30
-        mt_detail = f"Meta title length poor ({mt_len} chars), ideal is 50-60"
-    else:
-        mt_score = 0
-        mt_detail = "Missing meta title"
+    mt_good = content_thresholds["meta_title"]["good"]
+    mt_score, mt_detail = score_length(mt_len, content_thresholds["meta_title"], "meta title")
     checks["meta_title_length"] = {
         "score": mt_score,
         "detail": mt_detail,
-        "issue": None if mt_score == 100 else f"Adjust meta title to 50-60 characters (currently {mt_len})",
+        "issue": None if mt_score == 100 else f"Adjust meta title to {mt_good[0]}-{mt_good[1]} characters (currently {mt_len})",
         "fix_type": "meta_title",
     }
 
@@ -439,22 +433,12 @@ def analyze_product_technical_seo(product):
 
     # 6. Meta description length
     md_len = len(meta_desc)
-    if 140 <= md_len <= 160:
-        md_score = 100
-        md_detail = f"Meta description length optimal ({md_len} chars)"
-    elif 100 <= md_len <= 200:
-        md_score = 60
-        md_detail = f"Meta description length acceptable ({md_len} chars), ideal is 140-160"
-    elif md_len > 0:
-        md_score = 30
-        md_detail = f"Meta description length poor ({md_len} chars), ideal is 140-160"
-    else:
-        md_score = 0
-        md_detail = "Missing meta description"
+    md_good = content_thresholds["meta_description"]["good"]
+    md_score, md_detail = score_length(md_len, content_thresholds["meta_description"], "meta description")
     checks["meta_desc_length"] = {
         "score": md_score,
         "detail": md_detail,
-        "issue": None if md_score == 100 else f"Adjust meta description to 140-160 characters (currently {md_len})",
+        "issue": None if md_score == 100 else f"Adjust meta description to {md_good[0]}-{md_good[1]} characters (currently {md_len})",
         "fix_type": "meta_description",
     }
 
@@ -499,25 +483,12 @@ def analyze_product_technical_seo(product):
     }
 
     # 10. Description word count
-    if word_count >= 300:
-        wc_score = 100
-        wc_detail = f"Description length good ({word_count} words)"
-    elif word_count >= 150:
-        wc_score = 70
-        wc_detail = f"Description acceptable ({word_count} words), aim for 300+"
-    elif word_count >= 50:
-        wc_score = 40
-        wc_detail = f"Description short ({word_count} words), aim for 300+"
-    elif word_count > 0:
-        wc_score = 20
-        wc_detail = f"Description very short ({word_count} words)"
-    else:
-        wc_score = 0
-        wc_detail = "Missing product description"
+    dw = content_thresholds["description_words"]
+    wc_score, wc_detail = score_description_words(word_count, dw, "product")
     checks["description_word_count"] = {
         "score": wc_score,
         "detail": wc_detail,
-        "issue": None if wc_score == 100 else f"Expand description to 300+ words (currently {word_count})",
+        "issue": None if wc_score == 100 else f"Expand description to {dw['good']}+ words (currently {word_count})",
         "fix_type": "description",
     }
 
@@ -540,15 +511,7 @@ def analyze_product_technical_seo(product):
     }
 
     # 12. Image alt text coverage
-    if not images:
-        img_alt_score = 0
-        img_alt_detail = "No images found"
-    else:
-        with_alt = sum(1 for img in images if img.get("alt"))
-        total_imgs = len(images)
-        ratio = with_alt / total_imgs if total_imgs > 0 else 0
-        img_alt_score = int(ratio * 100)
-        img_alt_detail = f"{with_alt}/{total_imgs} images have alt text"
+    img_alt_score, img_alt_detail, _, _ = score_image_alt(images)
     checks["image_alt_coverage"] = {
         "score": img_alt_score,
         "detail": img_alt_detail,
@@ -652,24 +615,17 @@ def analyze_collection_technical_seo(collection):
         "fix_type": "meta_title",
     }
 
+    # Shared completeness thresholds — same source of truth as seo_analyzer
+    content_thresholds = get_setting("rules.collection_seo", DEFAULTS["rules.collection_seo"])["thresholds"]
+
     # 4. Meta title length
     mt_len = len(effective_meta)
-    if 50 <= mt_len <= 60:
-        mt_score = 100
-        mt_detail = f"Meta title length optimal ({mt_len} chars)"
-    elif 40 <= mt_len <= 70:
-        mt_score = 60
-        mt_detail = f"Meta title length acceptable ({mt_len} chars), ideal is 50-60"
-    elif mt_len > 0:
-        mt_score = 30
-        mt_detail = f"Meta title length poor ({mt_len} chars), ideal is 50-60"
-    else:
-        mt_score = 0
-        mt_detail = "Missing meta title"
+    mt_good = content_thresholds["meta_title"]["good"]
+    mt_score, mt_detail = score_length(mt_len, content_thresholds["meta_title"], "meta title")
     checks["meta_title_length"] = {
         "score": mt_score,
         "detail": mt_detail,
-        "issue": None if mt_score == 100 else f"Adjust meta title to 50-60 characters (currently {mt_len})",
+        "issue": None if mt_score == 100 else f"Adjust meta title to {mt_good[0]}-{mt_good[1]} characters (currently {mt_len})",
         "fix_type": "meta_title",
     }
 
@@ -684,22 +640,12 @@ def analyze_collection_technical_seo(collection):
 
     # 6. Meta description length
     md_len = len(meta_desc)
-    if 140 <= md_len <= 160:
-        md_score = 100
-        md_detail = f"Meta description length optimal ({md_len} chars)"
-    elif 100 <= md_len <= 200:
-        md_score = 60
-        md_detail = f"Meta description length acceptable ({md_len} chars), ideal is 140-160"
-    elif md_len > 0:
-        md_score = 30
-        md_detail = f"Meta description length poor ({md_len} chars), ideal is 140-160"
-    else:
-        md_score = 0
-        md_detail = "Missing meta description"
+    md_good = content_thresholds["meta_description"]["good"]
+    md_score, md_detail = score_length(md_len, content_thresholds["meta_description"], "meta description")
     checks["meta_desc_length"] = {
         "score": md_score,
         "detail": md_detail,
-        "issue": None if md_score == 100 else f"Adjust meta description to 140-160 characters (currently {md_len})",
+        "issue": None if md_score == 100 else f"Adjust meta description to {md_good[0]}-{md_good[1]} characters (currently {md_len})",
         "fix_type": "meta_description",
     }
 
@@ -744,25 +690,12 @@ def analyze_collection_technical_seo(collection):
     }
 
     # 10. Description word count (150+ for collections)
-    if word_count >= 150:
-        wc_score = 100
-        wc_detail = f"Description length good ({word_count} words)"
-    elif word_count >= 75:
-        wc_score = 70
-        wc_detail = f"Description acceptable ({word_count} words), aim for 150+"
-    elif word_count >= 25:
-        wc_score = 40
-        wc_detail = f"Description short ({word_count} words), aim for 150+"
-    elif word_count > 0:
-        wc_score = 20
-        wc_detail = f"Description very short ({word_count} words)"
-    else:
-        wc_score = 0
-        wc_detail = "Missing collection description"
+    dw = content_thresholds["description_words"]
+    wc_score, wc_detail = score_description_words(word_count, dw, "collection")
     checks["description_word_count"] = {
         "score": wc_score,
         "detail": wc_detail,
-        "issue": None if wc_score == 100 else f"Expand description to 150+ words (currently {word_count})",
+        "issue": None if wc_score == 100 else f"Expand description to {dw['good']}+ words (currently {word_count})",
         "fix_type": "description",
     }
 

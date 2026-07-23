@@ -860,6 +860,9 @@ DEFAULTS = {
             "ranking_strength": 0.20,
         },
     },
+    "rules.unified_scoring": {
+        "weights": {"content": 0.30, "keyword": 0.30, "search": 0.40},
+    },
     "rules.product_seo": {
         "weights": {
             "meta_title": 0.30,

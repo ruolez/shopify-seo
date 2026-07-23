@@ -3,6 +3,7 @@ import re
 
 from app.settings_manager import get_setting
 from app.prompt_defaults import DEFAULTS
+from app.services.seo_rules import score_length, score_description_words, score_image_alt
 
 
 DEFAULT_CTR_BENCHMARKS = {1: 0.10, 2: 0.07, 3: 0.05, 5: 0.035, 10: 0.02, 20: 0.01}
@@ -18,20 +19,12 @@ DEFAULT_COMPOSITE_SCORING = {
     },
 }
 
+DEFAULT_UNIFIED_SCORING = {
+    "weights": {"content": 0.30, "keyword": 0.30, "search": 0.40},
+}
 
-def _score_length(value_len, thresholds, field_label, unit="chars"):
-    good = thresholds["good"]
-    ok = thresholds["ok"]
-    poor_min = thresholds.get("poor_min", 1)
-
-    if good[0] <= value_len <= good[1]:
-        return 100, f"Good length ({value_len} {unit})"
-    elif ok[0] <= value_len < good[0] or good[1] < value_len <= ok[1]:
-        return 60, f"Acceptable length ({value_len} {unit}), ideal is {good[0]}-{good[1]}"
-    elif value_len >= poor_min:
-        return 30, f"Poor length ({value_len} {unit}), ideal is {good[0]}-{good[1]}"
-    else:
-        return 0, f"Missing {field_label}"
+# Back-compat alias: _score_length moved to seo_rules.score_length
+_score_length = score_length
 
 
 def analyze_product_seo(product):
@@ -55,35 +48,12 @@ def analyze_product_seo(product):
     body = product.get("description") or ""
     text_only = re.sub(r"<[^>]+>", " ", body)
     word_count = len(text_only.split())
-    dw = thresholds["description_words"]
-    if word_count >= dw["good"]:
-        scores["description"] = 100
-        details["description"] = f"Good length ({word_count} words)"
-    elif word_count >= dw["ok"]:
-        scores["description"] = 70
-        details["description"] = (
-            f"Acceptable ({word_count} words), aim for {dw['good']}+"
-        )
-    elif word_count >= dw["short"]:
-        scores["description"] = 40
-        details["description"] = f"Short ({word_count} words), aim for {dw['good']}+"
-    elif word_count >= dw["very_short"]:
-        scores["description"] = 20
-        details["description"] = f"Very short ({word_count} words)"
-    else:
-        scores["description"] = 0
-        details["description"] = "Missing product description"
+    scores["description"], details["description"] = score_description_words(
+        word_count, thresholds["description_words"], "product"
+    )
 
     images = product.get("images") or []
-    if not images:
-        scores["image_alt"] = 0
-        details["image_alt"] = "No images found"
-    else:
-        with_alt = sum(1 for img in images if img.get("alt"))
-        total = len(images)
-        ratio = with_alt / total if total > 0 else 0
-        scores["image_alt"] = int(ratio * 100)
-        details["image_alt"] = f"{with_alt}/{total} images have alt text"
+    scores["image_alt"], details["image_alt"], _, _ = score_image_alt(images)
 
     overall = sum(scores[k] * weights[k] for k in weights if k in scores)
 
@@ -114,21 +84,9 @@ def analyze_collection_seo(collection):
     body = collection.get("description") or ""
     text_only = re.sub(r"<[^>]+>", " ", body)
     word_count = len(text_only.split())
-    dw = thresholds["description_words"]
-    if word_count >= dw["good"]:
-        scores["description"] = 100
-        details["description"] = f"Good length ({word_count} words)"
-    elif word_count >= dw["ok"]:
-        scores["description"] = 60
-        details["description"] = (
-            f"Acceptable ({word_count} words), aim for {dw['good']}+"
-        )
-    elif word_count >= dw["short"]:
-        scores["description"] = 30
-        details["description"] = f"Short ({word_count} words), aim for {dw['good']}+"
-    else:
-        scores["description"] = 0
-        details["description"] = "Missing collection description"
+    scores["description"], details["description"] = score_description_words(
+        word_count, thresholds["description_words"], "collection", scores=(100, 60, 30, 20)
+    )
 
     overall = sum(scores[k] * weights[k] for k in weights if k in scores)
 
@@ -315,4 +273,43 @@ def compute_composite_score(on_page_result, search_result):
         "on_page_score": on_page_score,
         "search_score": search_score,
         "search_breakdown": search_result["breakdown"],
+    }
+
+
+def compute_unified_score(content_result, keyword_score, search_result):
+    """Blend the three pillars — content quality (completeness checks),
+    keyword alignment (technical_seo_analyzer score), search performance
+    (GSC/Semrush) — into one unified score.
+
+    Missing pillars drop out and the remaining weights renormalize, so an
+    item that hasn't been keyword-analyzed (or has no search data) is never
+    dragged down by a pillar with no signal.
+    """
+    config = get_setting("rules.unified_scoring", DEFAULT_UNIFIED_SCORING)
+    weights = config.get("weights", DEFAULT_UNIFIED_SCORING["weights"])
+
+    content_score = content_result["score"] if content_result else 0
+    search_score = search_result["search_score"] if search_result else None
+
+    pillars = {"content": content_score}
+    if keyword_score is not None:
+        pillars["keyword"] = keyword_score
+    if search_score is not None:
+        pillars["search"] = search_score
+
+    active_weight = sum(weights.get(k, 0) for k in pillars)
+    if active_weight > 0:
+        unified = sum(pillars[k] * weights.get(k, 0) for k in pillars) / active_weight
+        effective = {k: round(weights.get(k, 0) / active_weight, 3) for k in pillars}
+    else:
+        unified = content_score
+        effective = {"content": 1.0}
+
+    return {
+        "seo_score": round(unified),
+        "content_score": content_score,
+        "keyword_score": keyword_score,
+        "search_score": search_score,
+        "search_breakdown": search_result["breakdown"] if search_result else None,
+        "pillar_weights": effective,
     }
