@@ -4009,9 +4009,10 @@ def run_task(task_type, task_input, store_id=None):
                 if primary_kw:
                     stuffing_instruction = (
                         f"- KEYWORD STUFFING FIX: The keyword '{primary_kw}' appears excessively in the "
-                        "description. REDUCE exact-match repetitions — keep it in the first paragraph and "
-                        "1-2 headings, replace other occurrences with natural synonyms, related terms, or "
-                        "pronouns. Do NOT add more mentions.\n"
+                        "description. REDUCE exact-match repetitions, replacing most occurrences with "
+                        "natural synonyms, related terms, or pronouns — but you MUST keep the exact "
+                        "keyword at least once in the first paragraph and once in a heading. Never "
+                        "remove it entirely, and do NOT add more mentions.\n"
                     )
 
             description_rules = (
