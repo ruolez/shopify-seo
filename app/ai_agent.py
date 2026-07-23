@@ -3980,7 +3980,9 @@ def run_task(task_type, task_input, store_id=None):
             tags_rules += (
                 "- Tag structure: [brand tags] + [category tags] + [size/packaging tags] "
                 "+ [variant-specific tags]\n"
-                "- Image alt: descriptive, include keyword naturally, not keyword-stuffed\n"
+                "- Image alt: write varied, descriptive alt texts; include the primary keyword in only "
+                "the one or two most relevant images (typically the first/hero image); NEVER put the "
+                "keyword in every alt\n"
             )
         else:
             tags_rules = "- Do NOT propose tags or image_alt fixes for collections\n"
@@ -4000,30 +4002,25 @@ def run_task(task_type, task_input, store_id=None):
                     "  Place them naturally within relevant paragraphs. Do NOT change the href or link text.\n"
                 )
 
-            density_instruction = ""
+            stuffing_instruction = ""
             density_check = failing_checks.get("keyword_density", {})
             if density_check.get("issue"):
-                desc_text = _re.sub(r"<[^>]+>", " ", current_desc).lower()
-                desc_tokens = _re.findall(r"[a-z0-9]+", desc_text)
-                word_count = len(desc_tokens)
                 primary_kw = detected_kws[0]["keyword"] if detected_kws else ""
-                if primary_kw and word_count > 0:
-                    current_count = desc_text.count(primary_kw.lower())
-                    needed = max(current_count + 1, int(word_count * 0.008) + 1)
-                    density_instruction = (
-                        f"- KEYWORD DENSITY FIX: The description has ~{word_count} words and the keyword "
-                        f"'{primary_kw}' appears {current_count} times (density too low). "
-                        f"Include the EXACT phrase '{primary_kw}' at least {needed} times total, "
-                        f"spread naturally throughout the text. Add 1-3 more mentions than currently present.\n"
+                if primary_kw:
+                    stuffing_instruction = (
+                        f"- KEYWORD STUFFING FIX: The keyword '{primary_kw}' appears excessively in the "
+                        "description. REDUCE exact-match repetitions — keep it in the first paragraph and "
+                        "1-2 headings, replace other occurrences with natural synonyms, related terms, or "
+                        "pronouns. Do NOT add more mentions.\n"
                     )
 
             description_rules = (
                 "- Description: if there are failing description checks (keyword_density, body_first_100_has_keyword, "
                 "description_word_count, heading_structure), propose an improved HTML description\n"
                 "- Keep the existing description content and structure, but enhance it to fix the failing checks\n"
-                "- Use the primary keyword naturally within the first 100 words\n"
-                "- Aim for 0.5-3% keyword density — weave the keyword in naturally, do NOT stuff it\n"
-                + density_instruction
+                "- Use the primary keyword naturally in the first paragraph and in 1-2 headings; cover "
+                "related terms and synonyms; never force repetition\n"
+                + stuffing_instruction
                 + "- If word count is low, expand with relevant product information (features, usage, benefits)\n"
                 "- If headings are missing, add H2/H3 subheadings to structure the content\n"
                 "- Output valid HTML (p, h2, h3, ul, li tags)\n"

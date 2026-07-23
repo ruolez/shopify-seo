@@ -13,11 +13,11 @@ const SEO_CHECK_LABELS = {
     meta_desc_length: "Meta Description Length",
     url_has_keyword: "URL Contains Keyword",
     body_first_100_has_keyword: "Keyword in First 100 Words",
-    keyword_density: "Keyword Density",
+    keyword_density: "Keyword Stuffing Guard",
     description_word_count: "Description Word Count",
     heading_structure: "Heading Structure",
     image_alt_coverage: "Image Alt Coverage",
-    image_alt_has_keyword: "Image Alt Contains Keyword",
+    image_alt_has_keyword: "Alt Text Keyword Balance",
 };
 
 // The four completeness checks the keyword analyzer shares with the content

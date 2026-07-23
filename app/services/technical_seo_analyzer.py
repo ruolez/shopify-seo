@@ -297,7 +297,7 @@ def _keyword_in_text(keyword, text):
     return False
 
 
-def _keyword_position_in_title(keyword, title):
+def _keyword_position_in_title(keyword, title, first_n=5):
     if not keyword or not title:
         return 0
     words = _tokenize(title)
@@ -307,7 +307,7 @@ def _keyword_position_in_title(keyword, title):
     first_kw_word = kw_words[0]
     for i, w in enumerate(words):
         if w == first_kw_word:
-            if i < 3:
+            if i < first_n:
                 return 100
             return 50
     return 0
@@ -372,6 +372,9 @@ def analyze_product_technical_seo(product):
     first_100_text = " ".join(body_words[:100])
     word_count = len(body_words)
 
+    rules = get_setting("rules.technical_product", DEFAULTS["rules.technical_product"])
+    tech_thresholds = rules.get("thresholds", {})
+
     checks = {}
 
     # 1. Title contains primary keyword
@@ -384,17 +387,18 @@ def analyze_product_technical_seo(product):
     }
 
     # 2. Keyword position in title
-    pos_score = _keyword_position_in_title(primary_kw, title)
+    title_first_n = tech_thresholds.get("keyword_at_title_start", 5)
+    pos_score = _keyword_position_in_title(primary_kw, title, title_first_n)
     if pos_score == 100:
-        pos_detail = f"Keyword '{primary_kw}' appears in first 3 words of title"
+        pos_detail = f"Keyword '{primary_kw}' appears in first {title_first_n} words of title"
     elif pos_score == 50:
-        pos_detail = f"Keyword '{primary_kw}' found in title but not in first 3 words"
+        pos_detail = f"Keyword '{primary_kw}' found in title but not in first {title_first_n} words"
     else:
         pos_detail = f"Keyword '{primary_kw}' not found in title"
     checks["keyword_at_title_start"] = {
         "score": pos_score,
         "detail": pos_detail,
-        "issue": None if pos_score == 100 else "Move primary keyword to beginning of title",
+        "issue": None if pos_score == 100 else f"Move the primary keyword into the first {title_first_n} words of the title",
         "fix_type": "title",
     }
 
@@ -448,7 +452,7 @@ def analyze_product_technical_seo(product):
     checks["url_has_keyword"] = {
         "score": 100 if has_kw_url else 0,
         "detail": f"URL handle contains '{primary_kw}'" if has_kw_url else f"URL handle missing keyword '{primary_kw}'",
-        "issue": None if has_kw_url else f"URL handle does not contain '{primary_kw}' (informational — changing URLs breaks links)",
+        "issue": None if has_kw_url else f"URL handle does not contain '{primary_kw}' (informational — Shopify creates an automatic redirect if you change the handle with 'Create URL redirect' enabled)",
         "fix_type": None,
     }
 
@@ -461,24 +465,22 @@ def analyze_product_technical_seo(product):
         "fix_type": "description",
     }
 
-    # 9. Keyword density (0.5-3%)
+    # 9. Keyword stuffing guard — density is not a ranking factor; only
+    # excessive exact-match repetition is penalized.
     density = _keyword_density(primary_kw, body_html)
-    if 0.5 <= density <= 3.0:
+    stuffing_max = tech_thresholds.get("keyword_stuffing_max", 4.0)
+    if density <= stuffing_max:
         dens_score = 100
-        dens_detail = f"Keyword density optimal ({density:.1f}%)"
-    elif (0.1 <= density < 0.5) or (3.0 < density <= 5.0):
-        dens_score = 60
-        dens_detail = f"Keyword density {'low' if density < 0.5 else 'high'} ({density:.1f}%), ideal is 0.5-3%"
-    elif density > 5.0:
-        dens_score = 0
-        dens_detail = f"Keyword stuffing detected ({density:.1f}%), reduce to 0.5-3%"
+        dens_detail = f"No stuffing risk — keyword density {density:.1f}%"
+        dens_issue = None
     else:
         dens_score = 0
-        dens_detail = f"Keyword '{primary_kw}' barely present in content ({density:.1f}%)"
+        dens_detail = f"Keyword '{primary_kw}' appears excessively ({density:.1f}%) — reads as stuffing"
+        dens_issue = f"Keyword '{primary_kw}' appears excessively ({density:.1f}%) — reduce exact-match repetition, use synonyms"
     checks["keyword_density"] = {
         "score": dens_score,
         "detail": dens_detail,
-        "issue": None if dens_score == 100 else f"Adjust keyword density to 0.5-3% (currently {density:.1f}%)",
+        "issue": dens_issue,
         "fix_type": "description",
     }
 
@@ -519,27 +521,46 @@ def analyze_product_technical_seo(product):
         "fix_type": "image_alt",
     }
 
-    # 13. Image alt contains keyword
-    if not images:
+    # 13. Alt text keyword balance — the keyword belongs in 1-2 of the most
+    # relevant alts; putting it in every alt reads as stuffing (Google spam
+    # guidance), and none at all misses an image-search signal.
+    n_imgs = len(images)
+    k_with_kw = sum(
+        1 for img in images
+        if img.get("alt") and _keyword_in_text(primary_kw, img["alt"])
+    )
+    if n_imgs == 0:
         img_kw_score = 0
         img_kw_detail = "No images to check"
+        img_kw_issue = None  # coverage check owns the no-images problem
+    elif n_imgs == 1:
+        if k_with_kw == 1:
+            img_kw_score = 100
+            img_kw_detail = f"Image alt contains '{primary_kw}'"
+            img_kw_issue = None
+        else:
+            img_kw_score = 60
+            img_kw_detail = f"Image alt does not mention '{primary_kw}'"
+            img_kw_issue = f"Include '{primary_kw}' in the image alt text"
+    elif k_with_kw == 0:
+        img_kw_score = 60
+        img_kw_detail = f"0/{n_imgs} alts contain '{primary_kw}'"
+        img_kw_issue = f"Include '{primary_kw}' in one or two of the most relevant image alts"
+    elif k_with_kw == n_imgs:
+        img_kw_score = 0
+        img_kw_detail = f"All {n_imgs} image alts contain '{primary_kw}'"
+        img_kw_issue = "Keyword in every image alt reads as stuffing — vary the descriptions"
     else:
-        alts_with_kw = sum(
-            1 for img in images
-            if img.get("alt") and _keyword_in_text(primary_kw, img["alt"])
-        )
-        total_imgs = len(images)
-        ratio = alts_with_kw / total_imgs if total_imgs > 0 else 0
-        img_kw_score = int(ratio * 100)
-        img_kw_detail = f"{alts_with_kw}/{total_imgs} image alt texts contain '{primary_kw}'"
+        img_kw_score = 100
+        img_kw_detail = f"{k_with_kw}/{n_imgs} alts contain '{primary_kw}' — good balance (target 1-2)"
+        img_kw_issue = None
     checks["image_alt_has_keyword"] = {
         "score": img_kw_score,
         "detail": img_kw_detail,
-        "issue": None if img_kw_score >= 80 else f"Include '{primary_kw}' in image alt text",
+        "issue": img_kw_issue,
         "fix_type": "image_alt",
     }
 
-    rules = get_setting("rules.technical_product", DEFAULTS["rules.technical_product"])
     weights = rules.get("weights", DEFAULTS["rules.technical_product"]["weights"])
 
     overall = sum(checks[k]["score"] * weights.get(k, 0) for k in weights)
@@ -579,6 +600,9 @@ def analyze_collection_technical_seo(collection):
     first_100_text = " ".join(body_words[:100])
     word_count = len(body_words)
 
+    rules = get_setting("rules.technical_collection", DEFAULTS["rules.technical_collection"])
+    tech_thresholds = rules.get("thresholds", {})
+
     checks = {}
 
     # 1. Title contains primary keyword
@@ -591,17 +615,18 @@ def analyze_collection_technical_seo(collection):
     }
 
     # 2. Keyword position in title
-    pos_score = _keyword_position_in_title(primary_kw, title)
+    title_first_n = tech_thresholds.get("keyword_at_title_start", 5)
+    pos_score = _keyword_position_in_title(primary_kw, title, title_first_n)
     if pos_score == 100:
-        pos_detail = f"Keyword '{primary_kw}' appears in first 3 words of title"
+        pos_detail = f"Keyword '{primary_kw}' appears in first {title_first_n} words of title"
     elif pos_score == 50:
-        pos_detail = f"Keyword '{primary_kw}' found in title but not in first 3 words"
+        pos_detail = f"Keyword '{primary_kw}' found in title but not in first {title_first_n} words"
     else:
         pos_detail = f"Keyword '{primary_kw}' not found in title"
     checks["keyword_at_title_start"] = {
         "score": pos_score,
         "detail": pos_detail,
-        "issue": None if pos_score == 100 else "Move primary keyword to beginning of title",
+        "issue": None if pos_score == 100 else f"Move the primary keyword into the first {title_first_n} words of the title",
         "fix_type": "title",
     }
 
@@ -655,7 +680,7 @@ def analyze_collection_technical_seo(collection):
     checks["url_has_keyword"] = {
         "score": 100 if has_kw_url else 0,
         "detail": f"URL handle contains '{primary_kw}'" if has_kw_url else f"URL handle missing keyword '{primary_kw}'",
-        "issue": None if has_kw_url else f"URL handle does not contain '{primary_kw}' (informational — changing URLs breaks links)",
+        "issue": None if has_kw_url else f"URL handle does not contain '{primary_kw}' (informational — Shopify creates an automatic redirect if you change the handle with 'Create URL redirect' enabled)",
         "fix_type": None,
     }
 
@@ -668,24 +693,22 @@ def analyze_collection_technical_seo(collection):
         "fix_type": "description",
     }
 
-    # 9. Keyword density (0.5-3%)
+    # 9. Keyword stuffing guard — density is not a ranking factor; only
+    # excessive exact-match repetition is penalized.
     density = _keyword_density(primary_kw, body_html)
-    if 0.5 <= density <= 3.0:
+    stuffing_max = tech_thresholds.get("keyword_stuffing_max", 4.0)
+    if density <= stuffing_max:
         dens_score = 100
-        dens_detail = f"Keyword density optimal ({density:.1f}%)"
-    elif (0.1 <= density < 0.5) or (3.0 < density <= 5.0):
-        dens_score = 60
-        dens_detail = f"Keyword density {'low' if density < 0.5 else 'high'} ({density:.1f}%), ideal is 0.5-3%"
-    elif density > 5.0:
-        dens_score = 0
-        dens_detail = f"Keyword stuffing detected ({density:.1f}%), reduce to 0.5-3%"
+        dens_detail = f"No stuffing risk — keyword density {density:.1f}%"
+        dens_issue = None
     else:
         dens_score = 0
-        dens_detail = f"Keyword '{primary_kw}' barely present in content ({density:.1f}%)"
+        dens_detail = f"Keyword '{primary_kw}' appears excessively ({density:.1f}%) — reads as stuffing"
+        dens_issue = f"Keyword '{primary_kw}' appears excessively ({density:.1f}%) — reduce exact-match repetition, use synonyms"
     checks["keyword_density"] = {
         "score": dens_score,
         "detail": dens_detail,
-        "issue": None if dens_score == 100 else f"Adjust keyword density to 0.5-3% (currently {density:.1f}%)",
+        "issue": dens_issue,
         "fix_type": "description",
     }
 
@@ -733,7 +756,6 @@ def analyze_collection_technical_seo(collection):
     }
 
     # Collections: rebalanced weights (no image_alt_has_keyword)
-    rules = get_setting("rules.technical_collection", DEFAULTS["rules.technical_collection"])
     weights = rules.get("weights", DEFAULTS["rules.technical_collection"]["weights"])
 
     overall = sum(checks[k]["score"] * weights.get(k, 0) for k in checks)

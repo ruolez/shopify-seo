@@ -96,7 +96,7 @@ ISSUE_DEFS = {
         "fix_fields": ["title"], "item_types": ("product", "collection"),
     },
     "keyword_density": {
-        "label": "Keyword density off",
+        "label": "Keyword stuffing risk",
         "severity": "low", "source": "keyword", "fixable": True,
         "fix_fields": ["description"], "item_types": ("product", "collection"),
     },
@@ -106,7 +106,7 @@ ISSUE_DEFS = {
         "fix_fields": ["description"], "item_types": ("product", "collection"),
     },
     "image_alt_has_keyword": {
-        "label": "Alt text missing keyword",
+        "label": "Alt text keyword balance",
         "severity": "low", "source": "keyword", "fixable": True,
         "fix_fields": ["image_alt"], "item_types": ("product",),
     },

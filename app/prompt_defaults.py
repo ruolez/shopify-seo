@@ -15,7 +15,7 @@ DEFAULTS = {
         "Do NOT generate a product description — a separate specialized process handles that.\n\n"
         "Format your final response as JSON with these keys:\n"
         "- optimized_meta_title (string): SEO-optimized meta title, 50-60 chars, aim to exceed competitor title lengths\n"
-        "- optimized_meta_description (string): SEO-optimized meta description, 145-160 chars, aim to exceed competitor description lengths\n"
+        "- optimized_meta_description (string): SEO-optimized meta description, 120-160 chars, front-load the primary keyword and core message in the first 120 characters (mobile truncation)\n"
         "- h1_tag (string): Optimized product title / H1 tag for the Shopify product title field\n"
         "{tags_keys}"
         "- competitor_insights (string): Brief summary of competitor patterns and positioning\n"
@@ -82,7 +82,7 @@ DEFAULTS = {
         "Bad: 'Premium Pipe Tobacco — The Finest Selection of Luxury Blends'\n\n"
         "Format your final response as JSON with these keys:\n"
         "- optimized_meta_title (string): SEO-optimized meta title, 50-60 chars, aim to exceed competitor title lengths\n"
-        "- optimized_meta_description (string): SEO-optimized meta description, 145-160 chars, aim to exceed competitor description lengths\n"
+        "- optimized_meta_description (string): SEO-optimized meta description, 120-160 chars, front-load the primary keyword and core message in the first 120 characters (mobile truncation)\n"
         "- h1_tag (string): Optimized collection title / H1 tag — keep it clear and descriptive, avoid puffery adjectives\n"
         "- keywords_used (array of strings): Keywords you incorporated into the optimizations\n"
         "- target_keywords (object with keys 'primary' and 'secondary'): Primary keyword as a string with search volume, "
@@ -204,7 +204,9 @@ DEFAULTS = {
         "rewrite every OTHER item so no two values collide, even case-insensitively.\n"
         "- SEO titles: 50-60 characters, front-load the primary keyword, add distinguishing "
         "attributes (brand, type, size, use case) so each item reads differently.\n"
-        "- Meta descriptions: 150-160 characters, include the primary keyword and a natural call to action.\n"
+        "- Meta descriptions: 120-160 characters; put the primary message and keyword in the first "
+        "120 characters (mobile truncation); RETAIN the primary keywords already present in the item's "
+        "existing meta description; include a natural call to action.\n"
         "- BANNED puffery: premium, best, ultimate, top, amazing, incredible, luxury, superior, finest, exclusive.\n"
         "- Base each rewrite on that item's own title/vendor/type/handle/blog/summary — do not invent facts.\n"
         "- Do NOT include an item in the output if you are leaving it unchanged.\n\n"
@@ -307,9 +309,13 @@ DEFAULTS = {
         "- Use the detected target keywords (or suggest better ones if appropriate)\n"
         "- Propose specific new values for fields that have issues\n"
         "- Meta title: 50-60 chars, include primary keyword near the start\n"
-        "- Meta description: 140-160 chars, include primary keyword, be action-oriented\n"
+        "- Meta description: 120-160 chars; put the primary message and keyword in the first 120 characters (mobile truncation), be action-oriented\n"
         "{tags_rules}"
         "{description_rules}"
+        "- GEO PRESERVATION: If the existing description contains GEO elements — a Specifications/"
+        "At-a-glance table, an 'Expert Verdict' section, question-style H2 headings, statistics, "
+        "quotations or cited sources — you MUST keep them intact (verbatim or minimally adjusted). "
+        "Enhance around them; never delete or flatten them. Keep existing keywords.\n"
         "- Do NOT use puffery words: premium, best, ultimate, top, finest, exclusive, luxury\n"
         "- Be specific and practical\n\n"
         "Return ONLY valid JSON with these keys:\n"
@@ -342,8 +348,8 @@ DEFAULTS = {
         "REQUIREMENTS:\n"
         "- Improve heading structure (H2/H3 hierarchy)\n"
         "- Naturally incorporate internal links to products, collections, and other articles\n"
-        "- PRIMARY keyword density: 1-2% (must appear in first paragraph and H2 headings)\n"
-        "- SECONDARY keywords: appear naturally at 0.5-1% density each\n"
+        "- PRIMARY keyword: use it naturally in the first paragraph, in 2-3 H2 headings, and in the conclusion\n"
+        "- SECONDARY keywords: cover related terms and synonyms naturally; never force repetition\n"
         "- Maintain the article's original topic and information\n"
         "- Use <p>, <h2>, <h3>, <ul>, <li>, <strong>, <em>, <a> tags\n"
         "- Do NOT include <h1> tags\n"
@@ -590,8 +596,8 @@ DEFAULTS = {
         "- Do NOT include <h1> tags\n"
         "- Do NOT wrap output in code fences or JSON — this is for the body_html field only\n"
         "- Do NOT include word counts, notes, or meta-commentary in the output\n"
-        "- PRIMARY KEYWORD: must appear in the first paragraph, in 2-3 H2 headings, and throughout (1-2% density)\n"
-        "- SECONDARY KEYWORDS: distribute naturally across sections (0.5-1% density each)\n"
+        "- PRIMARY KEYWORD: must appear naturally in the first paragraph, in 2-3 H2 headings, and in the conclusion\n"
+        "- SECONDARY KEYWORDS: cover related terms and synonyms across sections; never force repetition\n"
         "- The primary keyword determines the core topic focus\n"
         "- Include internal links to products (/products/handle), collections (/collections/handle), "
         "and other articles (/blogs/blog-handle/article-handle)\n"
@@ -648,7 +654,7 @@ DEFAULTS = {
         "Only optimize the meta title, meta description, and description body.\n\n"
         "Format your final response as JSON with these keys:\n"
         "- optimized_meta_title (string): SEO-optimized meta title, 50-60 chars, include brand name + product types + store name\n"
-        "- optimized_meta_description (string): SEO-optimized meta description, 145-160 chars, aim to exceed competitor description lengths\n"
+        "- optimized_meta_description (string): SEO-optimized meta description, 120-160 chars, front-load the primary keyword and core message in the first 120 characters (mobile truncation)\n"
         "- keywords_used (array of strings): Keywords you incorporated into the optimizations\n"
         "- competitor_insights (string): Brief summary of competitor patterns and positioning\n"
         "- additional_recommendations (array of strings): Further SEO improvement suggestions\n"
@@ -872,7 +878,7 @@ DEFAULTS = {
         },
         "thresholds": {
             "meta_title": {"good": [50, 60], "ok": [30, 70], "poor_min": 1},
-            "meta_description": {"good": [140, 160], "ok": [100, 200], "poor_min": 1},
+            "meta_description": {"good": [120, 160], "ok": [100, 200], "poor_min": 1},
             "description_words": {"good": 300, "ok": 150, "short": 50, "very_short": 1},
         },
     },
@@ -1037,7 +1043,7 @@ DEFAULTS = {
         },
         "thresholds": {
             "meta_title": {"good": [50, 60], "ok": [30, 70], "poor_min": 1},
-            "meta_description": {"good": [140, 160], "ok": [100, 200], "poor_min": 1},
+            "meta_description": {"good": [120, 160], "ok": [100, 200], "poor_min": 1},
             "description_words": {"good": 150, "ok": 75, "short": 1},
         },
     },
@@ -1053,7 +1059,7 @@ DEFAULTS = {
         },
         "thresholds": {
             "meta_title": {"good": [35, 46], "ok": [25, 55], "poor_min": 1},
-            "meta_description": {"good": [140, 160], "ok": [100, 200], "poor_min": 1},
+            "meta_description": {"good": [120, 160], "ok": [100, 200], "poor_min": 1},
             "word_count": {"excellent": 1500, "good": 1000, "short": 500, "very_short": 1},
             "headings": {"good_h2": 2, "good_h3": 1},
             "internal_links": {"good": 3, "ok": 1},
@@ -1069,19 +1075,19 @@ DEFAULTS = {
             "meta_desc_has_keyword": 0.08,
             "meta_desc_length": 0.07,
             "url_has_keyword": 0.06,
-            "body_first_100_has_keyword": 0.08,
-            "keyword_density": 0.06,
-            "description_word_count": 0.10,
+            "body_first_100_has_keyword": 0.10,
+            "keyword_density": 0.02,
+            "description_word_count": 0.12,
             "heading_structure": 0.05,
             "image_alt_coverage": 0.10,
             "image_alt_has_keyword": 0.10,
         },
         "thresholds": {
             "meta_title_length": {"good": [50, 60], "ok": [40, 70], "poor_min": 1},
-            "meta_desc_length": {"good": [140, 160], "ok": [100, 200], "poor_min": 1},
-            "keyword_density": {"good": [0.5, 3.0], "ok_low": 0.1, "ok_high": 5.0},
+            "meta_desc_length": {"good": [120, 160], "ok": [100, 200], "poor_min": 1},
+            "keyword_stuffing_max": 4.0,
             "description_words": {"good": 300, "ok": 150, "short": 50, "very_short": 1},
-            "keyword_at_title_start": 3,
+            "keyword_at_title_start": 5,
         },
     },
     "rules.technical_collection": {
@@ -1093,17 +1099,18 @@ DEFAULTS = {
             "meta_desc_has_keyword": 0.10,
             "meta_desc_length": 0.08,
             "url_has_keyword": 0.06,
-            "body_first_100_has_keyword": 0.10,
-            "keyword_density": 0.06,
-            "description_word_count": 0.10,
+            "body_first_100_has_keyword": 0.12,
+            "keyword_density": 0.02,
+            "description_word_count": 0.12,
             "heading_structure": 0.06,
             "image_alt_coverage": 0.08,
         },
         "thresholds": {
             "meta_title_length": {"good": [50, 60], "ok": [40, 70], "poor_min": 1},
-            "meta_desc_length": {"good": [140, 160], "ok": [100, 200], "poor_min": 1},
-            "keyword_density": {"good": [0.5, 3.0], "ok_low": 0.1, "ok_high": 5.0},
+            "meta_desc_length": {"good": [120, 160], "ok": [100, 200], "poor_min": 1},
+            "keyword_stuffing_max": 4.0,
             "description_words": {"good": 150, "ok": 75, "short": 25, "very_short": 1},
+            "keyword_at_title_start": 5,
         },
     },
     "rules.interlinking": {
@@ -1149,7 +1156,7 @@ DEFAULTS = {
         "You are an expert Shopify SEO consultant specializing in landing page optimization. "
         "Analyze the page data and provide actionable SEO recommendations.\n\n"
         "SEO ANALYSIS RULES:\n"
-        "- Keyword density: primary keyword should appear 1-2% of total word count\n"
+        "- Primary keyword: use it naturally in the headline, first paragraph and 1-2 headings; cover related terms and synonyms; never force repetition\n"
         "- Meta title: 50-60 characters, front-load the primary keyword, include brand name\n"
         "- Meta description: 140-160 characters, include primary keyword and a clear CTA\n"
         "- Heading structure: exactly ONE H1 tag, at least 2 H2 tags, logical hierarchy (no skipping levels)\n"
@@ -1252,7 +1259,7 @@ DEFAULTS = {
         "- Include the primary keyword in the H1 and at least one H2\n\n"
         "CONTENT RULES:\n"
         "- Minimum 500 words total content\n"
-        "- Primary keyword density: 1-2% of total word count\n"
+        "- Primary keyword: naturally in the first paragraph and 1-2 headings; use synonyms and related terms elsewhere; never force repetition\n"
         "- Use secondary keywords naturally throughout\n"
         "- Write in short, scannable paragraphs (2-3 sentences each)\n"
         "- Add bullet points or numbered lists where appropriate\n\n"
