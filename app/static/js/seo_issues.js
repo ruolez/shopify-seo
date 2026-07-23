@@ -402,19 +402,146 @@ async function applySelectedItemFixes(itemType, itemId) {
     }
 }
 
-async function reanalyzeItemChecks(itemType, itemId) {
+async function reanalyzeItemChecks(itemType, itemId, returnTab = "checks") {
     try {
-        showToast("Analyzing keyword alignment...", "info");
+        showToast("Analyzing keywords & checks...", "info");
         await apiRequest("/api/technical-seo/analyze", {
             method: "POST",
             body: { item_type: itemType, item_id: itemId },
         });
         showToast("Analysis updated", "success");
-        if (itemType === "product") viewProduct(itemId, { tab: "checks" });
-        else viewCollection(itemId, { tab: "checks" });
+        if (itemType === "product") viewProduct(itemId, { tab: returnTab });
+        else viewCollection(itemId, { tab: returnTab });
     } catch (err) {
         showToast("Analysis failed: " + err.message, "error");
     }
+}
+
+/* ── Keywords tab: full resolution view + set-primary ────────────────── */
+
+const KW_SOURCE_META = {
+    page: { icon: "description", label: "On-page" },
+    gsc: { icon: "monitoring", label: "Search Console" },
+    semrush: { icon: "query_stats", label: "Semrush" },
+    semrush_semantic: { icon: "query_stats", label: "Semrush (semantic match)" },
+    strategy: { icon: "hub", label: "Keyword Strategy" },
+};
+
+function _kwSourceChips(sources) {
+    return (sources || []).map(s => {
+        const m = KW_SOURCE_META[s] || { icon: "help", label: s };
+        return `<span class="material-symbols-rounded kw-src-icon" title="${escapeAttr(m.label)}">${m.icon}</span>`;
+    }).join("");
+}
+
+function _fmtNum(v) {
+    return v != null ? Math.round(v).toLocaleString() : '<span class="traffic-none">—</span>';
+}
+
+function renderKeywordsPanel(item, itemType) {
+    const resolution = item.keyword_analysis && item.keyword_analysis.keyword_resolution;
+    if (!resolution || !resolution.candidates || !resolution.candidates.length) {
+        return `<div class="analyze-cta-banner">
+            <span class="material-symbols-rounded">travel_explore</span>
+            <span>Keywords haven't been resolved for this ${itemType} yet — run the analysis to cross-reference on-page phrases with Search Console and Semrush demand data.</span>
+            <button class="btn btn-primary btn-sm" onclick="reanalyzeItemChecks('${itemType}', ${item.id}, 'keywords')">Resolve keywords</button>
+        </div>`;
+    }
+
+    const primary = resolution.primary || {};
+    let html = "";
+
+    // Primary hero
+    html += `<div class="kw-primary-hero">
+        <div class="kw-primary-main">
+            <div class="kw-primary-label">Primary Keyword${primary.manual ? ' <span class="badge badge-info">manual</span>' : ""}</div>
+            <div class="kw-primary-kw">${escapeHtml(primary.keyword || "—")}</div>
+            <div class="kw-primary-meta">
+                ${_kwSourceChips(primary.sources)}
+                ${primary.volume != null ? `<span>vol ${primary.volume.toLocaleString()}</span>` : ""}
+                ${primary.gsc_position != null ? `<span>GSC pos ${primary.gsc_position}</span>` : ""}
+                ${primary.semrush_position != null ? `<span>SR pos ${primary.semrush_position}</span>` : ""}
+                ${primary.intent ? `<span class="badge badge-not-analyzed">${escapeHtml(primary.intent)}</span>` : ""}
+            </div>
+        </div>
+        <div style="text-align: right;">
+            ${primary.score != null ? renderScoreRing(Math.min(Math.round(primary.score), 100), 56) : ""}
+            <div style="margin-top: 8px;">
+                <button class="btn btn-secondary btn-sm" onclick="reanalyzeItemChecks('${itemType}', ${item.id}, 'keywords')">
+                    <span class="material-symbols-rounded">refresh</span> Re-resolve
+                </button>
+            </div>
+        </div>
+    </div>`;
+
+    if (resolution.note) {
+        html += `<div class="analyze-cta-banner" style="margin-top: 10px;">
+            <span class="material-symbols-rounded">lightbulb</span>
+            <span>Your manual pick is kept, but the data suggests a ${escapeHtml(resolution.note)}</span>
+        </div>`;
+    }
+    if (primary.cannibalization) {
+        html += `<div class="analyze-cta-banner" style="margin-top: 10px;">
+            <span class="material-symbols-rounded">warning</span>
+            <span>Cannibalization: another page already ranks position ${primary.cannibalization.position} for this keyword — <span style="font-family: var(--font-mono); font-size: 12px;">${escapeHtml(primary.cannibalization.competing_url || "")}</span></span>
+        </div>`;
+    }
+
+    // Candidates table
+    html += `<div class="table-container" style="margin-top: 16px;"><table class="data-table">
+        <thead><tr>
+            <th>Keyword</th><th>Sources</th><th>Volume</th><th>Clicks</th><th>Impr.</th>
+            <th>GSC Pos</th><th>SR Pos</th><th>Score</th><th></th><th style="width: 110px;"></th>
+        </tr></thead><tbody>`;
+    for (const c of resolution.candidates) {
+        const isPrimary = primary.keyword && c.keyword === primary.keyword;
+        html += `<tr${isPrimary ? ' style="background: var(--primary-light);"' : ""}>
+            <td><strong>${escapeHtml(c.keyword)}</strong>${c.manual ? ' <span class="badge badge-info" style="font-size:10px;">manual</span>' : ""}${c.packaging_only ? ' <span class="badge badge-not-analyzed" style="font-size:10px;">pkg</span>' : ""}</td>
+            <td><span class="kw-src-chips">${_kwSourceChips(c.sources)}</span></td>
+            <td>${_fmtNum(c.volume)}</td>
+            <td>${_fmtNum(c.gsc_clicks)}</td>
+            <td>${_fmtNum(c.gsc_impressions)}</td>
+            <td>${c.gsc_position != null ? renderPositionBadge(c.gsc_position) : '<span class="traffic-none">—</span>'}</td>
+            <td>${c.semrush_position != null ? renderPositionBadge(c.semrush_position) : '<span class="traffic-none">—</span>'}</td>
+            <td><strong>${c.score != null ? c.score : "—"}</strong></td>
+            <td>${c.cannibalization ? `<span class="material-symbols-rounded" style="color: var(--warning); font-size: 18px;" title="Cannibalization: ${escapeAttr(c.cannibalization.competing_url || "")} ranks position ${c.cannibalization.position}">warning</span>` : ""}</td>
+            <td>${isPrimary
+                ? '<span class="badge badge-success">primary</span>'
+                : `<button class="btn btn-secondary btn-sm" onclick="setPrimaryKeyword('${itemType}', ${item.id}, this.dataset.kw)" data-kw="${escapeAttr(c.keyword)}">Set primary</button>`}</td>
+        </tr>`;
+    }
+    html += "</tbody></table></div>";
+
+    html += `<p style="font-size: 12px; color: var(--on-surface-secondary); margin-top: 10px;">
+        Score = on-page relevance × search demand (Semrush volume / GSC impressions) × ranking opportunity,
+        halved when another page already owns the keyword. A manually set primary always wins.
+    </p>`;
+
+    return html;
+}
+
+async function setPrimaryKeyword(itemType, itemId, keyword) {
+    document.getElementById("confirm-dialog-title").textContent = "Set Primary Keyword";
+    document.getElementById("confirm-dialog-message").innerHTML =
+        `Make <strong>"${escapeHtml(keyword)}"</strong> the primary keyword for this ${itemType}? All checks, scoring, and AI optimizations will target it until you change it.`;
+    const okBtn = document.getElementById("confirm-dialog-ok");
+    okBtn.textContent = "Set Primary";
+    okBtn.onclick = async () => {
+        closeConfirmDialog();
+        try {
+            showToast("Setting primary keyword...", "info");
+            await apiRequest(`/api/seo/items/${itemType}/${itemId}/primary-keyword`, {
+                method: "POST",
+                body: { keyword },
+            });
+            showToast(`Primary keyword set to "${keyword}"`, "success");
+            if (itemType === "product") viewProduct(itemId, { tab: "keywords" });
+            else viewCollection(itemId, { tab: "keywords" });
+        } catch (err) {
+            showToast(`Failed: ${err.message}`, "error");
+        }
+    };
+    _openConfirmDialog();
 }
 
 /* Issues-count badge for the Products/Collections tables. A dash means the

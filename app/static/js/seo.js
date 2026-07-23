@@ -1698,6 +1698,7 @@ async function executeBulkPublishCollections(ids) {
  * (that's page-level and syncs ?tab=). Tab state resets on each open. */
 const MODAL_TABS = [
     { id: "overview", label: "Overview" },
+    { id: "keywords", label: "Keywords" },
     { id: "checks", label: "Checks" },
     { id: "performance", label: "Performance" },
     { id: "ai", label: "AI Optimize" },
@@ -1809,6 +1810,9 @@ async function viewProduct(id, opts = {}) {
         html += '</div>'; // end modal-col-aside
         html += '</div>'; // end modal-two-col
         html += '</div>'; // end overview panel
+
+        // ── Keywords tab ──
+        html += `<div class="modal-tab-panel${initialTab === "keywords" ? " active" : ""}" data-mpanel="keywords">${renderKeywordsPanel(p, "product")}</div>`;
 
         // ── Checks tab ──
         html += `<div class="modal-tab-panel${initialTab === "checks" ? " active" : ""}" data-mpanel="checks">${renderItemIssuesPanel(p, "product")}${renderCheckGroups(p)}</div>`;
@@ -2326,6 +2330,9 @@ async function viewCollection(id, opts = {}) {
         html += '</div>'; // end modal-col-aside
         html += '</div>'; // end modal-two-col
         html += '</div>'; // end overview panel
+
+        // ── Keywords tab ──
+        html += `<div class="modal-tab-panel${initialTab === "keywords" ? " active" : ""}" data-mpanel="keywords">${renderKeywordsPanel(c, "collection")}</div>`;
 
         // ── Checks tab ──
         html += `<div class="modal-tab-panel${initialTab === "checks" ? " active" : ""}" data-mpanel="checks">${renderItemIssuesPanel(c, "collection")}${renderCheckGroups(c)}</div>`;
