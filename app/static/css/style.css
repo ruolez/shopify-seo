@@ -4593,3 +4593,111 @@ tbody tr:hover .row-actions,
     .issue-row-count { margin-left: 0; }
     .pillar-bars { max-width: none; }
 }
+
+/* ═══════════════════════════════════════════════════════════════
+   SEO Items Facelift — slim list rows + tabbed detail modal
+   ═══════════════════════════════════════════════════════════════ */
+
+.item-thumb {
+    width: 48px;
+    height: 48px;
+    border-radius: var(--radius-sm);
+    object-fit: cover;
+    border: 1px solid var(--outline);
+    display: block;
+    flex-shrink: 0;
+    background: var(--surface-dim);
+}
+
+.item-thumb-ph {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 700;
+    font-size: 13px;
+    letter-spacing: 0.03em;
+    background: var(--surface-dim);
+    color: var(--on-surface-secondary);
+    border: 1px dashed var(--outline);
+    user-select: none;
+}
+
+.items-table tbody td { padding: 8px 12px; }
+.items-table tbody tr.item-row { cursor: pointer; }
+.items-table td.item-col { max-width: 0; width: 45%; }
+
+.item-cell { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.item-cell-text { min-width: 0; flex: 1; }
+.item-title {
+    font-weight: 600;
+    font-size: 13px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    white-space: nowrap;
+    overflow: hidden;
+}
+.item-title > span:first-child { overflow: hidden; text-overflow: ellipsis; }
+.item-title .badge { flex-shrink: 0; font-size: 10px; padding: 2px 6px; }
+.item-sub {
+    margin-top: 2px;
+    font-size: 12px;
+    color: var(--on-surface-secondary);
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.item-sub-warn { color: var(--warning); font-weight: 600; }
+
+.pub-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+.pub-dot.pub-on { background: var(--success); }
+.pub-dot.pub-off { background: var(--warning); }
+
+.traffic-cell {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    font-size: 12px;
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+}
+.traffic-cell .traffic-sub { font-size: 11px; color: var(--on-surface-secondary); }
+.traffic-none { color: var(--on-surface-secondary); }
+
+/* Local modal tabs (detail modal — not the page-level .tabs) */
+.modal-tabs {
+    display: flex;
+    gap: 2px;
+    border-bottom: 1px solid var(--outline);
+    margin: 4px 0 20px;
+}
+.modal-tab {
+    padding: 8px 16px;
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--on-surface-secondary);
+    border: none;
+    background: none;
+    cursor: pointer;
+    border-bottom: 2px solid transparent;
+    font-family: var(--font);
+    transition: all 0.15s;
+}
+.modal-tab:hover { color: var(--on-surface); }
+.modal-tab.active { color: var(--primary); font-weight: 600; border-bottom-color: var(--primary); }
+.modal-tab-panel { display: none; }
+.modal-tab-panel.active { display: block; }
+.modal-tab-empty {
+    text-align: center;
+    padding: 48px 20px;
+    color: var(--on-surface-secondary);
+}
+.modal-tab-empty .material-symbols-rounded {
+    font-size: 40px;
+    opacity: 0.4;
+    display: block;
+    margin-bottom: 10px;
+}

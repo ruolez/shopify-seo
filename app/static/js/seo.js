@@ -83,6 +83,38 @@ function renderScoreRing(score, size = 44, item = null) {
     </div>`;
 }
 
+function itemInitials(title) {
+    return (title || "").split(/\s+/).filter(Boolean).slice(0, 2)
+        .map(w => w[0]).join("").toUpperCase() || "?";
+}
+
+function renderItemThumb(url, title) {
+    if (url) return `<img class="item-thumb" src="${escapeAttr(url)}" alt="" loading="lazy">`;
+    return `<span class="item-thumb item-thumb-ph">${escapeHtml(itemInitials(title))}</span>`;
+}
+
+function renderTrafficCell(item) {
+    const hasGsc = item.gsc_clicks != null || item.gsc_impressions != null;
+    const hasSr = item.semrush_volume != null || item.semrush_position != null;
+    if (!hasGsc && !hasSr) return '<span class="traffic-none">—</span>';
+    const l1 = hasGsc
+        ? `${Math.round(item.gsc_clicks || 0).toLocaleString()} clk · ${Math.round(item.gsc_impressions || 0).toLocaleString()} imp`
+          + (item.gsc_position != null ? ` · pos ${item.gsc_position.toFixed(1)}` : "")
+        : '<span class="traffic-none">—</span>';
+    const l2 = [];
+    if (item.semrush_volume != null) l2.push(`vol ${item.semrush_volume.toLocaleString()}`);
+    if (item.semrush_position != null) l2.push(`SR pos ${item.semrush_position.toFixed(1)}`);
+    return `<div class="traffic-cell"><span>${l1}</span>${l2.length ? `<span class="traffic-sub">${l2.join(" · ")}</span>` : ""}</div>`;
+}
+
+function onItemRowClick(event, type, id) {
+    if (event.target.closest("button, input, a, .row-actions, .checkbox-col")) return;
+    const sel = window.getSelection();
+    if (sel && sel.type === "Range") return;
+    if (type === "product") viewProduct(id);
+    else viewCollection(id);
+}
+
 function renderPriorityBadge(score) {
     if (score == null || score <= 0) return '';
     if (score >= 80) return `<span class="badge badge-error" title="Priority: ${score}">${score}</span>`;
@@ -588,57 +620,51 @@ function renderProductsTable(container, products) {
         </div>`;
     }
 
-    html += '<div class="table-container"><table><thead><tr>';
+    const singleStore = new Set(filtered.map(p => p.store_name)).size <= 1;
+
+    html += '<div class="table-container"><table class="items-table"><thead><tr>';
     html += '<th class="checkbox-col"><input type="checkbox" class="table-checkbox" id="select-all-checkbox" onchange="toggleSelectAll(this)"></th>';
-    html += '<th class="row-num-col">#</th>';
 
     const columns = [
-        { key: "title", label: "Product" },
-        { key: "store", label: "Store" },
-        { key: "status", label: "Status" },
+        { key: "title", label: "Product", cls: "item-col" },
+        ...(singleStore ? [] : [{ key: "store", label: "Store" }]),
         { key: "seo_score", label: "Score" },
         { key: "issues_count", label: "Issues" },
-        { key: "gsc_clicks", label: "Clicks" },
-        { key: "gsc_impressions", label: "Impr." },
-        { key: "gsc_position", label: "Pos." },
-        { key: "semrush_volume", label: "Mo. Vol." },
-        { key: "semrush_position", label: "SR Pos." },
+        { key: "gsc_clicks", label: "Traffic (28d)" },
         { key: "last_optimized_at", label: "Last Optimized" },
     ];
 
     for (const col of columns) {
         const isActive = currentSort.by === col.key;
         const dirClass = isActive ? currentSort.dir : "";
-        html += `<th class="sortable-header ${dirClass}" onclick="toggleSort('${col.key}')">${col.label}</th>`;
+        html += `<th class="sortable-header ${dirClass} ${col.cls || ""}" onclick="toggleSort('${col.key}')">${col.label}</th>`;
     }
 
-    html += "<th>Actions</th>";
+    html += '<th style="width: 88px;"></th>';
     html += "</tr></thead><tbody>";
 
     for (let idx = 0; idx < filtered.length; idx++) {
         const p = filtered[idx];
         const checked = selectedProductIds.has(p.id) ? "checked" : "";
         const rowClass = selectedProductIds.has(p.id) ? "row-selected" : "";
-        html += `<tr class="${rowClass}">
+        html += `<tr class="${rowClass} item-row" onclick="onItemRowClick(event, 'product', ${p.id})">
             <td class="checkbox-col"><input type="checkbox" class="table-checkbox" data-product-id="${p.id}" data-index="${idx}" ${checked} onclick="toggleProductSelect(${p.id}, this, event)"></td>
-            <td class="row-num-col">${idx + 1}</td>
-            <td><strong>${escapeHtml(p.title)}</strong></td>
-            <td>${escapeHtml(p.store_name)}</td>
-            <td><span class="badge badge-info">${escapeHtml(p.status)}</span></td>
-            <td>${renderScoreRing(p.seo_score, 44, p)}</td>
-            <td>${renderIssuesBadge(p)}</td>
-            <td>${p.gsc_clicks != null ? Math.round(p.gsc_clicks).toLocaleString() : '<span style="color:var(--on-surface-secondary)">—</span>'}</td>
-            <td>${p.gsc_impressions != null ? Math.round(p.gsc_impressions).toLocaleString() : '<span style="color:var(--on-surface-secondary)">—</span>'}</td>
-            <td>${p.gsc_position != null ? renderPositionBadge(p.gsc_position) : '<span style="color:var(--on-surface-secondary)">—</span>'}</td>
-            <td>${p.semrush_volume != null ? p.semrush_volume.toLocaleString() : '<span style="color:var(--on-surface-secondary)">—</span>'}</td>
-            <td>${p.semrush_position != null ? renderPositionBadge(p.semrush_position) : '<span style="color:var(--on-surface-secondary)">—</span>'}</td>
-            <td>${formatOptimizedDate(p.last_optimized_at)}</td>
-            <td>
-                <div class="actions-cell">
-                    <button class="action-icon" title="View product details" onclick="viewProduct(${p.id})"><span class="material-symbols-rounded">visibility</span></button>
-                    <button class="action-icon action-icon-primary" title="AI Analyze" onclick="analyzeProduct(${p.id})"><span class="material-symbols-rounded">smart_toy</span></button>
+            <td class="item-col"><div class="item-cell">
+                ${renderItemThumb(p.images && p.images[0] && p.images[0].url, p.title)}
+                <div class="item-cell-text">
+                    <div class="item-title"><span>${escapeHtml(p.title)}</span>${p.status !== "ACTIVE" ? `<span class="badge badge-warning">${escapeHtml(p.status)}</span>` : ""}</div>
+                    <div class="item-sub">/${escapeHtml(p.handle || "")}</div>
                 </div>
-            </td>
+            </div></td>
+            ${singleStore ? "" : `<td>${escapeHtml(p.store_name)}</td>`}
+            <td>${renderScoreRing(p.seo_score, 36, p)}</td>
+            <td>${renderIssuesBadge(p)}</td>
+            <td>${renderTrafficCell(p)}</td>
+            <td>${formatOptimizedDate(p.last_optimized_at)}</td>
+            <td><div class="row-actions">
+                <button class="action-icon" title="View product details" onclick="viewProduct(${p.id})"><span class="material-symbols-rounded">visibility</span></button>
+                <button class="action-icon action-icon-primary" title="AI Analyze" onclick="analyzeProduct(${p.id})"><span class="material-symbols-rounded">smart_toy</span></button>
+            </div></td>
         </tr>`;
     }
     html += "</tbody></table></div>";
@@ -1344,69 +1370,59 @@ function renderCollectionsTable(container, collections) {
         </div>`;
     }
 
-    html += '<div class="table-container"><table><thead><tr>';
+    html += '<div class="table-container"><table class="items-table"><thead><tr>';
     html += '<th class="checkbox-col"><input type="checkbox" class="table-checkbox" id="select-all-collections-checkbox" onchange="toggleSelectAllCollections(this)"></th>';
-    html += '<th class="row-num-col">#</th>';
 
     const columns = [
-        { key: "title", label: "Collection" },
+        { key: "title", label: "Collection", cls: "item-col" },
     ];
     if (!singleStore) columns.push({ key: "store", label: "Store" });
     columns.push(
-        { key: "collection_type", label: "Status" },
-        { key: "image_url", label: "Img" },
         { key: "products_count", label: "Products" },
         { key: "seo_score", label: "Score" },
         { key: "issues_count", label: "Issues" },
-        { key: "gsc_clicks", label: "Clicks" },
-        { key: "gsc_impressions", label: "Impr." },
-        { key: "gsc_position", label: "Pos." },
-        { key: "semrush_volume", label: "Mo. Vol." },
-        { key: "semrush_position", label: "SR Pos." },
+        { key: "gsc_clicks", label: "Traffic (28d)" },
         { key: "last_optimized_at", label: "Last Optimized" },
     );
 
     for (const col of columns) {
         const isActive = collectionSort.by === col.key;
         const dirClass = isActive ? collectionSort.dir : "";
-        html += `<th class="sortable-header ${dirClass}" onclick="toggleCollectionSort('${col.key}')">${col.label}</th>`;
+        html += `<th class="sortable-header ${dirClass} ${col.cls || ""}" onclick="toggleCollectionSort('${col.key}')">${col.label}</th>`;
     }
 
-    html += "<th>Actions</th>";
+    html += '<th style="width: 88px;"></th>';
     html += "</tr></thead><tbody>";
 
     for (let idx = 0; idx < collections.length; idx++) {
         const c = collections[idx];
         const checked = selectedCollectionIds.has(c.id) ? "checked" : "";
         const rowClass = selectedCollectionIds.has(c.id) ? "row-selected" : "";
-        const typeBadge = `<span class="badge ${c.collection_type === "smart" ? "badge-info" : "badge-warning"}" style="font-size:10px;padding:2px 6px;">${c.collection_type === "smart" ? "Smart" : "Manual"}</span>`;
-        const pubBadge = `<span class="badge ${c.published ? "badge-success" : "badge-error"}" style="font-size:10px;padding:2px 6px;">${c.published ? "Published" : "Draft"}</span>`;
-        const imgIcon = c.image_url
-            ? '<span style="color: var(--success); font-size: 18px;" class="material-symbols-rounded">check_circle</span>'
-            : '<span style="color: var(--on-surface-secondary); opacity: 0.4; font-size: 18px;" class="material-symbols-rounded">hide_image</span>';
 
-        html += `<tr class="${rowClass}">
+        html += `<tr class="${rowClass} item-row" onclick="onItemRowClick(event, 'collection', ${c.id})">
             <td class="checkbox-col"><input type="checkbox" class="table-checkbox" data-collection-id="${c.id}" data-index="${idx}" ${checked} onclick="toggleCollectionSelect(${c.id}, this, event)"></td>
-            <td class="row-num-col">${idx + 1}</td>
-            <td><strong class="editable-title" ondblclick="startInlineEditCollectionTitle(this, ${c.id})" style="cursor: default;">${escapeHtml(c.title)}</strong></td>`;
-        if (!singleStore) html += `<td>${escapeHtml(c.store_name)}</td>`;
-        html += `<td><div style="display:flex;flex-direction:column;gap:3px;">${typeBadge}${pubBadge}</div></td>
-            <td style="text-align:center;">${imgIcon}</td>
-            <td>${c.products_count}</td>
-            <td>${renderScoreRing(c.seo_score, 44, c)}</td>
-            <td>${renderIssuesBadge(c)}</td>
-            <td>${c.gsc_clicks != null ? Math.round(c.gsc_clicks).toLocaleString() : '<span style="color:var(--on-surface-secondary)">—</span>'}</td>
-            <td>${c.gsc_impressions != null ? Math.round(c.gsc_impressions).toLocaleString() : '<span style="color:var(--on-surface-secondary)">—</span>'}</td>
-            <td>${c.gsc_position != null ? renderPositionBadge(c.gsc_position) : '<span style="color:var(--on-surface-secondary)">—</span>'}</td>
-            <td>${c.semrush_volume != null ? c.semrush_volume.toLocaleString() : '<span style="color:var(--on-surface-secondary)">—</span>'}</td>
-            <td>${c.semrush_position != null ? renderPositionBadge(c.semrush_position) : '<span style="color:var(--on-surface-secondary)">—</span>'}</td>
-            <td>${formatOptimizedDate(c.last_optimized_at)}</td>
-            <td>
-                <div class="actions-cell">
-                    <button class="action-icon" title="View collection details" onclick="viewCollection(${c.id})"><span class="material-symbols-rounded">visibility</span></button>
-                    <button class="action-icon action-icon-primary" title="AI Analyze" onclick="analyzeCollection(${c.id})"><span class="material-symbols-rounded">smart_toy</span></button>
+            <td class="item-col"><div class="item-cell">
+                ${renderItemThumb(c.image_url, c.title)}
+                <div class="item-cell-text">
+                    <div class="item-title"><span>${escapeHtml(c.title)}</span></div>
+                    <div class="item-sub">
+                        <span class="pub-dot ${c.published ? "pub-on" : "pub-off"}" title="${c.published ? "Published" : "Draft"}"></span>
+                        <span>${c.collection_type === "smart" ? "Smart" : "Manual"}</span>
+                        ${c.published ? "" : '<span class="item-sub-warn">Draft</span>'}
+                        <span>· /${escapeHtml(c.handle || "")}</span>
+                    </div>
                 </div>
-            </td>
+            </div></td>`;
+        if (!singleStore) html += `<td>${escapeHtml(c.store_name)}</td>`;
+        html += `<td>${c.products_count}</td>
+            <td>${renderScoreRing(c.seo_score, 36, c)}</td>
+            <td>${renderIssuesBadge(c)}</td>
+            <td>${renderTrafficCell(c)}</td>
+            <td>${formatOptimizedDate(c.last_optimized_at)}</td>
+            <td><div class="row-actions">
+                <button class="action-icon" title="View collection details" onclick="viewCollection(${c.id})"><span class="material-symbols-rounded">visibility</span></button>
+                <button class="action-icon action-icon-primary" title="AI Analyze" onclick="analyzeCollection(${c.id})"><span class="material-symbols-rounded">smart_toy</span></button>
+            </div></td>
         </tr>`;
     }
     html += "</tbody></table></div>";
@@ -1416,60 +1432,6 @@ function renderCollectionsTable(container, collections) {
     if (selectAllCb) {
         selectAllCb.checked =
             collections.length > 0 && collections.every((c) => selectedCollectionIds.has(c.id));
-    }
-}
-
-function startInlineEditCollectionTitle(el, collectionId) {
-    const originalTitle = el.textContent;
-    const input = document.createElement("input");
-    input.type = "text";
-    input.value = originalTitle;
-    input.style.cssText = "font-weight:700;font-size:inherit;font-family:inherit;border:none;outline:2px solid var(--primary);border-radius:4px;padding:2px 4px;width:100%;background:var(--surface);color:var(--on-surface);";
-    el.textContent = "";
-    el.appendChild(input);
-    input.select();
-
-    let saved = false;
-    input.addEventListener("blur", function () {
-        if (!saved) {
-            saved = true;
-            saveInlineCollectionTitle(el, input, collectionId, originalTitle);
-        }
-    });
-    input.addEventListener("keydown", function (e) {
-        if (e.key === "Enter") {
-            e.preventDefault();
-            input.blur();
-        } else if (e.key === "Escape") {
-            saved = true;
-            el.textContent = originalTitle;
-        }
-    });
-}
-
-async function saveInlineCollectionTitle(el, input, collectionId, originalTitle) {
-    const newTitle = input.value.trim();
-    if (!newTitle || newTitle === originalTitle) {
-        el.textContent = originalTitle;
-        return;
-    }
-    el.textContent = newTitle;
-    try {
-        const resp = await apiRequest(`/api/seo/collections/${collectionId}/apply`, {
-            method: "POST",
-            body: { title: newTitle },
-        });
-        if (resp.ok) {
-            const col = currentCollections.find((c) => c.id === collectionId);
-            if (col) col.title = newTitle;
-            showToast("Collection title updated", "success");
-        } else {
-            el.textContent = originalTitle;
-            showToast(`Failed to update title: ${resp.error || "Unknown error"}`, "error");
-        }
-    } catch (err) {
-        el.textContent = originalTitle;
-        showToast("Failed to update title", "error");
     }
 }
 
