@@ -4,9 +4,11 @@ import re
 from app.settings_manager import get_setting
 from app.prompt_defaults import DEFAULTS
 from app.services.seo_rules import score_length, score_description_words, score_image_alt
+from app.services.ctr_benchmarks import DEFAULT_CTR_CURVE, expected_ctr_for_position
 
 
-DEFAULT_CTR_BENCHMARKS = {1: 0.10, 2: 0.07, 3: 0.05, 5: 0.035, 10: 0.02, 20: 0.01}
+# Back-compat alias — expected CTRs now live in ctr_benchmarks (store-calibrated).
+DEFAULT_CTR_BENCHMARKS = DEFAULT_CTR_CURVE
 
 DEFAULT_COMPOSITE_SCORING = {
     "weights_with_search": {"on_page": 0.40, "search": 0.60},
@@ -97,13 +99,7 @@ def analyze_collection_seo(collection):
 
 
 def _expected_ctr(position, benchmarks=None):
-    if position is None or position <= 0:
-        return 0.01
-    benchmarks = benchmarks or DEFAULT_CTR_BENCHMARKS
-    for threshold in sorted(benchmarks.keys()):
-        if position <= threshold:
-            return benchmarks[threshold]
-    return 0.005
+    return expected_ctr_for_position(position, benchmarks)
 
 
 def analyze_search_performance(gsc_data, semrush_data, store_baselines=None):
@@ -152,7 +148,7 @@ def analyze_search_performance(gsc_data, semrush_data, store_baselines=None):
             details["search_visibility"] = f"{impressions:,.0f} impressions"
 
         if position > 0:
-            expected = _expected_ctr(position)
+            expected = _expected_ctr(position, (store_baselines or {}).get("ctr_curve"))
             if ctr >= expected:
                 scores["click_performance"] = 100
                 details["click_performance"] = f"CTR {ctr:.1%} exceeds expected {expected:.1%} for position {position:.1f}"

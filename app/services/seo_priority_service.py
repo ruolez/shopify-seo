@@ -2,8 +2,8 @@ import logging
 from datetime import datetime, timedelta, timezone
 
 from app.database import db
+from app.services.ctr_benchmarks import get_expected_ctr_curve
 from app.services.seo_analyzer import (
-    DEFAULT_CTR_BENCHMARKS,
     _expected_ctr,
     analyze_collection_seo,
     analyze_product_seo,
@@ -78,7 +78,7 @@ def _get_striking_keywords_for_url(store_id, url_path, base_url=""):
         return cur.fetchall()
 
 
-def compute_priority_score(item, gsc_data, semrush_data, striking_keywords):
+def compute_priority_score(item, gsc_data, semrush_data, striking_keywords, ctr_curve=None):
     """Compute 0-100 priority score. Higher = more urgent to optimize."""
     score = 0.0
 
@@ -87,7 +87,7 @@ def compute_priority_score(item, gsc_data, semrush_data, striking_keywords):
     position = float(gsc_data.get("gsc_position") or 0)
 
     if impressions > 0 and position > 0:
-        expected = _expected_ctr(position)
+        expected = _expected_ctr(position, ctr_curve)
         ctr_gap = max(expected - ctr, 0)
         if expected > 0:
             gap_ratio = ctr_gap / expected
@@ -145,6 +145,7 @@ def _check_keyword_cannibalization(store_id, keyword, this_path):
 def get_priority_ranked_items(store_id, item_type="product", limit=50):
     gsc_metrics = _get_gsc_metrics_for_store(store_id)
     semrush_metrics = _get_semrush_metrics_for_store(store_id)
+    ctr_curve = get_expected_ctr_curve(store_id)
 
     with db.get_cursor() as cur:
         cur.execute("SELECT gsc_property FROM gsc_credentials WHERE store_id = %s", (store_id,))
@@ -192,6 +193,7 @@ def get_priority_ranked_items(store_id, item_type="product", limit=50):
                 "semrush_position": sr.get("semrush_position"),
                 "semrush_keyword_count": sr.get("semrush_keyword_count"),
             },
+            {"ctr_curve": ctr_curve},
         )
         composite = compute_composite_score(seo, search_perf)
 
@@ -205,6 +207,7 @@ def get_priority_ranked_items(store_id, item_type="product", limit=50):
             gsc,
             sr,
             striking,
+            ctr_curve=ctr_curve,
         )
 
         if priority <= 0 and not gsc and not sr:
@@ -231,7 +234,7 @@ def get_priority_ranked_items(store_id, item_type="product", limit=50):
         if not recommended_action and float(gsc.get("gsc_impressions") or 0) > 50:
             ctr_val = float(gsc.get("gsc_ctr") or 0)
             pos_val = float(gsc.get("gsc_position") or 0)
-            expected = _expected_ctr(pos_val)
+            expected = _expected_ctr(pos_val, ctr_curve)
             if ctr_val < expected * 0.6:
                 recommended_action = f"Improve CTR — {ctr_val:.1%} vs {expected:.1%} expected at position {pos_val:.1f}"
 

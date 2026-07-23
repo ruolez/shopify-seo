@@ -698,8 +698,14 @@ def get_query_detail(store_id, query_text, date_from, date_to, limit=200, device
 
 
 def get_opportunities(store_id, date_from, date_to, limit=200, device=None, country=None):
+    """CTR opportunities — position-aware: a query underperforms when its CTR
+    is below half the expected CTR for its position (store-calibrated curve),
+    not below a flat threshold that ignores where it ranks."""
+    from app.services.ctr_benchmarks import expected_ctr_for_position, get_expected_ctr_curve
+
+    curve = get_expected_ctr_curve(store_id)
     where, params = _build_filters(store_id, date_from, date_to, device, country)
-    params.append(limit)
+    params.append(min(limit * 5, 2000))
     with db.get_cursor() as cur:
         cur.execute(
             f"""SELECT page, query,
@@ -711,7 +717,6 @@ def get_opportunities(store_id, date_from, date_to, limit=200, device=None, coun
                WHERE {where}
                GROUP BY page, query
                HAVING SUM(impressions) >= 10
-                  AND (CASE WHEN SUM(impressions) > 0 THEN SUM(clicks) / SUM(impressions) ELSE 0 END) < 0.05
                ORDER BY SUM(impressions) DESC, avg_ctr ASC
                LIMIT %s""",
             params,
@@ -723,14 +728,16 @@ def get_opportunities(store_id, date_from, date_to, limit=200, device=None, coun
         ctr = float(r["avg_ctr"] or 0)
         impressions = float(r["total_impressions"] or 0)
         position = float(r["avg_position"] or 0)
-        if ctr < 0.05 and impressions >= 10:
-            potential_clicks = impressions * 0.05 - float(r["total_clicks"] or 0)
+        expected = expected_ctr_for_position(position, curve)
+        if ctr < expected * 0.5 and impressions >= 10:
+            potential_clicks = impressions * expected - float(r["total_clicks"] or 0)
             results.append({
                 "page": r["page"],
                 "query": r["query"],
                 "clicks": float(r["total_clicks"] or 0),
                 "impressions": impressions,
                 "ctr": round(ctr, 4),
+                "expected_ctr": round(expected, 4),
                 "position": round(position, 1),
                 "potential_clicks": round(max(potential_clicks, 0), 0),
                 "action": "Improve meta title & description" if position <= 10 else "Improve rankings first",

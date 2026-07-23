@@ -227,6 +227,15 @@ def _get_store_baselines(store_id):
         logger.warning("Failed to compute store baselines for store %s", store_id)
         data = None
 
+    # Store-calibrated expected-CTR curve rides along with the baselines so
+    # analyze_search_performance gets it without signature churn.
+    from app.services.ctr_benchmarks import get_expected_ctr_curve
+    curve = get_expected_ctr_curve(store_id)
+    if data is None:
+        data = {"ctr_curve": curve}
+    else:
+        data["ctr_curve"] = curve
+
     _store_baselines_cache[store_id] = {"ts": now, "data": data}
     return data
 
