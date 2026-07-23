@@ -515,6 +515,14 @@ def _step_publish(session, store, client, is_published=True, regen_hub=True):
     if is_published and regen_hub:
         _regen_news_hub_async(store_id, client, store)
         _regen_blog_landings_async(store_id, client, store)
+    if is_published and result.get("handle"):
+        from app.services.indexnow_service import ping_async
+
+        ping_async(
+            store_id,
+            [f"{_store_base_url(store)}/blogs/{blog.get('handle') or 'news'}/{result.get('handle', '')}"],
+            "news_publish",
+        )
 
     return {
         "success": True,

@@ -948,7 +948,7 @@ DEFAULTS = {
             "freshness": 0.10,
         },
         "thresholds": {
-            "fact_density_per_100w": {"good": 6, "ok": 3, "min": 1},
+            "fact_density_per_100w": {"good": 4, "ok": 2, "min": 0.7, "bare_weight": 0.3},
             "freshness_days": {"fresh": 90, "aging": 365},
             "desired_schema": {
                 "product": ["Product", "BreadcrumbList", "FAQPage", "Organization"],
@@ -963,6 +963,26 @@ DEFAULTS = {
                 "product": ["offers", "brand", "image", "identifier", "aggregateRating", "additionalProperty"],
                 "collection": ["description", "image", "isPartOf"],
             },
+        },
+    },
+    "rules.feed_readiness": {
+        "weights": {
+            "gtin": 0.20,
+            "images": 0.14,
+            "availability": 0.12,
+            "price": 0.10,
+            "product_type": 0.10,
+            "title": 0.10,
+            "description": 0.10,
+            "sku": 0.08,
+            "brand": 0.06,
+            "review_signals": 0.0,
+        },
+        "thresholds": {
+            "title_len": {"min": 20, "max": 150},
+            "description_words": {"min": 30},
+            "gtin_lengths": [8, 12, 13, 14],
+            "price_min": 0.01,
         },
     },
     "rules.collection_seo": {

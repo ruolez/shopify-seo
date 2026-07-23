@@ -367,6 +367,11 @@ def publish_home_page():
                 WHERE store_id = %s""",
                 (store_id,),
             )
+        host = (store.get("primary_domain") or store.get("domain") or "").replace("https://", "").replace("http://", "").strip("/")
+        if host:
+            from app.services.indexnow_service import ping_async
+
+            ping_async(int(store_id), [f"https://{host}/"], "homepage_publish")
         return jsonify({"success": True})
     except Exception as e:
         logger.exception("Home page publish failed for store %s", store_id)

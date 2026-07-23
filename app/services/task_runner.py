@@ -21,6 +21,7 @@ _HAS_ERROR_COLUMN = {
     "bulk_tasks": False,
     "ai_tracking_runs": True,
     "keyword_strategy_runs": True,
+    "offsite_runs": True,
 }
 
 
@@ -106,6 +107,10 @@ def sweep_stale_jobs(min_interval_seconds=60):
             )
             cur.execute(
                 "UPDATE keyword_strategy_runs SET status='failed', error=COALESCE(error,'Timed out'), completed_at=NOW() "
+                "WHERE status IN ('pending','running') AND started_at < NOW() - INTERVAL '2 hours'"
+            )
+            cur.execute(
+                "UPDATE offsite_runs SET status='failed', error=COALESCE(error,'Timed out'), completed_at=NOW() "
                 "WHERE status IN ('pending','running') AND started_at < NOW() - INTERVAL '2 hours'"
             )
             cur.execute(

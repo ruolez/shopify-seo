@@ -382,6 +382,18 @@ class Database:
             """)
             cur.execute("""
                 DO $$ BEGIN
+                    ALTER TABLE synced_products ADD COLUMN shopify_updated_at TIMESTAMP;
+                EXCEPTION WHEN duplicate_column THEN NULL;
+                END $$
+            """)
+            cur.execute("""
+                DO $$ BEGIN
+                    ALTER TABLE synced_collections ADD COLUMN shopify_updated_at TIMESTAMP;
+                EXCEPTION WHEN duplicate_column THEN NULL;
+                END $$
+            """)
+            cur.execute("""
+                DO $$ BEGIN
                     ALTER TABLE sync_jobs ADD COLUMN current_phase VARCHAR(50);
                 EXCEPTION WHEN duplicate_column THEN NULL;
                 END $$
@@ -1481,6 +1493,105 @@ class Database:
                 EXCEPTION WHEN duplicate_column THEN NULL;
                 END $$
             """)
+            cur.execute("""
+                DO $$ BEGIN
+                    ALTER TABLE ai_config ADD COLUMN grounded_models JSONB DEFAULT '["perplexity/sonar"]';
+                EXCEPTION WHEN duplicate_column THEN NULL;
+                END $$
+            """)
+            for _ddl in [
+                "ALTER TABLE ai_mention_results ADD COLUMN grounded BOOLEAN DEFAULT FALSE",
+                "ALTER TABLE ai_mention_results ADD COLUMN citations JSONB DEFAULT '[]'",
+                "ALTER TABLE stores ADD COLUMN indexnow_key VARCHAR(64)",
+            ]:
+                cur.execute(
+                    f"DO $$ BEGIN {_ddl}; EXCEPTION WHEN duplicate_column THEN NULL; END $$"
+                )
+
+            # Live AI-crawler access verification results (one row per store).
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS ai_bot_checks (
+                    id SERIAL PRIMARY KEY,
+                    store_id INTEGER REFERENCES stores(id) ON DELETE CASCADE,
+                    results JSONB DEFAULT '{}',
+                    checked_at TIMESTAMP DEFAULT NOW(),
+                    UNIQUE(store_id)
+                )
+            """)
+
+            # IndexNow submission log (append-only).
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS indexnow_pings (
+                    id SERIAL PRIMARY KEY,
+                    store_id INTEGER REFERENCES stores(id) ON DELETE CASCADE,
+                    url_count INTEGER DEFAULT 0,
+                    sample_urls JSONB DEFAULT '[]',
+                    reason VARCHAR(50),
+                    status_code INTEGER,
+                    ok BOOLEAN DEFAULT FALSE,
+                    error TEXT,
+                    created_at TIMESTAMP DEFAULT NOW()
+                )
+            """)
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_indexnow_pings_store ON indexnow_pings(store_id, created_at)"
+            )
+
+            # Feed readiness (agentic-commerce catalog quality) per-product scores.
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS feed_readiness_scores (
+                    id SERIAL PRIMARY KEY,
+                    store_id INTEGER REFERENCES stores(id) ON DELETE CASCADE,
+                    product_id INTEGER REFERENCES synced_products(id) ON DELETE CASCADE,
+                    score INTEGER DEFAULT 0,
+                    breakdown JSONB DEFAULT '{}',
+                    fixables JSONB DEFAULT '[]',
+                    created_at TIMESTAMP DEFAULT NOW(),
+                    UNIQUE(store_id, product_id)
+                )
+            """)
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_feed_readiness_store ON feed_readiness_scores(store_id, score)"
+            )
+
+            # Off-site visibility audits (third-party corroboration).
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS offsite_runs (
+                    id SERIAL PRIMARY KEY,
+                    store_id INTEGER REFERENCES stores(id) ON DELETE CASCADE,
+                    status VARCHAR(50) DEFAULT 'pending',
+                    queries_run INTEGER DEFAULT 0,
+                    scorecard JSONB DEFAULT '{}',
+                    actions JSONB DEFAULT '[]',
+                    error TEXT,
+                    started_at TIMESTAMP DEFAULT NOW(),
+                    completed_at TIMESTAMP
+                )
+            """)
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_offsite_runs_store ON offsite_runs(store_id, started_at)"
+            )
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS offsite_results (
+                    id SERIAL PRIMARY KEY,
+                    run_id INTEGER REFERENCES offsite_runs(id) ON DELETE CASCADE,
+                    store_id INTEGER REFERENCES stores(id) ON DELETE CASCADE,
+                    query TEXT NOT NULL,
+                    query_kind VARCHAR(30) NOT NULL,
+                    position INTEGER,
+                    title TEXT,
+                    url TEXT,
+                    domain VARCHAR(255),
+                    description TEXT,
+                    classification VARCHAR(30),
+                    brand_present BOOLEAN DEFAULT FALSE,
+                    competitors_present JSONB DEFAULT '[]',
+                    created_at TIMESTAMP DEFAULT NOW()
+                )
+            """)
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_offsite_results_run ON offsite_results(run_id)"
+            )
 
             # Blog topic discovery: AI market research runs + suggested topics
             cur.execute("""

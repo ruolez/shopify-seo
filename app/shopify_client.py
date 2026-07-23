@@ -223,6 +223,7 @@ class ShopifyClient:
                 productType
                 tags
                 status
+                updatedAt
                 seo { title description }
                 media(first: 50) {
                   edges {
@@ -265,6 +266,7 @@ class ShopifyClient:
                     "product_type": node.get("productType", ""),
                     "tags": ", ".join(node.get("tags", [])),
                     "status": node.get("status", ""),
+                    "shopify_updated_at": node.get("updatedAt"),
                     "meta_title": (node.get("seo") or {}).get("title", ""),
                     "meta_description": (node.get("seo") or {}).get("description", ""),
                     "images": [
@@ -308,6 +310,7 @@ class ShopifyClient:
                 title
                 handle
                 descriptionHtml
+                updatedAt
                 seo { title description }
                 productsCount { count }
                 image { url altText }
@@ -344,6 +347,7 @@ class ShopifyClient:
                     "image_url": image.get("url", ""),
                     "collection_type": "smart" if node.get("ruleSet") is not None else "manual",
                     "published": is_published,
+                    "shopify_updated_at": node.get("updatedAt"),
                 }
             )
 
@@ -1682,7 +1686,7 @@ class ShopifyClient:
             raise Exception(f"Shopify pageDelete error: {errors[0].get('message', str(errors))}")
         return result.get("deletedPageId")
 
-    def create_page(self, title, body_html, handle=None, is_published=True, seo_title=None, seo_description=None):
+    def create_page(self, title, body_html, handle=None, is_published=True, seo_title=None, seo_description=None, template_suffix=None):
         query = """
         mutation ($page: PageCreateInput!) {
           pageCreate(page: $page) {
@@ -1698,6 +1702,8 @@ class ShopifyClient:
         }
         if handle:
             page_input["handle"] = handle
+        if template_suffix:
+            page_input["templateSuffix"] = template_suffix
         metafields = []
         if seo_title:
             metafields.append({"namespace": "global", "key": "title_tag", "value": seo_title, "type": "single_line_text_field"})
@@ -1735,6 +1741,8 @@ class ShopifyClient:
             page_input["handle"] = fields["handle"]
         if "is_published" in fields:
             page_input["isPublished"] = fields["is_published"]
+        if "template_suffix" in fields:
+            page_input["templateSuffix"] = fields["template_suffix"]
         metafields = []
         if "seo_title" in fields:
             metafields.append({"namespace": "global", "key": "title_tag", "value": fields["seo_title"], "type": "single_line_text_field"})
@@ -1753,6 +1761,48 @@ class ShopifyClient:
             "title": page.get("title", ""),
             "handle": page.get("handle", ""),
         }
+
+    def create_url_redirect(self, path, target):
+        """Create a storefront URL redirect (idempotent — an existing identical
+        path is treated as success). Returns the redirect id or None."""
+        query = """
+        mutation ($redirect: UrlRedirectInput!) {
+          urlRedirectCreate(urlRedirect: $redirect) {
+            urlRedirect { id path target }
+            userErrors { field message }
+          }
+        }
+        """
+        data = self._graphql(query, {"redirect": {"path": path, "target": target}})
+        result = data.get("urlRedirectCreate", {})
+        errors = result.get("userErrors", [])
+        if errors:
+            msg = errors[0].get("message", "")
+            if "taken" in msg.lower() or "exists" in msg.lower():
+                return None
+            raise Exception(f"Shopify urlRedirectCreate error: {msg}")
+        return (result.get("urlRedirect") or {}).get("id")
+
+    def delete_url_redirect_by_path(self, path):
+        """Best-effort: find and delete a URL redirect matching a path."""
+        query = """
+        query ($q: String!) {
+          urlRedirects(first: 5, query: $q) { edges { node { id path } } }
+        }
+        """
+        data = self._graphql(query, {"q": f"path:{path}"})
+        for edge in (data.get("urlRedirects") or {}).get("edges", []):
+            if edge["node"].get("path") == path:
+                self._graphql(
+                    """
+                    mutation ($id: ID!) {
+                      urlRedirectDelete(id: $id) { deletedUrlRedirectId userErrors { message } }
+                    }
+                    """,
+                    {"id": edge["node"]["id"]},
+                )
+                return True
+        return False
 
     def update_collection_image(self, collection_shopify_id, image_src_url, alt_text):
         query = """

@@ -7,9 +7,11 @@ and the analyzer in services/ai_seo_analyzer.py.
 """
 
 import asyncio
+import hashlib
 import json
 import logging
 import threading
+from datetime import datetime, timezone
 
 import requests
 from itertools import islice
@@ -19,6 +21,7 @@ from app.auth import decrypt_value
 from app.database import db
 from app.services.task_runner import spawn as spawn_task, sweep_stale_jobs
 from app.services import ai_seo_analyzer
+from app.services import indexnow_service
 from app.services.serp_scraper import scrape_serp_pages
 from app.shopify_client import ShopifyClient
 
@@ -72,6 +75,89 @@ def _fetch_store_crawlability(base_url):
     return robots, bool(llms and llms.strip())
 
 
+# Live bot-access verification: fetch with real AI-crawler user agents to detect
+# WAF/CDN blocking that robots.txt can't reveal. Only bots that actually fetch
+# pages are tested (Google-Extended is a robots token, not a fetcher).
+AI_BOT_CHECK_AGENTS = {
+    "GPTBot": "Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko); compatible; GPTBot/1.2; +https://openai.com/gptbot",
+    "OAI-SearchBot": "Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko); compatible; OAI-SearchBot/1.0; +https://openai.com/searchbot",
+    "ClaudeBot": "Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko); compatible; ClaudeBot/1.0; +claudebot@anthropic.com",
+    "PerplexityBot": "Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko); compatible; PerplexityBot/1.0; +https://perplexity.ai/perplexitybot",
+}
+_CHALLENGE_MARKERS = ("just a moment", "cf-chl", "captcha", "attention required")
+
+
+def _classify_bot_fetch(url, user_agent):
+    """Fetch a URL with a bot UA and classify: ok / blocked / challenged / error.
+
+    A full 200 HTML page is ok even if it mentions "captcha" somewhere (Shopify
+    themes ship captcha helpers for forms) — challenge markers only distinguish
+    challenged from blocked on failing or suspiciously tiny responses.
+    """
+    import time
+
+    time.sleep(0.5)
+    try:
+        resp = requests.get(url, timeout=10, headers={"User-Agent": user_agent})
+    except Exception:
+        return "error"
+    body = resp.text or ""
+    low = body[:20000].lower()
+    has_marker = any(m in low for m in _CHALLENGE_MARKERS)
+    if resp.status_code in (403, 429, 503):
+        return "challenged" if has_marker else "blocked"
+    if resp.status_code != 200:
+        return "blocked"
+    if len(body) < 5000 or "<html" not in body[:1000].lower():
+        return "challenged" if has_marker else "blocked"
+    return "ok"
+
+
+def _run_bot_check(store_id, base_url):
+    """Verify AI-crawler access to the homepage + one product page; cache in
+    ai_bot_checks. ≤9 sequential requests with 0.5s spacing."""
+    if not base_url:
+        return None
+    with db.get_cursor() as cur:
+        cur.execute(
+            "SELECT handle FROM synced_products WHERE store_id = %s AND handle IS NOT NULL ORDER BY id LIMIT 1",
+            (store_id,),
+        )
+        row = cur.fetchone()
+    urls = {"home": base_url}
+    if row and row.get("handle"):
+        urls["product"] = f"{base_url}/products/{row['handle']}"
+
+    control = _classify_bot_fetch(base_url, "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36")
+    results = {"bots": {}, "control_ok": control == "ok"}
+    for bot, ua in AI_BOT_CHECK_AGENTS.items():
+        results["bots"][bot] = {label: _classify_bot_fetch(u, ua) for label, u in urls.items()}
+    with db.get_cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO ai_bot_checks (store_id, results, checked_at) VALUES (%s, %s, NOW())
+            ON CONFLICT (store_id) DO UPDATE SET results = EXCLUDED.results, checked_at = NOW()
+            """,
+            (store_id, json.dumps(results)),
+        )
+    return results
+
+
+def _cached_bot_check(store_id, max_age_hours=None):
+    """Stored bot-check results, optionally only if fresher than max_age_hours."""
+    with db.get_cursor() as cur:
+        cur.execute("SELECT results, checked_at FROM ai_bot_checks WHERE store_id = %s", (store_id,))
+        row = cur.fetchone()
+    if not row:
+        return None, None
+    if max_age_hours is not None and row["checked_at"]:
+        from datetime import timedelta
+
+        if row["checked_at"] < datetime.now() - timedelta(hours=max_age_hours):
+            return None, row["checked_at"]
+    return row["results"], row["checked_at"]
+
+
 def _crawl_batch(urls):
     """Concurrently fetch one bounded batch of pages; return {url: metadata}."""
     urls = [u for u in urls if u]
@@ -108,26 +194,55 @@ def _pushed_schema(store_id):
     return out
 
 
-def _published_site_schema_types(store_id):
-    """Schema types published site-wide via the theme (Organization/BreadcrumbList/WebSite)."""
+def _site_schema_asset(store_id):
+    """Published site-schema snippet state.
+
+    Returns {"published", "types", "renders_item_schema", "snippet_sha"}.
+    Backward compat: assets published before per-item rendering stored a bare
+    JSON list of types — those don't render metafield schema.
+    """
     with db.get_cursor() as cur:
         cur.execute(
-            "SELECT content FROM aeo_assets WHERE store_id = %s AND asset_type = 'site_schema' AND status = 'published'",
+            "SELECT content, status FROM aeo_assets WHERE store_id = %s AND asset_type = 'site_schema'",
             (store_id,),
         )
         row = cur.fetchone()
-    if not row or not row.get("content"):
-        return []
+    out = {"published": False, "types": [], "renders_item_schema": False, "snippet_sha": None}
+    if not row or row.get("status") != "published" or not row.get("content"):
+        return out
+    out["published"] = True
     try:
-        return json.loads(row["content"]) or []
+        content = json.loads(row["content"])
     except (json.JSONDecodeError, ValueError, TypeError):
-        return []
+        return out
+    if isinstance(content, list):  # old format
+        out["types"] = content
+    elif isinstance(content, dict):
+        out["types"] = content.get("types") or []
+        out["renders_item_schema"] = bool(content.get("renders_item_schema"))
+        out["snippet_sha"] = content.get("snippet_sha")
+    return out
+
+
+def _published_site_schema_types(store_id):
+    return _site_schema_asset(store_id)["types"]
+
+
+def _credited_markup(markup, site_asset, live):
+    """Pushed metafield schema only counts toward the score when the published
+    snippet actually renders it on the storefront, or the live crawl verified
+    the type is present. Prevents crediting invisible schema."""
+    if site_asset.get("renders_item_schema"):
+        return markup
+    live_types = set((live or {}).get("schema_types") or [])
+    return [r for r in (markup or []) if r.get("schema_type") in live_types]
 
 
 def _score_items(store_id, resource_type, items, base_url, crawlability, store_domain):
     """Crawl (in bounded batches) + score every item; upsert into ai_seo_scores."""
     schema_map = _pushed_schema(store_id)
-    site_types = _published_site_schema_types(store_id)
+    site_asset = _site_schema_asset(store_id)
+    site_types = site_asset["types"]
     scored = 0
     it_iter = iter(items)
     while True:
@@ -140,7 +255,7 @@ def _score_items(store_id, resource_type, items, base_url, crawlability, store_d
             it = dict(it)
             it["resource_type"] = resource_type
             live = crawled.get(urls[it["id"]])
-            markup = schema_map.get(str(it.get("shopify_id")), [])
+            markup = _credited_markup(schema_map.get(str(it.get("shopify_id")), []), site_asset, live)
             result = ai_seo_analyzer.analyze_ai_visibility(
                 it,
                 live=live,
@@ -186,7 +301,14 @@ def _execute_scan(task_id, store_id, resource_type):
 
         base_url = _store_base_url(store)
         robots, llms_present = _fetch_store_crawlability(base_url)
-        crawlability = ai_seo_analyzer.analyze_store_crawlability(robots, llms_present)
+        bot_results, _checked = _cached_bot_check(store_id, max_age_hours=24)
+        if bot_results is None:
+            try:
+                bot_results = _run_bot_check(store_id, base_url)
+            except Exception as e:
+                logger.warning("Bot access check failed for store %s: %s", store_id, e)
+                bot_results = None
+        crawlability = ai_seo_analyzer.analyze_store_crawlability(robots, llms_present, bot_results)
 
         types = [resource_type] if resource_type in ("product", "collection") else ["product", "collection"]
         total = 0
@@ -265,7 +387,8 @@ def overview():
 
     base_url = _store_base_url(store)
     robots, llms_present = _fetch_store_crawlability(base_url)
-    crawl_score, crawl_detail = ai_seo_analyzer.analyze_store_crawlability(robots, llms_present)
+    bot_results, _checked = _cached_bot_check(store_id)
+    crawl_score, crawl_detail = ai_seo_analyzer.analyze_store_crawlability(robots, llms_present, bot_results)
 
     with db.get_cursor() as cur:
         cur.execute(
@@ -331,6 +454,156 @@ def list_items():
     )
 
 
+# ── Feed readiness (agentic-commerce catalog quality) ───────────────────
+
+
+def _execute_feed_scan(task_id, store_id):
+    from app.services import feed_readiness_analyzer
+
+    with db.get_cursor() as cur:
+        cur.execute("UPDATE ai_tasks SET status = 'running' WHERE id = %s", (task_id,))
+    try:
+        with db.get_cursor() as cur:
+            cur.execute("SELECT * FROM synced_products WHERE store_id = %s", (store_id,))
+            products = [dict(p) for p in cur.fetchall()]
+            cur.execute(
+                "SELECT resource_id, live_crawl FROM ai_seo_scores WHERE store_id = %s AND resource_type = 'product' AND live_crawl IS NOT NULL",
+                (store_id,),
+            )
+            live_map = {r["resource_id"]: (r["live_crawl"] or {}).get("schema_types") for r in cur.fetchall()}
+        schema_map = _pushed_schema(store_id)
+
+        scanned = 0
+        for p in products:
+            pushed = None
+            for row in schema_map.get(str(p.get("shopify_id")), []):
+                if row.get("schema_type") in ("Product", "ProductGroup") and row.get("schema_json"):
+                    pj = row["schema_json"]
+                    if isinstance(pj, str):
+                        try:
+                            pj = json.loads(pj)
+                        except (json.JSONDecodeError, ValueError):
+                            pj = None
+                    if isinstance(pj, dict):
+                        pushed = pj
+                    break
+            result = feed_readiness_analyzer.analyze_feed_readiness(p, pushed, live_map.get(p["id"]))
+            with db.get_cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO feed_readiness_scores (store_id, product_id, score, breakdown, fixables, created_at)
+                    VALUES (%s, %s, %s, %s, %s, NOW())
+                    ON CONFLICT (store_id, product_id) DO UPDATE SET
+                        score = EXCLUDED.score, breakdown = EXCLUDED.breakdown,
+                        fixables = EXCLUDED.fixables, created_at = NOW()
+                    """,
+                    (store_id, p["id"], result["score"], json.dumps(result["breakdown"]), json.dumps(result["fixables"])),
+                )
+            scanned += 1
+
+        with db.get_cursor() as cur:
+            cur.execute(
+                "UPDATE ai_tasks SET status = 'completed', result = %s, completed_at = NOW() WHERE id = %s",
+                (json.dumps({"scanned": scanned}), task_id),
+            )
+    except Exception as e:
+        logger.exception("Feed readiness scan failed: %s", e)
+        with db.get_cursor() as cur:
+            cur.execute(
+                "UPDATE ai_tasks SET status = 'failed', error = %s, completed_at = NOW() WHERE id = %s",
+                (str(e), task_id),
+            )
+
+
+@ai_seo_bp.route("/api/ai-seo/feed/scan", methods=["POST"])
+def feed_scan():
+    data = request.get_json(silent=True) or {}
+    store_id = data.get("store_id")
+    if not store_id:
+        return jsonify({"error": "store_id is required"}), 400
+    with db.get_cursor() as cur:
+        cur.execute(
+            "INSERT INTO ai_tasks (store_id, task_type, input) VALUES (%s, 'feed_readiness_scan', '{}') RETURNING id",
+            (int(store_id),),
+        )
+        task_id = cur.fetchone()["id"]
+    spawn_task("ai_tasks", task_id, _execute_feed_scan, task_id, int(store_id))
+    return jsonify({"ok": True, "task_id": task_id}), 201
+
+
+@ai_seo_bp.route("/api/ai-seo/feed/overview", methods=["GET"])
+def feed_overview():
+    from app.services.feed_readiness_analyzer import ELIGIBILITY_CHECKLIST, UNSYNCED_SIGNALS
+
+    store_id = request.args.get("store_id")
+    if not store_id:
+        return jsonify({"error": "store_id is required"}), 400
+    store_id = int(store_id)
+    components = ["gtin", "sku", "images", "product_type", "title", "description", "price", "availability", "brand", "review_signals"]
+    with db.get_cursor() as cur:
+        cur.execute(
+            "SELECT COUNT(*) AS n, COALESCE(AVG(score), 0) AS avg_score FROM feed_readiness_scores WHERE store_id = %s",
+            (store_id,),
+        )
+        totals = cur.fetchone()
+        coverage = {}
+        for c in components:
+            cur.execute(
+                f"""SELECT ROUND(AVG((breakdown->'{c}'->>'score')::numeric)) AS avg,
+                           COUNT(*) FILTER (WHERE (breakdown->'{c}'->>'score')::int = 100) AS full_count
+                    FROM feed_readiness_scores WHERE store_id = %s""",
+                (store_id,),
+            )
+            row = cur.fetchone()
+            coverage[c] = {
+                "avg": int(row["avg"]) if row and row["avg"] is not None else None,
+                "full_count": int(row["full_count"] or 0) if row else 0,
+            }
+    return jsonify(
+        {
+            "scanned_count": int(totals["n"]),
+            "avg_score": round(totals["avg_score"]),
+            "coverage": coverage,
+            "unsynced": UNSYNCED_SIGNALS,
+            "checklist": ELIGIBILITY_CHECKLIST,
+        }
+    )
+
+
+@ai_seo_bp.route("/api/ai-seo/feed/items", methods=["GET"])
+def feed_items():
+    store_id = request.args.get("store_id")
+    if not store_id:
+        return jsonify({"error": "store_id is required"}), 400
+    with db.get_cursor() as cur:
+        cur.execute(
+            """
+            SELECT f.product_id AS resource_id, f.score, f.breakdown, f.fixables, f.created_at,
+                   p.title, p.handle
+            FROM feed_readiness_scores f
+            JOIN synced_products p ON p.id = f.product_id
+            WHERE f.store_id = %s
+            ORDER BY f.score ASC
+            """,
+            (int(store_id),),
+        )
+        rows = cur.fetchall()
+    return jsonify(
+        [
+            {
+                "resource_id": r["resource_id"],
+                "title": r["title"],
+                "handle": r["handle"],
+                "score": r["score"],
+                "breakdown": r["breakdown"],
+                "fixables": r["fixables"],
+                "scanned_at": r["created_at"].isoformat() if r["created_at"] else None,
+            }
+            for r in rows
+        ]
+    )
+
+
 # ── Phase 2: review-first GEO optimization ──────────────────────────────
 
 
@@ -361,14 +634,17 @@ def _stored_score(store_id, resource_type, resource_id):
 
 
 def _rescore_item(store_id, resource_type, item, live, crawlability, store_domain):
-    markup = _pushed_schema(store_id).get(str(item.get("shopify_id")), [])
+    site_asset = _site_schema_asset(store_id)
+    markup = _credited_markup(
+        _pushed_schema(store_id).get(str(item.get("shopify_id")), []), site_asset, live
+    )
     result = ai_seo_analyzer.analyze_ai_visibility(
         {**item, "resource_type": resource_type},
         live=live,
         schema_markup=markup,
         crawlability=crawlability,
         store_domain=store_domain,
-        site_schema_types=_published_site_schema_types(store_id),
+        site_schema_types=site_asset["types"],
     )
     with db.get_cursor() as cur:
         cur.execute(
@@ -430,15 +706,17 @@ def optimize_preview():
     if geo.get("error"):
         return jsonify({"error": geo["error"]}), 502
 
-    # Honest projection: reuse the real crawl schema, add the schema we'd push (FAQPage
-    # plus the enriched Product/CollectionPage JSON-LD applied alongside the content).
+    # Honest projection: reuse the real crawl schema, and only credit the schema
+    # we'd push when the published theme snippet actually renders it — pushed
+    # metafields are invisible to crawlers otherwise.
     live_after = dict((stored or {}).get("live_crawl") or {}) if stored else {}
     schema_after = list(live_after.get("schema_types") or [])
-    if geo.get("faqpage_jsonld") and "FAQPage" not in schema_after:
-        schema_after.append("FAQPage")
-    pushed_type = "CollectionPage" if resource_type == "collection" else "Product"
-    if pushed_type not in schema_after:
-        schema_after.append(pushed_type)
+    if _site_schema_asset(int(store_id))["renders_item_schema"]:
+        if geo.get("faqpage_jsonld") and "FAQPage" not in schema_after:
+            schema_after.append("FAQPage")
+        pushed_type = "CollectionPage" if resource_type == "collection" else "Product"
+        if pushed_type not in schema_after:
+            schema_after.append(pushed_type)
     live_after["schema_types"] = schema_after
     # Crawlability is store-level (robots.txt/llms.txt) — carry it over unchanged so
     # content optimization never shows a spurious crawlability delta.
@@ -509,7 +787,7 @@ def _push_and_rescore(store, resource_type, item, description_html, meta_title, 
     with db.get_cursor() as cur:
         if resource_type == "collection":
             cur.execute(
-                "UPDATE synced_collections SET description = %s, meta_title = %s, meta_description = %s WHERE id = %s",
+                "UPDATE synced_collections SET description = %s, meta_title = %s, meta_description = %s, last_optimized_at = NOW() WHERE id = %s",
                 (description_html or item.get("description"), meta_title or item.get("meta_title"), meta_description or item.get("meta_description"), resource_id),
             )
         else:
@@ -519,7 +797,13 @@ def _push_and_rescore(store, resource_type, item, description_html, meta_title, 
             )
 
     stored = _stored_score(store_id, resource_type, resource_id)
-    updated_item = {**item, "description": description_html or item.get("description"), "meta_title": meta_title, "meta_description": meta_description}
+    updated_item = {
+        **item,
+        "description": description_html or item.get("description"),
+        "meta_title": meta_title,
+        "meta_description": meta_description,
+        "last_optimized_at": datetime.now(timezone.utc),
+    }
 
     # Also generate & push enriched Product / CollectionPage JSON-LD (seo.schema_json_ld) —
     # the structured-data signal AI answer engines reward. Best-effort: a schema failure
@@ -586,6 +870,9 @@ def optimize_apply():
     except Exception as e:
         logger.exception("GEO apply failed: %s", e)
         return jsonify({"error": str(e)}), 502
+    indexnow_service.ping_async(
+        int(store_id), [_item_url(_store_base_url(store), resource_type, item.get("handle"))], "geo_apply"
+    )
     return jsonify({"ok": True, "new_score": result["score"], "breakdown": result["breakdown"]})
 
 
@@ -609,8 +896,10 @@ def _execute_ai_seo_batch(batch_id, store_id, resource_type, resource_ids):
     task_type = "ai_seo_collection" if resource_type == "collection" else "ai_seo_product"
     id_key = "collection_id" if resource_type == "collection" else "product_id"
     item_col = "collection_id" if resource_type == "collection" else "product_id"
+    base_url = _store_base_url(store)
 
     completed = failed = 0
+    applied_urls = []
     for rid in resource_ids:
         with db.get_cursor() as cur:
             cur.execute(f"SELECT * FROM {table} WHERE id = %s AND store_id = %s", (rid, int(store_id)))
@@ -631,6 +920,7 @@ def _execute_ai_seo_batch(batch_id, store_id, resource_type, resource_ids):
                 geo.get("optimized_description_html", ""), geo.get("meta_title", ""),
                 geo.get("meta_description", ""), geo.get("faqpage_jsonld"), client,
             )
+            applied_urls.append(_item_url(base_url, resource_type, item.get("handle")))
             completed += 1
             with db.get_cursor() as cur:
                 cur.execute(
@@ -657,6 +947,7 @@ def _execute_ai_seo_batch(batch_id, store_id, resource_type, resource_ids):
 
     with db.get_cursor() as cur:
         cur.execute("UPDATE bulk_tasks SET status = 'completed', completed_at = NOW(), current_product_title = NULL WHERE id = %s", (batch_id,))
+    indexnow_service.ping_async(store_id, applied_urls, "geo_batch")
 
 
 def _sweep_stale_jobs():
@@ -821,6 +1112,9 @@ def facts_apply():
     except Exception as e:
         logger.exception("Fact-boost apply failed: %s", e)
         return jsonify({"error": str(e)}), 502
+    indexnow_service.ping_async(
+        int(store_id), [_item_url(_store_base_url(store), resource_type, item.get("handle"))], "fact_apply"
+    )
     return jsonify({"ok": True, "new_score": result["score"], "breakdown": result["breakdown"]})
 
 
@@ -844,6 +1138,7 @@ def _execute_fact_batch(batch_id, store_id, resource_type, resource_ids):
     item_col = "collection_id" if resource_type == "collection" else "product_id"
 
     completed = failed = 0
+    applied_urls = []
     for rid in resource_ids:
         with db.get_cursor() as cur:
             cur.execute(f"SELECT * FROM {table} WHERE id = %s AND store_id = %s", (rid, int(store_id)))
@@ -870,6 +1165,7 @@ def _execute_fact_batch(batch_id, store_id, resource_type, resource_ids):
                     result["reason"] = "facts found but no measurable fact-density gain"
             if enriched:
                 _push_and_rescore(store, resource_type, item, result["optimized_description_html"], "", "", None, client)
+                applied_urls.append(_item_url(base, resource_type, item.get("handle")))
             completed += 1
             with db.get_cursor() as cur:
                 cur.execute(
@@ -889,6 +1185,7 @@ def _execute_fact_batch(batch_id, store_id, resource_type, resource_ids):
 
     with db.get_cursor() as cur:
         cur.execute("UPDATE bulk_tasks SET status = 'completed', completed_at = NOW(), current_product_title = NULL WHERE id = %s", (batch_id,))
+    indexnow_service.ping_async(store_id, applied_urls, "fact_batch")
 
 
 @ai_seo_bp.route("/api/ai-seo/facts/batch", methods=["POST"])
@@ -1180,7 +1477,8 @@ def tracking_detail(run_id):
             """
             SELECT m.model, m.prompt, m.prompt_id, m.run_index, m.brand_mentioned,
                    m.domain_cited, m.brand_rank, m.products_mentioned,
-                   m.competitors_mentioned, m.recommended_brands, p.intent
+                   m.competitors_mentioned, m.recommended_brands, m.grounded,
+                   m.citations, m.response_text, m.brand_known, p.intent
             FROM ai_mention_results m
             LEFT JOIN ai_prompts p ON p.id = m.prompt_id
             WHERE m.run_id = %s ORDER BY m.id
@@ -1200,6 +1498,9 @@ def tracking_detail(run_id):
             "citation_rate": agg["citation_rate"],
             "avg_rank": agg["avg_rank"],
             "brand_known_rate": agg["brand_known_rate"],
+            "memory": agg.get("memory"),
+            "retrieval": agg.get("retrieval"),
+            "models": agg.get("models"),
             "total_answers": agg["total_answers"],
             "brand_hits": agg["brand_hits"],
             "competitors": agg["competitors"],
@@ -1337,6 +1638,88 @@ def tracking_gap_analysis(run_id):
     return jsonify({"ok": True, "gap_analysis": analysis})
 
 
+# ── Off-site visibility (third-party corroboration) ─────────────────────
+
+
+@ai_seo_bp.route("/api/ai-seo/offsite/run", methods=["POST"])
+def offsite_run():
+    from app.services.offsite_visibility_service import run_offsite_audit
+
+    sweep_stale_jobs()
+    data = request.get_json(silent=True) or {}
+    store_id = data.get("store_id")
+    if not store_id:
+        return jsonify({"error": "store_id is required"}), 400
+    with db.get_cursor() as cur:
+        cur.execute(
+            "SELECT id FROM offsite_runs WHERE store_id = %s AND status IN ('pending','running')",
+            (int(store_id),),
+        )
+        if cur.fetchone():
+            return jsonify({"error": "An off-site audit is already running for this store"}), 409
+        cur.execute(
+            "INSERT INTO offsite_runs (store_id, status) VALUES (%s, 'pending') RETURNING id",
+            (int(store_id),),
+        )
+        run_id = cur.fetchone()["id"]
+    spawn_task("offsite_runs", run_id, run_offsite_audit, run_id, int(store_id))
+    return jsonify({"ok": True, "run_id": run_id}), 201
+
+
+@ai_seo_bp.route("/api/ai-seo/offsite/runs", methods=["GET"])
+def offsite_runs():
+    store_id = request.args.get("store_id")
+    if not store_id:
+        return jsonify({"error": "store_id is required"}), 400
+    with db.get_cursor() as cur:
+        cur.execute(
+            """SELECT id, status, queries_run, scorecard, error, started_at, completed_at
+               FROM offsite_runs WHERE store_id = %s ORDER BY id DESC LIMIT 20""",
+            (int(store_id),),
+        )
+        rows = cur.fetchall()
+    return jsonify(
+        [
+            {
+                **{k: r[k] for k in ("id", "status", "queries_run", "scorecard", "error")},
+                "started_at": r["started_at"].isoformat() if r["started_at"] else None,
+                "completed_at": r["completed_at"].isoformat() if r["completed_at"] else None,
+            }
+            for r in rows
+        ]
+    )
+
+
+@ai_seo_bp.route("/api/ai-seo/offsite/<int:run_id>", methods=["GET"])
+def offsite_detail(run_id):
+    with db.get_cursor() as cur:
+        cur.execute("SELECT * FROM offsite_runs WHERE id = %s", (run_id,))
+        run = cur.fetchone()
+        if not run:
+            return jsonify({"error": "Run not found"}), 404
+        cur.execute(
+            """SELECT query, query_kind, position, title, url, domain, classification,
+                      brand_present, competitors_present
+               FROM offsite_results WHERE run_id = %s ORDER BY query_kind, query, position""",
+            (run_id,),
+        )
+        results = [dict(r) for r in cur.fetchall()]
+    grouped = {}
+    for r in results:
+        grouped.setdefault(r["query_kind"], []).append(r)
+    return jsonify(
+        {
+            "id": run["id"],
+            "status": run["status"],
+            "queries_run": run["queries_run"],
+            "scorecard": run["scorecard"],
+            "actions": run["actions"],
+            "error": run["error"],
+            "results": grouped,
+        }
+    )
+
+
 # ── Phase 4: storefront AEO assets ──────────────────────────────────────
 
 
@@ -1364,13 +1747,14 @@ def _save_aeo_asset(store_id, asset_type, content, status="draft"):
         )
 
 
-def _crawl_score(num_allowed, total, blocks_sensitive, llms_present):
+def _crawl_score(num_allowed, total, blocks_sensitive, verified_ratio=None):
     """Mirror ai_seo_analyzer.analyze_store_crawlability scoring for impact estimates."""
-    score = round(num_allowed / total * 70) if total else 0
-    if llms_present:
-        score += 15
+    allowed_ratio = (num_allowed / total) if total else 0
+    score = round(allowed_ratio * 70)
     if blocks_sensitive:
         score += 15
+    ratio = verified_ratio if verified_ratio is not None else allowed_ratio
+    score += round(ratio * 15)
     return min(score, 100)
 
 
@@ -1425,6 +1809,12 @@ def aeo_preview():
     base_url = _store_base_url(store)
     org = gen.generate_organization_jsonld(store_id)
     org_configured = bool(settings and (settings.get("organization_name") or settings.get("organization_logo_url") or settings.get("organization_url")))
+    site_snippet = gen.generate_site_schema_snippet(store_id)
+    site_asset = _site_schema_asset(store_id)
+    schema_update_available = bool(
+        site_asset["published"]
+        and site_asset["snippet_sha"] != hashlib.sha256(site_snippet.encode()).hexdigest()
+    )
 
     robots_state = _current_robots_state(base_url)
     llms_state = _current_llms_state(base_url)
@@ -1434,9 +1824,11 @@ def aeo_preview():
     total = robots_state.get("ai_bots_total") or len(ai_seo_analyzer.AI_BOTS)
     cur_allowed = len(robots_state.get("ai_bots_allowed") or []) if robots_state.get("present") else total
     cur_sensitive = robots_state.get("blocks_sensitive", True)
-    crawl_current = _crawl_score(cur_allowed, total, cur_sensitive, llms_present)
-    crawl_after_robots = _crawl_score(total, total, True, llms_present)  # proposed: all allowed + sensitive blocked
-    crawl_after_llms = _crawl_score(cur_allowed, total, cur_sensitive, True)  # proposed: llms.txt present
+    bot_results, bot_checked_at = _cached_bot_check(store_id)
+    ok_bots, tested_bots = ai_seo_analyzer.summarize_bot_access(bot_results)
+    verified_ratio = (ok_bots / tested_bots) if tested_bots else None
+    crawl_current = _crawl_score(cur_allowed, total, cur_sensitive, verified_ratio)
+    crawl_after_robots = _crawl_score(total, total, True, verified_ratio)  # proposed: all allowed + sensitive blocked
 
     # Entity-authority + structured-data averages from scanned items.
     with db.get_cursor() as cur:
@@ -1471,11 +1863,19 @@ def aeo_preview():
                 "proposed": gen.generate_llms_txt(store_id),
                 "current": llms_state,
                 "published_status": published.get("llms_txt"),
-                "impact": {"signal": "AI crawlability", "current": crawl_current, "projected": crawl_after_llms},
+                "impact": {"signal": "AI crawlability", "current": crawl_current, "projected": crawl_current, "note": "optional"},
+            },
+            "bot_check": {
+                "results": bot_results,
+                "checked_at": bot_checked_at.isoformat() if bot_checked_at else None,
+                "ok": ok_bots,
+                "tested": tested_bots,
             },
             "site_schema": {
                 "proposed_org": org,
-                "proposed_snippet": gen.generate_site_schema_snippet(store_id),
+                "proposed_snippet": site_snippet,
+                "update_available": schema_update_available,
+                "renders_item_schema": site_asset["renders_item_schema"],
                 "org": {
                     "name": s.get("organization_name") or "",
                     "logo_url": s.get("organization_logo_url") or "",
@@ -1499,8 +1899,33 @@ def aeo_preview():
                 "proposed": gen.generate_a11y_snippet(),
                 "published_status": published.get("a11y"),
             },
+            "indexnow": indexnow_service.status(store_id),
         }
     )
+
+
+@ai_seo_bp.route("/api/ai-seo/aeo/bot-check", methods=["POST"])
+def aeo_bot_check():
+    """Force-refresh the live AI-crawler access verification."""
+    data = request.get_json(silent=True) or {}
+    store_id = data.get("store_id")
+    if not store_id:
+        return jsonify({"error": "store_id is required"}), 400
+    with db.get_cursor() as cur:
+        cur.execute("SELECT * FROM stores WHERE id = %s", (int(store_id),))
+        store = cur.fetchone()
+    if not store:
+        return jsonify({"error": "Store not found"}), 404
+    base_url = _store_base_url(dict(store))
+    if not base_url:
+        return jsonify({"error": "Store has no domain configured"}), 400
+    try:
+        results = _run_bot_check(int(store_id), base_url)
+    except Exception as e:
+        logger.exception("Bot check failed: %s", e)
+        return jsonify({"error": str(e)}), 502
+    ok, tested = ai_seo_analyzer.summarize_bot_access(results)
+    return jsonify({"ok": True, "results": results, "verified": ok, "tested": tested})
 
 
 @ai_seo_bp.route("/api/ai-seo/aeo/robots/apply", methods=["POST"])
@@ -1615,7 +2040,16 @@ def aeo_schema_apply():
         new_layout, changed = _inject_render_into_layout(layout, _SCHEMA_RENDER_TAG)
         if changed:
             client.upsert_theme_asset(theme_id, "layout/theme.liquid", new_layout)
-        _save_aeo_asset(int(store_id), "site_schema", json.dumps(_SITE_SCHEMA_TYPES), "published")
+        _save_aeo_asset(
+            int(store_id),
+            "site_schema",
+            json.dumps({
+                "types": _SITE_SCHEMA_TYPES,
+                "renders_item_schema": True,
+                "snippet_sha": hashlib.sha256(snippet.encode()).hexdigest(),
+            }),
+            "published",
+        )
     except Exception as e:
         logger.exception("Site schema apply failed: %s", e)
         return jsonify({"error": str(e)}), 502
@@ -1701,6 +2135,48 @@ def aeo_a11y_unpublish():
         logger.exception("Accessibility helper unpublish failed: %s", e)
         return jsonify({"error": str(e)}), 502
     return jsonify({"ok": True, "message": "Accessibility helper removed from theme."})
+
+
+@ai_seo_bp.route("/api/ai-seo/indexnow/setup", methods=["POST"])
+def indexnow_setup():
+    data = request.get_json(silent=True) or {}
+    store_id = data.get("store_id")
+    if not store_id:
+        return jsonify({"error": "store_id is required"}), 400
+    try:
+        result = indexnow_service.setup_key(int(store_id))
+    except Exception as e:
+        logger.exception("IndexNow setup failed: %s", e)
+        return jsonify({"error": str(e)}), 502
+    return jsonify({"ok": True, **result})
+
+
+@ai_seo_bp.route("/api/ai-seo/indexnow/submit-all", methods=["POST"])
+def indexnow_submit_all():
+    data = request.get_json(silent=True) or {}
+    store_id = data.get("store_id")
+    if not store_id:
+        return jsonify({"error": "store_id is required"}), 400
+    try:
+        result = indexnow_service.submit_all(int(store_id))
+    except Exception as e:
+        logger.exception("IndexNow submit-all failed: %s", e)
+        return jsonify({"error": str(e)}), 502
+    return jsonify(result)
+
+
+@ai_seo_bp.route("/api/ai-seo/indexnow/unpublish", methods=["POST"])
+def indexnow_unpublish():
+    data = request.get_json(silent=True) or {}
+    store_id = data.get("store_id")
+    if not store_id:
+        return jsonify({"error": "store_id is required"}), 400
+    try:
+        indexnow_service.remove_key(int(store_id))
+    except Exception as e:
+        logger.exception("IndexNow unpublish failed: %s", e)
+        return jsonify({"error": str(e)}), 502
+    return jsonify({"ok": True, "message": "IndexNow key page removed."})
 
 
 @ai_seo_bp.route("/api/ai-seo/aeo/org-settings", methods=["GET", "POST"])

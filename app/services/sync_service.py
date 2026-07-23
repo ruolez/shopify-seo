@@ -37,7 +37,7 @@ def _upsert_product_batch(store_id, batch):
             INSERT INTO synced_products
                 (store_id, shopify_id, title, handle, description, vendor,
                  product_type, tags, meta_title, meta_description, images,
-                 variants, status, synced_at)
+                 variants, status, shopify_updated_at, synced_at)
             VALUES %s
             ON CONFLICT (store_id, shopify_id) DO UPDATE SET
                 title = EXCLUDED.title,
@@ -51,6 +51,7 @@ def _upsert_product_batch(store_id, batch):
                 images = EXCLUDED.images,
                 variants = EXCLUDED.variants,
                 status = EXCLUDED.status,
+                shopify_updated_at = EXCLUDED.shopify_updated_at,
                 synced_at = NOW()
             """,
             [
@@ -68,10 +69,11 @@ def _upsert_product_batch(store_id, batch):
                     json.dumps(p["images"]),
                     json.dumps(p["variants"]),
                     p["status"],
+                    p.get("shopify_updated_at"),
                 )
                 for p in batch
             ],
-            template="(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())",
+            template="(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())",
         )
         cur.close()
 
@@ -334,9 +336,9 @@ def _sync_store_inner(store_id):
                     INSERT INTO synced_collections
                         (store_id, shopify_id, title, handle, description,
                          meta_title, meta_description, products_count, image_url,
-                         collection_type, published,
+                         collection_type, published, shopify_updated_at,
                          synced_at)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
                     ON CONFLICT (store_id, shopify_id) DO UPDATE SET
                         title = EXCLUDED.title,
                         handle = EXCLUDED.handle,
@@ -351,6 +353,7 @@ def _sync_store_inner(store_id):
                         END,
                         collection_type = EXCLUDED.collection_type,
                         published = EXCLUDED.published,
+                        shopify_updated_at = EXCLUDED.shopify_updated_at,
                         synced_at = NOW()
                     """,
                     (
@@ -365,6 +368,7 @@ def _sync_store_inner(store_id):
                         c["image_url"],
                         c["collection_type"],
                         c["published"],
+                        c.get("shopify_updated_at"),
                     ),
                 )
                 collections_synced += 1

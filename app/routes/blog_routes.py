@@ -1456,6 +1456,15 @@ def _wizard_step_publish(session, store, client, is_published=True):
     # Auto-regenerate landing page for this blog
     if is_published:
         _regen_landing_async(session["store_id"], blog_id, client, store)
+        from app.services.indexnow_service import ping_async
+
+        host = (store.get("primary_domain") or store.get("domain") or "").replace("https://", "").replace("http://", "").strip("/")
+        if host and blog.get("handle") and result.get("handle"):
+            ping_async(
+                session["store_id"],
+                [f"https://{host}/blogs/{blog['handle']}/{result['handle']}"],
+                "blog_publish",
+            )
 
     return {"article_id": article_row["id"], "shopify_id": result["shopify_id"]}
 

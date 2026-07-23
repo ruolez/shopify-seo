@@ -4061,3 +4061,15 @@ thead th.row-num-col {
     text-align: right;
     flex-shrink: 0;
 }
+
+/* Unstyled content links — theme-colored instead of browser-default blue.
+   Scoped to classless anchors so nav/buttons/styled links are unaffected. */
+.page-content a:not([class]) {
+    color: var(--primary);
+    text-decoration: none;
+    font-weight: 500;
+}
+.page-content a:not([class]):hover {
+    color: var(--primary-hover);
+    text-decoration: underline;
+}

@@ -69,20 +69,31 @@ def _looks_like_question(text):
 
 
 def _fact_density(text, thresholds):
-    """Statistics + citations + quotes per 100 words (Princeton GEO levers)."""
+    """Statistics + citations + quotes per 100 words (Princeton GEO levers).
+
+    Unit-bearing measures, prices, review counts, citations and quotes are strong
+    signals; bare multi-digit numbers (SKUs, years, model numbers) are weak — they
+    count at a reduced weight, are only counted where no strong match already did
+    (no "50 mg" double-count), and can never dominate the score.
+    """
     words = text.split()
     wc = len(words)
     if wc < 20:
         return 0, "Too little text to assess fact density"
 
-    signals = (
+    strong = (
         len(_MEASURE_RE.findall(text))
-        + len(_BARE_NUMBER_RE.findall(text))
         + len(_CURRENCY_RE.findall(text))
         + len(_REVIEW_RE.findall(text))
         + len(_CITATION_RE.findall(text))
         + len(_QUOTE_RE.findall(text))
     )
+    remainder = text
+    for rx in (_MEASURE_RE, _CURRENCY_RE, _REVIEW_RE):
+        remainder = rx.sub(" ", remainder)
+    bare = len(_BARE_NUMBER_RE.findall(remainder))
+    bare_weight = thresholds["fact_density_per_100w"].get("bare_weight", 0.3)
+    signals = strong + min(bare_weight * bare, strong + 2)
     density = signals / (wc / 100)
     t = thresholds["fact_density_per_100w"]
     if density >= t["good"]:
@@ -93,7 +104,10 @@ def _fact_density(text, thresholds):
         score = 35
     else:
         score = 10
-    detail = f"{signals} fact/stat/quote signals in {wc} words ({density:.1f} per 100w)"
+    detail = (
+        f"{strong} strong + {bare} bare-number signals in {wc} words "
+        f"({density:.1f} weighted per 100w)"
+    )
     return score, detail
 
 
@@ -222,7 +236,7 @@ def _entity_authority(text, html, schema_types, vendor=None, store_domain=None):
 
 def _freshness(updated_at, thresholds):
     if not updated_at:
-        return 50, "No update timestamp"
+        return 50, "No update timestamp — re-sync to fetch Shopify update dates"
     if isinstance(updated_at, str):
         try:
             updated_at = datetime.fromisoformat(updated_at.replace("Z", "+00:00"))
@@ -268,22 +282,41 @@ def _parse_robots_ai_rules(robots_txt):
     return {"bots": bots, "blocks_sensitive": blocks_sensitive}
 
 
-def analyze_store_crawlability(robots_txt, llms_txt_present):
-    """Store-level AI crawlability sub-score (robots.txt + llms.txt)."""
+def summarize_bot_access(bot_results):
+    """(ok_count, tested_count) from a stored ai_bot_checks results dict."""
+    bots = (bot_results or {}).get("bots") or {}
+    tested = len(bots)
+    ok = sum(1 for b in bots.values() if all(v == "ok" for v in b.values()))
+    return ok, tested
+
+
+def analyze_store_crawlability(robots_txt, llms_txt_present, bot_access=None):
+    """Store-level AI crawlability sub-score.
+
+    70 pts robots.txt bot allowance + 15 pts sensitive paths blocked + 15 pts
+    live bot-access verification (real fetches with AI-crawler user agents).
+    Without verification data the last 15 fall back to the robots allowance
+    ratio so unverified stores aren't penalized. llms.txt is informational
+    only — evidence shows AI crawlers don't read it.
+    """
     if robots_txt is None:
         return 50, "robots.txt not fetched"
     rules = _parse_robots_ai_rules(robots_txt)
     allowed = [b for b, ok in rules["bots"].items() if ok]
-    score = round(len(allowed) / len(AI_BOTS) * 70)
+    allowed_ratio = len(allowed) / len(AI_BOTS)
+    score = round(allowed_ratio * 70)
     parts = [f"{len(allowed)}/{len(AI_BOTS)} AI crawlers allowed"]
-    if llms_txt_present:
-        score += 15
-        parts.append("llms.txt present")
-    else:
-        parts.append("no llms.txt")
     if rules["blocks_sensitive"]:
         score += 15
         parts.append("cart/checkout blocked")
+
+    ok, tested = summarize_bot_access(bot_access)
+    if tested:
+        score += round(ok / tested * 15)
+        parts.append(f"{ok}/{tested} AI bots verified live")
+    else:
+        score += round(allowed_ratio * 15)
+    parts.append("llms.txt present (optional)" if llms_txt_present else "no llms.txt (optional)")
     return min(score, 100), ", ".join(parts)
 
 
@@ -352,8 +385,10 @@ def analyze_ai_visibility(
     scores["entity_authority"], details["entity_authority"] = _entity_authority(
         text, html, schema_types, item.get("vendor"), store_domain
     )
+    # Real content freshness only: when we optimized it, else Shopify's updatedAt.
+    # synced_at is deliberately excluded — re-syncing must not fake freshness.
     scores["freshness"], details["freshness"] = _freshness(
-        item.get("last_optimized_at") or item.get("synced_at") or item.get("updated_at"),
+        item.get("last_optimized_at") or item.get("shopify_updated_at"),
         thresholds,
     )
 

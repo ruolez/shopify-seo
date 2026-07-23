@@ -51,9 +51,12 @@ async function loadStores() {
             .join("");
         sel.addEventListener("change", () => {
             visibilityLoaded = false;
+            feedLoaded = false;
+            offsiteLoaded = false;
             loadOverview();
             loadItems();
-            if (document.querySelector(".tab.active")?.dataset.tab === "visibility") switchTab("visibility");
+            const active = document.querySelector(".tab.active")?.dataset.tab;
+            if (["visibility", "feed", "offsite"].includes(active)) switchTab(active);
         });
     } catch (err) {
         showToast(`Failed to load stores: ${err.message}`, "error");
@@ -618,6 +621,8 @@ function resetScanBtn() {
 
 // ── Tab switching ───────────────────────────────────────────────
 let visibilityLoaded = false;
+let feedLoaded = false;
+let offsiteLoaded = false;
 
 function switchTab(tab) {
     document.querySelectorAll(".tab").forEach((t) => t.classList.toggle("active", t.dataset.tab === tab));
@@ -627,9 +632,357 @@ function switchTab(tab) {
         loadPrompts();
         loadRuns();
     }
+    if (tab === "feed" && !feedLoaded) {
+        feedLoaded = true;
+        loadFeedOverview();
+        loadFeedItems();
+    }
+    if (tab === "offsite" && !offsiteLoaded) {
+        offsiteLoaded = true;
+        loadOffsite();
+    }
     if (tab === "assets") loadAeo();
     if (tab === "activity") loadActivity();
     else if (activityTimer) { clearInterval(activityTimer); activityTimer = null; }
+}
+
+// ── Feed readiness tab ──────────────────────────────────────────
+const FEED_COMPONENT_LABELS = {
+    gtin: { label: "GTIN / barcode", icon: "barcode" },
+    sku: { label: "SKU", icon: "tag" },
+    images: { label: "Images & alt", icon: "image" },
+    product_type: { label: "Category", icon: "category" },
+    title: { label: "Title quality", icon: "title" },
+    description: { label: "Description", icon: "notes" },
+    price: { label: "Price", icon: "attach_money" },
+    availability: { label: "Availability", icon: "inventory" },
+    brand: { label: "Brand", icon: "verified" },
+    review_signals: { label: "Review data", icon: "reviews" },
+};
+let feedItemsCache = [];
+
+async function runFeedScan() {
+    const storeId = getStoreId();
+    if (!storeId) { showToast("Select a store first", "warning"); return; }
+    const btn = document.getElementById("feed-scan-btn");
+    btn.disabled = true;
+    btn.innerHTML = '<span class="material-symbols-rounded">hourglass_empty</span> Auditing…';
+    const reset = () => { btn.disabled = false; btn.innerHTML = '<span class="material-symbols-rounded">inventory_2</span> Audit feed'; };
+    try {
+        const res = await apiRequest("/api/ai-seo/feed/scan", { method: "POST", body: { store_id: parseInt(storeId) } });
+        let errors = 0;
+        const timer = setInterval(async () => {
+            try {
+                const task = await apiRequest(`/api/ai-seo/scan/${res.task_id}`);
+                errors = 0;
+                if (task.status === "completed") {
+                    clearInterval(timer); reset();
+                    showToast(`Feed audit complete — ${task.result?.scanned ?? 0} products scored`, "success");
+                    loadFeedOverview(); loadFeedItems();
+                } else if (task.status === "failed") {
+                    clearInterval(timer); reset();
+                    showToast(`Feed audit failed: ${task.error || "unknown error"}`, "error");
+                }
+            } catch (err) {
+                if (++errors >= 5) { clearInterval(timer); reset(); showToast("Lost contact with the audit — reload to check.", "error"); }
+            }
+        }, 2000);
+    } catch (err) {
+        reset();
+        showToast(`Audit failed to start: ${err.message}`, "error");
+    }
+}
+
+async function loadFeedOverview() {
+    const storeId = getStoreId();
+    const cards = document.getElementById("feed-overview-cards");
+    const coverage = document.getElementById("feed-coverage");
+    const checklist = document.getElementById("feed-checklist");
+    if (!storeId) return;
+    try {
+        const o = await apiRequest(`/api/ai-seo/feed/overview?store_id=${storeId}`);
+        if (!o.scanned_count) {
+            cards.innerHTML = "";
+            coverage.innerHTML = "";
+            checklist.innerHTML = feedChecklistCard(o);
+            return;
+        }
+        const cov = o.coverage || {};
+        const pct = (c) => (o.scanned_count ? Math.round(((cov[c] || {}).full_count || 0) / o.scanned_count * 100) : 0);
+        cards.innerHTML = `
+            <div class="stat-card">${renderScoreRing(o.avg_score || 0, 56)}
+                <div class="stat-label" style="margin-top:8px;">Avg feed readiness</div>
+                <div class="stat-label" style="color:var(--on-surface-secondary);">${o.scanned_count} products audited</div></div>
+            <div class="stat-card"><div class="stat-value">${pct("gtin")}%</div>
+                <div class="stat-label">GTIN coverage</div>
+                <div class="stat-label" style="color:var(--on-surface-secondary);">products with barcodes on every variant</div></div>
+            <div class="stat-card"><div class="stat-value">${pct("images")}%</div>
+                <div class="stat-label">Image + alt coverage</div>
+                <div class="stat-label" style="color:var(--on-surface-secondary);">products fully imaged with alt text</div></div>
+            <div class="stat-card"><div class="stat-value">${pct("review_signals")}%</div>
+                <div class="stat-label">With review data</div>
+                <div class="stat-label" style="color:var(--on-surface-secondary);">aggregateRating detected</div></div>`;
+        const chips = Object.keys(FEED_COMPONENT_LABELS)
+            .map((c) => {
+                const avg = (cov[c] || {}).avg;
+                const color = avg == null ? "var(--on-surface-secondary)" : avg >= 80 ? "var(--success)" : avg >= 50 ? "var(--warning,#f9ab00)" : "var(--error)";
+                return `<div style="display:flex;align-items:center;gap:6px;font-size:12.5px;">
+                    <span class="material-symbols-rounded" style="font-size:16px;color:${color};">${FEED_COMPONENT_LABELS[c].icon}</span>
+                    ${FEED_COMPONENT_LABELS[c].label}: <b style="color:${color};">${avg == null ? "—" : avg}</b></div>`;
+            })
+            .join("");
+        coverage.innerHTML = `<div class="card" style="padding:12px 16px;display:flex;gap:18px;flex-wrap:wrap;">${chips}</div>`;
+        checklist.innerHTML = feedChecklistCard(o);
+    } catch (err) {
+        cards.innerHTML = "";
+    }
+}
+
+function feedChecklistCard(o) {
+    const items = (o.checklist || [])
+        .map((c) => `<li style="margin-bottom:6px;"><a href="${escapeHtml(c.url)}" target="_blank"><b>${escapeHtml(c.label)}</b></a><br>
+            <span style="color:var(--on-surface-secondary);">${escapeHtml(c.detail)}</span></li>`)
+        .join("");
+    const unsynced = (o.unsynced || [])
+        .map((u) => `<li style="margin-bottom:4px;"><b>${escapeHtml(u.label)}</b> (${escapeHtml(u.status)}) — <span style="color:var(--on-surface-secondary);">${escapeHtml(u.why)}</span></li>`)
+        .join("");
+    const noReviews = o.scanned_count && !((o.coverage || {}).review_signals || {}).full_count;
+    const reviewCard = noReviews
+        ? `<div style="display:flex;gap:10px;align-items:flex-start;background:var(--warning-light);border:1px solid var(--outline);border-radius:var(--radius-sm);padding:10px 12px;margin-bottom:12px;">
+            <span class="material-symbols-rounded" style="color:var(--warning);font-size:20px;">reviews</span>
+            <div style="font-size:12.5px;line-height:1.5;">No review data detected on any product. AI shopping ranks products with review stats higher — install a review app that writes <code>aggregateRating</code> JSON-LD (Judge.me, Loox, Okendo), then re-audit.</div></div>`
+        : "";
+    return `${reviewCard}<details class="card" style="padding:0;">
+        <summary style="padding:14px 16px;cursor:pointer;list-style:none;display:flex;align-items:center;gap:8px;">
+            <span class="material-symbols-rounded" style="color:var(--on-surface-secondary);">checklist</span>
+            <b style="flex:1;">Agentic Storefront eligibility checklist</b>
+            <span style="font-size:12px;color:var(--on-surface-secondary);">Shopify admin settings this app can't read — verify manually</span>
+        </summary>
+        <div style="padding:0 16px 16px;">
+            <ol style="font-size:12.5px;line-height:1.5;padding-left:18px;margin:8px 0;">${items}</ol>
+            <div style="font-weight:600;font-size:12px;margin:12px 0 4px;">Feed fields not yet audited (not in local sync)</div>
+            <ul style="font-size:12px;line-height:1.5;padding-left:18px;margin:0;">${unsynced}</ul>
+        </div>
+    </details>`;
+}
+
+async function loadFeedItems() {
+    const storeId = getStoreId();
+    const container = document.getElementById("feed-items-container");
+    if (!storeId) return;
+    try {
+        feedItemsCache = await apiRequest(`/api/ai-seo/feed/items?store_id=${storeId}`);
+        if (!feedItemsCache.length) {
+            container.innerHTML = `<div class="empty-state"><span class="material-symbols-rounded">inventory_2</span><p>No feed scores yet — run the audit.</p></div>`;
+            return;
+        }
+        const weakest = (b) => {
+            let worst = null;
+            for (const k of Object.keys(FEED_COMPONENT_LABELS)) {
+                if (k === "review_signals") continue;
+                const s = b && b[k] ? b[k].score : null;
+                if (s == null) continue;
+                if (!worst || s < worst.score) worst = { key: k, score: s };
+            }
+            return worst;
+        };
+        const rows = feedItemsCache
+            .map((it, i) => {
+                const w = weakest(it.breakdown);
+                const wLabel = w ? `${FEED_COMPONENT_LABELS[w.key].label} (${w.score})` : "—";
+                const fx = (it.fixables || []).length;
+                return `<tr style="cursor:pointer;" onclick="openFeedBreakdown(${i})">
+                    <td style="width:58px;">${renderScoreRing(it.score, 40)}</td>
+                    <td><div style="font-weight:500;">${escapeHtml(it.title || "")}</div>
+                        <div style="font-size:11.5px;color:var(--on-surface-secondary);">/products/${escapeHtml(it.handle || "")}</div></td>
+                    <td style="font-size:12.5px;">${wLabel}</td>
+                    <td>${fx ? `<span class="badge badge-warning">${fx} fix${fx > 1 ? "es" : ""}</span>` : '<span class="badge badge-success">clean</span>'}</td>
+                </tr>`;
+            })
+            .join("");
+        container.innerHTML = `<div class="table-container"><table>
+            <thead><tr><th>Score</th><th>Product</th><th>Weakest feed signal</th><th>Fixables</th></tr></thead>
+            <tbody>${rows}</tbody></table></div>`;
+    } catch (err) {
+        showToast(`Failed to load feed items: ${err.message}`, "error");
+    }
+}
+
+function openFeedBreakdown(i) {
+    const it = feedItemsCache[i];
+    if (!it) return;
+    document.getElementById("breakdown-title").textContent = `Feed readiness — ${it.title}`;
+    const comps = Object.keys(FEED_COMPONENT_LABELS)
+        .map((k) => {
+            const c = (it.breakdown || {})[k];
+            if (!c) return "";
+            const color = c.score >= 80 ? "var(--success)" : c.score >= 50 ? "var(--warning,#f9ab00)" : "var(--error)";
+            return `<div style="display:flex;gap:10px;align-items:flex-start;padding:8px 0;border-bottom:1px solid var(--outline);">
+                <span class="material-symbols-rounded" style="color:${color};">${FEED_COMPONENT_LABELS[k].icon}</span>
+                <div style="flex:1;"><b style="font-size:13px;">${FEED_COMPONENT_LABELS[k].label}</b>
+                    <div style="font-size:12px;color:var(--on-surface-secondary);">${escapeHtml(c.detail || "")}</div></div>
+                <b style="color:${color};">${c.score}</b>
+            </div>`;
+        })
+        .join("");
+    const fixes = (it.fixables || []).length
+        ? `<h4 style="margin:16px 0 6px;">Fix list</h4><ul style="font-size:13px;line-height:1.6;padding-left:18px;">${it.fixables.map((f) => `<li>${escapeHtml(f)}</li>`).join("")}</ul>`
+        : "";
+    document.getElementById("breakdown-content").innerHTML = `<div style="max-width:760px;">${comps}${fixes}</div>`;
+    document.getElementById("breakdown-modal").classList.add("active");
+}
+
+// ── Off-site visibility tab ─────────────────────────────────────
+let offsitePollTimer = null;
+
+async function runOffsiteAudit() {
+    const storeId = getStoreId();
+    if (!storeId) { showToast("Select a store first", "warning"); return; }
+    const btn = document.getElementById("offsite-run-btn");
+    btn.disabled = true;
+    btn.innerHTML = '<span class="material-symbols-rounded">hourglass_empty</span> Auditing…';
+    try {
+        await apiRequest("/api/ai-seo/offsite/run", { method: "POST", body: { store_id: parseInt(storeId) } });
+        pollOffsite();
+    } catch (err) {
+        showToast(`Audit failed to start: ${err.message}`, "error");
+        resetOffsiteBtn();
+    }
+}
+
+function resetOffsiteBtn() {
+    const btn = document.getElementById("offsite-run-btn");
+    btn.disabled = false;
+    btn.innerHTML = '<span class="material-symbols-rounded">public</span> Run off-site audit';
+}
+
+function pollOffsite() {
+    if (offsitePollTimer) clearInterval(offsitePollTimer);
+    let errors = 0;
+    offsitePollTimer = setInterval(async () => {
+        try {
+            const runs = await apiRequest(`/api/ai-seo/offsite/runs?store_id=${getStoreId()}`);
+            errors = 0;
+            const latest = runs[0];
+            if (!latest || ["pending", "running"].includes(latest.status)) return;
+            clearInterval(offsitePollTimer);
+            resetOffsiteBtn();
+            if (latest.status === "completed") {
+                showToast("Off-site audit complete", "success");
+                loadOffsite();
+            } else {
+                showToast(`Off-site audit failed: ${latest.error || "unknown error"}`, "error");
+            }
+        } catch (err) {
+            if (++errors >= 5) { clearInterval(offsitePollTimer); resetOffsiteBtn(); }
+        }
+    }, 2500);
+}
+
+async function loadOffsite() {
+    const storeId = getStoreId();
+    if (!storeId) return;
+    const scorecardEl = document.getElementById("offsite-scorecard");
+    const actionsEl = document.getElementById("offsite-actions");
+    const resultsEl = document.getElementById("offsite-results");
+    const trendEl = document.getElementById("offsite-trend");
+    try {
+        const runs = await apiRequest(`/api/ai-seo/offsite/runs?store_id=${storeId}`);
+        const latest = runs.find((r) => r.status === "completed");
+        if (runs[0] && ["pending", "running"].includes(runs[0].status)) pollOffsite();
+        if (!latest) {
+            scorecardEl.innerHTML = `<div class="empty-state" style="grid-column:1/-1;"><span class="material-symbols-rounded">public_off</span><p>No off-site audits yet — run one to see where your brand appears across the web.</p></div>`;
+            actionsEl.innerHTML = resultsEl.innerHTML = trendEl.innerHTML = "";
+            return;
+        }
+        const d = await apiRequest(`/api/ai-seo/offsite/${latest.id}`);
+        renderOffsiteScorecard(d.scorecard || {}, scorecardEl);
+        renderOffsiteActions(d.actions || [], actionsEl);
+        renderOffsiteResults(d.results || {}, resultsEl);
+        trendEl.innerHTML = runs.filter((r) => r.status === "completed").length > 1
+            ? `<details class="card" style="padding:0;"><summary style="padding:14px 16px;cursor:pointer;list-style:none;"><b>Previous audits</b></summary>
+                <div style="padding:0 16px 16px;font-size:12.5px;line-height:1.8;">${runs
+                    .filter((r) => r.status === "completed")
+                    .map((r) => {
+                        const sc = r.scorecard || {};
+                        return `${formatRelativeTime(r.started_at)}: Reddit ${((sc.reddit || {}).count) || 0} · listicles ${((sc.listicles || {}).included) || 0}/${((sc.listicles || {}).checked) || 0} · review platforms ${Object.values(sc.review_platforms || {}).filter(Boolean).length}`;
+                    })
+                    .join("<br>")}</div></details>`
+            : "";
+    } catch (err) {
+        showToast(`Failed to load off-site data: ${err.message}`, "error");
+    }
+}
+
+function renderOffsiteScorecard(sc, el) {
+    const yesNo = (v) => (v
+        ? '<span class="material-symbols-rounded" style="color:var(--success);font-size:20px;vertical-align:middle;">check_circle</span>'
+        : '<span class="material-symbols-rounded" style="color:var(--error);font-size:20px;vertical-align:middle;">cancel</span>');
+    const reddit = sc.reddit || {};
+    const lists = sc.listicles || {};
+    const rp = sc.review_platforms || {};
+    const rpFound = Object.entries(rp).filter(([, v]) => v).map(([k]) => k);
+    const compInc = lists.competitor_inclusions || {};
+    const bestComp = Object.entries(compInc).sort((a, b) => b[1] - a[1])[0];
+    el.innerHTML = `
+        <div class="stat-card"><div class="stat-value">${yesNo(reddit.found)} ${reddit.count || 0}</div>
+            <div class="stat-label">Reddit mentions</div>
+            <div class="stat-label" style="color:var(--on-surface-secondary);">threads naming your brand</div></div>
+        <div class="stat-card"><div class="stat-value">${yesNo(rpFound.length)} ${rpFound.length}</div>
+            <div class="stat-label">Review platforms</div>
+            <div class="stat-label" style="color:var(--on-surface-secondary);">${rpFound.length ? escapeHtml(rpFound.join(", ")) : "no profiles found"}</div></div>
+        <div class="stat-card"><div class="stat-value">${lists.included || 0}<span style="font-size:14px;color:var(--on-surface-secondary);"> / ${lists.checked || 0}</span></div>
+            <div class="stat-label">"Best of" roundup inclusion</div>
+            <div class="stat-label" style="color:var(--on-surface-secondary);">${bestComp ? `top competitor appears in ${bestComp[1]}` : "roundups checked for your brand"}</div></div>
+        <div class="stat-card"><div class="stat-value">${sc.news_mentions || 0}</div>
+            <div class="stat-label">News/blog mentions</div>
+            <div class="stat-label" style="color:var(--on-surface-secondary);">third-party articles naming you</div></div>`;
+}
+
+function renderOffsiteActions(actions, el) {
+    if (!actions.length) { el.innerHTML = ""; return; }
+    const badge = (p) => `<span class="badge ${p === "high" ? "badge-error" : p === "medium" ? "badge-warning" : "badge-success"}">${p}</span>`;
+    el.innerHTML = `<div class="card" style="padding:16px;">
+        <h3 style="margin:0 0 10px;">What to do about it</h3>
+        ${actions.map((a) => `<div style="display:flex;gap:10px;align-items:flex-start;padding:8px 0;border-bottom:1px solid var(--outline);">
+            ${badge(a.priority || "medium")}
+            <div style="flex:1;"><b style="font-size:13px;">${escapeHtml(a.title || "")}</b>
+                <div style="font-size:12px;color:var(--on-surface-secondary);margin-top:2px;">${escapeHtml(a.why || "")}</div>
+                ${a.action ? `<div style="font-size:12.5px;margin-top:4px;">${escapeHtml(a.action)}</div>` : ""}</div>
+        </div>`).join("")}
+    </div>`;
+}
+
+function renderOffsiteResults(groups, el) {
+    const kinds = Object.keys(groups);
+    if (!kinds.length) { el.innerHTML = ""; return; }
+    const KIND_LABELS = { brand_reviews: "Brand reviews", reddit: "Reddit", review_platform: "Review platforms", listicle: "Category roundups", brand_general: "Brand search" };
+    const section = (kind) => {
+        const rows = (groups[kind] || [])
+            .map((r) => `<tr>
+                <td style="font-size:12px;">${r.position ?? ""}</td>
+                <td><a href="${escapeHtml(r.url || "#")}" target="_blank" rel="noopener" style="font-size:12.5px;">${escapeHtml(r.title || r.url || "")}</a>
+                    <div style="font-size:11px;color:var(--on-surface-secondary);">${escapeHtml(r.domain || "")}</div></td>
+                <td><span class="badge" style="background:var(--surface-dim);color:var(--on-surface);">${escapeHtml(r.classification || "")}</span></td>
+                <td>${r.brand_present ? '<span class="badge badge-success">you</span>' : ""}
+                    ${(r.competitors_present || []).slice(0, 3).map((c) => `<span class="badge badge-warning" style="margin-left:2px;">${escapeHtml(c)}</span>`).join("")}</td>
+            </tr>`)
+            .join("");
+        return `<details style="border-bottom:1px solid var(--outline);padding:6px 0;">
+            <summary style="cursor:pointer;font-size:13px;font-weight:600;">${KIND_LABELS[kind] || kind} (${(groups[kind] || []).length})</summary>
+            <div class="table-container" style="margin-top:6px;"><table>
+                <thead><tr><th>#</th><th>Result</th><th>Type</th><th>Mentions</th></tr></thead>
+                <tbody>${rows}</tbody></table></div>
+        </details>`;
+    };
+    el.innerHTML = `<details class="card" style="padding:0;">
+        <summary style="padding:14px 16px;cursor:pointer;list-style:none;display:flex;align-items:center;gap:8px;">
+            <span class="material-symbols-rounded" style="color:var(--on-surface-secondary);">travel_explore</span>
+            <b style="flex:1;">Search results by query type</b>
+            <span style="font-size:12px;color:var(--on-surface-secondary);">what Brave found for each probe</span>
+        </summary>
+        <div style="padding:0 16px 16px;">${kinds.map(section).join("")}</div>
+    </details>`;
 }
 
 let activityTimer = null;
@@ -747,8 +1100,10 @@ async function loadAeo() {
         container.innerHTML =
             aeoOverview(a) +
             robotsCard(a.robots) +
-            llmsCard(a.llms, a.base_url) +
+            botCheckCard(a.bot_check) +
+            indexnowCard(a.indexnow) +
             siteSchemaCard(a.site_schema) +
+            llmsCard(a.llms, a.base_url) +
             a11yCard(a.a11y);
     } catch (err) {
         container.innerHTML = `<div class="empty-state"><span class="material-symbols-rounded">error</span><p>${escapeHtml(err.message)}</p></div>`;
@@ -780,10 +1135,13 @@ function improveLine(signal, current, projected) {
 }
 
 function aeoOverview(a) {
+    const bc = a.bot_check || {};
     const items = [
         ["dns", "robots.txt", a.robots && a.robots.published_status],
-        ["description", "llms.txt", a.llms && a.llms.published_status],
+        ["travel_explore", "Bot access", bc.tested ? (bc.ok === bc.tested ? "published" : "issues") : null],
+        ["send", "IndexNow", a.indexnow && a.indexnow.published_status],
         ["schema", "Site schema", a.site_schema && a.site_schema.published_status],
+        ["description", "llms.txt", a.llms && a.llms.published_status],
         ["accessibility_new", "Accessibility", a.a11y && a.a11y.published_status],
     ];
     return `<div class="card" style="padding:12px 16px;margin-bottom:16px;display:flex;gap:20px;flex-wrap:wrap;">
@@ -808,7 +1166,7 @@ function aeoProposed(label, text) {
 
 // Compact asset card: header (icon/title/status) + one-line desc + concise target
 // + visible actions, with all verbose detail folded into a "Details & preview" panel.
-function aeoCard({ icon, title, status, desc, target, actions, details }) {
+function aeoCard({ icon, title, status, desc, target, body, actions, details }) {
     return `<div class="card" style="padding:0;margin-bottom:12px;">
         <div style="padding:14px 16px;">
             <div style="display:flex;align-items:center;gap:10px;">
@@ -819,6 +1177,7 @@ function aeoCard({ icon, title, status, desc, target, actions, details }) {
             <p style="font-size:12.5px;color:var(--on-surface-secondary);margin:8px 0 0;line-height:1.5;">${desc}</p>
             ${target ? `<div style="font-size:12px;color:var(--on-surface);margin-top:8px;display:flex;gap:6px;align-items:flex-start;">
                 <span class="material-symbols-rounded" style="font-size:15px;color:var(--primary);">target</span><span>${target}</span></div>` : ""}
+            ${body || ""}
             <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px;align-items:center;">${actions || ""}</div>
         </div>
         ${details ? `<details style="border-top:1px solid var(--outline);">
@@ -854,6 +1213,52 @@ function robotsCard(r) {
     });
 }
 
+function botCheckCard(b) {
+    b = b || {};
+    const bots = (b.results && b.results.bots) || {};
+    const names = Object.keys(bots);
+    let body;
+    if (!names.length) {
+        body = `<div style="color:var(--on-surface-secondary);font-size:13px;">Not verified yet — run a scan or click Verify now.</div>`;
+    } else {
+        const chip = (name, statuses) => {
+            const vals = Object.values(statuses);
+            const allOk = vals.every((v) => v === "ok");
+            const challenged = vals.includes("challenged");
+            const cls = allOk ? "badge-success" : "badge-error";
+            const label = allOk ? name : `${name}: ${challenged ? "challenged" : vals.find((v) => v !== "ok") || "blocked"}`;
+            return `<span class="badge ${cls}" style="margin:2px;">${escapeHtml(label)}</span>`;
+        };
+        const controlOk = b.results && b.results.control_ok;
+        const anyChallenged = names.some((n) => Object.values(bots[n]).includes("challenged"));
+        body = `<div style="font-size:13px;margin-bottom:6px;">${b.ok}/${b.tested} AI crawlers verified with live fetches${b.checked_at ? ` · checked ${new Date(b.checked_at).toLocaleString()}` : ""}</div>
+            <div>${names.map((n) => chip(n, bots[n])).join("")}</div>
+            ${anyChallenged && controlOk ? `<div style="font-size:12px;color:var(--error);margin-top:8px;"><span class="material-symbols-rounded" style="font-size:14px;vertical-align:middle;">warning</span> Your WAF/CDN (e.g. Cloudflare) is challenging AI crawlers while normal browsers pass — allowlist these bots or they can't read your pages.</div>` : ""}
+            ${!controlOk && names.length ? `<div style="font-size:12px;color:var(--on-surface-secondary);margin-top:8px;">Control fetch also failed — results may reflect a store-wide issue, not bot blocking.</div>` : ""}`;
+    }
+    return aeoCard({
+        icon: "travel_explore",
+        title: "AI crawler access — live verification",
+        status: b.tested ? `<span class="badge ${b.ok === b.tested ? "badge-success" : "badge-error"}">${b.ok}/${b.tested} ok</span>` : "",
+        desc: "Fetches your homepage and a product page pretending to be GPTBot, OAI-SearchBot, ClaudeBot and PerplexityBot — the crawlers answer engines actually use. robots.txt can say \"allowed\" while a firewall still blocks them; this checks reality.",
+        target: "Feeds <b>AI crawlability</b> — verified live access counts for 15 of its 100 points.",
+        actions: `<button class="btn btn-primary btn-sm" onclick="runBotCheck(this)"><span class="material-symbols-rounded">refresh</span> Verify now</button>`,
+        details: `<div style="margin-top:8px;">${body}</div>`,
+    });
+}
+
+async function runBotCheck(btn) {
+    btn.disabled = true;
+    btn.innerHTML = '<span class="material-symbols-rounded">hourglass_empty</span> Verifying…';
+    try {
+        const res = await apiRequest("/api/ai-seo/aeo/bot-check", { method: "POST", body: { store_id: parseInt(getStoreId()) } });
+        showToast(`${res.verified}/${res.tested} AI crawlers verified`, res.verified === res.tested ? "success" : "warning");
+    } catch (err) {
+        showToast(`Verification failed: ${err.message}`, "error");
+    }
+    loadAeo();
+}
+
 function llmsCard(l) {
     const c = l.current || {};
     const current = c.present
@@ -866,11 +1271,97 @@ function llmsCard(l) {
         icon: "description",
         title: "llms.txt index",
         status: statusPill(l.published_status),
-        desc: "A Markdown map of your key collections & products for AI crawlers. Shopify can't serve <code>/llms.txt</code> at the root, so this publishes a <code>/pages/llms</code> page (download to self-host at root).",
-        target: "Targets <b>discoverability</b> — helps crawlers index the right pages and pull accurate product facts.",
+        desc: "A Markdown map of your key collections & products. <b>Optional:</b> studies of 137k+ sites show AI crawlers almost never read llms.txt, and it no longer affects your crawlability score. Shopify can't serve <code>/llms.txt</code> at the root, so this publishes a <code>/pages/llms</code> page (download to self-host at root).",
+        target: "Low-evidence, harmless extra — publish only if you want it; real crawl access is what the live verification above measures.",
         actions: `${aeoDownloadBtn("llms")}<button class="btn btn-primary btn-sm" onclick="applyAeo('llms', this)"><span class="material-symbols-rounded">cloud_upload</span> Publish /pages/llms</button>`,
         details,
     });
+}
+
+function indexnowCard(x) {
+    x = x || {};
+    const published = x.published_status === "published";
+    const lp = x.last_ping;
+    const pingLog = (x.pings || [])
+        .map((p) => `${p.created_at ? new Date(p.created_at).toLocaleString() : "?"} · ${p.reason || "?"} · ${p.url_count} URL(s) · ${p.ok ? "ok" : `failed${p.status_code ? ` (${p.status_code})` : ""}${p.error ? `: ${p.error}` : ""}`}`)
+        .join("\n");
+    // Visible status block: key URL + last ping outcome (with the full error).
+    let body = "";
+    if (published && x.key_location) {
+        let pingLine;
+        if (!lp) {
+            pingLine = `<div style="font-size:12px;color:var(--on-surface-secondary);margin-top:6px;">No pings yet — publish content or click Submit all URLs.</div>`;
+        } else if (lp.ok) {
+            pingLine = `<div style="font-size:12px;margin-top:6px;"><span class="badge badge-success">delivered</span> Last ping: ${escapeHtml(lp.reason || "")} · ${lp.url_count} URL(s) · ${lp.created_at ? new Date(lp.created_at).toLocaleString() : ""}</div>`;
+        } else {
+            pingLine = `<div style="font-size:12px;margin-top:6px;"><span class="badge badge-error">failed${lp.status_code ? ` (${lp.status_code})` : ""}</span> Last ping: ${escapeHtml(lp.reason || "")} · ${lp.url_count} URL(s) · ${lp.created_at ? new Date(lp.created_at).toLocaleString() : ""}</div>
+                <div style="font-size:12px;color:var(--error);margin-top:4px;word-break:break-word;">${escapeHtml(lp.error || "")}</div>
+                <div style="font-size:12px;color:var(--on-surface-secondary);margin-top:4px;">Click <b>Re-verify setup</b> to re-check the key, then <b>Submit all URLs</b> again.</div>`;
+        }
+        body = `<div style="margin-top:10px;padding:10px 12px;background:var(--surface-dim);border-radius:8px;">
+            <div style="font-size:12.5px;">Key served at <a href="${escapeHtml(x.key_location)}" target="_blank">${escapeHtml(x.key_location)}</a>${x.override_active ? ' <span class="badge badge-warning">self-hosted override</span>' : ""}</div>
+            ${pingLine}
+        </div>`;
+    } else {
+        body = `<div style="margin-top:10px;color:var(--on-surface-secondary);font-size:13px;">Not set up yet. Setup generates a verification key, hosts it on a hidden store page, and from then on every publish (blog, news, landing pages, GEO applies) pings Bing automatically.</div>`;
+    }
+    const bing = `<div style="font-weight:600;font-size:12px;margin:12px 0 4px;">Bing Webmaster Tools (manual, one-time)</div>
+        <ol style="font-size:12px;color:var(--on-surface-secondary);margin:0;padding-left:18px;line-height:1.7;">
+            <li>Go to <a href="https://www.bing.com/webmasters" target="_blank">bing.com/webmasters</a> and sign in.</li>
+            <li>Use <b>Import from Google Search Console</b> — one click, no DNS records needed.</li>
+            <li>Submit your sitemap: <code>/sitemap.xml</code>.</li>
+        </ol>`;
+    const fallback = `<div style="font-size:12px;color:var(--on-surface-secondary);margin-top:8px;"><b>If Bing keeps rejecting the key:</b> host <code>&lt;key&gt;.txt</code> containing the key at your domain root via your CDN (e.g. a Cloudflare rule) and set the <code>indexnow.key_location_override</code> setting.</div>`;
+    return aeoCard({
+        icon: "send",
+        title: "IndexNow — instant Bing indexing",
+        status: statusPill(x.published_status),
+        desc: "ChatGPT search runs on Bing's index. IndexNow tells Bing about new and updated URLs immediately (crawled in ~24h instead of days), so your optimized pages reach AI answers faster. Once set up, pings fire automatically on every publish.",
+        target: "Targets <b>freshness &amp; discovery</b> — shortens the loop between publishing an optimization and AI search seeing it.",
+        body,
+        actions: `<button class="btn btn-primary btn-sm" onclick="setupIndexnow(this)"><span class="material-symbols-rounded">key</span> ${published ? "Re-verify setup" : "Set up IndexNow"}</button>
+            ${published ? `<button class="btn btn-secondary btn-sm" onclick="submitAllIndexnow(this)"><span class="material-symbols-rounded">upload</span> Submit all URLs</button>
+            <button class="btn btn-secondary btn-sm" onclick="unpublishIndexnow(this)"><span class="material-symbols-rounded">undo</span> Remove</button>` : ""}`,
+        details: `${bing}${fallback}${pingLog ? aeoDetails("Ping log (last 10)", pingLog) : ""}`,
+    });
+}
+
+async function setupIndexnow(btn) {
+    btn.disabled = true;
+    btn.innerHTML = '<span class="material-symbols-rounded">hourglass_empty</span> Setting up…';
+    try {
+        const res = await apiRequest("/api/ai-seo/indexnow/setup", { method: "POST", body: { store_id: parseInt(getStoreId()) } });
+        if (res.verified === true) showToast("IndexNow key published and verified", "success");
+        else if (res.verified === null) showToast("Key published, but served with extra markup — Bing will likely accept it; watch the ping log", "warning");
+        else showToast("Key page published but could not be verified yet — check the key URL", "warning");
+    } catch (err) {
+        showToast(`Setup failed: ${err.message}`, "error");
+    }
+    loadAeo();
+}
+
+async function submitAllIndexnow(btn) {
+    if (!confirm("Submit your homepage, all active products, collections and articles to IndexNow now?")) return;
+    btn.disabled = true;
+    try {
+        const res = await apiRequest("/api/ai-seo/indexnow/submit-all", { method: "POST", body: { store_id: parseInt(getStoreId()) } });
+        showToast(res.ok ? `Submitted ${res.url_count} URLs to IndexNow` : `Submission failed${res.error ? `: ${res.error}` : ""}`, res.ok ? "success" : "error");
+    } catch (err) {
+        showToast(`Submission failed: ${err.message}`, "error");
+    }
+    loadAeo();
+}
+
+async function unpublishIndexnow(btn) {
+    if (!confirm("Remove the IndexNow key page from your store? Automatic pings will stop.")) return;
+    btn.disabled = true;
+    try {
+        await apiRequest("/api/ai-seo/indexnow/unpublish", { method: "POST", body: { store_id: parseInt(getStoreId()) } });
+        showToast("IndexNow key removed", "success");
+    } catch (err) {
+        showToast(`Remove failed: ${err.message}`, "error");
+    }
+    loadAeo();
 }
 
 function _inp(id, label, value, ph) {
@@ -881,6 +1372,7 @@ function _inp(id, label, value, ph) {
 function siteSchemaCard(o) {
     const org = o.org || {};
     const published = o.published_status === "published";
+    const updateAvail = published && o.update_available;
     const im = o.impact || {};
     const live = o.current_live || {};
     const improve = im.current_avg != null
@@ -918,10 +1410,12 @@ function siteSchemaCard(o) {
         ${aeoDetails("View theme snippet (ai-seo-schema.liquid)", o.proposed_snippet)}`;
     return aeoCard({
         icon: "schema",
-        title: "Site-wide Schema — Organization + Breadcrumbs",
-        status: statusPill(o.published_status),
-        desc: "A theme snippet with static <b>Organization</b> + <b>WebSite</b> JSON-LD plus a <b>BreadcrumbList</b> that renders on every product, collection and blog page. Reversible." + (hasBrand ? "" : " <b>Add your brand details</b> below first."),
-        target: "Targets <b>structured data</b> — the two site-wide schema types the per-product optimizer can't add.",
+        title: "Site-wide Schema — Organization + Breadcrumbs + per-item JSON-LD",
+        status: statusPill(o.published_status) + (updateAvail ? ' <span class="badge badge-warning">Update available</span>' : ""),
+        desc: "A theme snippet with static <b>Organization</b> + <b>WebSite</b> JSON-LD, a <b>BreadcrumbList</b> on every page, and — critically — it renders the enriched <b>Product/CollectionPage + FAQPage</b> JSON-LD the optimizer pushes to metafields (without this, that schema is invisible to crawlers). Reversible." +
+            (updateAvail ? " <b style=\"color:var(--warning,#f9ab00);\">Your published snippet is an older version that doesn't render per-item schema — Re-publish to fix.</b>" : "") +
+            (hasBrand ? "" : " <b>Add your brand details</b> below first."),
+        target: "Targets <b>structured data</b> — site-wide entity schema plus the per-item schema that pushed metafields alone can't expose.",
         actions,
         details,
     });
@@ -984,8 +1478,8 @@ function a11yCard(x) {
         icon: "accessibility_new",
         title: "Storefront Accessibility",
         status: statusPill(x && x.published_status),
-        desc: 'A small theme script that gives an accessible name to unlabeled links/buttons — e.g. the icon-only "Powered by Shopify" footer link. Fixes the "Links must have discernible text" audit. Reversible.',
-        target: "Targets <b>agentic browsing</b> — AI shopping agents navigate the accessibility tree; unlabeled controls make it malformed.",
+        desc: 'A small theme script that gives an accessible name to unlabeled links/buttons — e.g. the icon-only "Powered by Shopify" footer link. Fixes the "Links must have discernible text" audit. Note: this runs as JavaScript, so AI <i>crawlers</i> reading raw HTML never see it — it does not affect crawl or citation scores. Reversible.',
+        target: "Targets <b>screen readers &amp; agentic browsers</b> (ChatGPT Atlas, Claude in Chrome) — tools driving a real browser use the accessibility tree; unlabeled controls make it malformed.",
         actions,
         details: aeoProposed("View theme snippet (ai-seo-a11y.liquid)", (x && x.proposed) || ""),
     });
@@ -1164,7 +1658,7 @@ async function loadRuns() {
         renderHeadline(latest, summary, metrics);
 
         latestRunId = latest ? latest.id : null;
-        ["competitors-panel", "brands-panel", "gap-panel", "breakdown-panel"].forEach(
+        ["models-panel", "competitors-panel", "brands-panel", "gap-panel", "breakdown-panel"].forEach(
             (id) => (document.getElementById(id).innerHTML = "")
         );
         if (latestRunId) loadRunDetail(latestRunId);
@@ -1199,19 +1693,73 @@ function renderHeadline(latest, summary, metrics) {
     summary.innerHTML = `<p style="font-size:13px;color:var(--on-surface-secondary);margin:12px 0 0;">${summaryLine}</p>${zeroCallout}`;
 
     const brandKnown = s.brand_known_rate;
+    const retr = s.retrieval;
+    const retrCard = retr
+        ? `<div class="stat-card"><div class="stat-value">${fmtPct(retr.citation_rate)}</div>
+            <div class="stat-label">Live-search citations 🌐</div>
+            <div class="stat-label" style="color:var(--on-surface-secondary);">web-grounded answers citing your site (${retr.answers} probed)</div></div>`
+        : `<div class="stat-card"><div class="stat-value">${latest.avg_rank ?? "—"}</div>
+            <div class="stat-label">Avg position when listed</div>
+            <div class="stat-label" style="color:var(--on-surface-secondary);">1 = first recommendation</div></div>`;
+    const mentionLabel = s.memory && retr ? "Answers naming your store (memory)" : "Answers naming your store";
     metrics.innerHTML = `
         <div class="stat-card">${renderScoreRing(Math.round(latest.share_of_voice || 0), 56)}
             <div class="stat-label" style="margin-top:8px;">Share of voice</div>
             <div class="stat-label" style="color:var(--on-surface-secondary);">your mentions vs. competitors'</div></div>
         <div class="stat-card"><div class="stat-value">${total != null ? `${hits}<span style="font-size:14px;color:var(--on-surface-secondary);"> / ${total}</span>` : fmtPct(latest.brand_mention_rate)}</div>
-            <div class="stat-label">Answers naming your store</div>
+            <div class="stat-label">${mentionLabel}</div>
             <div class="stat-label" style="color:var(--on-surface-secondary);">out of all AI answers probed</div></div>
         <div class="stat-card"><div class="stat-value">${fmtPct(brandKnown)}</div>
             <div class="stat-label">Brand knowledge</div>
             <div class="stat-label" style="color:var(--on-surface-secondary);">do models know your store exists</div></div>
-        <div class="stat-card"><div class="stat-value">${latest.avg_rank ?? "—"}</div>
-            <div class="stat-label">Avg position when listed</div>
-            <div class="stat-label" style="color:var(--on-surface-secondary);">1 = first recommendation</div></div>`;
+        ${retrCard}`;
+}
+
+function renderModels(d) {
+    const panel = document.getElementById("models-panel");
+    const models = d.models || [];
+    if (!models.length) {
+        panel.innerHTML = "";
+        return;
+    }
+    const brandRows = (d.results || []).filter((r) => r.intent === "brand");
+    const shortName = (m) => m.replace(/^[a-z-]+\//, "");
+    const pctBadge = (v, goodAt) => {
+        if (v == null) return '<span style="color:var(--on-surface-secondary);">—</span>';
+        const cls = v >= goodAt ? "badge-success" : v > 0 ? "badge-warning" : "badge-error";
+        return `<span class="badge ${cls}">${v}%</span>`;
+    };
+    const rows = models
+        .map((m) => {
+            const answers = brandRows.filter((r) => r.model === m.model && r.response_text);
+            const answerFold = answers.length
+                ? `<details style="margin-top:4px;"><summary style="cursor:pointer;font-size:11.5px;color:var(--on-surface-secondary);">what it says about you (${answers.length})</summary>
+                    ${answers.map((r) => `<div style="margin:6px 0;padding:8px 10px;background:var(--surface-dim);border-radius:6px;">
+                        <div style="font-size:11px;color:var(--on-surface-secondary);margin-bottom:4px;">${escapeHtml(r.prompt)}</div>
+                        <div style="font-size:12px;white-space:pre-wrap;line-height:1.5;">${escapeHtml(r.response_text || "")}</div>
+                    </div>`).join("")}</details>`
+                : "";
+            return `<tr>
+                <td><div style="font-weight:500;font-size:13px;">${escapeHtml(shortName(m.model))}${m.grounded ? ' <span title="Answers with live web retrieval">🌐</span>' : ""}</div>
+                    <div style="font-size:11px;color:var(--on-surface-secondary);">${m.grounded ? "live web search" : "training-data memory"}</div>${answerFold}</td>
+                <td>${pctBadge(m.brand_known_rate, 100)}</td>
+                <td>${pctBadge(m.mention_rate, 10)}<div style="font-size:11px;color:var(--on-surface-secondary);">${m.buyer_answers} answers</div></td>
+                <td>${pctBadge(m.citation_rate, 5)}</td>
+            </tr>`;
+        })
+        .join("");
+    panel.innerHTML = `<div class="card" style="padding:16px;">
+        <h3 style="margin:0 0 4px;">Model scoreboard</h3>
+        <p style="font-size:12px;color:var(--on-surface-secondary);margin:0 0 10px;">Which AI models know your store, recommend it to buyers, and cite your site. Expand a model to read its actual answers about your brand.</p>
+        <div class="table-container"><table>
+            <thead><tr>
+                <th>Model</th>
+                <th title="Answered brand questions about you without an ignorance disclaimer">Knows your brand</th>
+                <th title="Buyer-question answers that named your store">Named you</th>
+                <th title="Answers that cited your domain">Cited your site</th>
+            </tr></thead>
+            <tbody>${rows}</tbody></table></div>
+    </div>`;
 }
 
 function renderRunsTable(runs, latest) {
@@ -1275,6 +1823,7 @@ async function loadRunDetail(runId) {
     try {
         const d = await apiRequest(`/api/ai-seo/tracking/${runId}`);
         visState.detail = d;
+        renderModels(d);
         renderLeaderboard(d);
         renderProductBrands(d.product_brands || []);
         renderGap(d.gap_analysis);
@@ -1304,7 +1853,7 @@ function renderLeaderboard(d) {
         </div>
         ${bar(d.brand_hits || 0, true)}
         <span class="sov-count" title="AI answers that recommended your store">${d.brand_hits || 0}×</span>
-        <span style="width:118px;"></span>
+        <span style="width:152px;flex-shrink:0;"></span>
     </div>`;
 
     const limit = visState.showAllComps ? comps.length : 10;
@@ -1327,7 +1876,7 @@ function renderLeaderboard(d) {
                 </div>
                 ${bar(c.count, false)}
                 <span class="sov-count" title="AI answers that recommended this retailer">${c.count}×</span>
-                <span style="width:118px;display:inline-flex;gap:4px;justify-content:flex-end;">
+                <span style="width:152px;flex-shrink:0;display:inline-flex;gap:4px;justify-content:flex-end;">
                     ${trackBtn}
                     <button class="icon-btn" title="Not a competitor — exclude from all results" onclick="excludeBrand('comp', ${i})"><span class="material-symbols-rounded">block</span></button>
                 </span>
@@ -1473,13 +2022,21 @@ function renderBreakdown(results) {
                 }
             const top = Object.entries(recCounts).sort((a, b) => b[1] - a[1]).slice(0, 6);
             const perAnswer = rows
-                .map(
-                    (r) => `<div style="display:flex;gap:8px;align-items:baseline;padding:4px 0;font-size:12px;">
+                .map((r) => {
+                    const cites = (r.citations || []).slice(0, 5);
+                    const citeLine = r.grounded && cites.length
+                        ? `<div style="font-size:11px;color:var(--on-surface-secondary);padding:0 0 2px 23px;">cites: ${cites.map((u) => { try { return escapeHtml(new URL(u).hostname.replace(/^www\./, "")); } catch (e) { return ""; } }).filter(Boolean).join(", ")}</div>`
+                        : "";
+                    const answerFold = r.response_text
+                        ? `<details style="padding:0 0 2px 23px;"><summary style="cursor:pointer;font-size:11px;color:var(--on-surface-secondary);">view full answer</summary>
+                            <div style="font-size:12px;white-space:pre-wrap;line-height:1.5;background:var(--surface-dim);border-radius:6px;padding:8px 10px;margin:4px 0;">${escapeHtml(r.response_text)}</div></details>`
+                        : "";
+                    return `<div style="display:flex;gap:8px;align-items:baseline;padding:4px 0;font-size:12px;">
                     <span class="material-symbols-rounded" style="font-size:15px;color:${r.brand_mentioned ? "var(--success)" : "var(--on-surface-secondary)"};">${r.brand_mentioned ? "check_circle" : "radio_button_unchecked"}</span>
-                    <span style="min-width:170px;color:var(--on-surface-secondary);">${escapeHtml(r.model)} · run ${(r.run_index ?? 0) + 1}</span>
+                    <span style="min-width:170px;color:var(--on-surface-secondary);">${escapeHtml(r.model)} · run ${(r.run_index ?? 0) + 1}${r.grounded ? ' <span title="Web-grounded answer (live retrieval)">🌐</span>' : ""}</span>
                     <span style="flex:1;">${(r.recommended_brands || []).map((b) => escapeHtml(b.name)).join(", ") || "<i>no retailers named</i>"}</span>
-                </div>`
-                )
+                </div>${citeLine}${answerFold}`;
+                })
                 .join("");
             return `<details style="border-bottom:1px solid var(--outline);padding:8px 0;">
                 <summary style="cursor:pointer;list-style:none;display:flex;gap:10px;align-items:baseline;">

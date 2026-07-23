@@ -636,6 +636,11 @@ def publish_page(page_id):
                 "UPDATE landing_pages SET is_published = TRUE, last_published_at = NOW(), last_generated_html = %s, schema_json = %s WHERE id = %s",
                 (full_html, json.dumps(schemas), page_id),
             )
+        if store_domain and page.get("handle"):
+            from app.services.indexnow_service import ping_async
+
+            host = store_domain.replace("https://", "").replace("http://", "").strip("/")
+            ping_async(page["store_id"], [f"https://{host}/pages/{page['handle']}"], "landing_publish")
         return jsonify({"success": True})
     except Exception as e:
         logger.exception("Publish failed for page %s", page_id)

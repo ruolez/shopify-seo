@@ -25,6 +25,8 @@
                 </div>
                 <div class="tabs">
                     <button class="tab active" data-tab="score" onclick="switchTab('score')">AI Readiness</button>
+                    <button class="tab" data-tab="feed" onclick="switchTab('feed')">Feed</button>
+                    <button class="tab" data-tab="offsite" onclick="switchTab('offsite')">Off-site</button>
                     <button class="tab" data-tab="visibility" onclick="switchTab('visibility')">Visibility</button>
                     <button class="tab" data-tab="assets" onclick="switchTab('assets')">AEO Assets</button>
                     <button class="tab" data-tab="activity" onclick="switchTab('activity')">Activity</button>
@@ -51,6 +53,55 @@
                     </div>
                 </div>
 
+                <div class="tab-panel" id="tab-feed">
+                    <div class="card" style="padding:16px;margin-bottom:16px;">
+                        <div class="toolbar-row" style="gap:12px;align-items:flex-start;flex-wrap:wrap;">
+                            <div style="flex:1;min-width:220px;">
+                                <h3 style="margin:0 0 4px;">Product feed readiness</h3>
+                                <p style="font-size:12px;color:var(--on-surface-secondary);margin:0;">
+                                    Shopify catalogs feed ChatGPT shopping directly (Agentic Storefronts). Product cards there
+                                    rank on <b>feed data</b> — GTINs, price/availability accuracy, images, category, reviews —
+                                    not page copy. This audits every product's feed quality from your synced catalog.
+                                </p>
+                            </div>
+                            <button id="feed-scan-btn" class="btn btn-primary" onclick="runFeedScan()">
+                                <span class="material-symbols-rounded">inventory_2</span> Audit feed
+                            </button>
+                        </div>
+                    </div>
+                    <div id="feed-overview-cards" class="stats-grid" style="margin-bottom:16px;"></div>
+                    <div id="feed-coverage" style="margin-bottom:16px;"></div>
+                    <div id="feed-checklist" style="margin-bottom:16px;"></div>
+                    <div id="feed-items-container">
+                        <div class="empty-state">
+                            <span class="material-symbols-rounded">inventory_2</span>
+                            <p>Run the feed audit to score every product's agentic-commerce readiness.</p>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="tab-panel" id="tab-offsite">
+                    <div class="card" style="padding:16px;margin-bottom:16px;">
+                        <div class="toolbar-row" style="gap:12px;align-items:flex-start;flex-wrap:wrap;">
+                            <div style="flex:1;min-width:220px;">
+                                <h3 style="margin:0 0 4px;">Off-site visibility</h3>
+                                <p style="font-size:12px;color:var(--on-surface-secondary);margin:0;">
+                                    AI engines cross-verify brands against Reddit, review platforms and "best of" roundups
+                                    before recommending them — a store with zero third-party mentions gets skipped. This audits
+                                    where you appear across the open web (via Brave Search) and what to fix.
+                                </p>
+                            </div>
+                            <button id="offsite-run-btn" class="btn btn-primary" onclick="runOffsiteAudit()">
+                                <span class="material-symbols-rounded">public</span> Run off-site audit
+                            </button>
+                        </div>
+                    </div>
+                    <div id="offsite-scorecard" class="stats-grid" style="margin-bottom:16px;"></div>
+                    <div id="offsite-actions" style="margin-bottom:16px;"></div>
+                    <div id="offsite-results" style="margin-bottom:16px;"></div>
+                    <div id="offsite-trend"></div>
+                </div>
+
                 <div class="tab-panel" id="tab-visibility">
                     <!-- Overview: what this is + primary action + headline metrics -->
                     <div class="card" style="padding:16px;margin-bottom:16px;">
@@ -71,6 +122,8 @@
                         <div id="visibility-metrics" class="stats-grid" style="margin-top:16px;"></div>
                     </div>
 
+                    <!-- Per-model scoreboard: who knows you, who names you, who cites you -->
+                    <div id="models-panel" style="margin-bottom:16px;"></div>
                     <!-- Us vs. them: where your share of voice is going -->
                     <div id="competitors-panel" style="margin-bottom:16px;"></div>
                     <!-- Product brands the AI mentions (informational) -->

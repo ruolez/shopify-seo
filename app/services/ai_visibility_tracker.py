@@ -24,6 +24,8 @@ logger = logging.getLogger(__name__)
 
 # Rough blended $/token estimate for budget gating (small models).
 COST_PER_TOKEN = 0.6 / 1_000_000
+# Web-grounded models carry search fees on top of tokens — budget them higher.
+GROUNDED_COST_PER_TOKEN = 6.0 / 1_000_000
 _LIST_MARKER = re.compile(r"^\s*(?:\d+[.)]|[-*•])\s+")
 
 # Retailer/brand extraction from model answers.
@@ -143,7 +145,18 @@ def _client_and_config():
         "anthropic/claude-haiku-4.5",
         "google/gemini-3-flash-preview",
     ]
+    # Retrieval-backed models probe what live AI search surfaces actually say,
+    # not just training-data memory. Merged in, deduped, order preserved.
+    grounded = cfg.get("grounded_models") or []
+    models = list(dict.fromkeys(list(models) + list(grounded)))
     return client, cfg, models
+
+
+def _is_grounded_model(model, cfg=None):
+    """True for models that answer with live web retrieval."""
+    if model.endswith(":online") or model.startswith("perplexity/"):
+        return True
+    return model in ((cfg or {}).get("grounded_models") or [])
 
 
 def _host(value):
@@ -225,16 +238,37 @@ def _detect_mentions(text, brand_terms, brand_host, product_titles, competitors,
     }
 
 
+def _extract_citations(message):
+    """URL citations from OpenRouter web-grounded responses (defensive: the
+    annotations shape varies by provider; any failure yields [])."""
+    try:
+        ann = getattr(message, "annotations", None)
+        if not ann and getattr(message, "model_extra", None):
+            ann = message.model_extra.get("annotations")
+        urls = []
+        for a in ann or []:
+            if not isinstance(a, dict):
+                a = getattr(a, "model_dump", lambda: {})() or {}
+            uc = a.get("url_citation") or {}
+            url = uc.get("url")
+            if url and url not in urls:
+                urls.append(url)
+        return urls[:20]
+    except Exception:
+        return []
+
+
 def _query_model(client, model, prompt, temperature=0.3):
     resp = client.chat.completions.create(
         model=model,
         messages=[{"role": "user", "content": prompt}],
         temperature=temperature,
     )
-    content = resp.choices[0].message.content or ""
+    msg = resp.choices[0].message
+    content = msg.content or ""
     tokens = getattr(resp, "usage", None)
     total = getattr(tokens, "total_tokens", 0) if tokens else 0
-    return content, total
+    return content, total, _extract_citations(msg)
 
 
 def _extract_entities_llm(client, model, question, answer, store_name, brand_ck):
@@ -256,7 +290,7 @@ def _extract_entities_llm(client, model, question, answer, store_name, brand_ck)
         'Return ONLY JSON: {"retailers": [{"name": string, "domain": string|null}], '
         '"product_brands": [string]}'
     )
-    text, tokens = _query_model(client, model, prompt, temperature=0)
+    text, tokens, _cites = _query_model(client, model, prompt, temperature=0)
     s, e = text.find("{"), text.rfind("}") + 1
     if s < 0 or e <= s:
         return None, tokens
@@ -357,7 +391,7 @@ def generate_prompt_set(store_id, n=12):
         f"'best X', 'where to buy X', 'X vs Y', and 'recommend a X for <use case>'.\n"
         f"Return ONLY JSON: {{\"prompts\": [string, ...]}}."
     )
-    content, _ = _query_model(client, cfg.get("model") or "openai/gpt-4o-mini", prompt)
+    content, _, _cites = _query_model(client, cfg.get("model") or "openai/gpt-4o-mini", prompt)
     s, e = content.find("{"), content.rfind("}") + 1
     prompts = []
     if s >= 0 and e > s:
@@ -472,12 +506,59 @@ def compute_share_of_voice(run_id):
         known = sum(1 for r in brand_rows if r["brand_known"])
         brand_known_rate = round(known / len(brand_rows) * 100, 2)
 
+    # Memory (base-model recall) vs retrieval (live web-grounded answers) split.
+    def _rates(rows_subset):
+        n = len(rows_subset)
+        if not n:
+            return None
+        return {
+            "answers": n,
+            "mention_rate": round(sum(1 for r in rows_subset if r["brand_mentioned"]) / n * 100, 2),
+            "citation_rate": round(sum(1 for r in rows_subset if r["domain_cited"]) / n * 100, 2),
+        }
+
+    memory = _rates([r for r in buyer if not r.get("grounded")])
+    retrieval = _rates([r for r in buyer if r.get("grounded")])
+
+    # Per-model scoreboard: which models know / name / cite the store.
+    by_model = {}
+    for r in rows:
+        m = by_model.setdefault(r["model"], {
+            "model": r["model"], "grounded": bool(r.get("grounded")),
+            "buyer_answers": 0, "mentions": 0, "cites": 0,
+            "brand_answers": 0, "brand_known": 0,
+        })
+        if (r.get("intent") or "buyer") == "brand":
+            m["brand_answers"] += 1
+            if r.get("brand_known"):
+                m["brand_known"] += 1
+        else:
+            m["buyer_answers"] += 1
+            if r["brand_mentioned"]:
+                m["mentions"] += 1
+            if r["domain_cited"]:
+                m["cites"] += 1
+    models_out = []
+    for m in by_model.values():
+        models_out.append({
+            "model": m["model"],
+            "grounded": m["grounded"],
+            "buyer_answers": m["buyer_answers"],
+            "mention_rate": round(m["mentions"] / m["buyer_answers"] * 100, 1) if m["buyer_answers"] else None,
+            "citation_rate": round(m["cites"] / m["buyer_answers"] * 100, 1) if m["buyer_answers"] else None,
+            "brand_known_rate": round(m["brand_known"] / m["brand_answers"] * 100) if m["brand_answers"] else None,
+        })
+    models_out.sort(key=lambda m: (m["grounded"], m["model"]))
+
     return {
         "brand_mention_rate": round(brand_hits / total_buyer * 100, 2),
         "citation_rate": round(cite_hits / total_buyer * 100, 2),
         "share_of_voice": round(sov, 2),
         "avg_rank": round(sum(ranks) / len(ranks), 2) if ranks else None,
         "brand_known_rate": brand_known_rate,
+        "memory": memory,
+        "retrieval": retrieval,
+        "models": models_out,
         "competitors": competitors,
         "product_brands": product_brands,
         "total_answers": len(buyer),
@@ -589,12 +670,16 @@ def run_tracking(run_id):
                         capped = True
                         break
                     try:
-                        text, tokens = _query_model(client, model, pr["prompt"])
+                        text, tokens, citations = _query_model(client, model, pr["prompt"])
                     except Exception as e:
                         logger.warning("Tracking query failed (%s): %s", model, e)
                         continue
-                    cost += tokens * COST_PER_TOKEN
+                    grounded = _is_grounded_model(model, cfg)
+                    cost += tokens * (GROUNDED_COST_PER_TOKEN if grounded else COST_PER_TOKEN)
                     det = _detect_mentions(text, brand_terms, brand_host, titles, competitors, intent)
+                    # Grounded answers cite real URLs — count our domain there too.
+                    if grounded and brand_host and any(brand_host in (u or "").lower() for u in citations):
+                        det["domain_cited"] = True
                     # LLM entity extraction beats the regex at separating real
                     # retailers from headings and product brands; regex result
                     # (already in det) stays as the fallback.
@@ -618,8 +703,9 @@ def run_tracking(run_id):
                             INSERT INTO ai_mention_results
                                 (run_id, prompt_id, model, prompt, response_text, brand_mentioned,
                                  domain_cited, brand_rank, products_mentioned, competitors_mentioned,
-                                 recommended_brands, product_brands, brand_known, run_index, tokens_used)
-                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                                 recommended_brands, product_brands, brand_known, run_index, tokens_used,
+                                 grounded, citations)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                             """,
                             (
                                 run_id, pr["id"], model, pr["prompt"], text[:4000],
@@ -629,6 +715,7 @@ def run_tracking(run_id):
                                 json.dumps(det["recommended_brands"]),
                                 json.dumps(product_brands), det["brand_known"],
                                 run_index, tokens,
+                                grounded, json.dumps(citations),
                             ),
                         )
 
@@ -675,6 +762,9 @@ def _run_summary(agg):
         "competitors": agg["competitors"],
         "product_brands": agg["product_brands"],
         "brand_known_rate": agg["brand_known_rate"],
+        "memory": agg.get("memory"),
+        "retrieval": agg.get("retrieval"),
+        "models": agg.get("models"),
         "total_answers": agg["total_answers"],
         "brand_hits": agg["brand_hits"],
     }
@@ -853,7 +943,7 @@ def analyze_competitive_gap(run_id):
         "\"priority\": \"high\"|\"medium\"|\"low\", \"applies_to\": \"products\"|\"collections\"|\"both\"}], "
         "\"content_ideas\": [{\"title\": string, \"format\": string, \"target_query\": string, \"why\": string}]}."
     )
-    text, _ = _query_model(client, cfg.get("model") or "openai/gpt-4o-mini", prompt)
+    text, _, _cites = _query_model(client, cfg.get("model") or "openai/gpt-4o-mini", prompt)
     s, e = text.find("{"), text.rfind("}") + 1
     analysis = {}
     if s >= 0 and e > s:

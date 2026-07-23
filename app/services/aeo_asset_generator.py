@@ -175,6 +175,28 @@ _BREADCRUMB_LIQUID = """{%- capture _crumbs -%}
 {%- endif -%}"""
 
 
+# Per-item JSON-LD pushed by the optimizer lives in `seo.schema_json_ld` /
+# `seo.faq_schema_json_ld` metafields (type json). Metafields are invisible to
+# crawlers until the theme prints them — this block renders them on product and
+# collection templates. `.value` parses the json metafield; `| json` re-serializes
+# it safely into the script tag.
+_ITEM_SCHEMA_LIQUID = """{%- if template contains 'product' and product -%}
+{%- if product.metafields.seo.schema_json_ld != blank -%}
+<script type="application/ld+json">{{ product.metafields.seo.schema_json_ld.value | json }}</script>
+{%- endif -%}
+{%- if product.metafields.seo.faq_schema_json_ld != blank -%}
+<script type="application/ld+json">{{ product.metafields.seo.faq_schema_json_ld.value | json }}</script>
+{%- endif -%}
+{%- elsif template contains 'collection' and collection -%}
+{%- if collection.metafields.seo.schema_json_ld != blank -%}
+<script type="application/ld+json">{{ collection.metafields.seo.schema_json_ld.value | json }}</script>
+{%- endif -%}
+{%- if collection.metafields.seo.faq_schema_json_ld != blank -%}
+<script type="application/ld+json">{{ collection.metafields.seo.faq_schema_json_ld.value | json }}</script>
+{%- endif -%}
+{%- endif -%}"""
+
+
 def generate_a11y_snippet():
     """Theme snippet: labels links/buttons that lack discernible text so the
     accessibility tree is well-formed for screen readers AND AI browsing agents
@@ -209,8 +231,9 @@ def generate_a11y_snippet():
 
 
 def generate_site_schema_snippet(store_id):
-    """Build the ai-seo-schema.liquid snippet: static Organization + WebSite JSON-LD
-    followed by a dynamic per-page BreadcrumbList."""
+    """Build the ai-seo-schema.liquid snippet: static Organization + WebSite JSON-LD,
+    a dynamic per-page BreadcrumbList, and the pushed per-item Product/CollectionPage
+    + FAQPage JSON-LD from `seo.*` metafields."""
     org = generate_organization_jsonld(store_id)
     website = generate_website_jsonld(store_id)
     parts = ["{%- comment -%} AI SEO: site-wide schema (managed — edit via the app) {%- endcomment -%}"]
@@ -219,4 +242,5 @@ def generate_site_schema_snippet(store_id):
     if website:
         parts.append('<script type="application/ld+json">\n' + json.dumps(website, ensure_ascii=False) + "\n</script>")
     parts.append(_BREADCRUMB_LIQUID)
+    parts.append(_ITEM_SCHEMA_LIQUID)
     return "\n".join(parts)
