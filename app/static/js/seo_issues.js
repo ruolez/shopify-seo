@@ -58,7 +58,7 @@ function renderUnifiedHero(item, itemType) {
         ${renderScoreRing(item.seo_score || 0, 80, item)}
         ${renderPillarBars(item)}
         <div class="tseo-modal-stats">
-            <div class="tseo-modal-stat">
+            <div class="tseo-modal-stat" ${issues ? `style="cursor: pointer;" title="View issues" onclick="switchModalTab('checks')"` : ""}>
                 <span class="tseo-stat-label">Issues</span>
                 <span class="tseo-stat-value"><span class="badge ${!issues ? "badge-success" : "badge-error"}">${issues != null ? issues : "—"}</span></span>
             </div>
@@ -183,6 +183,223 @@ function renderCheckGroups(item) {
 function toggleSeoCheckGroup(idx) {
     const el = document.getElementById(`seo-check-group-${idx}`);
     if (el) el.classList.toggle("collapsed");
+}
+
+/* ── Per-item issues panel + targeted AI fixes (Checks tab) ──────────── */
+
+/* Flat "what's wrong with this item" list. When keyword analysis exists its
+ * checks carry every issue (the four completeness checks share thresholds
+ * with the content pillar); before analysis we derive from seo_breakdown. */
+function collectItemIssues(item) {
+    const ka = item.keyword_analysis;
+    if (ka && ka.checks) {
+        return Object.entries(ka.checks)
+            .filter(([, c]) => c.issue)
+            .map(([key, c]) => ({
+                key,
+                label: SEO_CHECK_LABELS[key] || key.replace(/_/g, " "),
+                issue: c.issue,
+                fixable: !!c.fix_type,
+            }));
+    }
+    return Object.entries(item.seo_breakdown || {})
+        .filter(([, v]) => v.score < 100)
+        .map(([key, v]) => ({
+            key,
+            label: key.replace(/_/g, " "),
+            issue: v.detail,
+            fixable: true,
+        }));
+}
+
+function renderItemIssuesPanel(item, itemType) {
+    const issues = collectItemIssues(item);
+    const ka = item.keyword_analysis;
+    const fixableCount = issues.filter(i => i.fixable).length;
+
+    let html = '<div class="item-issues-panel">';
+    if (issues.length === 0) {
+        html += `<div class="item-issues-clear">
+            <span class="material-symbols-rounded">verified</span>
+            No issues found — this ${itemType} looks healthy.
+        </div>`;
+        html += '</div>';
+        return html;
+    }
+
+    html += `<div class="item-issues-head">
+        <span class="item-issues-title"><span class="material-symbols-rounded">report</span> Issues (${issues.length})</span>
+        ${ka && fixableCount > 0 ? `<button class="btn btn-primary btn-sm" id="gen-fixes-btn" onclick="generateItemFixes('${itemType}', ${item.id})">
+            <span class="material-symbols-rounded">auto_fix_high</span> Fix ${fixableCount} Issue${fixableCount !== 1 ? "s" : ""} with AI
+        </button>` : ""}
+    </div>`;
+
+    html += '<ul class="item-issues-list">';
+    for (const iss of issues) {
+        html += `<li class="item-issue">
+            <span class="issue-severity-dot ${iss.fixable ? "sev-med" : "sev-low"}"></span>
+            <span class="item-issue-text"><strong>${escapeHtml(iss.label)}:</strong> ${escapeHtml(iss.issue)}</span>
+            ${iss.fixable ? "" : '<span class="badge badge-not-analyzed" title="Informational — no automatic fix">info</span>'}
+        </li>`;
+    }
+    html += '</ul>';
+
+    html += '<div id="issue-fixes-container">';
+    if (ka && ka.ai_fixes && ka.ai_fixes.fixes && ka.ai_fixes.fixes.length) {
+        html += renderFixProposals(ka.ai_fixes, itemType, item.id, true);
+    }
+    html += '</div>';
+
+    html += '</div>';
+    return html;
+}
+
+async function generateItemFixes(itemType, itemId) {
+    const btn = document.getElementById("gen-fixes-btn");
+    const container = document.getElementById("issue-fixes-container");
+    if (!container) return;
+    if (btn) {
+        btn.disabled = true;
+        btn.innerHTML = '<span class="material-symbols-rounded spin">sync</span> Generating fixes...';
+    }
+    container.innerHTML = '<div class="loading-spinner" style="padding: 24px 0;"><div class="spinner"></div><p>AI is drafting targeted fixes for the failing checks...</p></div>';
+
+    try {
+        const resp = await apiRequest("/api/technical-seo/fix", {
+            method: "POST",
+            body: { item_type: itemType, item_id: itemId },
+        });
+        const task = await pollTaskUntilDone(`/api/tasks/${resp.task_id}`);
+        if (task.status === "failed" || !task.result || !task.result.fixes) {
+            container.innerHTML = `<p style="color: var(--error); font-size: 13px;">Fix generation failed: ${escapeHtml(task.error || "no fixes returned")}</p>`;
+        } else {
+            container.innerHTML = renderFixProposals(task.result, itemType, itemId, false);
+        }
+    } catch (err) {
+        container.innerHTML = `<p style="color: var(--error); font-size: 13px;">Fix generation failed: ${escapeHtml(err.message)}</p>`;
+    } finally {
+        if (btn) {
+            btn.disabled = false;
+            btn.innerHTML = '<span class="material-symbols-rounded">auto_fix_high</span> Regenerate Fixes';
+        }
+    }
+}
+
+function renderFixProposals(aiFixes, itemType, itemId, fromCache) {
+    const fixes = aiFixes.fixes || [];
+    if (!fixes.length) return "";
+    let html = '<div class="fix-proposals">';
+    html += `<div class="fix-proposals-head">
+        <span><span class="material-symbols-rounded" style="color: var(--primary); vertical-align: -4px;">auto_awesome</span>
+        AI Fix Proposals${fromCache ? ' <span class="badge badge-not-analyzed" title="From the last generation — regenerate for fresh proposals">saved</span>' : ""}</span>
+    </div>`;
+    if (aiFixes.summary) {
+        html += `<p class="fix-proposals-summary">${escapeHtml(aiFixes.summary)}</p>`;
+    }
+
+    fixes.forEach((fix, i) => {
+        const field = fix.field || "";
+        html += `<div class="fix-proposal">
+            <label class="fix-proposal-head">
+                <input type="checkbox" class="fix-select" data-fix-idx="${i}" data-field="${escapeAttr(field)}" checked>
+                <span class="fix-field-name">${escapeHtml(field.replace(/_/g, " "))}</span>
+                ${fix.reason ? `<span class="fix-reason">${escapeHtml(fix.reason)}</span>` : ""}
+            </label>`;
+
+        if (field === "image_alt" && Array.isArray(fix.proposed_value)) {
+            html += '<div class="fix-proposal-body">';
+            fix.proposed_value.forEach((alt, j) => {
+                html += `<div style="display: flex; align-items: center; gap: 8px; margin-bottom: 6px;">
+                    <input type="text" class="ai-field-editable fix-value-alt" data-fix-idx="${i}" data-alt-idx="${j}"
+                        data-media-id="${escapeAttr(alt.media_id || "")}" value="${escapeAttr(alt.alt || alt.proposed_alt || "")}" style="flex: 1;">
+                    <span style="font-size: 11px; color: var(--on-surface-secondary); white-space: nowrap;">Image ${j + 1}</span>
+                </div>`;
+            });
+            html += '</div>';
+        } else if (field === "description") {
+            html += `<div class="fix-proposal-body">
+                <textarea class="ai-field-editable fix-value" data-fix-idx="${i}" rows="6">${escapeHtml(String(fix.proposed_value || ""))}</textarea>
+            </div>`;
+        } else {
+            const val = Array.isArray(fix.proposed_value) ? fix.proposed_value.join(", ") : String(fix.proposed_value || "");
+            html += `<div class="fix-proposal-body">
+                ${fix.current_value ? `<div class="fix-current">Current: ${escapeHtml(String(fix.current_value).slice(0, 160))}</div>` : ""}
+                <input type="text" class="ai-field-editable fix-value" data-fix-idx="${i}" value="${escapeAttr(val)}">
+            </div>`;
+        }
+        html += '</div>';
+    });
+
+    html += `<div style="display: flex; justify-content: flex-end; margin-top: 12px;">
+        <button class="btn btn-primary" id="apply-fixes-btn" onclick="applySelectedItemFixes('${itemType}', ${itemId})">
+            <span class="material-symbols-rounded">publish</span> Apply Selected Fixes
+        </button>
+    </div>`;
+    html += '</div>';
+    return html;
+}
+
+async function applySelectedItemFixes(itemType, itemId) {
+    const container = document.getElementById("issue-fixes-container");
+    if (!container) return;
+
+    const fixes = [];
+    container.querySelectorAll(".fix-select:checked").forEach(cb => {
+        const idx = cb.dataset.fixIdx;
+        const proposal = cb.closest(".fix-proposal");
+        const field = cb.dataset.field;
+        const altInputs = proposal.querySelectorAll(`.fix-value-alt[data-fix-idx="${idx}"]`);
+        if (altInputs.length) {
+            const alts = [...altInputs]
+                .filter(inp => inp.dataset.mediaId && inp.value.trim())
+                .map(inp => ({ media_id: inp.dataset.mediaId, alt: inp.value.trim() }));
+            if (alts.length) fixes.push({ field: "image_alt", value: alts });
+            return;
+        }
+        const input = proposal.querySelector(`.fix-value[data-fix-idx="${idx}"]`);
+        const value = input ? input.value.trim() : "";
+        if (value) fixes.push({ field, value });
+    });
+
+    if (!fixes.length) {
+        showToast("No fixes selected", "warning");
+        return;
+    }
+
+    const btn = document.getElementById("apply-fixes-btn");
+    if (btn) {
+        btn.disabled = true;
+        btn.innerHTML = '<span class="material-symbols-rounded spin">sync</span> Applying...';
+    }
+
+    try {
+        const resp = await apiRequest("/api/technical-seo/apply", {
+            method: "POST",
+            body: { item_type: itemType, item_id: itemId, fixes },
+        });
+        if (resp.ok) {
+            showToast(`Applied: ${(resp.updated_fields || []).join(", ")}${resp.new_score != null ? ` — new score ${resp.new_score}` : ""}`, "success");
+            if (itemType === "product") {
+                viewProduct(itemId, { tab: "checks" });
+                loadProducts();
+            } else {
+                viewCollection(itemId, { tab: "checks" });
+                loadCollections();
+            }
+        } else {
+            showToast(`Apply failed: ${resp.error || "Unknown error"}`, "error");
+            if (btn) {
+                btn.disabled = false;
+                btn.innerHTML = '<span class="material-symbols-rounded">publish</span> Apply Selected Fixes';
+            }
+        }
+    } catch (err) {
+        showToast(`Apply failed: ${err.message}`, "error");
+        if (btn) {
+            btn.disabled = false;
+            btn.innerHTML = '<span class="material-symbols-rounded">publish</span> Apply Selected Fixes';
+        }
+    }
 }
 
 async function reanalyzeItemChecks(itemType, itemId) {

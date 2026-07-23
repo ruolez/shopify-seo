@@ -658,7 +658,7 @@ function renderProductsTable(container, products) {
             </div></td>
             ${singleStore ? "" : `<td>${escapeHtml(p.store_name)}</td>`}
             <td>${renderScoreRing(p.seo_score, 36, p)}</td>
-            <td>${renderIssuesBadge(p)}</td>
+            <td class="issues-cell" title="View issues" onclick="event.stopPropagation(); viewProduct(${p.id}, { tab: 'checks' })">${renderIssuesBadge(p)}</td>
             <td>${renderTrafficCell(p)}</td>
             <td>${formatOptimizedDate(p.last_optimized_at)}</td>
             <td><div class="row-actions">
@@ -1416,7 +1416,7 @@ function renderCollectionsTable(container, collections) {
         if (!singleStore) html += `<td>${escapeHtml(c.store_name)}</td>`;
         html += `<td>${c.products_count}</td>
             <td>${renderScoreRing(c.seo_score, 36, c)}</td>
-            <td>${renderIssuesBadge(c)}</td>
+            <td class="issues-cell" title="View issues" onclick="event.stopPropagation(); viewCollection(${c.id}, { tab: 'checks' })">${renderIssuesBadge(c)}</td>
             <td>${renderTrafficCell(c)}</td>
             <td>${formatOptimizedDate(c.last_optimized_at)}</td>
             <td><div class="row-actions">
@@ -1801,7 +1801,7 @@ async function viewProduct(id, opts = {}) {
         html += '</div>'; // end overview panel
 
         // ── Checks tab ──
-        html += `<div class="modal-tab-panel${initialTab === "checks" ? " active" : ""}" data-mpanel="checks">${renderCheckGroups(p)}</div>`;
+        html += `<div class="modal-tab-panel${initialTab === "checks" ? " active" : ""}" data-mpanel="checks">${renderItemIssuesPanel(p, "product")}${renderCheckGroups(p)}</div>`;
 
         // ── Performance tab ──
         html += `<div class="modal-tab-panel${initialTab === "performance" ? " active" : ""}" data-mpanel="performance">`;
@@ -2318,7 +2318,7 @@ async function viewCollection(id, opts = {}) {
         html += '</div>'; // end overview panel
 
         // ── Checks tab ──
-        html += `<div class="modal-tab-panel${initialTab === "checks" ? " active" : ""}" data-mpanel="checks">${renderCheckGroups(c)}</div>`;
+        html += `<div class="modal-tab-panel${initialTab === "checks" ? " active" : ""}" data-mpanel="checks">${renderItemIssuesPanel(c, "collection")}${renderCheckGroups(c)}</div>`;
 
         // ── Performance tab ──
         html += `<div class="modal-tab-panel${initialTab === "performance" ? " active" : ""}" data-mpanel="performance">`;
