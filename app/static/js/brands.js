@@ -1,269 +1,316 @@
+// Brands page — action-first table: KPI strip, search + filter chips, hover
+// row actions, floating bulk bar. Store context comes from the global topbar
+// StoreSelector (ui.js); selection is identity-keyed so it survives re-renders.
+
 let brandStoreId = null;
-let cachedVendors = [];
-let cachedCollections = [];
-let renderedBrandRows = [];
+let brandModel = []; // joined rows: {vendor, product_count, created, gc, gcId, imgUrl, score}
+let renderedBrandRows = []; // visible rows only: index -> {vendor, imgUrl, gcId}
 let interlinkSearchResults = [];
+let brandSearch = "";
+let brandFilter = loadFilter("brandsFilter", "all"); // all | created | missing | lowseo | nologo
+let brandSort = loadFilter("brandsSort", { col: "brand", dir: "asc" });
 const selectedVendors = new Set();
 const selectedForLogo = new Set();
 const selectedForSeo = new Set();
 let lastCheckedIndex = null;
-let brandSortCol = "brand";
-let brandSortDir = "asc";
+let brandImgModal = null;
+let brandSeoModalHandle = null;
+let brandConfirmHandle = null;
 
 document.addEventListener("DOMContentLoaded", () => {
-    loadVendors();
+    initBrandToolbarEvents();
+    initBrandModals();
+    // StoreSelector.init() (ui.js) resolves the store asynchronously — wait a
+    // beat, then load; reload on store switches.
+    setTimeout(initBrandStore, 350);
+    document.addEventListener("store:changed", (e) => {
+        brandStoreId = e.detail.storeId;
+        clearBrandSelection();
+        loadBrands();
+    });
 });
 
-async function loadVendors() {
-    const container = document.getElementById("brands-container");
-    container.innerHTML = '<div class="loading-spinner"><div class="spinner"></div><p>Loading stores...</p></div>';
-
-    try {
-        const stores = await apiRequest("/api/stores");
-        if (!stores || stores.length === 0) {
-            container.innerHTML = '<div class="empty-state"><span class="material-symbols-rounded">store</span><p>No stores configured. Add a store first.</p></div>';
-            return;
-        }
-
-        let storeSelectHtml = "";
-        if (stores.length === 1) {
-            brandStoreId = stores[0].id;
-            storeSelectHtml = `<input type="hidden" id="brand-store-id" value="${stores[0].id}">
-                <p style="margin-bottom: 16px;">Store: <strong>${escapeHtml(stores[0].name)}</strong></p>`;
-        } else {
-            storeSelectHtml = `<div class="form-group" style="margin-bottom: 16px;">
-                <label>Select Store</label>
-                <select class="form-control" id="brand-store-id" onchange="onBrandStoreChange(this.value)">
-                    <option value="">-- Select a store --</option>
-                    ${stores.map(s => `<option value="${s.id}">${escapeHtml(s.name)}</option>`).join("")}
-                </select>
-            </div>`;
-        }
-
-        container.innerHTML = storeSelectHtml + '<div id="vendors-table-container"></div>';
-
-        if (brandStoreId) {
-            fetchVendors(brandStoreId);
-        }
-    } catch (err) {
-        container.innerHTML = `<div class="empty-state"><p style="color: var(--error);">Error: ${escapeHtml(err.message)}</p></div>`;
+async function initBrandStore() {
+    brandStoreId = StoreSelector.getStoreId();
+    if (!brandStoreId) {
+        await new Promise((r) => setTimeout(r, 600));
+        brandStoreId = StoreSelector.getStoreId();
     }
-}
-
-async function onBrandStoreChange(storeId) {
-    brandStoreId = storeId || null;
-    selectedVendors.clear();
-    const tableContainer = document.getElementById("vendors-table-container");
-    if (!storeId) {
-        tableContainer.innerHTML = "";
+    if (!brandStoreId) {
+        try {
+            const stores = await apiRequest("/api/stores");
+            if (stores && stores.length) brandStoreId = stores[0].id;
+        } catch (e) { /* fall through to the empty state */ }
+    }
+    if (!brandStoreId) {
+        document.getElementById("brands-table-wrap").innerHTML =
+            '<div class="empty-state"><span class="material-symbols-rounded">store</span><p>No stores configured. Add a store first.</p></div>';
         return;
     }
-    fetchVendors(storeId);
+    loadBrands();
 }
 
-async function fetchVendors(storeId) {
-    const tableContainer = document.getElementById("vendors-table-container");
-    tableContainer.innerHTML = '<div class="loading-spinner"><div class="spinner"></div><p>Loading vendors...</p></div>';
+async function loadBrands() {
+    const wrap = document.getElementById("brands-table-wrap");
+    UISkeleton.show(wrap, { type: "table", rows: 8 });
 
     try {
         const [vendors, collections] = await Promise.all([
-            apiRequest(`/api/brands/vendors?store_id=${storeId}`),
-            apiRequest(`/api/brands/collections?store_id=${storeId}`),
+            apiRequest(`/api/brands/vendors?store_id=${brandStoreId}`),
+            apiRequest(`/api/brands/collections?store_id=${brandStoreId}`),
         ]);
-        cachedVendors = vendors || [];
-        cachedCollections = collections || [];
-        renderUnifiedTable();
+
+        const collectionsMap = {};
+        for (const c of collections || []) {
+            if (c.tag && c.tag.startsWith("__brand__")) {
+                collectionsMap[c.tag.substring("__brand__".length).toLowerCase()] = c;
+            } else {
+                collectionsMap[c.title.toLowerCase()] = c;
+            }
+        }
+
+        brandModel = (vendors || []).map((v) => {
+            const gc = collectionsMap[v.vendor.toLowerCase()] || null;
+            return {
+                vendor: v.vendor,
+                product_count: v.product_count || 0,
+                created: !!v.created,
+                gc,
+                gcId: gc ? gc.id : 0,
+                imgUrl: (gc && gc.image_url) || null,
+                score: v.created && gc ? gc.seo_score || 0 : null,
+            };
+        });
+
+        renderBrandKpis();
+        renderBrandChips();
+        document.getElementById("brands-kpis").hidden = false;
+        document.getElementById("brands-toolbar").hidden = false;
+        renderBrandTable();
+
+        if (brandModel.some((r) => r.created)) loadLandingPageStatus(brandStoreId);
     } catch (err) {
-        tableContainer.innerHTML = `<p style="color: var(--error);">Error loading vendors: ${escapeHtml(err.message)}</p>`;
+        wrap.innerHTML = `<div class="empty-state"><p style="color: var(--error);">Error loading vendors: ${escapeHtml(err.message)}</p></div>`;
     }
 }
 
-function renderUnifiedTable() {
-    const container = document.getElementById("vendors-table-container");
-    selectedVendors.clear();
+const BRAND_FILTERS = [
+    ["all", "All"],
+    ["created", "Created"],
+    ["missing", "Missing"],
+    ["lowseo", "Low SEO"],
+    ["nologo", "No Logo"],
+];
 
-    if (cachedVendors.length === 0) {
-        container.innerHTML = '<div class="empty-state"><span class="material-symbols-rounded">loyalty</span><p>No vendors found in synced products.</p></div>';
-        return;
-    }
-
-    const collectionsMap = {};
-    for (const c of cachedCollections) {
-        if (c.tag && c.tag.startsWith("__brand__")) {
-            collectionsMap[c.tag.substring("__brand__".length).toLowerCase()] = c;
-        } else {
-            collectionsMap[c.title.toLowerCase()] = c;
-        }
-    }
-
-    const uncreatedCount = cachedVendors.filter(v => !v.created).length;
-    const createdCount = cachedVendors.filter(v => v.created).length;
-    selectedForLogo.clear();
-
-    let html = `<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; flex-wrap: wrap; gap: 8px;">
-        <h3 style="margin: 0;">Brands (${cachedVendors.length})</h3>
-        <div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap;">
-            <span id="landing-page-status"></span>`;
-
-    if (createdCount > 0) {
-        html += `<button class="btn btn-secondary btn-sm" id="landing-page-btn" onclick="generateLandingPage()">
-                <span class="material-symbols-rounded">web</span>
-                Landing Page
-            </button>
-            <button class="btn btn-secondary btn-sm" id="bulk-seo-btn" onclick="startBulkBrandSeo()" disabled>
-                <span class="material-symbols-rounded">auto_awesome</span>
-                <span id="bulk-seo-label">Optimize SEO</span>
-            </button>
-            <button class="btn btn-secondary btn-sm" id="bulk-logo-btn" onclick="bulkGenerateLogos()" disabled>
-                <span class="material-symbols-rounded">image</span>
-                <span id="bulk-logo-label">Generate Logos</span>
-            </button>
-            <button class="btn btn-secondary btn-sm" id="fix-titles-btn" onclick="fixBrandTitles()" title="Revert AI-renamed collection titles back to original brand names">
-                <span class="material-symbols-rounded">restore</span>
-                Fix Titles
-            </button>`;
-    }
-
-    if (uncreatedCount > 0) {
-        html += `<span style="font-size: 13px; color: var(--on-surface-secondary);" id="brand-selected-count">0 selected</span>
-            <button class="btn btn-primary btn-sm" id="create-brands-btn" onclick="createBrandCollections()" disabled>
-                <span class="material-symbols-rounded">add</span>
-                Create Collections
-            </button>`;
-    }
-
-    html += `</div></div>`;
-
-    const sortArrow = (col) => {
-        if (brandSortCol !== col) return "";
-        return `<span class="material-symbols-rounded" style="font-size:16px;vertical-align:middle;margin-left:2px;">${brandSortDir === "asc" ? "arrow_upward" : "arrow_downward"}</span>`;
+function brandFilterCounts() {
+    const created = brandModel.filter((r) => r.created);
+    return {
+        all: brandModel.length,
+        created: created.length,
+        missing: brandModel.length - created.length,
+        lowseo: created.filter((r) => (r.score || 0) < 70).length,
+        nologo: created.filter((r) => !r.imgUrl).length,
     };
-    const thStyle = "cursor:pointer;user-select:none;";
+}
 
-    html += `<div class="table-container"><table class="data-table">
-        <thead><tr>
-            <th style="width: 40px;"><input type="checkbox" id="brand-select-all" onchange="toggleAllBrands(this.checked)"></th>
-            <th style="width: 60px;">Image</th>
-            <th style="${thStyle}" onclick="sortBrandsBy('brand')">Brand ${sortArrow("brand")}</th>
-            <th style="width: 100px;${thStyle}" onclick="sortBrandsBy('products')">Products ${sortArrow("products")}</th>
-            <th style="width: 100px;${thStyle}" onclick="sortBrandsBy('status')">Status ${sortArrow("status")}</th>
-            <th style="width: 90px;${thStyle}" onclick="sortBrandsBy('seo')">SEO ${sortArrow("seo")}</th>
-            <th style="width: 100px;">Actions</th>
-        </tr></thead><tbody>`;
+function renderBrandKpis() {
+    const created = brandModel.filter((r) => r.created);
+    const missing = brandModel.length - created.length;
+    const noLogo = created.filter((r) => !r.imgUrl).length;
+    const lowSeo = created.filter((r) => (r.score || 0) < 70).length;
+    const totalProducts = brandModel.reduce((sum, r) => sum + r.product_count, 0);
+    const avgScore = created.length
+        ? Math.round(created.reduce((sum, r) => sum + (r.score || 0), 0) / created.length)
+        : 0;
+    const scoreColor = avgScore >= 70 ? "var(--success)" : avgScore >= 40 ? "var(--warning)" : "var(--error)";
 
-    const sortedVendors = [...cachedVendors].sort((a, b) => {
-        const gcA = collectionsMap[a.vendor.toLowerCase()];
-        const gcB = collectionsMap[b.vendor.toLowerCase()];
+    document.getElementById("brands-kpis").innerHTML = `
+        <div class="stat-card">
+            <div class="stat-value">${brandModel.length}</div>
+            <div class="stat-label">Brands</div>
+            <div class="stat-sub">${totalProducts.toLocaleString()} products</div>
+        </div>
+        <div class="stat-card stat-card-clickable" onclick="setBrandFilter('missing')">
+            <div class="stat-value">${created.length}</div>
+            <div class="stat-label">Collections Created</div>
+            <div class="stat-sub">${missing ? `${missing} missing` : "all created"}</div>
+        </div>
+        <div class="stat-card stat-card-clickable" onclick="setBrandFilter('lowseo')">
+            <div class="stat-value" style="color:${created.length ? scoreColor : "var(--on-surface-secondary)"};">${created.length ? avgScore : "\u2014"}</div>
+            <div class="stat-label">Avg SEO Score</div>
+            <div class="stat-sub">${lowSeo} below 70</div>
+        </div>
+        <div class="stat-card stat-card-clickable" onclick="setBrandFilter('nologo')">
+            <div class="stat-value">${noLogo}</div>
+            <div class="stat-label">Missing Logos</div>
+            <div class="stat-sub">of ${created.length} created</div>
+        </div>`;
+}
+
+function renderBrandChips() {
+    const counts = brandFilterCounts();
+    document.getElementById("brand-filter-chips").innerHTML = BRAND_FILTERS.map(
+        ([key, label]) =>
+            `<button class="filter-chip ${brandFilter === key ? "active" : ""}" data-filter="${key}">${label}<span class="chip-count">${counts[key]}</span></button>`
+    ).join("");
+}
+
+function setBrandFilter(filter) {
+    brandFilter = brandFilter === filter ? "all" : filter;
+    saveFilter("brandsFilter", brandFilter);
+    renderBrandChips();
+    renderBrandTable();
+}
+
+function clearBrandFilters() {
+    brandFilter = "all";
+    saveFilter("brandsFilter", brandFilter);
+    brandSearch = "";
+    const input = document.getElementById("brand-search");
+    if (input) input.value = "";
+    document.getElementById("brand-search-clear").hidden = true;
+    renderBrandChips();
+    renderBrandTable();
+}
+
+function getVisibleRows() {
+    let rows = brandModel;
+    if (brandSearch) {
+        const q = brandSearch.toLowerCase();
+        rows = rows.filter((r) => r.vendor.toLowerCase().includes(q));
+    }
+    if (brandFilter === "created") rows = rows.filter((r) => r.created);
+    else if (brandFilter === "missing") rows = rows.filter((r) => !r.created);
+    else if (brandFilter === "lowseo") rows = rows.filter((r) => r.created && (r.score || 0) < 70);
+    else if (brandFilter === "nologo") rows = rows.filter((r) => r.created && !r.imgUrl);
+
+    const dir = brandSort.dir === "asc" ? 1 : -1;
+    return [...rows].sort((a, b) => {
         let cmp = 0;
-        switch (brandSortCol) {
+        switch (brandSort.col) {
             case "brand":
                 cmp = a.vendor.localeCompare(b.vendor, undefined, { sensitivity: "base" });
                 break;
             case "products":
-                cmp = (a.product_count || 0) - (b.product_count || 0);
+                cmp = a.product_count - b.product_count;
                 break;
             case "status":
                 cmp = (a.created ? 1 : 0) - (b.created ? 1 : 0);
                 break;
             case "seo":
-                cmp = ((gcA ? gcA.seo_score : -1) || -1) - ((gcB ? gcB.seo_score : -1) || -1);
+                cmp = (a.score ?? -1) - (b.score ?? -1);
                 break;
         }
-        return brandSortDir === "asc" ? cmp : -cmp;
+        return cmp * dir;
     });
+}
 
-    renderedBrandRows = [];
-    let rowIndex = 0;
-    for (const v of sortedVendors) {
-        const gc = collectionsMap[v.vendor.toLowerCase()];
-        const imgUrl = gc && gc.image_url ? gc.image_url : null;
-        const gcId = gc ? gc.id : 0;
-        renderedBrandRows.push({ vendor: v.vendor, imgUrl, gcId });
+function brandInitials(vendor) {
+    return vendor
+        .split(/\s+/)
+        .map((w) => w[0])
+        .join("")
+        .slice(0, 2)
+        .toUpperCase();
+}
 
+function renderBrandTable() {
+    const wrap = document.getElementById("brands-table-wrap");
+
+    if (brandModel.length === 0) {
+        renderedBrandRows = [];
+        wrap.innerHTML = '<div class="empty-state"><span class="material-symbols-rounded">loyalty</span><p>No vendors found in synced products.</p></div>';
+        updateBulkBar();
+        return;
+    }
+
+    const rows = getVisibleRows();
+    renderedBrandRows = rows.map((r) => ({ vendor: r.vendor, imgUrl: r.imgUrl, gcId: r.gcId }));
+    lastCheckedIndex = null;
+
+    if (rows.length === 0) {
+        wrap.innerHTML = `<div class="empty-state">
+            <span class="material-symbols-rounded">search_off</span>
+            <p>No brands match the current search or filter.</p>
+            <button class="btn btn-secondary btn-sm" onclick="clearBrandFilters()">Clear filters</button>
+        </div>`;
+        applySelectionToDom(wrap);
+        return;
+    }
+
+    const arrow = (col) =>
+        brandSort.col === col
+            ? `<span class="material-symbols-rounded" style="font-size:14px;vertical-align:-3px;">${brandSort.dir === "asc" ? "arrow_upward" : "arrow_downward"}</span>`
+            : "";
+    const thSort = "cursor:pointer;user-select:none;";
+
+    let html = `<div class="table-container"><table class="data-table">
+        <thead><tr>
+            <th style="width: 36px;"><input type="checkbox" id="brand-select-all" onchange="toggleAllBrands(this.checked)"></th>
+            <th style="width: 56px;"></th>
+            <th data-sort="brand" style="${thSort}">Brand ${arrow("brand")}</th>
+            <th data-sort="products" style="width: 100px;${thSort}">Products ${arrow("products")}</th>
+            <th data-sort="status" style="width: 100px;${thSort}">Status ${arrow("status")}</th>
+            <th data-sort="seo" style="width: 130px;${thSort}">SEO ${arrow("seo")}</th>
+            <th style="width: 120px;"></th>
+        </tr></thead><tbody>`;
+
+    rows.forEach((r, idx) => {
         html += "<tr>";
 
-        if (v.created && gcId) {
-            html += `<td><input type="checkbox" class="brand-cb logo-checkbox" data-idx="${rowIndex}" value="${gcId}"></td>`;
-        } else if (!v.created) {
-            html += `<td><input type="checkbox" class="brand-cb vendor-checkbox" data-idx="${rowIndex}" value="${escapeHtml(v.vendor)}"></td>`;
+        if (r.created && r.gcId) {
+            html += `<td><input type="checkbox" class="brand-cb logo-checkbox" data-idx="${idx}" value="${r.gcId}"></td>`;
+        } else if (!r.created) {
+            html += `<td><input type="checkbox" class="brand-cb vendor-checkbox" data-idx="${idx}" value="${escapeAttr(r.vendor)}"></td>`;
         } else {
-            html += `<td></td>`;
+            html += "<td></td>";
         }
 
-        if (imgUrl) {
-            html += `<td><img src="${escapeHtml(imgUrl)}" alt="${escapeHtml(v.vendor)}" style="width: 48px; height: 48px; object-fit: cover; border-radius: 6px; cursor: pointer; border: 1px solid var(--outline);" onclick="previewBrandImage(${rowIndex})"></td>`;
-        } else if (v.created) {
-            html += `<td><span style="display: inline-flex; width: 48px; height: 48px; align-items: center; justify-content: center; border-radius: 6px; background: var(--surface-variant, #f0f0f0); border: 1px dashed var(--outline);"><span class="material-symbols-rounded" style="font-size: 20px; color: var(--on-surface-secondary);">image</span></span></td>`;
+        if (r.imgUrl) {
+            html += `<td><img class="brand-avatar" src="${escapeAttr(r.imgUrl)}" alt="${escapeAttr(r.vendor)}" loading="lazy" onclick="previewBrandImage(${idx})"></td>`;
         } else {
-            html += `<td></td>`;
+            html += `<td><span class="brand-avatar-ph${r.created ? "" : " is-empty"}">${escapeHtml(brandInitials(r.vendor))}</span></td>`;
         }
 
-        html += `<td><strong>${escapeHtml(v.vendor)}</strong></td>`;
-        html += `<td>${v.product_count}</td>`;
+        html += `<td><strong>${escapeHtml(r.vendor)}</strong>${
+            r.created && r.gc && r.gc.handle
+                ? `<div style="font-size:12px;color:var(--on-surface-secondary);">/collections/${escapeHtml(r.gc.handle)}</div>`
+                : ""
+        }</td>`;
+        html += `<td>${r.product_count}</td>`;
 
-        if (v.created) {
-            html += `<td><span class="status-badge badge-success">Created</span></td>`;
+        if (r.created) {
+            html += `<td><span class="badge badge-success">Created</span></td>`;
 
-            const score = gc ? (gc.seo_score || 0) : 0;
-            const scoreColor = score >= 70 ? "var(--success, #16a34a)" : score >= 40 ? "var(--warning, #d97706)" : "var(--error, #dc2626)";
-            html += `<td><span style="display:inline-flex;align-items:center;gap:4px;font-weight:600;font-size:13px;color:${scoreColor};">${score}<span style="font-weight:400;color:var(--on-surface-secondary);font-size:12px;">/ 100</span></span></td>`;
+            const s = r.score || 0;
+            const color = s >= 70 ? "var(--success)" : s >= 40 ? "var(--warning)" : "var(--error)";
+            html += `<td><span class="score-inline"><span style="font-weight:600;font-size:13px;color:${color};min-width:20px;">${s}</span><span class="score-bar-mini"><span class="score-bar-mini-fill" style="width:${s}%;background:${color};"></span></span></span></td>`;
 
-            html += `<td style="white-space: nowrap;">`;
-            if (gcId) {
-                html += `<button class="icon-btn" onclick="openBrandSeoModal(${gcId})" title="Optimize SEO">
+            html += `<td><div class="row-actions">`;
+            if (r.gcId) {
+                html += `<button class="icon-btn" onclick="openBrandSeoModal(${r.gcId})" title="Optimize SEO">
                         <span class="material-symbols-rounded" style="color: var(--primary);">auto_awesome</span>
                     </button>
-                    <button class="icon-btn" id="logo-btn-${gcId}" onclick="generateBrandLogo(${rowIndex})" title="Generate Logo Image">
+                    <button class="icon-btn" id="logo-btn-${r.gcId}" onclick="generateBrandLogo(${idx})" title="Generate Logo Image">
                         <span class="material-symbols-rounded">image</span>
                     </button>
-                    <button class="icon-btn" onclick="deleteBrandCollection(${rowIndex})" title="Delete">
+                    <button class="icon-btn" onclick="deleteBrandCollection(${idx})" title="Delete">
                         <span class="material-symbols-rounded" style="color: var(--error);">delete</span>
                     </button>`;
             }
-            html += `</td>`;
+            html += `</div></td>`;
         } else {
-            html += `<td><span class="status-badge badge-neutral">\u2014</span></td>`;
-            html += `<td></td>`;
+            html += `<td><span style="color:var(--on-surface-secondary);">\u2014</span></td>`;
+            html += `<td><span style="color:var(--on-surface-secondary);">\u2014</span></td>`;
             html += `<td></td>`;
         }
 
         html += "</tr>";
-        rowIndex++;
-    }
-
-    html += "</tbody></table></div>";
-
-    if (uncreatedCount === 0) {
-        html += '<p style="margin-top: 12px; color: var(--on-surface-secondary); font-size: 13px;">All vendors already have brand collections.</p>';
-    }
-
-    container.innerHTML = html;
-    lastCheckedIndex = null;
-
-    container.addEventListener("click", function (e) {
-        const cb = e.target.closest(".brand-cb");
-        if (!cb) return;
-
-        const idx = parseInt(cb.dataset.idx, 10);
-        const allCbs = Array.from(container.querySelectorAll(".brand-cb"));
-
-        if (e.shiftKey && lastCheckedIndex !== null) {
-            const start = Math.min(lastCheckedIndex, idx);
-            const end = Math.max(lastCheckedIndex, idx);
-            const state = cb.checked;
-            for (let i = start; i <= end; i++) {
-                const target = allCbs.find(c => parseInt(c.dataset.idx, 10) === i);
-                if (target) target.checked = state;
-            }
-        }
-        lastCheckedIndex = idx;
-
-        syncSelectionState();
     });
 
-    if (createdCount > 0) {
-        loadLandingPageStatus(brandStoreId);
-    }
+    html += "</tbody></table></div>";
+    wrap.innerHTML = html;
+    applySelectionToDom(wrap);
 }
 
 async function fixBrandTitles() {
@@ -280,7 +327,7 @@ async function fixBrandTitles() {
         });
         if (resp.fixed > 0) {
             showToast(`Fixed ${resp.fixed} collection title${resp.fixed !== 1 ? "s" : ""} back to brand names${resp.errors > 0 ? ` (${resp.errors} failed)` : ""}`, "success");
-            fetchVendors(brandStoreId);
+            loadBrands();
         } else {
             showToast("All titles are already correct", "success");
         }
@@ -289,19 +336,51 @@ async function fixBrandTitles() {
     } finally {
         if (btn) {
             btn.disabled = false;
-            btn.innerHTML = '<span class="material-symbols-rounded">restore</span> Fix Titles';
+            btn.innerHTML = '<span class="material-symbols-rounded">restore</span> Fix Collection Titles';
         }
     }
 }
 
 function sortBrandsBy(col) {
-    if (brandSortCol === col) {
-        brandSortDir = brandSortDir === "asc" ? "desc" : "asc";
+    if (brandSort.col === col) {
+        brandSort.dir = brandSort.dir === "asc" ? "desc" : "asc";
     } else {
-        brandSortCol = col;
-        brandSortDir = col === "seo" || col === "products" ? "desc" : "asc";
+        brandSort = { col, dir: col === "seo" || col === "products" ? "desc" : "asc" };
     }
-    renderUnifiedTable();
+    saveFilter("brandsSort", brandSort);
+    renderBrandTable();
+}
+
+/* Selection is identity-keyed (vendor name / gcId). After each render, prune
+ * entries for rows the current search/filter hides — the bulk bar count must
+ * always equal what the user can see — then re-check the visible boxes. */
+function applySelectionToDom(container) {
+    const visibleVendors = new Set();
+    const visibleGcIds = new Set();
+    renderedBrandRows.forEach((r) => {
+        visibleVendors.add(r.vendor);
+        if (r.gcId) visibleGcIds.add(String(r.gcId));
+    });
+    for (const v of [...selectedVendors]) if (!visibleVendors.has(v)) selectedVendors.delete(v);
+    for (const id of [...selectedForLogo]) {
+        if (!visibleGcIds.has(id)) {
+            selectedForLogo.delete(id);
+            selectedForSeo.delete(id);
+        }
+    }
+    container.querySelectorAll(".vendor-checkbox").forEach((cb) => { cb.checked = selectedVendors.has(cb.value); });
+    container.querySelectorAll(".logo-checkbox").forEach((cb) => { cb.checked = selectedForLogo.has(cb.value); });
+    syncSelectAllHeader();
+    updateBulkBar();
+}
+
+function syncSelectAllHeader() {
+    const selectAll = document.getElementById("brand-select-all");
+    if (!selectAll) return;
+    const cbs = document.querySelectorAll("#brands-table-wrap .brand-cb");
+    const checked = document.querySelectorAll("#brands-table-wrap .brand-cb:checked");
+    selectAll.checked = cbs.length > 0 && checked.length === cbs.length;
+    selectAll.indeterminate = checked.length > 0 && checked.length < cbs.length;
 }
 
 function syncSelectionState() {
@@ -313,9 +392,8 @@ function syncSelectionState() {
         selectedForLogo.add(cb.value);
         selectedForSeo.add(cb.value);
     });
-    updateSelectedCount();
-    updateLogoCount();
-    updateSeoCount();
+    syncSelectAllHeader();
+    updateBulkBar();
 }
 
 function toggleAllBrands(checked) {
@@ -333,31 +411,130 @@ function toggleAllBrands(checked) {
             selectedForSeo.add(cb.value);
         }
     });
-    updateSelectedCount();
-    updateLogoCount();
-    updateSeoCount();
+    syncSelectAllHeader();
+    updateBulkBar();
 }
 
-function onVendorCheckChange() {
-    syncSelectionState();
+function updateBulkBar() {
+    const bar = document.getElementById("brands-bulk-bar");
+    if (!bar) return;
+    const total = selectedVendors.size + selectedForLogo.size;
+    if (!total) {
+        bar.classList.remove("active");
+        return;
+    }
+    document.getElementById("bulk-bar-count").textContent = `${total} selected`;
+    let html = "";
+    if (selectedVendors.size) {
+        html += `<button class="btn btn-primary btn-sm" onclick="createBrandCollections()">
+            <span class="material-symbols-rounded">add</span> Create Collections (${selectedVendors.size})</button>`;
+    }
+    if (selectedForLogo.size) {
+        html += `<button class="btn btn-secondary btn-sm" onclick="bulkGenerateLogos()">
+            <span class="material-symbols-rounded">image</span> Generate Logos (${selectedForLogo.size})</button>
+            <button class="btn btn-secondary btn-sm" onclick="startBulkBrandSeo()">
+            <span class="material-symbols-rounded">auto_awesome</span> Optimize SEO (${selectedForSeo.size})</button>`;
+    }
+    document.getElementById("bulk-bar-actions").innerHTML = html;
+    bar.classList.add("active");
 }
 
-function onLogoCheckChange() {
-    syncSelectionState();
+function clearBrandSelection() {
+    selectedVendors.clear();
+    selectedForLogo.clear();
+    selectedForSeo.clear();
+    document.querySelectorAll("#brands-table-wrap .brand-cb").forEach((cb) => { cb.checked = false; });
+    const selectAll = document.getElementById("brand-select-all");
+    if (selectAll) {
+        selectAll.checked = false;
+        selectAll.indeterminate = false;
+    }
+    updateBulkBar();
 }
 
-function updateSelectedCount() {
-    const countEl = document.getElementById("brand-selected-count");
-    const btn = document.getElementById("create-brands-btn");
-    if (countEl) countEl.textContent = `${selectedVendors.size} selected`;
-    if (btn) btn.disabled = selectedVendors.size === 0;
+function initBrandToolbarEvents() {
+    const wrap = document.getElementById("brands-table-wrap");
+
+    // One delegated listener for sortable headers and checkbox shift-click
+    // ranges — bound once so re-renders never stack duplicate handlers.
+    wrap.addEventListener("click", (e) => {
+        const th = e.target.closest("th[data-sort]");
+        if (th) {
+            sortBrandsBy(th.dataset.sort);
+            return;
+        }
+
+        const cb = e.target.closest(".brand-cb");
+        if (!cb) return;
+        const idx = parseInt(cb.dataset.idx, 10);
+        if (e.shiftKey && lastCheckedIndex !== null) {
+            const start = Math.min(lastCheckedIndex, idx);
+            const end = Math.max(lastCheckedIndex, idx);
+            const state = cb.checked;
+            wrap.querySelectorAll(".brand-cb").forEach((c) => {
+                const i = parseInt(c.dataset.idx, 10);
+                if (i >= start && i <= end) c.checked = state;
+            });
+        }
+        lastCheckedIndex = idx;
+        syncSelectionState();
+    });
+
+    const search = document.getElementById("brand-search");
+    const clearBtn = document.getElementById("brand-search-clear");
+    let searchDebounce = null;
+    search.addEventListener("input", () => {
+        clearTimeout(searchDebounce);
+        searchDebounce = setTimeout(() => {
+            brandSearch = search.value.trim();
+            clearBtn.hidden = !brandSearch;
+            renderBrandTable();
+        }, 150);
+    });
+    clearBtn.addEventListener("click", () => {
+        search.value = "";
+        brandSearch = "";
+        clearBtn.hidden = true;
+        renderBrandTable();
+        search.focus();
+    });
+
+    document.getElementById("brand-filter-chips").addEventListener("click", (e) => {
+        const chip = e.target.closest(".filter-chip");
+        if (!chip) return;
+        brandFilter = chip.dataset.filter;
+        saveFilter("brandsFilter", brandFilter);
+        renderBrandChips();
+        renderBrandTable();
+    });
+
+    const moreBtn = document.getElementById("brands-more-btn");
+    const moreMenu = document.getElementById("brands-more-menu");
+    moreBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        moreMenu.classList.toggle("open");
+    });
+    document.addEventListener("click", (e) => {
+        if (!e.target.closest(".overflow-wrap")) moreMenu.classList.remove("open");
+    });
+    document.addEventListener("keydown", (e) => {
+        if (e.key === "Escape") moreMenu.classList.remove("open");
+    });
 }
 
-function updateLogoCount() {
-    const btn = document.getElementById("bulk-logo-btn");
-    const label = document.getElementById("bulk-logo-label");
-    if (btn) btn.disabled = selectedForLogo.size === 0;
-    if (label) label.textContent = selectedForLogo.size > 0 ? `Generate Logos (${selectedForLogo.size})` : "Generate Logos";
+function initBrandModals() {
+    brandImgModal = UIModal.adopt("brand-image-preview-overlay", {
+        onClose: () => { document.getElementById("brand-preview-img").src = ""; },
+    });
+    brandSeoModalHandle = UIModal.adopt("brand-seo-modal-overlay", {
+        onClose: () => {
+            if (brandSeoPollInterval) {
+                clearInterval(brandSeoPollInterval);
+                brandSeoPollInterval = null;
+            }
+        },
+    });
+    brandConfirmHandle = UIModal.adopt("brand-confirm-dialog-overlay");
 }
 
 async function createBrandCollections() {
@@ -417,7 +594,7 @@ function pollBrandTask(bulkTaskId, total) {
 
                 setTimeout(() => {
                     overlay.classList.remove("active");
-                    fetchVendors(brandStoreId);
+                    loadBrands();
                     showToast(
                         `${task.completed} brand collection${task.completed !== 1 ? "s" : ""} created${task.failed > 0 ? `, ${task.failed} failed` : ""}`,
                         task.failed > 0 ? "warning" : "success"
@@ -490,7 +667,7 @@ function pollBrandLogoTask(bulkTaskId, total) {
 
                 setTimeout(() => {
                     overlay.classList.remove("active");
-                    fetchVendors(brandStoreId);
+                    loadBrands();
                     showToast(
                         `${task.completed} logo${task.completed !== 1 ? "s" : ""} generated${task.failed > 0 ? `, ${task.failed} failed` : ""}`,
                         task.failed > 0 ? "warning" : "success"
@@ -510,7 +687,7 @@ async function generateLandingPage() {
     const btn = document.getElementById("landing-page-btn");
     if (btn) {
         btn.disabled = true;
-        btn.innerHTML = '<span class="material-symbols-rounded">sync</span> Creating...';
+        btn.innerHTML = '<span class="material-symbols-rounded spin">sync</span> Creating...';
     }
 
     try {
@@ -525,7 +702,7 @@ async function generateLandingPage() {
     } finally {
         if (btn) {
             btn.disabled = false;
-            btn.innerHTML = '<span class="material-symbols-rounded">web</span> Landing Page';
+            btn.innerHTML = '<span class="material-symbols-rounded">web</span> Generate Landing Page';
         }
     }
 }
@@ -537,8 +714,8 @@ async function loadLandingPageStatus(storeId) {
     try {
         const status = await apiRequest(`/api/brands/landing-page/status?store_id=${storeId}`);
         if (status.exists) {
-            container.innerHTML = `<span class="status-badge badge-success" style="margin-right: 4px;">Live</span>
-                <a href="${escapeHtml(status.url)}" target="_blank" style="font-size: 13px; color: var(--primary);">${escapeHtml(status.url)}</a>`;
+            container.innerHTML = `<span class="badge badge-success">Live</span>
+                <a href="${escapeAttr(status.url)}" target="_blank" style="font-size: 13px; color: var(--primary);">Landing page</a>`;
         } else {
             container.innerHTML = "";
         }
@@ -552,7 +729,6 @@ function deleteBrandCollection(rowIndex) {
     if (!row || !row.gcId) return;
     const gcId = row.gcId;
     const title = row.vendor;
-    const overlay = document.getElementById("brand-confirm-dialog-overlay");
     const titleEl = document.getElementById("brand-confirm-dialog-title");
     const msgEl = document.getElementById("brand-confirm-dialog-message");
     const okBtn = document.getElementById("brand-confirm-dialog-ok");
@@ -565,12 +741,12 @@ function deleteBrandCollection(rowIndex) {
         try {
             await apiRequest(`/api/brands/collections/${gcId}`, { method: "DELETE" });
             showToast(`Deleted "${title}"`, "success");
-            fetchVendors(brandStoreId);
+            loadBrands();
         } catch (err) {
             showToast(`Delete failed: ${err.message}`, "error");
         }
     };
-    overlay.classList.add("active");
+    brandConfirmHandle.open();
 }
 
 async function generateBrandLogo(rowIndex) {
@@ -578,7 +754,6 @@ async function generateBrandLogo(rowIndex) {
     if (!row || !row.gcId) return;
     const gcId = row.gcId;
     const brandName = row.vendor;
-    const overlay = document.getElementById("brand-confirm-dialog-overlay");
     const titleEl = document.getElementById("brand-confirm-dialog-title");
     const msgEl = document.getElementById("brand-confirm-dialog-message");
     const okBtn = document.getElementById("brand-confirm-dialog-ok");
@@ -620,45 +795,33 @@ async function generateBrandLogo(rowIndex) {
                 body,
             });
             showToast(`Brand logo image created for ${brandName}`, "success");
-            fetchVendors(brandStoreId);
+            loadBrands();
         } catch (err) {
             showToast(`Logo generation failed: ${err.message}`, "error");
         } finally {
             if (btn) {
                 btn.disabled = false;
-                btn.innerHTML = '<span class="material-symbols-rounded">auto_awesome</span>';
+                btn.innerHTML = '<span class="material-symbols-rounded">image</span>';
             }
         }
     };
-    overlay.classList.add("active");
+    brandConfirmHandle.open();
 }
 
 function previewBrandImage(rowIndex) {
     const row = renderedBrandRows[rowIndex];
     if (!row || !row.imgUrl) return;
-    const overlay = document.getElementById("brand-image-preview-overlay");
-    const img = document.getElementById("brand-preview-img");
-    const title = document.getElementById("brand-preview-title");
-    img.src = row.imgUrl;
-    title.textContent = row.vendor;
-    overlay.classList.add("active");
+    document.getElementById("brand-preview-img").src = row.imgUrl;
+    document.getElementById("brand-preview-title").textContent = row.vendor;
+    brandImgModal.open();
 }
 
 function closeBrandImagePreview() {
-    const overlay = document.getElementById("brand-image-preview-overlay");
-    overlay.classList.remove("active");
-    document.getElementById("brand-preview-img").src = "";
+    brandImgModal.close();
 }
 
 function closeBrandConfirmDialog() {
-    document.getElementById("brand-confirm-dialog-overlay").classList.remove("active");
-}
-
-function updateSeoCount() {
-    const btn = document.getElementById("bulk-seo-btn");
-    const label = document.getElementById("bulk-seo-label");
-    if (btn) btn.disabled = selectedForSeo.size === 0;
-    if (label) label.textContent = selectedForSeo.size > 0 ? `Optimize SEO (${selectedForSeo.size})` : "Optimize SEO";
+    brandConfirmHandle.close();
 }
 
 // ==================== Brand SEO Optimization ====================
@@ -670,12 +833,11 @@ async function openBrandSeoModal(gcId) {
         clearInterval(brandSeoPollInterval);
         brandSeoPollInterval = null;
     }
-    const overlay = document.getElementById("brand-seo-modal-overlay");
     const body = document.getElementById("brand-seo-modal-body");
     const title = document.getElementById("brand-seo-modal-title");
 
     body.innerHTML = '<div class="loading-spinner"><div class="spinner"></div><p>Loading SEO data...</p></div>';
-    overlay.classList.add("active");
+    brandSeoModalHandle.open();
 
     try {
         const data = await apiRequest(`/api/brands/collections/${gcId}/seo`);
@@ -782,11 +944,8 @@ async function openBrandSeoModal(gcId) {
 }
 
 function closeBrandSeoModal() {
-    if (brandSeoPollInterval) {
-        clearInterval(brandSeoPollInterval);
-        brandSeoPollInterval = null;
-    }
-    document.getElementById("brand-seo-modal-overlay").classList.remove("active");
+    // poll cleanup happens in the modal's onClose (covers Esc/overlay-click too)
+    brandSeoModalHandle.close();
 }
 
 function addBrandCustomKeyword() {
@@ -1097,7 +1256,7 @@ async function applyBrandSeo(gcId) {
         if (resp.ok) {
             showToast(`Changes applied! Updated: ${resp.updated_fields.join(", ")}`, "success");
             closeBrandSeoModal();
-            fetchVendors(brandStoreId);
+            loadBrands();
         } else {
             showToast(`Failed to apply: ${resp.error || "Unknown error"}`, "error");
             if (applyBtn) {
@@ -1122,7 +1281,6 @@ async function startBulkBrandSeo() {
 
     const gcIds = Array.from(selectedForSeo).map(Number);
 
-    const overlay = document.getElementById("brand-confirm-dialog-overlay");
     const msgEl = document.getElementById("brand-confirm-dialog-message");
     const titleEl = document.getElementById("brand-confirm-dialog-title");
     const okBtn = document.getElementById("brand-confirm-dialog-ok");
@@ -1157,7 +1315,7 @@ async function startBulkBrandSeo() {
             showToast(`Bulk SEO optimization failed: ${err.message}`, "error");
         }
     };
-    overlay.classList.add("active");
+    brandConfirmHandle.open();
 }
 
 function pollBulkBrandSeo(bulkTaskId, total) {
@@ -1189,7 +1347,7 @@ function pollBulkBrandSeo(bulkTaskId, total) {
 
                 setTimeout(() => {
                     overlay.classList.remove("active");
-                    fetchVendors(brandStoreId);
+                    loadBrands();
                     showToast(
                         `${task.completed} brand${task.completed !== 1 ? "s" : ""} optimized${task.failed > 0 ? `, ${task.failed} failed` : ""}`,
                         task.failed > 0 ? "warning" : "success"

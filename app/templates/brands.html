@@ -5,8 +5,41 @@
 {% block page_title %}Brand Collections{% endblock %}
 
 {% block content %}
-                <div id="brands-container">
+                <div class="stats-grid kpi-strip" id="brands-kpis" hidden></div>
+
+                <div class="toolbar-row" id="brands-toolbar" hidden>
+                    <div class="search-bar" style="max-width: 280px; flex: 1; min-width: 180px; margin-bottom: 0;">
+                        <span class="material-symbols-rounded">search</span>
+                        <input type="text" class="search-input" id="brand-search" placeholder="Search brands..." autocomplete="off">
+                        <button class="search-clear" id="brand-search-clear" hidden><span class="material-symbols-rounded" style="font-size: 18px;">close</span></button>
+                    </div>
+                    <div class="status-filter-bar" id="brand-filter-chips" style="margin-bottom: 0; flex: initial;"></div>
+                    <span id="landing-page-status" style="margin-left: auto; display: inline-flex; align-items: center; gap: 4px;"></span>
+                    <div class="overflow-wrap">
+                        <button class="icon-btn" id="brands-more-btn" title="More actions"><span class="material-symbols-rounded">more_horiz</span></button>
+                        <div class="overflow-menu" id="brands-more-menu">
+                            <button class="overflow-item" id="landing-page-btn" onclick="generateLandingPage()">
+                                <span class="material-symbols-rounded">web</span> Generate Landing Page
+                            </button>
+                            <button class="overflow-item" id="fix-titles-btn" onclick="fixBrandTitles()" title="Revert AI-renamed collection titles back to original brand names">
+                                <span class="material-symbols-rounded">restore</span> Fix Collection Titles
+                            </button>
+                        </div>
+                    </div>
+                </div>
+
+                <div id="brands-table-wrap">
                     <div class="loading-spinner"><div class="spinner"></div><p>Loading vendors...</p></div>
+                </div>
+
+                <!-- Floating bulk-selection bar -->
+                <div class="bulk-bar" id="brands-bulk-bar">
+                    <span class="bulk-count" id="bulk-bar-count">0 selected</span>
+                    <span class="bulk-divider"></span>
+                    <span id="bulk-bar-actions" style="display: flex; gap: 8px;"></span>
+                    <button class="icon-btn" onclick="clearBrandSelection()" title="Clear selection">
+                        <span class="material-symbols-rounded">close</span>
+                    </button>
                 </div>
 
                 <!-- Progress Overlay -->
@@ -24,7 +57,7 @@
                 </div>
 
                 <!-- Image Preview Modal -->
-                <div class="modal-overlay" id="brand-image-preview-overlay" onclick="if(event.target===this)closeBrandImagePreview()">
+                <div class="modal-overlay" id="brand-image-preview-overlay">
                     <div class="modal" style="max-width: 700px; width: 90vw;">
                         <div class="modal-header">
                             <h3 id="brand-preview-title">Brand Image</h3>
@@ -37,7 +70,7 @@
                 </div>
 
                 <!-- Brand SEO Modal -->
-                <div class="modal-overlay" id="brand-seo-modal-overlay" onclick="if(event.target===this)closeBrandSeoModal()">
+                <div class="modal-overlay" id="brand-seo-modal-overlay">
                     <div class="modal modal-fullscreen">
                         <div class="modal-header">
                             <h3 id="brand-seo-modal-title">Brand SEO Optimization</h3>
@@ -74,7 +107,7 @@
                         </div>
                     </div>
                 </div>
-            
+
 {% endblock %}
 
 {% block scripts %}

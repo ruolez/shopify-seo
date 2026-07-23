@@ -2308,6 +2308,7 @@ thead th.row-num-col {
 }
 
 .score-bar-mini-fill {
+    display: block;
     height: 100%;
     border-radius: 3px;
     transition: width 0.3s;
@@ -2529,6 +2530,17 @@ thead th.row-num-col {
 .search-clear:hover {
     background: var(--surface-dim);
     color: var(--on-surface);
+}
+
+/* display:flex above would defeat the hidden attribute's UA display:none */
+.search-clear[hidden] { display: none; }
+
+/* the .search-bar icon rule targets ALL descendant icons — without this, the
+   ✕ inside .search-clear gets absolutely positioned 14px past its button and
+   renders outside the input pill */
+.search-clear .material-symbols-rounded {
+    position: static;
+    transform: none;
 }
 
 /* ── Summary Stats Strip ──────────────────────────────────────── */
@@ -4350,3 +4362,122 @@ thead th.row-num-col {
 }
 .bulk-menu-item:hover { background: var(--primary-light); color: var(--primary); }
 .bulk-menu-item .material-symbols-rounded { font-size: 17px; }
+
+/* ═══════════════════════════════════════════════════════════════
+   Brands Page — UI/UX Overhaul
+   ═══════════════════════════════════════════════════════════════ */
+
+.brand-avatar {
+    width: 44px;
+    height: 44px;
+    border-radius: var(--radius-sm);
+    object-fit: cover;
+    border: 1px solid var(--outline);
+    cursor: pointer;
+    display: block;
+    transition: transform 0.15s, box-shadow 0.15s;
+}
+.brand-avatar:hover { transform: scale(1.08); box-shadow: var(--shadow-sm); }
+
+.brand-avatar-ph {
+    width: 44px;
+    height: 44px;
+    border-radius: var(--radius-sm);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 700;
+    font-size: 13px;
+    letter-spacing: 0.03em;
+    background: var(--primary-light);
+    color: var(--primary);
+    border: 1px dashed var(--outline);
+    user-select: none;
+}
+.brand-avatar-ph.is-empty { background: var(--surface-dim); color: var(--on-surface-secondary); }
+
+.row-actions {
+    display: flex;
+    gap: 2px;
+    justify-content: flex-end;
+    opacity: 0;
+    transition: opacity 0.12s;
+}
+tbody tr:hover .row-actions,
+.row-actions:focus-within { opacity: 1; }
+@media (hover: none) { .row-actions { opacity: 1; } }
+
+.bulk-bar {
+    position: fixed;
+    left: 50%;
+    bottom: 24px;
+    transform: translateX(-50%) translateY(10px);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 12px 10px 16px;
+    background: var(--surface);
+    border: 1px solid var(--outline);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow-xl);
+    z-index: 150;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.18s, transform 0.18s;
+}
+.bulk-bar.active { opacity: 1; pointer-events: auto; transform: translateX(-50%) translateY(0); }
+.bulk-bar .bulk-count {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--primary);
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+}
+.bulk-bar .bulk-divider { width: 1px; height: 20px; background: var(--outline); }
+[data-theme="dark"] .bulk-bar { box-shadow: 0 12px 40px rgba(0,0,0,0.55); }
+
+.overflow-wrap { position: relative; }
+.overflow-menu {
+    position: absolute;
+    right: 0;
+    top: calc(100% + 6px);
+    min-width: 230px;
+    padding: 6px;
+    background: var(--surface);
+    border: 1px solid var(--outline);
+    border-radius: var(--radius-sm);
+    box-shadow: var(--shadow-lg);
+    z-index: 120;
+    display: none;
+}
+.overflow-menu.open { display: block; }
+.overflow-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+    padding: 9px 10px;
+    border: none;
+    background: none;
+    border-radius: 8px;
+    font: inherit;
+    font-size: 13px;
+    color: var(--on-surface);
+    cursor: pointer;
+    text-align: left;
+}
+.overflow-item:hover { background: var(--surface-dim); }
+.overflow-item:disabled { opacity: 0.5; cursor: default; }
+.overflow-item .material-symbols-rounded { font-size: 18px; color: var(--on-surface-secondary); }
+
+.filter-chip .chip-count {
+    margin-left: 6px;
+    padding: 1px 7px;
+    border-radius: 10px;
+    font-size: 11px;
+    font-weight: 600;
+    background: var(--surface-dim);
+    color: var(--on-surface-secondary);
+    font-variant-numeric: tabular-nums;
+}
+.filter-chip.active .chip-count { background: rgba(255,255,255,0.22); color: #fff; }
