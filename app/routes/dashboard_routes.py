@@ -1,8 +1,13 @@
+import time
+
 from flask import Blueprint, jsonify, render_template, request, session
 
 from app.services import dashboard_service
 
 dashboard_bp = Blueprint("dashboard", __name__)
+
+_badge_cache = {}
+_BADGE_TTL = 60
 
 
 def _resolve_store_id():
@@ -24,6 +29,20 @@ def dashboard_overview():
     return jsonify(dashboard_service.get_overview(store_id))
 
 
+@dashboard_bp.route("/api/nav/badges")
+def nav_badges():
+    store_id = _resolve_store_id()
+    if not store_id:
+        return jsonify({})
+    now = time.time()
+    cached = _badge_cache.get(store_id)
+    if cached and now - cached[0] < _BADGE_TTL:
+        return jsonify(cached[1])
+    payload = dashboard_service.get_nav_badges(store_id)
+    _badge_cache[store_id] = (now, payload)
+    return jsonify(payload)
+
+
 @dashboard_bp.route("/api/dashboard/action-queue")
 def dashboard_action_queue():
     store_id = _resolve_store_id()
@@ -31,6 +50,25 @@ def dashboard_action_queue():
     if not store_id:
         return jsonify({"items": [], "total_by_source": {}})
     return jsonify(dashboard_service.build_action_queue(store_id, limit))
+
+
+@dashboard_bp.route("/api/dashboard/action-queue/dismiss", methods=["POST"])
+def dashboard_action_dismiss():
+    store_id = _resolve_store_id()
+    data = request.get_json(silent=True) or {}
+    action_key = (data.get("action_key") or "").strip()
+    if not store_id or not action_key:
+        return jsonify({"error": "store_id and action_key are required"}), 400
+    dashboard_service.dismiss_action(store_id, action_key, data.get("snooze_days"))
+    return jsonify({"ok": True})
+
+
+@dashboard_bp.route("/api/dashboard/setup-state")
+def dashboard_setup_state():
+    store_id = _resolve_store_id()
+    if not store_id:
+        return jsonify({"steps": [], "complete": True})
+    return jsonify(dashboard_service.get_setup_state(store_id))
 
 
 @dashboard_bp.route("/api/dashboard/ctr-opportunities")

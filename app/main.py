@@ -84,9 +84,10 @@ def require_auth():
 
 @app.after_request
 def no_cache(response):
-    if "Cache-Control" not in response.headers:
-        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
-        response.headers["Pragma"] = "no-cache"
+    # Always override: Flask's static handler sets its own Cache-Control
+    # (max-age/no-cache), which let browsers keep stale JS/CSS after deploys.
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+    response.headers["Pragma"] = "no-cache"
     return response
 
 

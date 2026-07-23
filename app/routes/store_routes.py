@@ -40,6 +40,11 @@ def list_stores():
     return jsonify(result)
 
 
+@store_bp.route("/api/session/active-store", methods=["GET"])
+def get_active_store():
+    return jsonify({"store_id": session.get("active_store_id")})
+
+
 @store_bp.route("/api/session/active-store", methods=["POST"])
 def set_active_store():
     data = request.get_json(silent=True) or {}

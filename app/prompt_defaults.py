@@ -480,6 +480,47 @@ DEFAULTS = {
         "Return exactly the number of suggestions requested in the user message, ordered "
         "best-opportunity first."
     ),
+    "prompts.topic_enrich": (
+        "You are an expert SEO content strategist. You are enriching ONE pre-validated blog "
+        "topic that came from an AI-visibility gap analysis (a competitive audit already proved "
+        "the topic winnable — do NOT second-guess or change the topic's subject or intent).\n\n"
+        "Your job: turn the seed (topic title + target buyer query + rationale) into a fully "
+        "specified suggestion using ONLY the store data provided in the user message.\n\n"
+        "HARD RULES:\n"
+        "- Keep the topic's subject. You may polish the working title and craft a proper h1, "
+        "but it must target the same buyer query.\n"
+        "- h1: contains the primary keyword, under 70 characters. BANNED patterns: 'The "
+        "Ultimate Guide to...', 'Everything You Need to Know About...', 'The Complete Guide "
+        "to...', 'A Comprehensive Guide to...'.\n"
+        "- meta_title: max 60 characters, primary keyword at the front.\n"
+        "- meta_description: max 155 characters, includes the primary keyword and a call to action.\n"
+        "- url_slug: lowercase, hyphen-separated, contains the primary keyword, no stop words, "
+        "no leading slash.\n"
+        "- keywords: keep the provided target query as the primary keyword (you may tighten its "
+        "phrasing); add 3-6 copy-ready keywords per intent group where relevant:\n"
+        '  {"primary": "...", "informational": ["..."], "commercial": ["..."], '
+        '"transactional": ["..."], "navigational": ["..."]}\n'
+        '- search_intent: exactly one of "Informational", "Navigational", "Commercial", '
+        '"Transactional".\n'
+        "- rationale: 2-4 sentences merging the provided gap-analysis reasoning with the store "
+        "evidence (inventory depth, coverage gap).\n"
+        "- cannibalization_note: check the provided existing/queued article lists and state how "
+        "this post stays separate (empty string if no overlap risk).\n"
+        "- target_products / target_collections: choose ONLY from the CANDIDATE LINK TARGETS "
+        "lists in the user message, copied EXACTLY as written (they must resolve against the "
+        "store catalog). Pick the 2-6 most relevant of each; empty arrays if none fit.\n"
+        "- target_articles: titles of EXISTING blog articles (from the provided list) the new "
+        "post should link to; may be empty.\n\n"
+        "Return ONLY valid JSON, no markdown fences:\n"
+        "{\n"
+        '  "topic": "...", "h1": "...", "meta_title": "...", "meta_description": "...",\n'
+        '  "url_slug": "...",\n'
+        '  "keywords": {"primary": "...", "informational": ["..."], "commercial": ["..."], "transactional": ["..."], "navigational": ["..."]},\n'
+        '  "search_intent": "Commercial",\n'
+        '  "rationale": "...", "cannibalization_note": "...",\n'
+        '  "target_products": ["..."], "target_collections": ["..."], "target_articles": ["..."]\n'
+        "}"
+    ),
     "prompts.article_discovery": (
         "You are an expert SEO strategist. Given a blog article topic and target keywords, "
         "select the most relevant products and collections from the store catalog for internal linking.\n\n"
@@ -847,7 +888,7 @@ DEFAULTS = {
         "(title) / <=160 chars (description). Only write a fresh meta when the field is empty.\n\n"
         "Then apply the empirically-validated GEO levers:\n"
         "1. STATISTICS — weave in verifiable numbers, specs, measurements and quantities.\n"
-        "2. QUOTATIONS — include 1-3 short authoritative quotes with clear attribution.\n"
+        "2. QUOTATIONS — only quote text copied VERBATIM from the web research context or existing content, with clear attribution; if nothing quotable is provided, use no quotes (unverifiable quotes are stripped automatically).\n"
         "3. CITED SOURCES — reference reputable sources where a claim benefits from evidence.\n"
         "4. EXTRACTABLE ANSWERS — use question-style H2 headings and lead each section with a "
         "concise, direct answer (a quotable 1-2 sentence summary) before elaborating.\n"
@@ -889,7 +930,7 @@ DEFAULTS = {
         "(description). Only write a fresh meta when the field is empty.\n\n"
         "Frame the collection as an authoritative buyer's guide. Apply the validated GEO levers:\n"
         "1. STATISTICS — include verifiable numbers about the category (ranges, typical specs, counts).\n"
-        "2. QUOTATIONS — include 1-3 short authoritative quotes with attribution where natural.\n"
+        "2. QUOTATIONS — only quote text copied VERBATIM from the web research context or existing content, with attribution where natural; if nothing quotable is provided, use no quotes (unverifiable quotes are stripped automatically).\n"
         "3. CITED SOURCES — reference reputable sources for evidence-based claims.\n"
         "4. EXTRACTABLE ANSWERS — use question-style H2 headings (e.g. 'How to choose ...') and lead "
         "each section with a concise direct answer before elaborating.\n"
@@ -967,16 +1008,16 @@ DEFAULTS = {
     },
     "rules.feed_readiness": {
         "weights": {
-            "gtin": 0.20,
-            "images": 0.14,
-            "availability": 0.12,
-            "price": 0.10,
-            "product_type": 0.10,
-            "title": 0.10,
-            "description": 0.10,
-            "sku": 0.08,
-            "brand": 0.06,
-            "review_signals": 0.0,
+            "gtin": 0.18,
+            "images": 0.13,
+            "availability": 0.11,
+            "price": 0.09,
+            "product_type": 0.09,
+            "title": 0.09,
+            "description": 0.09,
+            "sku": 0.07,
+            "brand": 0.05,
+            "review_signals": 0.10,
         },
         "thresholds": {
             "title_len": {"min": 20, "max": 150},

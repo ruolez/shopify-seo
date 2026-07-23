@@ -148,13 +148,17 @@ def _client_and_config():
     # Retrieval-backed models probe what live AI search surfaces actually say,
     # not just training-data memory. Merged in, deduped, order preserved.
     grounded = cfg.get("grounded_models") or []
+    if not grounded or grounded == ["perplexity/sonar"]:
+        # Never-customized default: pair Perplexity with an OpenAI search model so
+        # grounded coverage spans both major retrieval surfaces (Perplexity + Bing).
+        grounded = ["perplexity/sonar", "openai/gpt-4o-mini-search-preview"]
     models = list(dict.fromkeys(list(models) + list(grounded)))
     return client, cfg, models
 
 
 def _is_grounded_model(model, cfg=None):
     """True for models that answer with live web retrieval."""
-    if model.endswith(":online") or model.startswith("perplexity/"):
+    if model.endswith(":online") or model.endswith("-search-preview") or model.startswith("perplexity/"):
         return True
     return model in ((cfg or {}).get("grounded_models") or [])
 
@@ -656,6 +660,10 @@ def run_tracking(run_id):
 
         cost = 0.0
         capped = False
+        planned = sum(
+            (runs_per_prompt if (p.get("intent") or "buyer") == "buyer" else 1) for p in prompts
+        ) * len(models)
+        attempted = 0
         for pr in prompts:
             if capped:
                 break
@@ -669,6 +677,7 @@ def run_tracking(run_id):
                     if cost >= budget:
                         capped = True
                         break
+                    attempted += 1
                     try:
                         text, tokens, citations = _query_model(client, model, pr["prompt"])
                     except Exception as e:
@@ -720,6 +729,14 @@ def run_tracking(run_id):
                         )
 
         agg = compute_share_of_voice(run_id)
+        summary = _run_summary(agg)
+        summary["queries_planned"] = planned
+        summary["queries_asked"] = attempted
+        if capped:
+            summary["truncated"] = (
+                f"Daily budget ${budget:.2f} reached — {planned - attempted} of {planned} "
+                "model queries skipped; raise the budget in Settings or re-run for full coverage"
+            )
         with db.get_cursor() as cur:
             cur.execute(
                 """
@@ -731,7 +748,7 @@ def run_tracking(run_id):
                     "budget_capped" if capped else "completed",
                     len(prompts), agg["brand_mention_rate"], agg["citation_rate"],
                     agg["share_of_voice"], agg["avg_rank"], round(cost, 4),
-                    json.dumps(_run_summary(agg)), run_id,
+                    json.dumps(summary), run_id,
                 ),
             )
         # Resolve official websites for the recommended brands so the competitor
@@ -830,6 +847,16 @@ def reanalyze_run(run_id):
                 )
         agg = compute_share_of_voice(run_id)
         final_status = prior_status if prior_status in ("completed", "budget_capped") else "completed"
+        summary = _run_summary(agg)
+        prior_summary = run.get("summary") or {}
+        if isinstance(prior_summary, str):
+            try:
+                prior_summary = json.loads(prior_summary)
+            except (json.JSONDecodeError, ValueError):
+                prior_summary = {}
+        for k in ("queries_planned", "queries_asked", "truncated"):
+            if k in prior_summary:
+                summary[k] = prior_summary[k]
         with db.get_cursor() as cur:
             cur.execute(
                 """UPDATE ai_tracking_runs SET status = %s, brand_mention_rate = %s, citation_rate = %s,
@@ -837,7 +864,7 @@ def reanalyze_run(run_id):
                 (
                     final_status, agg["brand_mention_rate"], agg["citation_rate"],
                     agg["share_of_voice"], agg["avg_rank"], round(cost, 4),
-                    json.dumps(_run_summary(agg)), run_id,
+                    json.dumps(summary), run_id,
                 ),
             )
         try:

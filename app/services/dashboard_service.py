@@ -444,11 +444,37 @@ def get_ctr_opportunities(store_id, limit=10, min_impressions=200):
     return candidates
 
 
+def _dismissed_action_keys(store_id):
+    """Action keys the user dismissed or snoozed (snooze still in effect)."""
+    with db.get_cursor() as cur:
+        cur.execute(
+            """SELECT action_key FROM action_dismissals
+               WHERE store_id = %s AND (snoozed_until IS NULL OR snoozed_until > NOW())""",
+            (store_id,),
+        )
+        return {r["action_key"] for r in cur.fetchall()}
+
+
+def dismiss_action(store_id, action_key, snooze_days=None):
+    snoozed_until = None
+    if snooze_days:
+        snoozed_until = datetime.now(timezone.utc) + timedelta(days=int(snooze_days))
+    with db.get_cursor() as cur:
+        cur.execute(
+            """INSERT INTO action_dismissals (store_id, action_key, snoozed_until)
+               VALUES (%s, %s, %s)
+               ON CONFLICT (store_id, action_key)
+               DO UPDATE SET snoozed_until = EXCLUDED.snoozed_until, dismissed_at = NOW()""",
+            (store_id, action_key, snoozed_until),
+        )
+
+
 def build_action_queue(store_id, limit=15):
     """One prioritized to-do list merged from every analysis engine,
     ranked by estimated click gain."""
     items = []
     counts = {}
+    dismissed = _dismissed_action_keys(store_id)
 
     try:
         from app.services.seo_priority_service import get_priority_ranked_items
@@ -457,6 +483,9 @@ def build_action_queue(store_id, limit=15):
         logger.warning("Action queue: priorities failed: %s", e)
         priorities = []
     for p in priorities:
+        key = f"priority:{p['item_type']}:{p['id']}"
+        if key in dismissed:
+            continue
         severity = "high" if p["priority_score"] >= 80 else "med" if p["priority_score"] >= 60 else "low"
         action = p.get("recommended_action") or p.get("top_opportunity") or "Optimize on-page SEO"
         items.append(
@@ -469,6 +498,7 @@ def build_action_queue(store_id, limit=15):
                 "est_clicks_gain": p.get("potential_clicks_gain"),
                 "item_type": p["item_type"],
                 "item_id": p["id"],
+                "action_key": key,
             }
         )
     counts["priority"] = len(priorities)
@@ -479,6 +509,9 @@ def build_action_queue(store_id, limit=15):
         logger.warning("Action queue: CTR scan failed: %s", e)
         ctr = []
     for c in ctr:
+        key = f"ctr:{c['query']}"
+        if key in dismissed:
+            continue
         matched = c.get("matched_item")
         href = f"/seo?optimize={matched['item_type']}&id={matched['id']}" if matched else "/gsc"
         target = matched["title"] if matched else c["page"]
@@ -492,6 +525,7 @@ def build_action_queue(store_id, limit=15):
                 "est_clicks_gain": c["est_clicks_gain"],
                 "item_type": matched["item_type"] if matched else None,
                 "item_id": matched["id"] if matched else None,
+                "action_key": key,
             }
         )
     counts["ctr"] = len(ctr)
@@ -499,10 +533,14 @@ def build_action_queue(store_id, limit=15):
     insights = get_store_insights(store_id)
 
     def summary_row(source, severity, title, detail, href):
+        key = f"{source}:summary"
+        if key in dismissed:
+            return
         items.append(
             {
                 "source": source, "severity": severity, "title": title, "detail": detail,
                 "href": href, "est_clicks_gain": None, "item_type": None, "item_id": None,
+                "action_key": key,
             }
         )
 
@@ -540,6 +578,71 @@ def build_action_queue(store_id, limit=15):
     severity_rank = {"high": 0, "med": 1, "low": 2}
     items.sort(key=lambda i: (-(i["est_clicks_gain"] or 0), severity_rank[i["severity"]]))
     return {"items": items[:limit], "total_by_source": counts}
+
+
+def get_setup_state(store_id):
+    """Cold-start checklist state, inferred entirely from existing tables."""
+    with db.get_cursor() as cur:
+        cur.execute("SELECT last_synced_at FROM stores WHERE id = %s", (store_id,))
+        store = cur.fetchone()
+        cur.execute("SELECT 1 FROM gsc_credentials WHERE store_id = %s LIMIT 1", (store_id,))
+        gsc = cur.fetchone() is not None
+        cur.execute("SELECT 1 FROM semrush_imports WHERE store_id = %s LIMIT 1", (store_id,))
+        semrush = cur.fetchone() is not None
+        cur.execute("SELECT 1 FROM seo_change_events WHERE store_id = %s LIMIT 1", (store_id,))
+        optimized = cur.fetchone() is not None
+        cur.execute("SELECT 1 FROM blog_schedule_settings WHERE store_id = %s LIMIT 1", (store_id,))
+        blog = cur.fetchone() is not None
+        cur.execute("SELECT api_key_enc FROM ai_config ORDER BY id LIMIT 1")
+        ai_row = cur.fetchone()
+    steps = [
+        {"key": "sync", "label": "Sync your store from Shopify", "done": bool(store and store["last_synced_at"]), "href": "/stores"},
+        {"key": "ai", "label": "Add your OpenRouter API key", "done": bool(ai_row and ai_row.get("api_key_enc")), "href": "/settings"},
+        {"key": "gsc", "label": "Connect Google Search Console", "done": gsc, "href": "/gsc"},
+        {"key": "semrush", "label": "Import Semrush keyword data", "done": semrush, "href": "/semrush"},
+        {"key": "optimize", "label": "Apply your first optimization", "done": optimized, "href": "/seo?tab=priorities"},
+        {"key": "blog", "label": "Set a blog publishing cadence", "done": blog, "href": "/blog?tab=scheduled"},
+    ]
+    return {"steps": steps, "complete": all(s["done"] for s in steps)}
+
+
+def get_nav_badges(store_id):
+    """Pending-work counts for the sidebar. One action-queue build (the caller
+    caches this endpoint) plus two cheap counts; zero values are omitted."""
+    q = build_action_queue(store_id, limit=50)
+    c = q["total_by_source"]
+    with db.get_cursor() as cur:
+        cur.execute(
+            """SELECT COUNT(*) AS n FROM bulk_tasks
+               WHERE store_id = %s AND kind IN ('geo_optimize', 'fact_boost')
+                 AND (status = 'failed' OR failed > 0)
+                 AND created_at > NOW() - INTERVAL '7 days'""",
+            (store_id,),
+        )
+        ai_failed = cur.fetchone()["n"]
+        cur.execute(
+            """SELECT COUNT(*) AS n FROM article_wizard_sessions
+               WHERE store_id = %s AND scheduled_for IS NOT NULL AND status != 'published'
+                 AND (status = 'error' OR scheduled_for < NOW() - INTERVAL '1 hour')""",
+            (store_id,),
+        )
+        content_stuck = cur.fetchone()["n"]
+    # Counts are "work you'd queue", not raw issue sums — a sidebar of permanent
+    # 99+ chips is noise. seo = bounded priority/CTR items; technical = pages
+    # with issues (not summed issues); cannibalization stays off (lives on GSC).
+    insights = get_store_insights(store_id)
+    tech_pages = (insights.get("technical_seo") or {}).get("items_with_issues", 0)
+    badges = {
+        "home": len(q["items"]),
+        "seo": c.get("priority", 0) + c.get("ctr", 0),
+        "technical-seo": tech_pages,
+        "interlinking": c.get("links", 0),
+        "content-gaps": c.get("gaps", 0),
+        "competitors": c.get("competitor", 0),
+        "ai-seo": ai_failed,
+        "content": content_stuck,
+    }
+    return {k: v for k, v in badges.items() if v}
 
 
 def get_coverage(store_id):

@@ -1,34 +1,25 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Stores — SEO Platform</title>
-    <link rel="stylesheet" href="/static/css/style.css">
-</head>
-<body>
-    <div class="app-layout">
-        {% include '_sidebar.html' %}
-        <div class="main-content">
-            <div class="topbar">
-                <div class="topbar-left">
-                    <button id="sidebar-toggle" class="icon-btn"><span class="material-symbols-rounded">menu</span></button>
-                    <h2>Stores</h2>
-                </div>
-                <div class="topbar-right">
+{% extends "base.html" %}
+
+{% block title %}Stores{% endblock %}
+
+{% block page_title %}Stores{% endblock %}
+
+{% block topbar_extra %}
                     <button class="btn btn-primary" onclick="openAddModal()">
                         <span class="material-symbols-rounded">add</span>
                         Add Store
                     </button>
-                    <button id="theme-toggle" class="icon-btn"><span class="material-symbols-rounded">dark_mode</span></button>
-                </div>
-            </div>
-            <div class="page-content">
+{% endblock %}
+
+{% block content %}
                 <div id="stores-container">
                     <div class="loading-spinner"><div class="spinner"></div><p>Loading stores...</p></div>
                 </div>
-            </div>
-            <div class="progress-overlay" id="sync-progress-overlay">
+            
+{% endblock %}
+
+{% block modals %}
+    <div class="progress-overlay" id="sync-progress-overlay">
                 <div class="progress-card">
                     <span class="material-symbols-rounded" style="font-size: 40px; color: var(--primary); margin-bottom: 12px;">sync</span>
                     <h3>Syncing Store</h3>
@@ -40,9 +31,6 @@
                     <div class="progress-current" id="sync-progress-current"></div>
                 </div>
             </div>
-        </div>
-    </div>
-
     <div class="modal-overlay" id="store-modal">
         <div class="modal">
             <div class="modal-header">
@@ -75,8 +63,8 @@
             </form>
         </div>
     </div>
+{% endblock %}
 
-    <script src="/static/js/app.js"></script>
+{% block scripts %}
     <script src="/static/js/stores.js"></script>
-</body>
-</html>
+{% endblock %}

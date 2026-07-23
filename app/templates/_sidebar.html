@@ -7,18 +7,21 @@
         <div class="nav-section">
             <a href="/" class="nav-item" data-page="dashboard">
                 <span class="material-symbols-rounded">dashboard</span>
-                Dashboard
+                Home
+                <span class="nav-badge" data-badge="home"></span>
             </a>
         </div>
         <div class="nav-section nav-group" data-group="optimize">
-            <button type="button" class="nav-section-label nav-group-toggle">
+            <button type="button" class="nav-section-label nav-group-toggle" data-href="/seo">
                 Optimize
+                <span class="nav-badge" data-badge="optimize"></span>
                 <span class="material-symbols-rounded nav-group-chevron">expand_more</span>
             </button>
             <div class="nav-group-items">
                 <a href="/seo" class="nav-item" data-page="seo">
                     <span class="material-symbols-rounded">search</span>
                     SEO
+                    <span class="nav-badge" data-badge="seo"></span>
                 </a>
                 <a href="/duplicates" class="nav-item" data-page="duplicates">
                     <span class="material-symbols-rounded">difference</span>
@@ -27,14 +30,12 @@
                 <a href="/technical-seo" class="nav-item" data-page="technical-seo">
                     <span class="material-symbols-rounded">speed</span>
                     Technical SEO
-                </a>
-                <a href="/ai-seo" class="nav-item" data-page="ai-seo">
-                    <span class="material-symbols-rounded">smart_toy</span>
-                    AI SEO
+                    <span class="nav-badge" data-badge="technical-seo"></span>
                 </a>
                 <a href="/interlinking" class="nav-item" data-page="interlinking">
                     <span class="material-symbols-rounded">link</span>
                     Interlinking
+                    <span class="nav-badge" data-badge="interlinking"></span>
                 </a>
                 <a href="/images" class="nav-item" data-page="images">
                     <span class="material-symbols-rounded">image</span>
@@ -42,12 +43,24 @@
                 </a>
             </div>
         </div>
+        <div class="nav-section">
+            <a href="/ai-seo" class="nav-item" data-page="ai-seo">
+                <span class="material-symbols-rounded">smart_toy</span>
+                AI Search
+                <span class="nav-badge" data-badge="ai-seo"></span>
+            </a>
+        </div>
         <div class="nav-section nav-group" data-group="content">
-            <button type="button" class="nav-section-label nav-group-toggle">
+            <button type="button" class="nav-section-label nav-group-toggle" data-href="/blog">
                 Content
+                <span class="nav-badge nav-badge-error" data-badge="content"></span>
                 <span class="material-symbols-rounded nav-group-chevron">expand_more</span>
             </button>
             <div class="nav-group-items">
+                <a href="/content/calendar" class="nav-item" data-page="content/calendar">
+                    <span class="material-symbols-rounded">calendar_month</span>
+                    Calendar
+                </a>
                 <a href="/blog" class="nav-item" data-page="blog">
                     <span class="material-symbols-rounded">edit_note</span>
                     Blog Posts
@@ -71,18 +84,14 @@
             </div>
         </div>
         <div class="nav-section nav-group" data-group="research">
-            <button type="button" class="nav-section-label nav-group-toggle">
-                Research
+            <button type="button" class="nav-section-label nav-group-toggle" data-href="/gsc">
+                Insights
                 <span class="material-symbols-rounded nav-group-chevron">expand_more</span>
             </button>
             <div class="nav-group-items">
                 <a href="/gsc" class="nav-item" data-page="gsc">
                     <span class="material-symbols-rounded">monitoring</span>
                     Search Console
-                </a>
-                <a href="/semrush" class="nav-item" data-page="semrush">
-                    <span class="material-symbols-rounded">query_stats</span>
-                    Semrush Data
                 </a>
                 <a href="/keyword-strategy" class="nav-item" data-page="keyword-strategy">
                     <span class="material-symbols-rounded">hub</span>
@@ -91,26 +100,16 @@
                 <a href="/content-gaps" class="nav-item" data-page="content-gaps">
                     <span class="material-symbols-rounded">target</span>
                     Content Gaps
+                    <span class="nav-badge" data-badge="content-gaps"></span>
                 </a>
                 <a href="/competitors" class="nav-item" data-page="competitors">
                     <span class="material-symbols-rounded">groups</span>
                     Competitors
+                    <span class="nav-badge" data-badge="competitors"></span>
                 </a>
-            </div>
-        </div>
-        <div class="nav-section nav-group" data-group="manage">
-            <button type="button" class="nav-section-label nav-group-toggle">
-                Manage
-                <span class="material-symbols-rounded nav-group-chevron">expand_more</span>
-            </button>
-            <div class="nav-group-items">
-                <a href="/stores" class="nav-item" data-page="stores">
-                    <span class="material-symbols-rounded">store</span>
-                    Stores
-                </a>
-                <a href="/settings" class="nav-item" data-page="settings">
-                    <span class="material-symbols-rounded">settings</span>
-                    Settings
+                <a href="/semrush" class="nav-item" data-page="semrush">
+                    <span class="material-symbols-rounded">query_stats</span>
+                    Semrush Data
                 </a>
             </div>
         </div>
@@ -118,9 +117,13 @@
     <div class="sidebar-footer">
         <button type="button" class="nav-item tasks-panel-toggle" id="tasksPanelToggle" style="width: 100%; background: none; border: none; cursor: pointer; font: inherit; text-align: left;">
             <span class="material-symbols-rounded">checklist</span>
-            Tasks
+            Activity
             <span class="tasks-badge" id="tasksBadge" hidden>0</span>
         </button>
+        <a href="/settings" class="nav-item" data-page="settings">
+            <span class="material-symbols-rounded">settings</span>
+            Settings
+        </a>
         <a href="/logout" class="nav-item">
             <span class="material-symbols-rounded">logout</span>
             Logout
@@ -144,22 +147,31 @@
             }
         });
 
-        // Collapsible groups: collapsed set persisted; the active page's group
-        // is always expanded so you can never lose where you are.
-        let collapsed = [];
-        try { collapsed = JSON.parse(localStorage.getItem('navCollapsed') || '[]'); } catch (e) {}
+        // Exclusive accordion: at most one group open. The active page's group
+        // always opens; otherwise the last-opened group (navOpenGroup) does.
+        let openGroup = activeGroup;
+        if (!openGroup) {
+            try { openGroup = localStorage.getItem('navOpenGroup') || null; } catch (e) {}
+        }
 
-        document.querySelectorAll('.nav-group').forEach(group => {
-            const name = group.dataset.group;
-            if (collapsed.includes(name) && name !== activeGroup) {
-                group.classList.add('collapsed');
-            }
-            group.querySelector('.nav-group-toggle').addEventListener('click', () => {
-                group.classList.toggle('collapsed');
-                const isCollapsed = group.classList.contains('collapsed');
-                collapsed = collapsed.filter(n => n !== name);
-                if (isCollapsed) collapsed.push(name);
-                try { localStorage.setItem('navCollapsed', JSON.stringify(collapsed)); } catch (e) {}
+        const groups = [...document.querySelectorAll('.nav-group')];
+        const apply = () => groups.forEach(g =>
+            g.classList.toggle('collapsed', g.dataset.group !== openGroup));
+        apply();
+
+        groups.forEach(group => {
+            const toggle = group.querySelector('.nav-group-toggle');
+            toggle.addEventListener('click', (e) => {
+                // Chevron toggles; anywhere else on the header navigates to the
+                // group's primary page (which also opens the group on arrival).
+                const onChevron = e.target.closest('.nav-group-chevron');
+                if (!onChevron && toggle.dataset.href) {
+                    window.location.href = toggle.dataset.href;
+                    return;
+                }
+                openGroup = group.classList.contains('collapsed') ? group.dataset.group : null;
+                try { localStorage.setItem('navOpenGroup', openGroup || ''); } catch (e2) {}
+                apply();
             });
         });
     })();

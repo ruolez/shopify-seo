@@ -3,18 +3,9 @@ const dashCharts = {};
 
 document.addEventListener("DOMContentLoaded", () => {
     loadDashboard();
-    document.getElementById("store-switcher").addEventListener("change", async (e) => {
-        const storeId = parseInt(e.target.value, 10);
-        try {
-            await apiRequest("/api/session/active-store", {
-                method: "POST",
-                body: JSON.stringify({ store_id: storeId }),
-            });
-        } catch {
-            showToast("Failed to switch store", "error");
-            return;
-        }
-        dashStoreId = storeId;
+    // Store switching is owned by the global topbar StoreSelector (ui.js).
+    document.addEventListener("store:changed", (e) => {
+        dashStoreId = e.detail.storeId;
         loadDashboard();
     });
 });
@@ -22,18 +13,19 @@ document.addEventListener("DOMContentLoaded", () => {
 function loadDashboard() {
     // Reset store-scoped widgets so a store switch never shows stale data
     // from the previous store while the new requests are in flight.
-    for (const id of ["trend-card", "queue-card", "ctr-card", "impact-card", "movers-card", "ops-row", "dash-freshness", "changes-card", "revenue-card", "kpi-revenue-card"]) {
+    for (const id of ["trend-card", "queue-card", "ctr-card", "impact-card", "movers-card", "ops-row", "dash-freshness", "changes-card", "revenue-card", "kpi-revenue-card", "setup-card"]) {
         document.getElementById(id).style.display = "none";
     }
     loadOverview().then(() => {
         // Widgets below depend on the resolved store id from the overview.
-        loadTrends();
+        loadSetupChecklist();
         loadActionQueue();
+        loadChanges();
+        loadTrends();
         loadCtrOpportunities();
         loadImpact();
         loadMovers();
         loadOps();
-        loadChanges();
         loadRevenue();
     });
 }
@@ -48,15 +40,8 @@ function setChart(key, make) {
 }
 
 function renderStoreSwitcher(stores, activeId) {
-    const sel = document.getElementById("store-switcher");
-    if (!stores || stores.length < 2) {
-        sel.style.display = "none";
-        return;
-    }
-    sel.innerHTML = stores
-        .map((s) => `<option value="${s.id}" ${s.id === activeId ? "selected" : ""}>${escapeHtml(s.name)}</option>`)
-        .join("");
-    sel.style.display = "";
+    // Superseded by the global topbar StoreSelector (ui.js); kept as a no-op
+    // because loadOverview still calls it.
 }
 
 async function loadOverview() {
@@ -178,7 +163,7 @@ function renderKpis(kpis, stats) {
     } else {
         visEl.textContent = "—";
         document.getElementById("kpi-visibility-sub").innerHTML =
-            '<a href="/ai-seo" style="color:var(--primary);">Run tracking</a>';
+            '<a href="/ai-seo?tab=visibility" style="color:var(--primary);">Run tracking</a>';
     }
 }
 
@@ -252,7 +237,9 @@ async function loadActionQueue() {
 
         const totals = data.total_by_source || {};
         const totalCount = Object.values(totals).reduce((a, b) => a + b, 0);
-        document.getElementById("queue-note").textContent = totalCount ? `${totalCount} open items` : "";
+        document.getElementById("queue-note").textContent = data.items.length
+            ? `top ${data.items.length} of ${totalCount.toLocaleString()} tracked opportunities`
+            : "";
 
         if (!data.items.length) {
             container.innerHTML = `<div style="padding:16px 0;color:var(--on-surface-secondary);font-size:13px;">
@@ -262,26 +249,88 @@ async function loadActionQueue() {
             return;
         }
 
+        // Work bands: concrete per-item fixes lead, aggregate reviews follow,
+        // content creation last. Quick wins expand by default.
+        const BANDS = [
+            { key: "quick", label: "Quick wins", verb: "Fix", sources: ["priority", "ctr"], open: true },
+            { key: "review", label: "Needs review", verb: "Review", sources: ["cannibalization", "technical", "competitor", "links"], open: false },
+            { key: "create", label: "Create content", verb: "Draft", sources: ["gaps"], open: false },
+        ];
         const sevBadge = { high: "badge-error", med: "badge-warning", low: "badge-info" };
-        let html = "";
-        for (const item of data.items) {
+        const row = (item, verb) => {
             const gain = item.est_clicks_gain
                 ? `<span style="font-size:11px;color:var(--success);white-space:nowrap;">+${item.est_clicks_gain} clicks/mo</span>`
                 : "";
-            html += `<div style="display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--outline);cursor:pointer;" onclick="window.location='${item.href}'">
+            const dismiss = item.action_key
+                ? `<button class="icon-btn" style="width:28px;height:28px;" title="Snooze 7 days" onclick="event.stopPropagation();dismissQueueItem('${escapeAttr(item.action_key)}', 7, this)"><span class="material-symbols-rounded" style="font-size:16px;">snooze</span></button>
+                   <button class="icon-btn" style="width:28px;height:28px;" title="Dismiss" onclick="event.stopPropagation();dismissQueueItem('${escapeAttr(item.action_key)}', null, this)"><span class="material-symbols-rounded" style="font-size:16px;">close</span></button>`
+                : "";
+            return `<div class="queue-row" style="display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--outline);cursor:pointer;" onclick="window.location='${item.href}'">
                 <span class="badge ${sevBadge[item.severity] || "badge-info"}" style="min-width:64px;text-align:center;">${QUEUE_SOURCE_LABELS[item.source] || item.source}</span>
                 <div style="flex:1;min-width:0;">
                     <div style="font-weight:600;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(item.title)}</div>
                     <div style="font-size:11px;color:var(--on-surface-secondary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(item.detail || "")}</div>
                 </div>
                 ${gain}
-                <a href="${item.href}" class="action-icon" title="Open" onclick="event.stopPropagation()"><span class="material-symbols-rounded" style="font-size:18px;">arrow_forward</span></a>
+                ${dismiss}
+                <a href="${item.href}" class="btn btn-secondary btn-sm" onclick="event.stopPropagation()">${verb}</a>
             </div>`;
+        };
+
+        let html = "";
+        const placed = new Set();
+        for (const band of BANDS) {
+            const items = data.items.filter((i) => band.sources.includes(i.source));
+            items.forEach((i) => placed.add(i));
+            if (!items.length) continue;
+            html += `<details ${band.open ? "open" : ""} style="margin:4px 0;">
+                <summary style="cursor:pointer;list-style:none;display:flex;align-items:center;gap:8px;padding:8px 0;font-weight:600;font-size:12.5px;color:var(--on-surface-secondary);">
+                    <span class="material-symbols-rounded" style="font-size:16px;">expand_more</span>${band.label}
+                    <span class="badge" style="background:var(--surface-dim);color:var(--on-surface);">${items.length}</span>
+                </summary>
+                ${items.map((i) => row(i, band.verb)).join("")}
+            </details>`;
         }
+        const rest = data.items.filter((i) => !placed.has(i));
+        if (rest.length) html += rest.map((i) => row(i, "Open")).join("");
         container.innerHTML = html;
         card.style.display = "";
     } catch {
         // Queue unavailable — card stays hidden
+    }
+}
+
+async function dismissQueueItem(actionKey, snoozeDays, btn) {
+    if (btn) btn.disabled = true;
+    try {
+        await apiRequest(`/api/dashboard/action-queue/dismiss?store_id=${dashStoreId}`, {
+            method: "POST",
+            body: JSON.stringify({ action_key: actionKey, snooze_days: snoozeDays }),
+        });
+        const row = btn && btn.closest(".queue-row");
+        if (row) row.remove();
+        showToast(snoozeDays ? `Snoozed for ${snoozeDays} days` : "Dismissed", "success");
+    } catch (err) {
+        showToast(`Failed: ${err.message}`, "error");
+        if (btn) btn.disabled = false;
+    }
+}
+
+async function loadSetupChecklist() {
+    try {
+        const data = await apiRequest(`/api/dashboard/setup-state?store_id=${dashStoreId || ""}`);
+        if (!data.steps || !data.steps.length || data.complete) return;
+        const html = data.steps
+            .map((s) => `<div style="display:flex;align-items:center;gap:10px;padding:6px 0;border-bottom:1px solid var(--outline);">
+                <span class="material-symbols-rounded" style="font-size:19px;color:${s.done ? "var(--success)" : "var(--on-surface-secondary)"};">${s.done ? "check_circle" : "radio_button_unchecked"}</span>
+                <span style="flex:1;font-size:13px;${s.done ? "text-decoration:line-through;color:var(--on-surface-secondary);" : ""}">${escapeHtml(s.label)}</span>
+                ${s.done ? "" : `<a href="${s.href}" class="btn btn-secondary btn-sm">Go</a>`}
+            </div>`)
+            .join("");
+        document.getElementById("dash-setup").innerHTML = html;
+        document.getElementById("setup-card").style.display = "";
+    } catch {
+        // Checklist unavailable — card stays hidden
     }
 }
 
@@ -307,6 +356,9 @@ async function loadCtrOpportunities() {
             </tr>`;
         }
         document.getElementById("dash-ctr-rows").innerHTML = html;
+        const totalGain = data.items.reduce((a, c) => a + (c.est_clicks_gain || 0), 0);
+        document.getElementById("ctr-summary-note").textContent =
+            `${data.items.length} page${data.items.length !== 1 ? "s" : ""} could gain ~${totalGain} clicks/mo — expand for details`;
         document.getElementById("ctr-card").style.display = "";
     } catch {
         // No CTR data — card stays hidden
@@ -402,7 +454,7 @@ const FRESHNESS_LABELS = {
     sync: ["Store sync", "/stores"],
     gsc_pull: ["GSC pull", "/gsc"],
     semrush_import: ["Semrush", "/semrush"],
-    visibility_run: ["AI visibility", "/ai-seo"],
+    visibility_run: ["AI visibility", "/ai-seo?tab=visibility"],
     competitor_check: ["Competitors", "/competitors"],
 };
 
@@ -455,9 +507,9 @@ async function loadOps() {
             bar("Meta titles", c.meta_title_pct, "/seo") +
             bar("Meta descriptions", c.meta_desc_pct, "/seo") +
             bar("Image alt text", c.alt_text_pct, "/seo") +
-            bar("Schema pushed", c.schema_pushed_pct, "/ai-seo") +
+            bar("Schema pushed", c.schema_pushed_pct, "/ai-seo?tab=score") +
             bar("Keywords mapped", c.keyword_mapped_pct, "/keyword-strategy") +
-            `<div style="padding:5px 0;font-size:12px;display:flex;justify-content:space-between;"><a href="/ai-seo" style="color:inherit;">AEO assets</a><span>${aeo.published ?? 0}/${aeo.total ?? 0} published</span></div>`;
+            `<div style="padding:5px 0;font-size:12px;display:flex;justify-content:space-between;"><a href="/ai-seo?tab=assets" style="color:inherit;">AEO assets</a><span>${aeo.published ?? 0}/${aeo.total ?? 0} published</span></div>`;
 
         // AI operations
         const a = data.ai_ops || {};
@@ -524,12 +576,11 @@ async function loadChanges() {
         document.getElementById("changes-note").textContent =
             data.since ? `since ${formatRelativeTime(data.since)}` : "";
 
-        let html = "";
-        for (const item of data.items) {
+        const rowHtml = (item) => {
             const [icon, color, label] = CHANGE_EVENT_META[item.event_type] || ["info", "var(--on-surface-secondary)", item.event_type];
             const detail = changeDetail(item);
             const subject = (item.subject || "").replace(/^https?:\/\/[^/]+/, "");
-            html += `<div style="display:flex;align-items:center;gap:10px;padding:7px 0;border-bottom:1px solid var(--outline);">
+            return `<div style="display:flex;align-items:center;gap:10px;padding:7px 0;border-bottom:1px solid var(--outline);">
                 <span class="material-symbols-rounded" style="font-size:18px;color:${color};">${icon}</span>
                 <div style="flex:1;min-width:0;">
                     <div style="font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;"><strong>${label}:</strong> ${escapeHtml(subject)}</div>
@@ -537,6 +588,14 @@ async function loadChanges() {
                 </div>
                 <span style="font-size:11px;color:var(--on-surface-secondary);white-space:nowrap;">${formatRelativeTime(item.created_at)}</span>
             </div>`;
+        };
+        // Top 5 visible; the full feed stays one click away behind the expander.
+        let html = data.items.slice(0, 5).map(rowHtml).join("");
+        if (data.items.length > 5) {
+            html += `<details style="margin-top:4px;">
+                <summary style="cursor:pointer;list-style:none;font-size:12px;color:var(--primary);padding:6px 0;">View all ${data.items.length} events</summary>
+                ${data.items.slice(5).map(rowHtml).join("")}
+            </details>`;
         }
         document.getElementById("dash-changes").innerHTML = html;
         document.getElementById("changes-card").style.display = "";

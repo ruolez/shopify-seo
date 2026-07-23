@@ -1,26 +1,10 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Home Page — SEO Platform</title>
-    <link rel="stylesheet" href="/static/css/style.css">
-</head>
-<body>
-    <div class="app-layout">
-        {% include '_sidebar.html' %}
-        <div class="main-content">
-            <div class="topbar">
-                <div class="topbar-left">
-                    <button id="sidebar-toggle" class="icon-btn"><span class="material-symbols-rounded">menu</span></button>
-                    <h2>Home Page</h2>
-                </div>
-                <div class="topbar-right">
-                    <button id="theme-toggle" class="icon-btn"><span class="material-symbols-rounded">dark_mode</span></button>
-                </div>
-            </div>
-            <div class="page-content">
+{% extends "base.html" %}
 
+{% block title %}Home Page{% endblock %}
+
+{% block page_title %}Home Page{% endblock %}
+
+{% block content %}
                 <div class="card" style="margin-bottom: 16px;">
                     <div style="display: flex; align-items: center; gap: 12px; flex-wrap: wrap;">
                         <select id="hp-store-select" class="form-control" style="max-width: 300px;"></select>
@@ -100,10 +84,10 @@
                 </div>
 
                 <div id="hp-empty" class="empty-state">Select a store to build its home page carousel.</div>
-            </div>
-        </div>
-    </div>
+            
+{% endblock %}
 
+{% block modals %}
     <!-- Image picker modal -->
     <div id="hp-image-modal" class="modal-overlay">
         <div class="modal" style="max-width: 720px;">
@@ -116,8 +100,8 @@
             </div>
         </div>
     </div>
+{% endblock %}
 
-    <script src="/static/js/app.js"></script>
+{% block scripts %}
     <script src="/static/js/homepage.js"></script>
-</body>
-</html>
+{% endblock %}

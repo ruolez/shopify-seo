@@ -1,54 +1,57 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AI SEO — SEO Platform</title>
-    <link rel="stylesheet" href="/static/css/style.css">
-</head>
-<body>
-    <div class="app-layout">
-        {% include '_sidebar.html' %}
-        <div class="main-content">
-            <div class="topbar">
-                <div class="topbar-left">
-                    <button id="sidebar-toggle" class="icon-btn"><span class="material-symbols-rounded">menu</span></button>
-                    <h2>AI SEO <span style="font-size:13px;color:var(--on-surface-secondary);font-weight:400;">GEO · AEO · LLMO</span></h2>
-                </div>
-                <div class="topbar-right">
-                    <button id="theme-toggle" class="icon-btn"><span class="material-symbols-rounded">dark_mode</span></button>
-                </div>
-            </div>
-            <div class="page-content">
-                <div class="toolbar-row" style="margin-bottom:12px;">
+{% extends "base.html" %}
+
+{% block title %}AI SEO{% endblock %}
+
+{% block page_title %}AI SEO <span style="font-size:13px;color:var(--on-surface-secondary);font-weight:400;">GEO · AEO · LLMO</span>{% endblock %}
+
+{% block content %}
+                <div class="toolbar-row" style="margin-bottom:12px;gap:12px;">
                     <select id="store-select" class="form-control" style="max-width:240px;"></select>
+                    <button class="btn btn-secondary btn-sm" style="margin-left:auto;" title="Running and recent AI Search jobs" onclick="TasksPanel.open({ page: '/ai-seo' })">
+                        <span class="material-symbols-rounded">checklist</span> View activity
+                    </button>
                 </div>
                 <div class="tabs">
-                    <button class="tab active" data-tab="score" onclick="switchTab('score')">AI Readiness</button>
-                    <button class="tab" data-tab="feed" onclick="switchTab('feed')">Feed</button>
-                    <button class="tab" data-tab="offsite" onclick="switchTab('offsite')">Off-site</button>
-                    <button class="tab" data-tab="visibility" onclick="switchTab('visibility')">Visibility</button>
-                    <button class="tab" data-tab="assets" onclick="switchTab('assets')">AEO Assets</button>
-                    <button class="tab" data-tab="activity" onclick="switchTab('activity')">Activity</button>
+                    <button class="tab active" data-tab="overview">Overview</button>
+                    <button class="tab" data-tab="score">AI Readiness</button>
+                    <button class="tab" data-tab="feed">Feed</button>
+                    <button class="tab" data-tab="offsite">Off-site</button>
+                    <button class="tab" data-tab="visibility">Visibility</button>
+                    <button class="tab" data-tab="assets">AEO Assets</button>
                 </div>
 
-                <div class="tab-panel active" id="tab-score">
-                    <div class="toolbar-row" style="gap:12px;flex-wrap:wrap;align-items:center;margin-bottom:16px;">
-                        <div class="status-filter-bar">
-                            <button class="filter-chip active" data-type="product" onclick="setScanType('product')">Products</button>
-                            <button class="filter-chip" data-type="collection" onclick="setScanType('collection')">Collections</button>
+                <div class="tab-panel active" id="tab-overview">
+                    <div class="card" style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-bottom:16px;">
+                        <div style="flex:1;min-width:220px;">
+                            <h3 style="margin:0 0 4px;">AI Search health</h3>
+                            <div id="ov-freshness" style="font-size:12px;color:var(--on-surface-secondary);">Loading…</div>
                         </div>
-                        <button id="scan-btn" class="btn btn-primary" style="margin-left:auto;" onclick="runScan()">
-                            <span class="material-symbols-rounded">radar</span> Scan AI readiness
+                        <button id="run-all-btn" class="btn btn-primary" onclick="runAllAudits(this)">
+                            <span class="material-symbols-rounded">play_circle</span> Run all audits
                         </button>
                     </div>
+                    <div class="stats-grid" id="ov-pillars" style="margin-bottom:16px;"></div>
+                    <div class="card" id="ov-actions-card" style="display:none;">
+                        <div class="card-header"><h3><span class="material-symbols-rounded" style="vertical-align:middle;font-size:20px;">checklist</span> What to do next</h3></div>
+                        <div id="ov-actions" style="padding:0 16px 12px;"></div>
+                    </div>
+                    <div id="ov-empty"></div>
+                </div>
 
+                <div class="tab-panel" id="tab-score">
                     <div id="overview-cards" class="stats-grid" style="margin-bottom:16px;"></div>
 
                     <div id="items-container">
                         <div class="empty-state">
                             <span class="material-symbols-rounded">smart_toy</span>
                             <p>Select a store and run a scan to score AI-answer-engine readiness.</p>
+                            <div class="status-filter-bar" style="justify-content:center;margin:12px 0;">
+                                <button class="filter-chip active" data-type="product" onclick="setScanType('product')">Products</button>
+                                <button class="filter-chip" data-type="collection" onclick="setScanType('collection')">Collections</button>
+                            </div>
+                            <button id="scan-btn" class="btn btn-primary" onclick="runScan()">
+                                <span class="material-symbols-rounded">radar</span> Scan AI readiness
+                            </button>
                         </div>
                     </div>
                 </div>
@@ -71,13 +74,13 @@
                     </div>
                     <div id="feed-overview-cards" class="stats-grid" style="margin-bottom:16px;"></div>
                     <div id="feed-coverage" style="margin-bottom:16px;"></div>
-                    <div id="feed-checklist" style="margin-bottom:16px;"></div>
-                    <div id="feed-items-container">
+                    <div id="feed-items-container" style="margin-bottom:16px;">
                         <div class="empty-state">
                             <span class="material-symbols-rounded">inventory_2</span>
                             <p>Run the feed audit to score every product's agentic-commerce readiness.</p>
                         </div>
                     </div>
+                    <div id="feed-checklist"></div>
                 </div>
 
                 <div class="tab-panel" id="tab-offsite">
@@ -86,10 +89,19 @@
                             <div style="flex:1;min-width:220px;">
                                 <h3 style="margin:0 0 4px;">Off-site visibility</h3>
                                 <p style="font-size:12px;color:var(--on-surface-secondary);margin:0;">
-                                    AI engines cross-verify brands against Reddit, review platforms and "best of" roundups
-                                    before recommending them — a store with zero third-party mentions gets skipped. This audits
-                                    where you appear across the open web (via Brave Search) and what to fix.
+                                    Where you appear across Reddit, review platforms and "best of" roundups — the third-party
+                                    signals AI engines check before recommending a store.
                                 </p>
+                                <details style="margin-top:4px;">
+                                    <summary style="cursor:pointer;font-size:11.5px;color:var(--primary);">About this audit</summary>
+                                    <p style="font-size:12px;color:var(--on-surface-secondary);margin:6px 0 0;">
+                                        AI engines cross-verify brands against independent sources before recommending them —
+                                        a store with zero third-party mentions gets skipped no matter how good its own pages are.
+                                        The audit probes the open web via Brave Search (brand reviews, Reddit, review platforms,
+                                        category roundups) and fetches the top roundup pages to check whether you're actually
+                                        listed in them.
+                                    </p>
+                                </details>
                             </div>
                             <button id="offsite-run-btn" class="btn btn-primary" onclick="runOffsiteAudit()">
                                 <span class="material-symbols-rounded">public</span> Run off-site audit
@@ -122,46 +134,62 @@
                         <div id="visibility-metrics" class="stats-grid" style="margin-top:16px;"></div>
                     </div>
 
-                    <!-- Per-model scoreboard: who knows you, who names you, who cites you -->
-                    <div id="models-panel" style="margin-bottom:16px;"></div>
-                    <!-- Us vs. them: where your share of voice is going -->
-                    <div id="competitors-panel" style="margin-bottom:16px;"></div>
-                    <!-- Product brands the AI mentions (informational) -->
-                    <div id="brands-panel" style="margin-bottom:16px;"></div>
-                    <!-- How to close the gap -->
-                    <div id="gap-panel" style="margin-bottom:16px;"></div>
-                    <!-- Per-question breakdown of what each model answered -->
-                    <div id="breakdown-panel" style="margin-bottom:12px;"></div>
-                    <!-- Excluded brands manager (undo) -->
-                    <div id="excluded-panel" style="margin-bottom:12px;"></div>
+                    <!-- Sub-section pills: one zone visible at a time (synced to &sub=) -->
+                    <div class="status-filter-bar" id="vis-pills" style="margin-bottom:14px;display:none;">
+                        <button class="filter-chip active" data-sub="answers" onclick="switchVisSub('answers')">Answers <span class="vis-pill-count" data-count="answers"></span></button>
+                        <button class="filter-chip" data-sub="competitors" onclick="switchVisSub('competitors')">Competitors <span class="vis-pill-count" data-count="competitors"></span></button>
+                        <button class="filter-chip" data-sub="actions" onclick="switchVisSub('actions')">Actions</button>
+                        <button class="filter-chip" data-sub="settings" onclick="switchVisSub('settings')">Settings</button>
+                    </div>
 
-                    <!-- Secondary controls, collapsed to keep the insights above the fold -->
-                    <details class="card" style="padding:0;margin-bottom:12px;">
-                        <summary style="padding:14px 16px;cursor:pointer;list-style:none;display:flex;align-items:center;gap:8px;">
-                            <span class="material-symbols-rounded" style="color:var(--on-surface-secondary);">forum</span>
-                            <b style="flex:1;">Prompt set</b>
-                            <span style="font-size:12px;color:var(--on-surface-secondary);">the buyer questions we probe</span>
-                        </summary>
-                        <div style="padding:0 16px 16px;">
-                            <div class="toolbar-row" style="margin-bottom:8px;">
-                                <button class="btn btn-secondary btn-sm" onclick="generatePrompts()">
-                                    <span class="material-symbols-rounded">auto_awesome</span> Auto-generate
-                                </button>
+                    <div class="vis-sub" id="vis-sub-answers">
+                        <!-- Per-model scoreboard: who knows you, who names you, who cites you -->
+                        <div id="models-panel" style="margin-bottom:16px;"></div>
+                        <!-- Per-question breakdown of what each model answered -->
+                        <div id="breakdown-panel" style="margin-bottom:12px;"></div>
+                    </div>
+
+                    <div class="vis-sub" id="vis-sub-competitors" style="display:none;">
+                        <!-- Us vs. them: where your share of voice is going -->
+                        <div id="competitors-panel" style="margin-bottom:16px;"></div>
+                        <!-- Product brands the AI mentions (informational) -->
+                        <div id="brands-panel" style="margin-bottom:16px;"></div>
+                    </div>
+
+                    <div class="vis-sub" id="vis-sub-actions" style="display:none;">
+                        <!-- How to close the gap -->
+                        <div id="gap-panel" style="margin-bottom:16px;"></div>
+                    </div>
+
+                    <div class="vis-sub" id="vis-sub-settings" style="display:none;">
+                        <details class="card" style="padding:0;margin-bottom:12px;" open>
+                            <summary style="padding:14px 16px;cursor:pointer;list-style:none;display:flex;align-items:center;gap:8px;">
+                                <span class="material-symbols-rounded" style="color:var(--on-surface-secondary);">forum</span>
+                                <b style="flex:1;">Prompt set</b>
+                                <span style="font-size:12px;color:var(--on-surface-secondary);">the buyer questions we probe</span>
+                            </summary>
+                            <div style="padding:0 16px 16px;">
+                                <div class="toolbar-row" style="margin-bottom:8px;">
+                                    <button class="btn btn-secondary btn-sm" onclick="generatePrompts()">
+                                        <span class="material-symbols-rounded">auto_awesome</span> Auto-generate
+                                    </button>
+                                </div>
+                                <div id="prompts-container"></div>
                             </div>
-                            <div id="prompts-container"></div>
-                        </div>
-                    </details>
-
-                    <details class="card" style="padding:0;">
-                        <summary style="padding:14px 16px;cursor:pointer;list-style:none;display:flex;align-items:center;gap:8px;">
-                            <span class="material-symbols-rounded" style="color:var(--on-surface-secondary);">history</span>
-                            <b style="flex:1;">Run history</b>
-                            <span style="font-size:12px;color:var(--on-surface-secondary);">each row is one full probe of all prompts</span>
-                        </summary>
-                        <div style="padding:0 16px 16px;">
-                            <div id="runs-container"></div>
-                        </div>
-                    </details>
+                        </details>
+                        <!-- Excluded brands manager (undo) -->
+                        <div id="excluded-panel" style="margin-bottom:12px;"></div>
+                        <details class="card" style="padding:0;">
+                            <summary style="padding:14px 16px;cursor:pointer;list-style:none;display:flex;align-items:center;gap:8px;">
+                                <span class="material-symbols-rounded" style="color:var(--on-surface-secondary);">history</span>
+                                <b style="flex:1;">Run history</b>
+                                <span style="font-size:12px;color:var(--on-surface-secondary);">each row is one full probe of all prompts</span>
+                            </summary>
+                            <div style="padding:0 16px 16px;">
+                                <div id="runs-container"></div>
+                            </div>
+                        </details>
+                    </div>
                 </div>
 
                 <div class="tab-panel" id="tab-assets">
@@ -170,18 +198,6 @@
                         writes to your live theme / store.
                     </p>
                     <div id="aeo-container">
-                        <div class="loading-spinner" style="padding:24px 0;"><div class="spinner"></div><p>Loading…</p></div>
-                    </div>
-                </div>
-
-                <div class="tab-panel" id="tab-activity">
-                    <div class="toolbar-row" style="align-items:center;gap:12px;margin-bottom:12px;">
-                        <h3 style="margin:0;flex:1;">Batch jobs</h3>
-                        <button class="btn btn-secondary btn-sm" onclick="clearFinishedBatches()"><span class="material-symbols-rounded">delete_sweep</span> Clear finished</button>
-                        <button class="btn btn-secondary btn-sm" onclick="loadActivity()"><span class="material-symbols-rounded">refresh</span> Refresh</button>
-                    </div>
-                    <p style="font-size:12px;color:var(--on-surface-secondary);margin:0 0 12px;">Live progress and results of your optimization and fact-density runs — no terminal needed. Running jobs auto-refresh.</p>
-                    <div id="activity-container">
                         <div class="loading-spinner" style="padding:24px 0;"><div class="spinner"></div><p>Loading…</p></div>
                     </div>
                 </div>
@@ -195,10 +211,9 @@
                         <div class="modal-body" id="breakdown-content"></div>
                     </div>
                 </div>
-            </div>
-        </div>
-    </div>
-    <script src="/static/js/app.js"></script>
+            
+{% endblock %}
+
+{% block scripts %}
     <script src="/static/js/ai_seo.js"></script>
-</body>
-</html>
+{% endblock %}

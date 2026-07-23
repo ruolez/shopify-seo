@@ -1,25 +1,10 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Brand Collections — SEO Platform</title>
-    <link rel="stylesheet" href="/static/css/style.css">
-</head>
-<body>
-    <div class="app-layout">
-        {% include '_sidebar.html' %}
-        <div class="main-content">
-            <div class="topbar">
-                <div class="topbar-left">
-                    <button id="sidebar-toggle" class="icon-btn"><span class="material-symbols-rounded">menu</span></button>
-                    <h2>Brand Collections</h2>
-                </div>
-                <div class="topbar-right">
-                    <button id="theme-toggle" class="icon-btn"><span class="material-symbols-rounded">dark_mode</span></button>
-                </div>
-            </div>
-            <div class="page-content">
+{% extends "base.html" %}
+
+{% block title %}Brand Collections{% endblock %}
+
+{% block page_title %}Brand Collections{% endblock %}
+
+{% block content %}
                 <div id="brands-container">
                     <div class="loading-spinner"><div class="spinner"></div><p>Loading vendors...</p></div>
                 </div>
@@ -89,11 +74,9 @@
                         </div>
                     </div>
                 </div>
-            </div>
-        </div>
-    </div>
+            
+{% endblock %}
 
-    <script src="/static/js/app.js"></script>
+{% block scripts %}
     <script src="/static/js/brands.js"></script>
-</body>
-</html>
+{% endblock %}

@@ -4073,3 +4073,280 @@ thead th.row-num-col {
     color: var(--primary-hover);
     text-decoration: underline;
 }
+
+/* ═══════════════════════════════════════════════════════════════════════
+   Shared UI components (ui.js) — additive only
+   z-index ladder: topbar 50 < sidebar 100 < drawer 160 < modal 200–340
+                   < toast 300 (legacy) < confirm 350
+   ═══════════════════════════════════════════════════════════════════════ */
+:root {
+    --z-topbar: 50;
+    --z-sidebar: 100;
+    --z-drawer: 160;
+    --z-modal: 200;
+    --z-modal-max: 340;
+    --z-toast: 300;
+    --z-confirm: 350;
+}
+
+/* Skeleton loading */
+.ui-skeleton {
+    background: linear-gradient(90deg, var(--surface-dim, rgba(0,0,0,0.06)) 25%, var(--outline) 50%, var(--surface-dim, rgba(0,0,0,0.06)) 75%);
+    background-size: 200% 100%;
+    animation: ui-shimmer 1.4s ease-in-out infinite;
+    border-radius: var(--radius-sm);
+}
+[data-theme="dark"] .ui-skeleton {
+    background: linear-gradient(90deg, rgba(255,255,255,0.05) 25%, rgba(255,255,255,0.10) 50%, rgba(255,255,255,0.05) 75%);
+    background-size: 200% 100%;
+}
+@keyframes ui-shimmer {
+    0% { background-position: 200% 0; }
+    100% { background-position: -200% 0; }
+}
+.ui-skeleton-table { display: flex; flex-direction: column; gap: 10px; padding: 8px 0; }
+.ui-skeleton-row { height: 40px; width: 100%; }
+.ui-skeleton-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; }
+.ui-skeleton-card { height: 110px; }
+.ui-skeleton-block { margin-bottom: 12px; }
+
+/* Right-side drawer (generic; TasksPanel keeps its own .tasks-panel styles) */
+.ui-drawer {
+    position: fixed;
+    top: 0;
+    right: 0;
+    height: 100vh;
+    background: var(--surface);
+    border-left: 1px solid var(--outline);
+    box-shadow: var(--shadow-xl);
+    z-index: var(--z-drawer);
+    transform: translateX(100%);
+    transition: transform 0.25s ease;
+    display: flex;
+    flex-direction: column;
+    max-width: 92vw;
+}
+.ui-drawer.open { transform: translateX(0); }
+.ui-drawer-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 14px 16px;
+    border-bottom: 1px solid var(--outline);
+    flex-shrink: 0;
+}
+.ui-drawer-body { flex: 1; overflow-y: auto; padding: 12px 16px; }
+
+/* Sidebar nav badges (Phase 1 paints these) */
+.nav-badge {
+    margin-left: auto;
+    font-size: 10.5px;
+    font-weight: 600;
+    line-height: 1;
+    padding: 3px 7px;
+    border-radius: 999px;
+    background: var(--primary-light);
+    color: var(--primary);
+    flex-shrink: 0;
+}
+.nav-badge.nav-badge-error { background: color-mix(in srgb, var(--error) 12%, transparent); color: var(--error); }
+.nav-badge:empty { display: none; }
+
+/* Nav badge sits flush right; chevron yields its auto margin when a badge shows */
+.nav-badge:not(:empty) + .nav-group-chevron { margin-left: 6px; }
+
+/* Global store selector (topbar) */
+.global-store-single {
+    font-size: 12.5px;
+    color: var(--on-surface-secondary);
+    text-decoration: none;
+    padding: 6px 10px;
+    border: 1px solid var(--outline);
+    border-radius: var(--radius-sm);
+    white-space: nowrap;
+}
+.global-store-single:hover { color: var(--primary); border-color: var(--primary); }
+#global-store-select select { width: auto; min-width: 150px; }
+
+/* Command palette (Cmd/Ctrl+K) */
+.cmdk-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.35);
+    backdrop-filter: blur(2px);
+    z-index: var(--z-modal-max);
+    display: none;
+    align-items: flex-start;
+    justify-content: center;
+    padding-top: 14vh;
+}
+.cmdk-overlay.active { display: flex; }
+.cmdk {
+    width: min(560px, 92vw);
+    background: var(--surface);
+    border: 1px solid var(--outline);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow-xl);
+    overflow: hidden;
+}
+.cmdk input {
+    width: 100%;
+    border: none;
+    outline: none;
+    background: transparent;
+    color: var(--on-surface);
+    font: inherit;
+    font-size: 15px;
+    padding: 16px 18px;
+    border-bottom: 1px solid var(--outline);
+}
+.cmdk-results { max-height: 46vh; overflow-y: auto; padding: 6px; }
+.cmdk-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 9px 12px;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    font-size: 13.5px;
+}
+.cmdk-item .material-symbols-rounded { font-size: 18px; color: var(--on-surface-secondary); }
+.cmdk-item.selected, .cmdk-item:hover { background: var(--primary-light); color: var(--primary); }
+.cmdk-item.selected .material-symbols-rounded, .cmdk-item:hover .material-symbols-rounded { color: var(--primary); }
+.cmdk-hint { font-size: 11px; color: var(--on-surface-secondary); margin-left: auto; }
+.cmdk-empty { padding: 22px; text-align: center; font-size: 13px; color: var(--on-surface-secondary); }
+
+/* Activity Center (tasks panel) tabs + filter chips */
+.tasks-panel-tabs {
+    display: flex;
+    gap: 4px;
+    padding: 8px 14px 0;
+    border-bottom: 1px solid var(--outline);
+}
+.tasks-mode-tab {
+    background: none;
+    border: none;
+    cursor: pointer;
+    font: inherit;
+    font-size: 12.5px;
+    font-weight: 600;
+    color: var(--on-surface-secondary);
+    padding: 6px 10px;
+    border-bottom: 2px solid transparent;
+    margin-bottom: -1px;
+}
+.tasks-mode-tab.active { color: var(--primary); border-bottom-color: var(--primary); }
+.tasks-panel-filters {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+    padding: 10px 14px 4px;
+}
+.tasks-filter-chip {
+    background: var(--surface-dim, rgba(0,0,0,0.04));
+    border: 1px solid var(--outline);
+    border-radius: 999px;
+    cursor: pointer;
+    font: inherit;
+    font-size: 11px;
+    font-weight: 500;
+    color: var(--on-surface-secondary);
+    padding: 3px 10px;
+}
+.tasks-filter-chip.active {
+    background: var(--primary-light);
+    border-color: var(--primary);
+    color: var(--primary);
+}
+
+/* Compact KPI strip on the action-first Home — orientation, not the lead */
+.kpi-strip { grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 14px; margin-bottom: 20px; }
+.kpi-strip .stat-card { padding: 12px 14px; }
+.kpi-strip .stat-icon { display: none; }
+.kpi-strip .stat-value { font-size: 22px; }
+.kpi-strip .stat-label { font-size: 11px; }
+.kpi-strip .stat-sub { font-size: 11px; }
+
+/* Content Calendar */
+.cal-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 6px; }
+.cal-cell {
+    min-height: 96px;
+    border: 1px solid var(--outline);
+    border-radius: var(--radius-sm);
+    padding: 6px;
+    font-size: 12px;
+    overflow: hidden;
+}
+.cal-cell-empty { border: none; }
+.cal-cell-today { border-color: var(--primary); box-shadow: 0 0 0 1px var(--primary); }
+.cal-cell-day { font-size: 11px; font-weight: 600; color: var(--on-surface-secondary); margin-bottom: 4px; }
+.cal-cell-today .cal-cell-day { color: var(--primary); }
+.cal-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+.cal-entry {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    padding: 2px 4px;
+    border-radius: 4px;
+    text-decoration: none;
+    color: var(--on-surface);
+    font-size: 11px;
+    line-height: 1.3;
+}
+.cal-entry:hover { background: var(--primary-light); }
+.cal-entry-kind { font-weight: 700; color: var(--on-surface-secondary); flex-shrink: 0; }
+.cal-entry-title { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* Topbar must never push its icon buttons off-screen: the title truncates,
+   the right side keeps its size and can wrap on narrow windows. */
+.topbar { flex-wrap: wrap; gap: 8px 12px; }
+.topbar-left { min-width: 0; }
+.topbar-left h2 { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.topbar-right { flex-shrink: 0; flex-wrap: wrap; }
+#global-store-select select, .global-store-single {
+    max-width: 170px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* Wide content (stat rows, steppers, tables) scrolls inside the page area
+   instead of stretching the document — the topbar always spans the viewport,
+   so its controls (store, ⌘K, theme) can never be pushed off-screen. */
+.main-content { min-width: 0; max-width: 100%; }
+.page-content { overflow-x: auto; }
+
+/* Bulk actions dropdown (AI Search readiness toolbar) */
+.bulk-menu { position: relative; }
+.bulk-menu summary { list-style: none; display: inline-flex; }
+.bulk-menu summary::-webkit-details-marker { display: none; }
+.bulk-menu-pop {
+    position: absolute;
+    top: calc(100% + 4px);
+    left: 0;
+    z-index: 60;
+    background: var(--surface);
+    border: 1px solid var(--outline);
+    border-radius: var(--radius-sm);
+    box-shadow: var(--shadow-lg);
+    padding: 4px;
+    min-width: 220px;
+}
+.bulk-menu-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    background: none;
+    border: none;
+    cursor: pointer;
+    font: inherit;
+    font-size: 13px;
+    color: var(--on-surface);
+    padding: 8px 10px;
+    border-radius: 6px;
+    text-align: left;
+}
+.bulk-menu-item:hover { background: var(--primary-light); color: var(--primary); }
+.bulk-menu-item .material-symbols-rounded { font-size: 17px; }

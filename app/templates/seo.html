@@ -1,33 +1,24 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>SEO — SEO Platform</title>
-    <link rel="stylesheet" href="/static/css/style.css">
-</head>
-<body>
-    <div class="app-layout">
-        {% include '_sidebar.html' %}
-        <div class="main-content">
-            <div class="topbar">
-                <div class="topbar-left">
-                    <button id="sidebar-toggle" class="icon-btn"><span class="material-symbols-rounded">menu</span></button>
-                    <h2>SEO Analysis</h2>
-                </div>
-                <div class="topbar-right">
-                    <button id="theme-toggle" class="icon-btn"><span class="material-symbols-rounded">dark_mode</span></button>
-                </div>
-            </div>
-            <div class="page-content">
+{% extends "base.html" %}
+
+{% block title %}SEO{% endblock %}
+
+{% block page_title %}SEO Analysis{% endblock %}
+
+{% block content %}
                 <div class="tabs">
-                    <button class="tab active" data-tab="products">Products</button>
+                    <button class="tab active" data-tab="priorities">Priorities</button>
+                    <button class="tab" data-tab="products">Products</button>
                     <button class="tab" data-tab="collections">Collections</button>
-                    <button class="tab" data-tab="priorities">Priorities</button>
                     <button class="tab" data-tab="schema">Schema Markup</button>
                 </div>
 
-                <div class="tab-panel active" id="tab-products">
+                <div class="tab-panel active" id="tab-priorities">
+                    <div id="priorities-container">
+                        <div class="loading-spinner"><div class="spinner"></div><p>Loading priorities...</p></div>
+                    </div>
+                </div>
+
+                <div class="tab-panel" id="tab-products">
                     <div id="products-container">
                         <div class="loading-spinner"><div class="spinner"></div><p>Loading products...</p></div>
                     </div>
@@ -36,12 +27,6 @@
                 <div class="tab-panel" id="tab-collections">
                     <div id="collections-container">
                         <div class="loading-spinner"><div class="spinner"></div><p>Loading collections...</p></div>
-                    </div>
-                </div>
-
-                <div class="tab-panel" id="tab-priorities">
-                    <div id="priorities-container">
-                        <div class="loading-spinner"><div class="spinner"></div><p>Loading priorities...</p></div>
                     </div>
                 </div>
 
@@ -146,11 +131,9 @@
                         </div>
                     </div>
                 </div>
-            </div>
-        </div>
-    </div>
+            
+{% endblock %}
 
-    <script src="/static/js/app.js"></script>
+{% block scripts %}
     <script src="/static/js/seo.js"></script>
-</body>
-</html>
+{% endblock %}

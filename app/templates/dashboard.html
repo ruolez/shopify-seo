@@ -1,32 +1,22 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Dashboard — SEO Platform</title>
-    <link rel="stylesheet" href="/static/css/style.css">
-</head>
-<body>
-    <div class="app-layout">
-        {% include '_sidebar.html' %}
-        <div class="main-content">
-            <div class="topbar">
-                <div class="topbar-left">
-                    <button id="sidebar-toggle" class="icon-btn"><span class="material-symbols-rounded">menu</span></button>
-                    <h2>Dashboard</h2>
-                </div>
-                <div class="topbar-right">
-                    <select id="store-switcher" class="form-control" style="display:none;width:auto;min-width:160px;"></select>
-                    <button id="theme-toggle" class="icon-btn"><span class="material-symbols-rounded">dark_mode</span></button>
-                </div>
-            </div>
-            <div class="page-content">
+{% extends "base.html" %}
+
+{% block title %}Dashboard{% endblock %}
+
+{% block page_title %}Home{% endblock %}
+
+{% block content %}
                 <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:16px;">
                     <div id="dash-store-line" style="display:none;font-size:13px;color:var(--on-surface-secondary);"></div>
                     <div id="dash-freshness" style="display:none;font-size:11px;color:var(--on-surface-secondary);gap:10px;flex-wrap:wrap;align-items:center;"></div>
                 </div>
 
-                <div class="stats-grid" id="kpi-grid">
+                <!-- Cold-start setup checklist: shows until every step is done -->
+                <div id="setup-card" class="card" style="display:none;margin-bottom:24px;">
+                    <div class="card-header"><h3><span class="material-symbols-rounded" style="vertical-align:middle;font-size:20px;">rocket_launch</span> Finish setting up</h3></div>
+                    <div id="dash-setup" style="padding:0 16px 12px;"></div>
+                </div>
+
+                <div class="stats-grid kpi-strip" id="kpi-grid">
                     <div class="stat-card">
                         <div class="stat-icon blue"><span class="material-symbols-rounded">ads_click</span></div>
                         <div class="stat-value" id="kpi-clicks">—</div>
@@ -68,38 +58,41 @@
                     </div>
                 </div>
 
-                <!-- 90-day search performance with optimization markers -->
-                <div id="trend-card" class="card" style="display:none;margin-bottom:24px;">
-                    <div class="card-header" style="display:flex;align-items:center;justify-content:space-between;">
-                        <h3>Search Performance <span id="trend-note" style="font-weight:400;font-size:12px;color:var(--on-surface-secondary);"></span></h3>
-                        <a href="/gsc" class="btn btn-secondary btn-sm">View Details</a>
-                    </div>
-                    <div style="height:260px;padding:0 8px 8px;"><canvas id="trend-chart"></canvas></div>
-                </div>
-
-                <!-- Since-you-were-here feed: anomalies, closures, activity -->
-                <div id="changes-card" class="card" style="display:none;margin-bottom:24px;">
-                    <div class="card-header" style="display:flex;align-items:center;justify-content:space-between;">
-                        <h3><span class="material-symbols-rounded" style="vertical-align:middle;font-size:20px;">notifications</span> Since You Were Here <span id="changes-note" style="font-weight:400;font-size:12px;color:var(--on-surface-secondary);"></span></h3>
-                    </div>
-                    <div id="dash-changes" style="padding:0 16px 12px;"></div>
-                </div>
-
-                <!-- Unified action queue: one prioritized to-do list across all engines -->
+                <!-- THE lead card: unified action queue, grouped into work bands -->
                 <div id="queue-card" class="card" style="display:none;margin-bottom:24px;">
                     <div class="card-header" style="display:flex;align-items:center;justify-content:space-between;">
-                        <h3><span class="material-symbols-rounded" style="vertical-align:middle;font-size:20px;">checklist</span> Action Queue <span id="queue-note" style="font-weight:400;font-size:12px;color:var(--on-surface-secondary);"></span></h3>
-                        <a href="/seo?tab=priorities" class="btn btn-secondary btn-sm">View All</a>
+                        <h3><span class="material-symbols-rounded" style="vertical-align:middle;font-size:20px;">checklist</span> What to do next <span id="queue-note" style="font-weight:400;font-size:12px;color:var(--on-surface-secondary);"></span></h3>
+                        <a href="/seo?tab=priorities" class="btn btn-primary btn-sm"><span class="material-symbols-rounded">play_arrow</span> Work through queue</a>
                     </div>
                     <div id="dash-queue" style="padding:0 16px 12px;"></div>
                 </div>
 
-                <!-- CTR opportunities: top-10 rankings underperforming the expected CTR curve -->
-                <div id="ctr-card" class="card" style="display:none;margin-bottom:24px;">
-                    <div class="card-header" style="display:flex;align-items:center;justify-content:space-between;">
-                        <h3><span class="material-symbols-rounded" style="vertical-align:middle;font-size:20px;">mouse</span> CTR Opportunities</h3>
-                        <a href="/gsc" class="btn btn-secondary btn-sm">Search Console</a>
+                <!-- Two-up: what changed + how it's trending -->
+                <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:24px;margin-bottom:24px;">
+                    <div id="changes-card" class="card" style="display:none;margin-bottom:0;">
+                        <div class="card-header" style="display:flex;align-items:center;justify-content:space-between;">
+                            <h3><span class="material-symbols-rounded" style="vertical-align:middle;font-size:20px;">notifications</span> Since You Were Here <span id="changes-note" style="font-weight:400;font-size:12px;color:var(--on-surface-secondary);"></span></h3>
+                        </div>
+                        <div id="dash-changes" style="padding:0 16px 12px;"></div>
                     </div>
+                    <div id="trend-card" class="card" style="display:none;margin-bottom:0;">
+                        <div class="card-header" style="display:flex;align-items:center;justify-content:space-between;">
+                            <h3>Search Performance <span id="trend-note" style="font-weight:400;font-size:12px;color:var(--on-surface-secondary);"></span></h3>
+                            <a href="/gsc" class="btn btn-secondary btn-sm">View Details</a>
+                        </div>
+                        <div style="height:220px;padding:0 8px 8px;"><canvas id="trend-chart"></canvas></div>
+                    </div>
+                </div>
+
+                <!-- CTR opportunities: collapsed by default — rows are already merged
+                     into the queue above; the full table stays one click away -->
+                <details id="ctr-card" class="card" style="display:none;margin-bottom:24px;padding:0;">
+                    <summary style="padding:16px 20px;cursor:pointer;list-style:none;display:flex;align-items:center;gap:8px;">
+                        <span class="material-symbols-rounded" style="font-size:20px;color:var(--on-surface-secondary);">mouse</span>
+                        <b>CTR Opportunities</b>
+                        <span id="ctr-summary-note" style="font-size:12px;color:var(--on-surface-secondary);flex:1;"></span>
+                        <a href="/gsc" class="btn btn-secondary btn-sm" onclick="event.stopPropagation()">Search Console</a>
+                    </summary>
                     <div style="padding:0 16px 12px;overflow-x:auto;">
                         <table style="width:100%;font-size:13px;border-collapse:collapse;">
                             <thead>
@@ -116,7 +109,7 @@
                             <tbody id="dash-ctr-rows"></tbody>
                         </table>
                     </div>
-                </div>
+                </details>
 
                 <!-- Operational cards: content pipeline, coverage, AI ops -->
                 <div id="ops-row" style="display:none;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:24px;margin-bottom:24px;">
@@ -165,44 +158,10 @@
                     </div>
                 </div>
 
-                <div class="card">
-                    <div class="card-header">
-                        <h3>Quick Actions</h3>
-                    </div>
-                    <div style="display: flex; gap: 12px; flex-wrap: wrap;">
-                        <a href="/seo" class="btn btn-secondary">
-                            <span class="material-symbols-rounded">search</span>
-                            SEO Analysis
-                        </a>
-                        <a href="/technical-seo" class="btn btn-secondary">
-                            <span class="material-symbols-rounded">build</span>
-                            Technical SEO
-                        </a>
-                        <a href="/ai-seo" class="btn btn-secondary">
-                            <span class="material-symbols-rounded">smart_toy</span>
-                            AI SEO
-                        </a>
-                        <a href="/gsc" class="btn btn-secondary">
-                            <span class="material-symbols-rounded">monitoring</span>
-                            Search Console
-                        </a>
-                        <a href="/stores" class="btn btn-secondary">
-                            <span class="material-symbols-rounded">sync</span>
-                            Sync Store
-                        </a>
-                        <a href="/settings" class="btn btn-secondary">
-                            <span class="material-symbols-rounded">settings</span>
-                            Settings
-                        </a>
-                    </div>
-                </div>
-            </div>
-        </div>
-    </div>
+{% endblock %}
 
+{% block scripts %}
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
-    <script src="/static/js/app.js"></script>
     <script src="/static/js/dash_charts.js"></script>
     <script src="/static/js/dashboard.js"></script>
-</body>
-</html>
+{% endblock %}

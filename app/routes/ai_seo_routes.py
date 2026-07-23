@@ -10,6 +10,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import re
 import threading
 from datetime import datetime, timezone
 
@@ -346,6 +347,12 @@ def start_scan():
 
     with db.get_cursor() as cur:
         cur.execute(
+            "SELECT 1 FROM ai_tasks WHERE store_id = %s AND task_type = 'ai_seo_scan' AND status IN ('pending','running')",
+            (store_id,),
+        )
+        if cur.fetchone():
+            return jsonify({"error": "An AI readiness scan is already running for this store"}), 409
+        cur.execute(
             "INSERT INTO ai_tasks (store_id, task_type, input) VALUES (%s, 'ai_seo_scan', %s) RETURNING id",
             (store_id, json.dumps({"type": resource_type})),
         )
@@ -370,6 +377,296 @@ def scan_status(task_id):
             "error": task["error"],
         }
     )
+
+
+_AEO_SETUP_KEYS = ["robots_txt", "site_schema", "indexnow_key", "llms_txt", "a11y"]
+_AEO_FOCUS = {"robots_txt": "robots", "site_schema": "site_schema", "indexnow_key": "indexnow"}
+
+
+def _section_pillars(store_id):
+    """Cached pillar summaries — pure DB, no live HTTP or AI calls."""
+    pillars = {}
+    with db.get_cursor() as cur:
+        cur.execute(
+            "SELECT ROUND(AVG(score)) AS avg, COUNT(*) AS n, MAX(created_at) AS last FROM ai_seo_scores WHERE store_id = %s",
+            (store_id,),
+        )
+        r = cur.fetchone()
+        pillars["readiness"] = {
+            "avg_score": int(r["avg"] or 0), "count": r["n"],
+            "last_run": r["last"].isoformat() if r["last"] else None,
+        }
+        cur.execute(
+            "SELECT ROUND(AVG(score)) AS avg, COUNT(*) AS n, MAX(created_at) AS last FROM feed_readiness_scores WHERE store_id = %s",
+            (store_id,),
+        )
+        r = cur.fetchone()
+        pillars["feed"] = {
+            "avg_score": int(r["avg"] or 0), "count": r["n"],
+            "last_run": r["last"].isoformat() if r["last"] else None,
+        }
+        cur.execute(
+            "SELECT scorecard, completed_at FROM offsite_runs WHERE store_id = %s AND status = 'completed' ORDER BY id DESC LIMIT 1",
+            (store_id,),
+        )
+        r = cur.fetchone()
+        pillars["offsite"] = {
+            "scorecard": (r["scorecard"] if r else None) or None,
+            "last_run": r["completed_at"].isoformat() if r and r["completed_at"] else None,
+        }
+        cur.execute(
+            """SELECT share_of_voice, summary, status, completed_at FROM ai_tracking_runs
+               WHERE store_id = %s AND status IN ('completed','budget_capped') ORDER BY id DESC LIMIT 1""",
+            (store_id,),
+        )
+        r = cur.fetchone()
+        summary = (r["summary"] if r else None) or {}
+        pillars["visibility"] = {
+            "share_of_voice": float(r["share_of_voice"]) if r and r["share_of_voice"] is not None else None,
+            "brand_hits": summary.get("brand_hits"),
+            "total_answers": summary.get("total_answers"),
+            "last_run": r["completed_at"].isoformat() if r and r["completed_at"] else None,
+            "last_status": r["status"] if r else None,
+        }
+        cur.execute("SELECT asset_type, status FROM aeo_assets WHERE store_id = %s", (store_id,))
+        statuses = {row["asset_type"]: row["status"] for row in cur.fetchall()}
+    bot_results, bot_checked = _cached_bot_check(store_id)
+    ok, tested = ai_seo_analyzer.summarize_bot_access(bot_results)
+    published = sum(1 for k in _AEO_SETUP_KEYS if statuses.get(k) == "published")
+    if tested and ok == tested:
+        published += 1
+    pillars["aeo"] = {
+        "published": published, "total": len(_AEO_SETUP_KEYS) + 1,
+        "statuses": statuses,
+        "bot_check": {"ok": ok, "tested": tested, "checked_at": bot_checked.isoformat() if bot_checked else None},
+    }
+    return pillars
+
+
+def _section_running(store_id):
+    with db.get_cursor() as cur:
+        cur.execute(
+            """SELECT
+                 EXISTS(SELECT 1 FROM ai_tasks WHERE store_id = %(s)s AND task_type = 'ai_seo_scan' AND status IN ('pending','running')) AS scan,
+                 EXISTS(SELECT 1 FROM ai_tasks WHERE store_id = %(s)s AND task_type = 'feed_readiness_scan' AND status IN ('pending','running')) AS feed,
+                 EXISTS(SELECT 1 FROM offsite_runs WHERE store_id = %(s)s AND status IN ('pending','running')) AS offsite,
+                 EXISTS(SELECT 1 FROM ai_tracking_runs WHERE store_id = %(s)s AND status IN ('pending','running')) AS tracking""",
+            {"s": store_id},
+        )
+        r = cur.fetchone()
+    return {"scan": r["scan"], "feed": r["feed"], "offsite": r["offsite"], "tracking": r["tracking"]}
+
+
+def _section_actions(store_id, pillars):
+    """The merged 'what to do next' list for the AI Search section — every source
+    is cached data; each block is fenced so one failure can't blank the list."""
+    high, med, low = [], [], []
+
+    def row(bucket, id_, pillar, priority, icon, title, detail, href=None, action=None):
+        bucket.append({
+            "id": id_, "pillar": pillar, "priority": priority, "icon": icon,
+            "title": title, "detail": detail, "href": href, "action": action,
+        })
+
+    try:  # 1. blocked AI crawlers (high)
+        bc = pillars["aeo"]["bot_check"]
+        if bc["tested"] and bc["ok"] < bc["tested"]:
+            n = bc["tested"] - bc["ok"]
+            row(high, "aeo:bot_access", "aeo", "high", "gpp_bad",
+                f"{n} AI crawler{'s are' if n != 1 else ' is'} being blocked",
+                "robots.txt may allow them, but the live fetch fails — answer engines can't read your pages.",
+                href="/ai-seo?tab=assets&focus=asset:bot_check")
+    except Exception as e:
+        logger.warning("overview actions: bot check block failed: %s", e)
+
+    try:  # 2. failed AI batches (high, direct retry)
+        with db.get_cursor() as cur:
+            cur.execute(
+                """SELECT id, kind, failed FROM bulk_tasks
+                   WHERE store_id = %s AND kind IN ('geo_optimize','fact_boost')
+                     AND status NOT IN ('pending','running') AND (status = 'failed' OR failed > 0)
+                     AND created_at > NOW() - INTERVAL '7 days'
+                   ORDER BY id DESC LIMIT 2""",
+                (store_id,),
+            )
+            for b in cur.fetchall():
+                label = "GEO optimization" if b["kind"] == "geo_optimize" else "fact-density"
+                row(high, f"jobs:batch:{b['id']}", "jobs", "high", "error",
+                    f"{b['failed'] or 'A'} failed item{'s' if (b['failed'] or 0) != 1 else ''} in a {label} batch",
+                    "Retry re-runs only the failed items.",
+                    action={"label": "Retry", "endpoint": f"/api/ai-seo/batches/{b['id']}/retry", "method": "POST", "body": {}})
+    except Exception as e:
+        logger.warning("overview actions: failed batches block failed: %s", e)
+
+    review_covered = None
+    try:  # 3+7. feed coverage: review signals (high) + weak components (med)
+        if pillars["feed"]["count"]:
+            with db.get_cursor() as cur:
+                comps = {}
+                for c in ("review_signals", "gtin", "images", "product_type", "brand", "description"):
+                    cur.execute(
+                        f"""SELECT ROUND(AVG((breakdown->'{c}'->>'score')::numeric)) AS avg,
+                                   COUNT(*) FILTER (WHERE (breakdown->'{c}'->>'score')::int = 100) AS full_count
+                            FROM feed_readiness_scores WHERE store_id = %s""",
+                        (store_id,),
+                    )
+                    comps[c] = cur.fetchone()
+            review_covered = int(comps["review_signals"]["full_count"] or 0)
+            if review_covered == 0:
+                row(high, "feed:reviews", "feed", "high", "reviews",
+                    "No review data on any product",
+                    "AI shopping ranks reviewed products higher — install a review app that writes aggregateRating.",
+                    href="/ai-seo?tab=feed&focus=eligibility")
+            from app.services.feed_readiness_analyzer import UNSYNCED_SIGNALS  # noqa: F401 (import proximity)
+            weak = [(c, int(v["avg"] or 0)) for c, v in comps.items()
+                    if c != "review_signals" and v["avg"] is not None and int(v["avg"]) < 50][:2]
+            for c, avg in weak:
+                row(med, f"feed:component:{c}", "feed", "medium", "inventory_2",
+                    f"Weak feed data: {c.replace('_', ' ')} averages {avg}/100",
+                    "Feed completeness drives AI shopping ranking.",
+                    href="/ai-seo?tab=feed")
+    except Exception as e:
+        logger.warning("overview actions: feed block failed: %s", e)
+
+    try:  # 4. off-site high-priority actions (high, verbatim)
+        with db.get_cursor() as cur:
+            cur.execute(
+                "SELECT actions FROM offsite_runs WHERE store_id = %s AND status = 'completed' ORDER BY id DESC LIMIT 1",
+                (store_id,),
+            )
+            r = cur.fetchone()
+        for i, a in enumerate([a for a in ((r["actions"] if r else None) or []) if a.get("priority") == "high"][:3]):
+            row(high, f"offsite:action:{i}", "offsite", "high", "public",
+                a.get("title") or "Off-site gap",
+                a.get("why") or a.get("detail") or "",
+                href="/ai-seo?tab=offsite&focus=actions")
+    except Exception as e:
+        logger.warning("overview actions: offsite block failed: %s", e)
+
+    try:  # 5. zero visibility (high)
+        v = pillars["visibility"]
+        if (v["total_answers"] or 0) > 0 and (v["brand_hits"] or 0) == 0:
+            row(high, "visibility:zero", "visibility", "high", "visibility_off",
+                "AI never recommends your store",
+                f"0 of {v['total_answers']} buyer answers named you — the gap analysis shows what to change.",
+                href="/ai-seo?tab=visibility&sub=actions")
+    except Exception as e:
+        logger.warning("overview actions: zero-visibility block failed: %s", e)
+
+    try:  # 6. worst readiness items (med)
+        with db.get_cursor() as cur:
+            cur.execute(
+                """SELECT s.resource_type, s.resource_id, s.score, s.breakdown,
+                          COALESCE(p.title, c.title) AS title
+                   FROM ai_seo_scores s
+                   LEFT JOIN synced_products p ON s.resource_type = 'product' AND p.id = s.resource_id
+                   LEFT JOIN synced_collections c ON s.resource_type = 'collection' AND c.id = s.resource_id
+                   WHERE s.store_id = %s AND s.score < 60
+                   ORDER BY s.score ASC LIMIT 4""",
+                (store_id,),
+            )
+            worst = cur.fetchall()
+            cur.execute(
+                "SELECT COUNT(*) AS n FROM ai_seo_scores WHERE store_id = %s AND score < 60", (store_id,),
+            )
+            below = cur.fetchone()["n"]
+        for it in worst[:3]:
+            weakest = _weak_signals(it["breakdown"], 1)
+            row(med, f"readiness:{it['resource_type']}:{it['resource_id']}", "readiness", "medium", "auto_fix_high",
+                f"Optimize “{(it['title'] or 'Untitled')[:60]}” — scores {it['score']}",
+                weakest[0] if weakest else "Lowest AI-readiness score in your catalog.",
+                href=f"/ai-seo?tab=score&focus=item:{it['resource_type']}:{it['resource_id']}&action=optimize")
+        if below > 3:
+            row(med, "readiness:more", "readiness", "medium", "checklist",
+                f"{below - 3} more items score below 60",
+                "Work through them from the AI Readiness tab (bulk optimize supported).",
+                href="/ai-seo?tab=score")
+    except Exception as e:
+        logger.warning("overview actions: readiness block failed: %s", e)
+
+    try:  # 8. gap-analysis recommendations (med) + content ideas (low)
+        with db.get_cursor() as cur:
+            cur.execute(
+                """SELECT gap_analysis FROM ai_tracking_runs
+                   WHERE store_id = %s AND gap_analysis IS NOT NULL ORDER BY id DESC LIMIT 1""",
+                (store_id,),
+            )
+            r = cur.fetchone()
+        gap = (r["gap_analysis"] if r else None) or {}
+        if isinstance(gap, str):
+            gap = json.loads(gap)
+        for i, imp in enumerate([p for p in gap.get("page_improvements", []) if p.get("priority") == "high"][:2]):
+            row(med, f"visibility:gap:{i}", "visibility", "medium", "trending_up",
+                imp.get("title") or "Close a competitive gap",
+                imp.get("why") or "", href="/ai-seo?tab=visibility&sub=actions")
+        for i, idea in enumerate(gap.get("content_ideas", [])[:2]):
+            row(low, f"visibility:idea:{i}", "visibility", "low", "post_add",
+                f"Content idea: {idea.get('title') or 'buyer guide'}",
+                (idea.get("target_query") and f"Targets “{idea['target_query']}”") or idea.get("why") or "",
+                href="/ai-seo?tab=visibility&sub=actions")
+    except Exception as e:
+        logger.warning("overview actions: gap block failed: %s", e)
+
+    try:  # 9. unpublished AEO assets (med) — importance order
+        statuses = pillars["aeo"]["statuses"]
+        names = {"robots_txt": "robots.txt AI crawler rules", "site_schema": "site-wide Organization schema",
+                 "indexnow_key": "IndexNow instant indexing"}
+        for key in ("robots_txt", "site_schema", "indexnow_key"):
+            if statuses.get(key) != "published":
+                row(med, f"aeo:{key}", "aeo", "medium", "rocket_launch",
+                    f"Publish {names[key]}",
+                    "Preview-first — nothing goes live until you apply it.",
+                    href=f"/ai-seo?tab=assets&focus=asset:{_AEO_FOCUS[key]}")
+    except Exception as e:
+        logger.warning("overview actions: aeo block failed: %s", e)
+
+    try:  # 10. stale / never-run pillars (low, direct run)
+        from datetime import datetime, timezone, timedelta
+        cutoff = datetime.now(timezone.utc) - timedelta(days=30)
+        nudges = [
+            ("readiness", "AI readiness scan", "/api/ai-seo/scan", {"type": "all"}),
+            ("feed", "feed audit", "/api/ai-seo/feed/scan", {}),
+            ("offsite", "off-site audit", "/api/ai-seo/offsite/run", {}),
+            ("visibility", "visibility tracking", "/api/ai-seo/tracking/run", {}),
+        ]
+        for pillar_key, label, endpoint, extra in nudges:
+            last = pillars[pillar_key].get("last_run")
+            stale = last is None
+            if last:
+                from datetime import datetime as dt
+                parsed = dt.fromisoformat(last)
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=timezone.utc)
+                stale = parsed < cutoff
+            if stale:
+                age = "never run" if last is None else "last run over 30 days ago"
+                row(low, f"stale:{pillar_key}", pillar_key, "low", "schedule",
+                    f"Refresh: {label} {age}",
+                    "Data drives the pillar score and this action list.",
+                    action={"label": "Run now", "endpoint": endpoint, "method": "POST",
+                            "body": {"store_id": store_id, **extra}})
+    except Exception as e:
+        logger.warning("overview actions: stale block failed: %s", e)
+
+    actions = high + med + low
+    return actions[:12], max(0, len(actions) - 12)
+
+
+@ai_seo_bp.route("/api/ai-seo/overview/actions", methods=["GET"])
+def overview_actions():
+    """Overview tab payload: pillar summaries + running flags + the merged
+    'what to do next' list. Pure DB — safe to poll."""
+    store_id = request.args.get("store_id", type=int)
+    if not store_id:
+        return jsonify({"error": "store_id is required"}), 400
+    pillars = _section_pillars(store_id)
+    actions, more = _section_actions(store_id, pillars)
+    return jsonify({
+        "pillars": pillars,
+        "running": _section_running(store_id),
+        "actions": actions,
+        "more": more,
+    })
 
 
 @ai_seo_bp.route("/api/ai-seo/overview", methods=["GET"])
@@ -522,6 +819,12 @@ def feed_scan():
     if not store_id:
         return jsonify({"error": "store_id is required"}), 400
     with db.get_cursor() as cur:
+        cur.execute(
+            "SELECT 1 FROM ai_tasks WHERE store_id = %s AND task_type = 'feed_readiness_scan' AND status IN ('pending','running')",
+            (int(store_id),),
+        )
+        if cur.fetchone():
+            return jsonify({"error": "A feed audit is already running for this store"}), 409
         cur.execute(
             "INSERT INTO ai_tasks (store_id, task_type, input) VALUES (%s, 'feed_readiness_scan', '{}') RETURNING id",
             (int(store_id),),
@@ -1106,6 +1409,23 @@ def facts_apply():
     if not store or not item:
         return jsonify({"error": "Store or item not found"}), 404
     store, item = dict(store), dict(item)
+
+    # Same rule as the batch path: only apply an enrichment that actually raises
+    # fact density — otherwise it's churn (and a fake freshness bump) for nothing.
+    store_domain = _store_base_url(store)
+    before_fd = _fact_density_score(store_id, resource_type, resource_id, item, store_domain)
+    after_fd = _fact_density_score(
+        store_id, resource_type, resource_id, {**item, "description": description_html}, store_domain
+    )
+    if after_fd <= before_fd:
+        return jsonify({
+            "ok": False,
+            "no_change": True,
+            "reason": f"Fact density would not improve ({before_fd} → {after_fd}) — nothing was applied",
+            "before_fact_density": before_fd,
+            "after_fact_density": after_fd,
+        })
+
     client = ShopifyClient(store["domain"], decrypt_value(store["access_token_enc"]), store["api_version"])
     try:
         result = _push_and_rescore(store, resource_type, item, description_html, "", "", None, client)
@@ -1432,6 +1752,13 @@ def tracking_run():
     store_id = data.get("store_id")
     if not store_id:
         return jsonify({"error": "store_id is required"}), 400
+    with db.get_cursor() as cur:
+        cur.execute(
+            "SELECT 1 FROM ai_tracking_runs WHERE store_id = %s AND status IN ('pending','running')",
+            (int(store_id),),
+        )
+        if cur.fetchone():
+            return jsonify({"error": "A visibility tracking run is already in progress for this store"}), 409
     run_id = start_tracking_run(int(store_id), data.get("models"))
     return jsonify({"ok": True, "run_id": run_id}), 201
 
@@ -1636,6 +1963,116 @@ def tracking_gap_analysis(run_id):
         logger.exception("Gap analysis failed: %s", e)
         return jsonify({"error": str(e)}), 502
     return jsonify({"ok": True, "gap_analysis": analysis})
+
+
+@ai_seo_bp.route("/api/ai-seo/gap/send-to-blog", methods=["POST"])
+def gap_send_to_blog():
+    """Queue a gap-analysis content idea as a blog topic suggestion, entering the
+    existing topic-research → schedule pipeline (schedule it from the Blog section)."""
+    data = request.get_json(silent=True) or {}
+    store_id = data.get("store_id")
+    idea = data.get("idea") or {}
+    title = (idea.get("title") or "").strip()
+    if not store_id or not title:
+        return jsonify({"error": "store_id and idea.title are required"}), 400
+
+    target_query = (idea.get("target_query") or "").strip()
+    keywords = {"primary": target_query, "informational": []} if target_query else {}
+    rationale = (idea.get("why") or "").strip() or "From AI visibility gap analysis"
+    fmt = (idea.get("format") or "").strip()
+    if fmt:
+        rationale = f"[{fmt}] {rationale}"
+
+    with db.get_cursor() as cur:
+        cur.execute(
+            "SELECT id FROM topic_suggestions WHERE store_id = %s AND topic = %s AND status = 'suggested'",
+            (int(store_id), title[:500]),
+        )
+        existing = cur.fetchone()
+        if existing:
+            return jsonify({"ok": True, "suggestion_id": existing["id"], "already_queued": True})
+        cur.execute(
+            """INSERT INTO topic_suggestions
+                (store_id, topic, h1, keywords, search_intent, opportunity_type, rationale)
+            VALUES (%s, %s, %s, %s, 'informational', 'ai_visibility_gap', %s) RETURNING id""",
+            (int(store_id), title[:500], title[:500], json.dumps(keywords), rationale),
+        )
+        suggestion_id = cur.fetchone()["id"]
+
+    # Auto-research the idea so it arrives with the full topic-research shape
+    # (meta, keyword groups, overlap guard, link targets). Best-effort — the
+    # idea lands either way and a manual Research button covers failures.
+    enrich_task_id = None
+    try:
+        from app.routes.blog_routes import start_topic_enrich
+        enrich_task_id = start_topic_enrich(int(store_id), suggestion_id)
+    except Exception as e:
+        logger.warning("Auto-enrich failed to start for suggestion %s: %s", suggestion_id, e)
+    return jsonify({"ok": True, "suggestion_id": suggestion_id, "enrich_task_id": enrich_task_id})
+
+
+_QUESTION_STOPWORDS = {
+    "the", "and", "for", "with", "what", "which", "where", "when", "who", "why", "how",
+    "can", "does", "are", "should", "will", "best", "good", "top", "place", "places",
+    "buy", "get", "find", "shop", "store", "stores", "online", "website", "websites",
+    "site", "sites", "retailer", "retailers", "cheap", "cheapest", "near", "you",
+    "your", "recommend", "recommended", "from", "that", "this",
+}
+
+
+@ai_seo_bp.route("/api/ai-seo/tracking/question-targets", methods=["GET"])
+def tracking_question_targets():
+    """Map a losing buyer question to the store's own pages worth optimizing for it.
+
+    Keyword-matches the question against synced collection/product titles and joins
+    each match's AI-readiness score, weakest matches first — the concrete next
+    action after seeing a 0-mention question in the breakdown."""
+    store_id = request.args.get("store_id")
+    q = (request.args.get("q") or "").strip().lower()
+    if not store_id or not q:
+        return jsonify({"error": "store_id and q are required"}), 400
+    tokens = [
+        t for t in re.findall(r"[a-z0-9']+", q)
+        if len(t) > 2 and t not in _QUESTION_STOPWORDS
+    ]
+    if not tokens:
+        return jsonify({"targets": []})
+
+    out = []
+    with db.get_cursor() as cur:
+        for rtype, table in (("collection", "synced_collections"), ("product", "synced_products")):
+            cur.execute(
+                f"""SELECT t.id, t.title, s.score, s.breakdown
+                    FROM {table} t
+                    LEFT JOIN ai_seo_scores s
+                      ON s.store_id = t.store_id AND s.resource_type = %s AND s.resource_id = t.id
+                    WHERE t.store_id = %s""",
+                (rtype, int(store_id)),
+            )
+            for r in cur.fetchall():
+                title = (r["title"] or "").lower()
+                matched = [t for t in tokens if t in title or t.rstrip("s") in title]
+                if not matched:
+                    continue
+                weakest = []
+                if r["breakdown"]:
+                    ranked = sorted(
+                        ((k, d) for k, d in r["breakdown"].items() if k in COMPONENT_LABELS),
+                        key=lambda kv: kv[1].get("score", 0),
+                    )
+                    weakest = [COMPONENT_LABELS[k] for k, _ in ranked[:2]]
+                out.append({
+                    "type": rtype,
+                    "id": r["id"],
+                    "title": r["title"],
+                    "score": r["score"],
+                    "matched": len(matched),
+                    "weak_signals": weakest,
+                })
+    # Collections first (category questions map to category pages), then most
+    # tokens matched, then lowest AI score — the biggest optimization headroom.
+    out.sort(key=lambda x: (x["type"] != "collection", -x["matched"], x["score"] if x["score"] is not None else 101))
+    return jsonify({"targets": out[:6]})
 
 
 # ── Off-site visibility (third-party corroboration) ─────────────────────

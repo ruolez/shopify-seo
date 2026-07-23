@@ -1833,6 +1833,89 @@ def _collection_top_members(store_id, collection_shopify_id, limit=5):
     return [{k: v for k, v in m.items() if k != "_lo"} for m in members[:limit] if m["title"]]
 
 
+_ENRICH_STOPWORDS = {
+    "the", "and", "for", "with", "best", "guide", "test", "ultimate", "your",
+    "from", "that", "this", "buy", "online", "how", "what", "which", "where",
+}
+
+
+def _topic_enrich_context(store_id, topic, primary):
+    """Store context for enriching one topic suggestion: inventory profile,
+    coverage lists for the overlap guard, and REAL candidate link targets whose
+    names will resolve at schedule time."""
+    tokens = [
+        t for t in re.findall(r"[a-z0-9']+", f"{topic} {primary}".lower())
+        if len(t) > 2 and t not in _ENRICH_STOPWORDS
+    ]
+
+    def _match(rows):
+        out = []
+        for r in rows:
+            title = (r["title"] or "").lower()
+            hits = sum(1 for t in tokens if t in title or t.rstrip("s") in title)
+            if hits:
+                out.append((hits, r["title"]))
+        out.sort(key=lambda x: -x[0])
+        return [t for _, t in out[:12]]
+
+    with db.get_cursor() as cur:
+        cur.execute("SELECT name, domain FROM stores WHERE id = %s", (store_id,))
+        store = cur.fetchone() or {}
+        cur.execute(
+            "SELECT COALESCE(product_type, '(none)') AS product_type, COUNT(*) AS count "
+            "FROM synced_products WHERE store_id = %s AND status = 'ACTIVE' "
+            "GROUP BY product_type ORDER BY count DESC LIMIT 40",
+            (store_id,),
+        )
+        types = cur.fetchall()
+        cur.execute(
+            "SELECT COALESCE(vendor, '(none)') AS vendor, COUNT(*) AS count "
+            "FROM synced_products WHERE store_id = %s AND status = 'ACTIVE' "
+            "GROUP BY vendor ORDER BY count DESC LIMIT 25",
+            (store_id,),
+        )
+        vendors = cur.fetchall()
+        cur.execute("SELECT title FROM synced_collections WHERE store_id = %s", (store_id,))
+        coll_titles = _match(cur.fetchall())
+        cur.execute(
+            "SELECT title FROM synced_products WHERE store_id = %s AND status = 'ACTIVE'",
+            (store_id,),
+        )
+        prod_titles = _match(cur.fetchall())
+        cur.execute(
+            "SELECT title FROM synced_articles WHERE store_id = %s "
+            "ORDER BY published_at DESC NULLS LAST LIMIT 200",
+            (store_id,),
+        )
+        articles = [a["title"] for a in cur.fetchall()]
+        cur.execute(
+            "SELECT COALESCE(generated_article->>'title', topic) AS title "
+            "FROM article_wizard_sessions WHERE store_id = %s AND status != 'published' "
+            "AND topic IS NOT NULL AND topic != '' "
+            "AND updated_at > NOW() - INTERVAL '90 days' LIMIT 50",
+            (store_id,),
+        )
+        queued = [q["title"] for q in cur.fetchall()]
+        cur.execute(
+            "SELECT topic FROM topic_suggestions WHERE store_id = %s AND status = 'suggested' "
+            "ORDER BY created_at DESC LIMIT 50",
+            (store_id,),
+        )
+        others = [o["topic"] for o in cur.fetchall() if o["topic"] != topic]
+
+    return {
+        "store_name": store.get("name") or "",
+        "store_domain": store.get("domain") or "",
+        "profile": "\n".join(f"- {t['product_type']}: {t['count']} products" for t in types),
+        "vendors": ", ".join(f"{v['vendor']} ({v['count']})" for v in vendors),
+        "collections": "\n".join(f"- {t}" for t in coll_titles),
+        "products": "\n".join(f"- {t}" for t in prod_titles),
+        "articles": "\n".join(f"- {t}" for t in articles),
+        "queued": "\n".join(f"- {t}" for t in queued),
+        "other_suggestions": "\n".join(f"- {t}" for t in others),
+    }
+
+
 def _geo_research(item):
     """Best-effort Brave web research for real product facts. Rate-limit-safe and cached
     (serp_scraper.brave_search sleeps between calls and backs off on 429)."""
@@ -1854,6 +1937,53 @@ def _geo_research(item):
     except Exception as e:
         logger.warning("GEO Brave research failed: %s", e)
         return ""
+
+
+_QUOTED_SPAN_RE = re.compile(r"[\"“”]([^\"“”]{20,300})[\"“”]")
+
+
+def _quote_guard_norm(text):
+    text = re.sub(r"<[^>]+>", " ", text or "").lower()
+    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9 ]+", " ", text)).strip()
+
+
+def _strip_unverifiable_quotes(description_html, source_text):
+    """Remove quotes the model cannot have taken verbatim from its inputs.
+
+    GEO's quotation lever only works with real quotes — an invented attribution is
+    a brand-risk event at batch scale, so any blockquote or long quoted span not
+    traceable to the provided context (existing copy, store facts, web research)
+    is cut, blockquotes alone and inline quotes with their whole paragraph/list item.
+    Returns (clean_html, removed_snippets)."""
+    if not description_html:
+        return description_html, []
+    corpus = _quote_guard_norm(source_text)
+    removed = []
+
+    def _verified(quote):
+        q = _quote_guard_norm(quote)
+        return len(q) < 20 or q in corpus
+
+    def _drop_bad_blockquote(m):
+        if _verified(m.group(1)):
+            return m.group(0)
+        removed.append(re.sub(r"<[^>]+>", " ", m.group(1)).strip()[:120])
+        return ""
+
+    html = re.sub(
+        r"<blockquote[^>]*>(.*?)</blockquote>", _drop_bad_blockquote, description_html, flags=re.S | re.I
+    )
+
+    def _drop_bad_container(m):
+        for qm in _QUOTED_SPAN_RE.finditer(m.group(1)):
+            if not _verified(qm.group(1)):
+                removed.append(qm.group(1).strip()[:120])
+                return ""
+        return m.group(0)
+
+    for tag in ("p", "li"):
+        html = re.sub(rf"<{tag}[^>]*>(.*?)</{tag}>", _drop_bad_container, html, flags=re.S | re.I)
+    return html, removed
 
 
 def _generate_geo_content(client, config, item, entity_type, weak_signals=None):
@@ -1914,6 +2044,19 @@ def _generate_geo_content(client, config, item, entity_type, weak_signals=None):
                 "products or invent data):\n" + "\n".join(lines)
             )
 
+    # Deterministic per-item style variation so a batch run doesn't stamp one
+    # identical section template across the whole catalog (a scaled-content footprint).
+    style_variants = [
+        "Name the facts table 'Specifications' and the closing summary 'Expert Verdict'; place the summary last.",
+        "Name the facts table 'At a glance' and the closing summary 'Our verdict'; put the table right after the answer-first lead.",
+        "Name the facts table 'Key details' and the closing summary 'The bottom line'; phrase section headings as How/Why questions.",
+        "Name the facts table 'Quick facts' and the closing summary 'Who it's for'; phrase section headings as What/Which questions.",
+    ]
+    style_block = (
+        "\n\nSTYLE VARIATION (apply so optimized pages don't all share one template): "
+        + style_variants[int(item.get("id") or 0) % len(style_variants)]
+    )
+
     user_prompt = (
         f"{entity_type.capitalize()} title: {item.get('title') or ''}\n"
         f"Brand/Vendor: {item.get('vendor') or 'n/a'}\n"
@@ -1926,6 +2069,7 @@ def _generate_geo_content(client, config, item, entity_type, weak_signals=None):
         f"{research_block}"
         f"{preserve_block}"
         f"{weak_block}"
+        f"{style_block}"
     )
     resp = client.chat.completions.create(
         model=config["model"],
@@ -1950,6 +2094,13 @@ def _generate_geo_content(client, config, item, entity_type, weak_signals=None):
     description = _sanitize_description(
         data.get("optimized_description_html") or data.get("description_html") or ""
     )
+    # Quotes must be traceable verbatim to what the model was given — anything
+    # else is presumed fabricated and cut before the user ever previews it.
+    quote_sources = " ".join(
+        [item.get("description") or "", item.get("title") or "", research]
+        + [str(v) for v in facts.values()]
+    )
+    description, removed_quotes = _strip_unverifiable_quotes(description, quote_sources)
     meta_title = (data.get("meta_title") or "").strip()
     meta_description = (data.get("meta_description") or "").strip()
 
@@ -1969,6 +2120,7 @@ def _generate_geo_content(client, config, item, entity_type, weak_signals=None):
         "geo_edits_applied": data.get("geo_edits_applied") or [],
         "preserved_keywords": preserved_keywords,
         "dropped_keywords": dropped_keywords,
+        "removed_quotes": removed_quotes,
         "expert_verdict": (data.get("expert_verdict") or "").strip(),
         "product_facts": facts,
     }
@@ -5026,6 +5178,92 @@ def run_task(task_type, task_input, store_id=None):
             f"Perform an SEO audit of store ID {store_id}. "
             "Get the store summary and identify key areas for improvement."
         )
+
+    elif task_type == "topic_enrich":
+        # Enrich ONE pipeline-sent topic suggestion (from the AI Search gap
+        # analysis) into the full topic_discovery shape. Single grounded call —
+        # winnability was already validated upstream, so no tool loop.
+        suggestion_id = task_input.get("suggestion_id")
+        if not suggestion_id:
+            return {"error": "suggestion_id is required"}
+        with db.get_cursor() as cur:
+            cur.execute("SELECT * FROM topic_suggestions WHERE id = %s", (suggestion_id,))
+            sug = cur.fetchone()
+        if not sug:
+            return {"error": "Suggestion not found"}
+        te_store_id = sug["store_id"]
+        seed_kw = sug["keywords"] or {}
+        if isinstance(seed_kw, str):
+            try:
+                seed_kw = json.loads(seed_kw)
+            except (json.JSONDecodeError, ValueError):
+                seed_kw = {}
+        primary = seed_kw.get("primary") or ""
+
+        ctx = _topic_enrich_context(te_store_id, sug["topic"], primary)
+        user_prompt = (
+            f"STORE: {ctx['store_name']} ({ctx['store_domain']})\n\n"
+            f"TOPIC TO ENRICH: {sug['topic']}\n"
+            f"TARGET BUYER QUERY (primary keyword): {primary or '(derive from topic)'}\n"
+            f"GAP-ANALYSIS REASONING: {sug['rationale'] or '(none)'}\n"
+            f"SEED INTENT: {sug['search_intent'] or 'informational'}\n\n"
+            f"PRODUCT CATEGORY INVENTORY:\n{ctx['profile']}\n\n"
+            f"TOP VENDORS/BRANDS: {ctx['vendors']}\n\n"
+            f"CANDIDATE LINK TARGETS — COLLECTIONS (copy names exactly):\n{ctx['collections'] or '(none matched)'}\n\n"
+            f"CANDIDATE LINK TARGETS — PRODUCTS (copy names exactly):\n{ctx['products'] or '(none matched)'}\n\n"
+            f"EXISTING BLOG ARTICLES:\n{ctx['articles'] or '(no blog articles yet)'}\n"
+            + (f"\nARTICLES QUEUED OR IN PROGRESS (treat as existing):\n{ctx['queued']}\n" if ctx["queued"] else "")
+            + (f"\nOTHER PENDING TOPIC SUGGESTIONS (avoid overlap):\n{ctx['other_suggestions']}\n" if ctx["other_suggestions"] else "")
+        )
+        resp = client.chat.completions.create(
+            model=config.get("topic_research_model") or config["model"],
+            messages=[
+                {"role": "system", "content": get_setting("prompts.topic_enrich", DEFAULTS["prompts.topic_enrich"])},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.4,
+        )
+        content = resp.choices[0].message.content or ""
+        start, end = content.find("{"), content.rfind("}") + 1
+        data = {}
+        if start >= 0 and end > start:
+            try:
+                data = json.loads(content[start:end])
+            except (json.JSONDecodeError, ValueError):
+                data = {}
+        if not data:
+            return {"error": "AI did not return valid enrichment JSON"}
+
+        kw = data.get("keywords") or {}
+        if primary and not kw.get("primary"):
+            kw["primary"] = primary
+        intent = data.get("search_intent") or sug["search_intent"] or "Informational"
+        with db.get_cursor() as cur:
+            cur.execute(
+                """UPDATE topic_suggestions SET
+                       topic = COALESCE(NULLIF(%s, ''), topic),
+                       h1 = %s, meta_title = %s, meta_description = %s, url_slug = %s,
+                       keywords = %s, search_intent = %s, rationale = COALESCE(NULLIF(%s, ''), rationale),
+                       cannibalization_note = %s,
+                       target_products = %s, target_collections = %s, target_articles = %s,
+                       updated_at = NOW()
+                   WHERE id = %s""",
+                (
+                    (data.get("topic") or "")[:500],
+                    (data.get("h1") or "")[:500],
+                    (data.get("meta_title") or "")[:255],
+                    data.get("meta_description") or "",
+                    (data.get("url_slug") or "")[:255],
+                    json.dumps(kw), intent[:30],
+                    data.get("rationale") or "",
+                    data.get("cannibalization_note") or "",
+                    json.dumps(data.get("target_products") or []),
+                    json.dumps(data.get("target_collections") or []),
+                    json.dumps(data.get("target_articles") or []),
+                    suggestion_id,
+                ),
+            )
+        return {"suggestion_id": suggestion_id, "topic": data.get("topic") or sug["topic"], "enriched": True}
 
     elif task_type == "topic_discovery":
         from datetime import datetime

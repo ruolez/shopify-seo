@@ -1,25 +1,10 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Landing Pages — SEO Platform</title>
-    <link rel="stylesheet" href="/static/css/style.css">
-</head>
-<body>
-    <div class="app-layout">
-        {% include '_sidebar.html' %}
-        <div class="main-content">
-            <div class="topbar">
-                <div class="topbar-left">
-                    <button id="sidebar-toggle" class="icon-btn"><span class="material-symbols-rounded">menu</span></button>
-                    <h2>Landing Pages</h2>
-                </div>
-                <div class="topbar-right">
-                    <button id="theme-toggle" class="icon-btn"><span class="material-symbols-rounded">dark_mode</span></button>
-                </div>
-            </div>
-            <div class="page-content">
+{% extends "base.html" %}
+
+{% block title %}Landing Pages{% endblock %}
+
+{% block page_title %}Landing Pages{% endblock %}
+
+{% block content %}
                 <div class="tabs">
                     <button class="tab active" data-tab="existing">Existing Pages</button>
                     <button class="tab" data-tab="builder">Builder</button>
@@ -206,10 +191,10 @@
                         </div>
                     </div>
                 </div>
-            </div>
-        </div>
-    </div>
+            
+{% endblock %}
 
+{% block modals %}
     <!-- New Page Modal -->
     <div class="modal-overlay" id="new-page-modal">
         <div class="modal" style="max-width: 500px;">
@@ -233,7 +218,6 @@
             </div>
         </div>
     </div>
-
     <!-- AI Generate Modal -->
     <div class="modal-overlay" id="generate-modal">
         <div class="modal" style="max-width: 500px;">
@@ -259,7 +243,6 @@
             </div>
         </div>
     </div>
-
     <!-- Section Edit Modal -->
     <div class="modal-overlay" id="section-edit-modal">
         <div class="modal" style="max-width: 600px; max-height: 80vh; overflow-y: auto;">
@@ -274,7 +257,6 @@
             </div>
         </div>
     </div>
-
     <!-- Confirm Modal -->
     <div class="modal-overlay" id="confirm-modal">
         <div class="modal" style="max-width: 400px;">
@@ -291,8 +273,8 @@
             </div>
         </div>
     </div>
+{% endblock %}
 
-    <script src="/static/js/app.js"></script>
+{% block scripts %}
     <script src="/static/js/landing_pages.js"></script>
-</body>
-</html>
+{% endblock %}

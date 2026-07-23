@@ -761,6 +761,16 @@ class Database:
                 ON dashboard_events(store_id, created_at)
             """)
             cur.execute("""
+                CREATE TABLE IF NOT EXISTS action_dismissals (
+                    id SERIAL PRIMARY KEY,
+                    store_id INTEGER REFERENCES stores(id) ON DELETE CASCADE,
+                    action_key VARCHAR(300) NOT NULL,
+                    snoozed_until TIMESTAMP,
+                    dismissed_at TIMESTAMP DEFAULT NOW(),
+                    UNIQUE(store_id, action_key)
+                )
+            """)
+            cur.execute("""
                 DO $$ BEGIN
                     ALTER TABLE content_gaps ADD COLUMN addressed_at TIMESTAMP;
                 EXCEPTION WHEN duplicate_column THEN NULL;

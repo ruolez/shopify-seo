@@ -53,10 +53,11 @@ async function loadStores() {
             visibilityLoaded = false;
             feedLoaded = false;
             offsiteLoaded = false;
+            overviewLoaded = false;
             loadOverview();
             loadItems();
             const active = document.querySelector(".tab.active")?.dataset.tab;
-            if (["visibility", "feed", "offsite"].includes(active)) switchTab(active);
+            if (active) handleTabChange(active);
         });
     } catch (err) {
         showToast(`Failed to load stores: ${err.message}`, "error");
@@ -159,6 +160,23 @@ function renderItems() {
         })
         .join("");
 
+    // "Fix next" strip: the five worst items, one click from the review modal.
+    const worstFive = [...currentItems]
+        .map((it, i) => ({ it, i }))
+        .sort((a, b) => a.it.score - b.it.score)
+        .slice(0, 5);
+    const fixNext = worstFive.length && worstFive[0].it.score < 100
+        ? `<div style="display:flex;gap:10px;align-items:stretch;overflow-x:auto;padding:2px 0 10px;">
+            <div style="display:flex;flex-direction:column;justify-content:center;flex-shrink:0;font-size:12px;font-weight:600;color:var(--on-surface-secondary);">FIX<br>NEXT</div>
+            ${worstFive.map(({ it, i }) => `<div style="flex:0 0 200px;border:1px solid var(--outline);border-radius:var(--radius-sm);padding:10px 12px;display:flex;flex-direction:column;gap:6px;">
+                <div style="display:flex;align-items:center;gap:8px;">${renderScoreRing(it.score, 34)}
+                    <div style="font-size:12px;font-weight:600;line-height:1.3;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;">${escapeHtml(it.title || it.handle || "—")}</div></div>
+                <button class="btn btn-primary btn-sm" style="margin-top:auto;" onclick="openBreakdown(${i})">
+                    <span class="material-symbols-rounded">auto_fix_high</span> Optimize</button>
+            </div>`).join("")}
+        </div>`
+        : "";
+
     const sortOptions = [
         `<option value="weakest" ${sortBy === "weakest" ? "selected" : ""}>Weakest signal</option>`,
         `<option value="overall" ${sortBy === "overall" ? "selected" : ""}>Overall score</option>`,
@@ -166,28 +184,37 @@ function renderItems() {
         .concat(Object.entries(COMPONENT_LABELS).map(([k, v]) => `<option value="${k}" ${sortBy === k ? "selected" : ""}>${v.label}</option>`))
         .join("");
     container.innerHTML = `
-        <div class="toolbar-row" style="align-items:center;gap:12px;margin-bottom:10px;flex-wrap:wrap;">
-            <label style="font-size:13px;color:var(--on-surface-secondary);">Sort by</label>
-            <select class="form-control" style="max-width:170px;padding:4px 8px;" onchange="setSortBy(this.value)">${sortOptions}</select>
+        <div class="toolbar-row" style="align-items:center;gap:10px;margin-bottom:12px;flex-wrap:wrap;">
+            <div class="status-filter-bar">
+                <button class="filter-chip ${scanType === "product" ? "active" : ""}" data-type="product" onclick="setScanType('product')">Products</button>
+                <button class="filter-chip ${scanType === "collection" ? "active" : ""}" data-type="collection" onclick="setScanType('collection')">Collections</button>
+            </div>
+            <select class="form-control" style="max-width:170px;padding:4px 8px;" title="Sort by" onchange="setSortBy(this.value)">${sortOptions}</select>
             <button class="btn btn-secondary btn-sm" title="Toggle direction" onclick="toggleSortDir()">
                 <span class="material-symbols-rounded">${sortDir === "asc" ? "arrow_upward" : "arrow_downward"}</span> ${sortDir === "asc" ? "Worst first" : "Best first"}
             </button>
-            <span id="sel-count" style="font-size:13px;color:var(--on-surface-secondary);margin-left:8px;">${selectedIds.size} selected</span>
+            <span id="sel-count" style="font-size:13px;color:var(--on-surface-secondary);">${selectedIds.size} selected</span>
             <button id="batch-selected-btn" class="btn btn-primary btn-sm" ${selectedIds.size ? "" : "disabled"} onclick="batchOptimize('selected')">
                 <span class="material-symbols-rounded">auto_fix_high</span> Optimize selected
             </button>
-            <button class="btn btn-secondary btn-sm" onclick="batchOptimize('all')">
-                <span class="material-symbols-rounded">bolt</span> Optimize all (${currentItems.length})
+            <details class="bulk-menu">
+                <summary class="btn btn-secondary btn-sm"><span class="material-symbols-rounded">expand_more</span> Bulk</summary>
+                <div class="bulk-menu-pop">
+                    <button class="bulk-menu-item" onclick="this.closest('details').open=false;batchOptimize('all')">
+                        <span class="material-symbols-rounded">bolt</span> Optimize all (${currentItems.length})</button>
+                    <button class="bulk-menu-item" title="Research-driven fact-density pass; only changes items where verifiable facts raise the score" onclick="this.closest('details').open=false;boostFactsBatch()">
+                        <span class="material-symbols-rounded">insights</span> Boost fact density</button>
+                </div>
+            </details>
+            <div id="batch-progress" style="font-size:13px;color:var(--on-surface-secondary);"></div>
+            <button id="scan-btn" class="btn btn-primary btn-sm" style="margin-left:auto;" onclick="runScan()">
+                <span class="material-symbols-rounded">radar</span> Scan
             </button>
-            <button class="btn btn-secondary btn-sm" onclick="boostFactsBatch()" title="Research-driven fact-density pass; only changes items where verifiable facts raise the score">
-                <span class="material-symbols-rounded">insights</span> Boost fact density
-            </button>
-            <div id="batch-progress" style="margin-left:auto;font-size:13px;color:var(--on-surface-secondary);"></div>
         </div>
-        <p style="font-size:11px;color:var(--on-surface-secondary);margin:0 0 8px;">Tip: click a checkbox, then Shift-click another to select the whole range.</p>
+        ${fixNext}
         <div class="table-container"><table>
             <thead><tr>
-                <th style="width:36px;text-align:center;"><input type="checkbox" ${allSelected ? "checked" : ""} onchange="toggleSelectAll(this.checked)"></th>
+                <th style="width:36px;text-align:center;"><input type="checkbox" ${allSelected ? "checked" : ""} title="Select all — or click one checkbox then Shift-click another to select the range" onchange="toggleSelectAll(this.checked)"></th>
                 <th>Score</th><th>${label}</th><th>${signalLabel}</th><th>Scanned</th>
             </tr></thead>
             <tbody>${rows}</tbody>
@@ -438,6 +465,12 @@ async function applyFacts(btn) {
     btn.innerHTML = '<span class="material-symbols-rounded">hourglass_empty</span> Applying…';
     try {
         const res = await apiRequest("/api/ai-seo/facts/apply", { method: "POST", body: window._factsPayload });
+        if (res.no_change) {
+            showToast(res.reason || "No improvement — nothing was applied", "warning");
+            btn.disabled = false;
+            btn.innerHTML = '<span class="material-symbols-rounded">cloud_upload</span> Apply to Shopify';
+            return;
+        }
         showToast(`Applied — new score ${res.new_score}`, "success");
         closeBreakdown();
         loadItems();
@@ -615,18 +648,26 @@ function pollScan(taskId) {
 
 function resetScanBtn() {
     const btn = document.getElementById("scan-btn");
+    if (!btn) return; // renderItems may have re-rendered the toolbar (fresh button)
     btn.disabled = false;
-    btn.innerHTML = '<span class="material-symbols-rounded">radar</span> Scan AI readiness';
+    // The empty-state button carries the long label; the toolbar one is compact.
+    btn.innerHTML = btn.closest(".empty-state")
+        ? '<span class="material-symbols-rounded">radar</span> Scan AI readiness'
+        : '<span class="material-symbols-rounded">radar</span> Scan';
 }
 
-// ── Tab switching ───────────────────────────────────────────────
+// ── Tabs (UITabs: ?tab= synced, onChange fires on initial activation) ──
 let visibilityLoaded = false;
 let feedLoaded = false;
 let offsiteLoaded = false;
+let overviewLoaded = false;
+let aiTabs = null;
 
-function switchTab(tab) {
-    document.querySelectorAll(".tab").forEach((t) => t.classList.toggle("active", t.dataset.tab === tab));
-    document.querySelectorAll(".tab-panel").forEach((p) => p.classList.toggle("active", p.id === `tab-${tab}`));
+function handleTabChange(tab) {
+    if (tab === "overview" && !overviewLoaded) {
+        overviewLoaded = true;
+        loadSectionOverview();
+    }
     if (tab === "visibility" && !visibilityLoaded) {
         visibilityLoaded = true;
         loadPrompts();
@@ -642,8 +683,185 @@ function switchTab(tab) {
         loadOffsite();
     }
     if (tab === "assets") loadAeo();
-    if (tab === "activity") loadActivity();
-    else if (activityTimer) { clearInterval(activityTimer); activityTimer = null; }
+}
+
+// ── Overview tab: pillar health + merged action list + Run all ─────
+let ovData = null;
+let ovPollTimer = null;
+
+async function loadSectionOverview() {
+    const storeId = getStoreId();
+    if (!storeId) return;
+    UISkeleton.show(document.getElementById("ov-pillars"), { type: "stats" });
+    try {
+        ovData = await apiRequest(`/api/ai-seo/overview/actions?store_id=${storeId}`);
+        renderSectionOverview(ovData);
+    } catch (err) {
+        document.getElementById("ov-pillars").innerHTML = "";
+        showToast(`Failed to load overview: ${err.message}`, "error");
+    }
+}
+
+function ovAge(iso) {
+    return iso ? formatRelativeTime(iso) : "never";
+}
+
+function renderSectionOverview(d) {
+    const p = d.pillars;
+    document.getElementById("ov-freshness").textContent =
+        `Readiness ${ovAge(p.readiness.last_run)} · Feed ${ovAge(p.feed.last_run)} · ` +
+        `Off-site ${ovAge(p.offsite.last_run)} · Visibility ${ovAge(p.visibility.last_run)}`;
+
+    const sc = p.offsite.scorecard || {};
+    const platforms = Object.values(sc.review_platforms || {}).filter(Boolean).length;
+    const sov = p.visibility.share_of_voice;
+    const card = (onclickTab, inner) =>
+        `<div class="stat-card" style="cursor:pointer;" onclick="aiTabs.activate('${onclickTab}')">${inner}</div>`;
+    document.getElementById("ov-pillars").innerHTML =
+        card("score", `${renderScoreRing(p.readiness.avg_score || 0, 52)}
+            <div class="stat-label" style="margin-top:6px;">AI Readiness</div>
+            <div class="stat-label" style="color:var(--on-surface-secondary);">${p.readiness.count || 0} items scored</div>`) +
+        card("feed", `${renderScoreRing(p.feed.avg_score || 0, 52)}
+            <div class="stat-label" style="margin-top:6px;">Feed</div>
+            <div class="stat-label" style="color:var(--on-surface-secondary);">${p.feed.count || 0} products audited</div>`) +
+        card("visibility", `${renderScoreRing(Math.round(sov || 0), 52)}
+            <div class="stat-label" style="margin-top:6px;">Share of voice</div>
+            <div class="stat-label" style="color:var(--on-surface-secondary);">${p.visibility.brand_hits ?? "—"} of ${p.visibility.total_answers ?? "—"} AI answers</div>`) +
+        card("offsite", `<div class="stat-value" style="font-size:19px;">${sc.reddit ? `${sc.reddit.count || 0} Reddit` : "—"}</div>
+            <div class="stat-label" style="margin-top:6px;">Off-site presence</div>
+            <div class="stat-label" style="color:var(--on-surface-secondary);">${sc.listicles ? `${sc.listicles.included}/${sc.listicles.checked} roundups · ${platforms} review sites` : "not audited yet"}</div>`) +
+        card("assets", `<div class="stat-value" style="font-size:19px;">${p.aeo.published} of ${p.aeo.total}</div>
+            <div class="stat-label" style="margin-top:6px;">Setup live</div>
+            <div class="stat-label" style="color:var(--on-surface-secondary);">robots · schema · IndexNow · bots</div>`);
+
+    // Merged action list
+    const box = document.getElementById("ov-actions");
+    const cardEl = document.getElementById("ov-actions-card");
+    if (!d.actions.length) {
+        cardEl.style.display = "";
+        box.innerHTML = `<div style="padding:14px 0;font-size:13px;color:var(--on-surface-secondary);">
+            <span class="material-symbols-rounded" style="vertical-align:middle;color:var(--success);">check_circle</span>
+            Nothing urgent — all pillars look healthy.</div>`;
+    } else {
+        cardEl.style.display = "";
+        const pr = { high: "badge-error", medium: "badge-warning", low: "badge-info" };
+        box.innerHTML = d.actions.map((a, i) => `
+            <div style="display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--outline);">
+                <span class="badge ${pr[a.priority] || "badge-info"}" style="min-width:56px;text-align:center;">${a.priority}</span>
+                <span class="material-symbols-rounded" style="font-size:18px;color:var(--on-surface-secondary);">${a.icon || "arrow_forward"}</span>
+                <div style="flex:1;min-width:0;">
+                    <div style="font-weight:600;font-size:13px;">${escapeHtml(a.title)}</div>
+                    <div style="font-size:11.5px;color:var(--on-surface-secondary);">${escapeHtml(a.detail || "")}</div>
+                </div>
+                ${a.action
+                    ? `<button class="btn btn-primary btn-sm" onclick="ovDirectAction(${i}, this)">${escapeHtml(a.action.label)}</button>`
+                    : `<button class="btn btn-secondary btn-sm" onclick="aiNavigate('${escapeAttr(a.href || "")}')">Review</button>`}
+            </div>`).join("") +
+            (d.more ? `<div style="padding:8px 0;font-size:12px;color:var(--on-surface-secondary);">+ ${d.more} more suggestions after these are handled</div>` : "");
+    }
+
+    // Run-all button state + poll while anything runs
+    const running = Object.values(d.running || {}).some(Boolean);
+    const btn = document.getElementById("run-all-btn");
+    btn.disabled = running;
+    btn.innerHTML = running
+        ? '<span class="material-symbols-rounded">hourglass_empty</span> Audits running…'
+        : '<span class="material-symbols-rounded">play_circle</span> Run all audits';
+    if (running && !ovPollTimer) {
+        ovPollTimer = setInterval(async () => {
+            try {
+                ovData = await apiRequest(`/api/ai-seo/overview/actions?store_id=${getStoreId()}`);
+                if (!Object.values(ovData.running || {}).some(Boolean)) {
+                    clearInterval(ovPollTimer);
+                    ovPollTimer = null;
+                    feedLoaded = offsiteLoaded = visibilityLoaded = false;
+                    loadOverview();
+                    loadItems();
+                }
+                renderSectionOverview(ovData);
+            } catch (e) { /* poll errors are silent */ }
+        }, 15000);
+    } else if (!running && ovPollTimer) {
+        clearInterval(ovPollTimer);
+        ovPollTimer = null;
+    }
+}
+
+async function ovDirectAction(index, btn) {
+    const a = ovData?.actions?.[index];
+    if (!a || !a.action) return;
+    btn.disabled = true;
+    try {
+        await apiRequest(a.action.endpoint, { method: a.action.method || "POST", body: a.action.body || {} });
+        showToast(`${a.action.label} started`, "success");
+        loadSectionOverview();
+    } catch (err) {
+        showToast(`Failed: ${err.message}`, "error");
+        btn.disabled = false;
+    }
+}
+
+async function runAllAudits(btn) {
+    const storeId = parseInt(getStoreId());
+    if (!storeId) { showToast("Select a store first", "warning"); return; }
+    if (!confirm("Run 4 audits: AI readiness scan (products + collections), feed audit, off-site audit, and AI visibility tracking.\n\nVisibility tracking spends OpenRouter budget (capped at your daily budget in Settings); the other three are free.")) return;
+    btn.disabled = true;
+    const posts = [
+        apiRequest("/api/ai-seo/scan", { method: "POST", body: { store_id: storeId, type: "all" } }),
+        apiRequest("/api/ai-seo/feed/scan", { method: "POST", body: { store_id: storeId } }),
+        apiRequest("/api/ai-seo/offsite/run", { method: "POST", body: { store_id: storeId } }),
+        apiRequest("/api/ai-seo/tracking/run", { method: "POST", body: { store_id: storeId } }),
+    ];
+    const results = await Promise.allSettled(posts);
+    let started = 0;
+    results.forEach((r, i) => {
+        if (r.status === "fulfilled") started++;
+        else if (/already running|already in progress/i.test(r.reason?.message || "")) started++; // benign
+        else showToast(`${["Readiness scan", "Feed audit", "Off-site audit", "Visibility tracking"][i]} failed: ${r.reason?.message}`, "error");
+    });
+    showToast(`Started ${started} of 4 audits — progress in Activity`, started ? "success" : "error");
+    TasksPanel.open({ page: "/ai-seo" });
+    loadSectionOverview();
+}
+
+// ── Deep links: /ai-seo?tab=&focus=&action=&sub= ────────────────────
+function aiNavigate(href) {
+    if (!href) return;
+    const url = new URL(href, window.location.origin);
+    if (url.pathname !== "/ai-seo") { window.location.href = href; return; }
+    const params = url.searchParams;
+    const tab = params.get("tab");
+    if (tab && aiTabs) aiTabs.activate(tab);
+    applyAiFocus(params.get("focus"), params.get("action"), params.get("sub"));
+}
+
+async function applyAiFocus(focus, action, sub) {
+    if (sub && typeof switchVisSub === "function") switchVisSub(sub);
+    if (!focus) return;
+    const [kind, ...rest] = focus.split(":");
+    if (kind === "item") {
+        // item:<resource_type>:<resource_id> — open the readiness breakdown
+        const rtype = rest.length > 1 ? rest[0] : scanType;
+        const rid = parseInt(rest[rest.length - 1], 10);
+        if (rtype !== scanType) setScanType(rtype);
+        await loadItems();
+        const idx = currentItems.findIndex((it) => it.resource_id === rid);
+        if (idx >= 0) {
+            openBreakdown(idx);
+            if (action === "optimize") setTimeout(() => optimizePreview(), 300);
+        }
+    } else if (kind === "asset") {
+        const el = document.getElementById(`aeo-card-${rest[0]}`);
+        if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
+        else setTimeout(() => document.getElementById(`aeo-card-${rest[0]}`)?.scrollIntoView({ behavior: "smooth" }), 900);
+    } else if (kind === "eligibility") {
+        setTimeout(() => {
+            const el = document.getElementById("feed-eligibility");
+            if (el) { el.open = true; el.scrollIntoView({ behavior: "smooth" }); }
+        }, 600);
+    } else if (kind === "actions") {
+        setTimeout(() => document.getElementById("offsite-actions")?.scrollIntoView({ behavior: "smooth" }), 600);
+    }
 }
 
 // ── Feed readiness tab ──────────────────────────────────────────
@@ -747,18 +965,25 @@ function feedChecklistCard(o) {
         .map((u) => `<li style="margin-bottom:4px;"><b>${escapeHtml(u.label)}</b> (${escapeHtml(u.status)}) — <span style="color:var(--on-surface-secondary);">${escapeHtml(u.why)}</span></li>`)
         .join("");
     const noReviews = o.scanned_count && !((o.coverage || {}).review_signals || {}).full_count;
-    const reviewCard = noReviews
-        ? `<div style="display:flex;gap:10px;align-items:flex-start;background:var(--warning-light);border:1px solid var(--outline);border-radius:var(--radius-sm);padding:10px 12px;margin-bottom:12px;">
-            <span class="material-symbols-rounded" style="color:var(--warning);font-size:20px;">reviews</span>
-            <div style="font-size:12.5px;line-height:1.5;">No review data detected on any product. AI shopping ranks products with review stats higher — install a review app that writes <code>aggregateRating</code> JSON-LD (Judge.me, Loox, Okendo), then re-audit.</div></div>`
-        : "";
-    return `${reviewCard}<details class="card" style="padding:0;">
-        <summary style="padding:14px 16px;cursor:pointer;list-style:none;display:flex;align-items:center;gap:8px;">
-            <span class="material-symbols-rounded" style="color:var(--on-surface-secondary);">checklist</span>
-            <b style="flex:1;">Agentic Storefront eligibility checklist</b>
-            <span style="font-size:12px;color:var(--on-surface-secondary);">Shopify admin settings this app can't read — verify manually</span>
+    // One collapsed card carries policy + review warning + checklist; the badges
+    // in the summary keep the warnings visible even while collapsed.
+    return `<details class="card" id="feed-eligibility" style="padding:0;">
+        <summary style="padding:14px 16px;cursor:pointer;list-style:none;display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+            <span class="material-symbols-rounded" style="color:var(--on-surface-secondary);">policy</span>
+            <b>Eligibility &amp; policy</b>
+            <span class="badge" style="background:var(--surface-dim);color:var(--on-surface);">restricted categories excluded</span>
+            ${noReviews ? '<span class="badge badge-error">no review data</span>' : ""}
+            <span style="font-size:12px;color:var(--on-surface-secondary);margin-left:auto;">checklist + policy notes</span>
         </summary>
         <div style="padding:0 16px 16px;">
+            <div style="display:flex;gap:10px;align-items:flex-start;background:var(--primary-light);border:1px solid var(--outline);border-radius:var(--radius-sm);padding:10px 12px;margin:8px 0 12px;">
+                <span class="material-symbols-rounded" style="color:var(--primary);font-size:20px;">policy</span>
+                <div style="font-size:12.5px;line-height:1.5;">Feed score measures data quality, not channel eligibility. <a href="https://openai.com/policies/commerce-policies/" target="_blank">OpenAI commerce policies</a> exclude restricted categories (nicotine/tobacco &amp; smoking accessories, alcohol, weapons, adult) from ChatGPT Shopping regardless of feed quality — if that's your catalog, win AI visibility through grounded answer engines (Perplexity, Bing-backed search) and the <b>Off-site</b> tab instead.</div>
+            </div>
+            ${noReviews ? `<div style="display:flex;gap:10px;align-items:flex-start;background:var(--warning-light);border:1px solid var(--outline);border-radius:var(--radius-sm);padding:10px 12px;margin-bottom:12px;">
+                <span class="material-symbols-rounded" style="color:var(--warning);font-size:20px;">reviews</span>
+                <div style="font-size:12.5px;line-height:1.5;">No review data detected on any product. AI shopping ranks products with review stats higher — install a review app that writes <code>aggregateRating</code> JSON-LD (Judge.me, Loox, Okendo), then re-audit.</div></div>` : ""}
+            <div style="font-weight:600;font-size:12px;margin:12px 0 4px;">Agentic Storefront eligibility checklist <span style="font-weight:400;color:var(--on-surface-secondary);">— Shopify admin settings this app can't read, verify manually</span></div>
             <ol style="font-size:12.5px;line-height:1.5;padding-left:18px;margin:8px 0;">${items}</ol>
             <div style="font-weight:600;font-size:12px;margin:12px 0 4px;">Feed fields not yet audited (not in local sync)</div>
             <ul style="font-size:12px;line-height:1.5;padding-left:18px;margin:0;">${unsynced}</ul>
@@ -944,7 +1169,8 @@ function renderOffsiteActions(actions, el) {
     const badge = (p) => `<span class="badge ${p === "high" ? "badge-error" : p === "medium" ? "badge-warning" : "badge-success"}">${p}</span>`;
     el.innerHTML = `<div class="card" style="padding:16px;">
         <h3 style="margin:0 0 10px;">What to do about it</h3>
-        ${actions.map((a) => `<div style="display:flex;gap:10px;align-items:flex-start;padding:8px 0;border-bottom:1px solid var(--outline);">
+        ${actions.map((a, i) => `<div style="display:flex;gap:10px;align-items:flex-start;padding:8px 0;border-bottom:1px solid var(--outline);">
+            <span style="width:22px;height:22px;flex-shrink:0;border-radius:50%;background:var(--surface-dim);display:flex;align-items:center;justify-content:center;font-size:11.5px;font-weight:700;">${i + 1}</span>
             ${badge(a.priority || "medium")}
             <div style="flex:1;"><b style="font-size:13px;">${escapeHtml(a.title || "")}</b>
                 <div style="font-size:12px;color:var(--on-surface-secondary);margin-top:2px;">${escapeHtml(a.why || "")}</div>
@@ -985,110 +1211,6 @@ function renderOffsiteResults(groups, el) {
     </details>`;
 }
 
-let activityTimer = null;
-const BATCH_KIND = { geo_optimize: "GEO optimize", fact_boost: "Fact-density boost" };
-
-async function loadActivity() {
-    const storeId = getStoreId();
-    const container = document.getElementById("activity-container");
-    try {
-        const batches = await apiRequest(`/api/ai-seo/batches?store_id=${storeId}`);
-        if (!batches.length) {
-            container.innerHTML = `<div class="empty-state"><span class="material-symbols-rounded">history</span><p>No batch jobs yet. Run "Optimize all" or "Boost fact density" from AI Readiness.</p></div>`;
-        } else {
-            container.innerHTML = batches.map(batchCard).join("");
-        }
-        // Auto-refresh while anything is running.
-        const anyRunning = batches.some((b) => b.status === "running" || b.status === "pending");
-        if (anyRunning && !activityTimer) {
-            activityTimer = setInterval(() => { if (document.querySelector(".tab.active")?.dataset.tab === "activity") loadActivity(); }, 5000);
-        } else if (!anyRunning && activityTimer) {
-            clearInterval(activityTimer);
-            activityTimer = null;
-        }
-    } catch (err) {
-        showToast(`Failed to load activity: ${err.message}`, "error");
-    }
-}
-
-function batchCard(b) {
-    const running = b.status === "running" || b.status === "pending";
-    const done = b.completed + b.failed;
-    const pct = b.total ? Math.round((done / b.total) * 100) : 0;
-    const kind = BATCH_KIND[b.kind] || b.kind;
-    const statusBadge = running
-        ? `<span class="badge badge-warning">running</span>`
-        : b.status === "failed" ? `<span class="badge badge-error">failed</span>` : `<span class="badge badge-success">done</span>`;
-    const bar = `<div style="background:var(--surface-dim);border-radius:6px;height:8px;overflow:hidden;margin:8px 0;">
-        <div style="background:var(--primary);height:100%;width:${pct}%;transition:width .3s;"></div></div>`;
-    let stats = "";
-    if (b.kind === "fact_boost") {
-        stats = `<span class="badge badge-success">${b.enriched} enriched</span>
-                 <span class="badge" style="background:var(--surface-dim);color:var(--on-surface);">${b.skipped} left unchanged</span>
-                 <span class="badge badge-warning">${b.facts_added} facts added</span>`;
-    } else {
-        stats = `<span class="badge badge-success">${b.completed} optimized</span>${b.dropped_kw_items ? ` <span class="badge badge-error">${b.dropped_kw_items} w/ dropped keywords</span>` : ""}`;
-    }
-    if (b.failed) stats += ` <span class="badge badge-error">${b.failed} failed</span>`;
-    const clearBtn = running
-        ? ""
-        : `<button class="icon-btn" title="Clear from activity" onclick="clearBatch(${b.id})" style="padding:2px;margin-left:4px;"><span class="material-symbols-rounded" style="font-size:18px;">close</span></button>`;
-    const retryBtn = (!running && b.failed)
-        ? `<div style="margin-top:10px;"><button class="btn btn-secondary btn-sm" onclick="retryBatch(${b.id}, this)"><span class="material-symbols-rounded">refresh</span> Retry ${b.failed} failed</button></div>`
-        : "";
-    const finishedLine = b.completed_at ? ` · finished ${formatDate(b.completed_at)}` : "";
-    const timeTitle = `Started ${formatDate(b.created_at)}${finishedLine}`;
-    const timeBlock = `<div style="margin-left:auto;text-align:right;line-height:1.25;" title="${escapeHtml(timeTitle)}">
-            <div style="font-size:12px;color:var(--on-surface-secondary);">${formatRelativeTime(b.created_at)}</div>
-            <div style="font-size:11px;color:var(--on-surface-secondary);opacity:.7;">${formatDate(b.created_at)}</div>
-        </div>`;
-    return `<div class="card" style="padding:14px;margin-bottom:12px;">
-        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
-            <b>${kind}</b><span style="color:var(--on-surface-secondary);font-size:13px;">${b.resource_type === "collection" ? "collections" : "products"}</span>
-            ${statusBadge}
-            ${timeBlock}
-            ${clearBtn}
-        </div>
-        ${bar}
-        <div style="font-size:13px;color:var(--on-surface-secondary);">${done}/${b.total} processed${running && b.current ? " · " + escapeHtml(b.current) : ""}</div>
-        <div style="margin-top:8px;display:flex;gap:4px;flex-wrap:wrap;">${stats}</div>
-        ${retryBtn}
-    </div>`;
-}
-
-async function retryBatch(id, btn) {
-    btn.disabled = true;
-    btn.innerHTML = '<span class="material-symbols-rounded">hourglass_empty</span> Starting…';
-    try {
-        const res = await apiRequest(`/api/ai-seo/batches/${id}/retry`, { method: "POST", body: {} });
-        showToast(`Retrying ${res.total} failed item${res.total > 1 ? "s" : ""}…`, "info");
-        loadActivity();
-    } catch (err) {
-        showToast(`Retry failed: ${err.message}`, "error");
-        btn.disabled = false;
-        btn.innerHTML = '<span class="material-symbols-rounded">refresh</span> Retry failed';
-    }
-}
-
-async function clearBatch(id) {
-    try {
-        await apiRequest(`/api/ai-seo/batches/${id}`, { method: "DELETE" });
-        loadActivity();
-    } catch (err) {
-        showToast(`Clear failed: ${err.message}`, "error");
-    }
-}
-
-async function clearFinishedBatches() {
-    try {
-        const res = await apiRequest("/api/ai-seo/batches/clear", { method: "POST", body: { store_id: parseInt(getStoreId()) } });
-        showToast(res.cleared ? `Cleared ${res.cleared} finished job${res.cleared > 1 ? "s" : ""}` : "Nothing to clear", "success");
-        loadActivity();
-    } catch (err) {
-        showToast(`Clear failed: ${err.message}`, "error");
-    }
-}
-
 // ── AEO assets ──────────────────────────────────────────────────
 async function loadAeo() {
     const storeId = getStoreId();
@@ -1097,12 +1219,14 @@ async function loadAeo() {
     try {
         const a = await apiRequest(`/api/ai-seo/aeo/preview?store_id=${storeId}`);
         window._aeo = a;
+        // Guided checklist order: verify access first, then the assets that move
+        // scores, then the optional extras.
         container.innerHTML =
             aeoOverview(a) +
-            robotsCard(a.robots) +
             botCheckCard(a.bot_check) +
-            indexnowCard(a.indexnow) +
+            robotsCard(a.robots) +
             siteSchemaCard(a.site_schema) +
+            indexnowCard(a.indexnow) +
             llmsCard(a.llms, a.base_url) +
             a11yCard(a.a11y);
     } catch (err) {
@@ -1136,23 +1260,35 @@ function improveLine(signal, current, projected) {
 
 function aeoOverview(a) {
     const bc = a.bot_check || {};
+    // Checklist order (matches the card order below)
     const items = [
-        ["dns", "robots.txt", a.robots && a.robots.published_status],
-        ["travel_explore", "Bot access", bc.tested ? (bc.ok === bc.tested ? "published" : "issues") : null],
-        ["send", "IndexNow", a.indexnow && a.indexnow.published_status],
-        ["schema", "Site schema", a.site_schema && a.site_schema.published_status],
-        ["description", "llms.txt", a.llms && a.llms.published_status],
-        ["accessibility_new", "Accessibility", a.a11y && a.a11y.published_status],
+        ["bot_check", "Bot access", bc.tested ? (bc.ok === bc.tested ? "published" : "issues") : null],
+        ["robots", "robots.txt", a.robots && a.robots.published_status],
+        ["site_schema", "Site schema", a.site_schema && a.site_schema.published_status],
+        ["indexnow", "IndexNow", a.indexnow && a.indexnow.published_status],
+        ["llms", "llms.txt", a.llms && a.llms.published_status],
+        ["a11y", "Accessibility", a.a11y && a.a11y.published_status],
     ];
-    return `<div class="card" style="padding:12px 16px;margin-bottom:16px;display:flex;gap:20px;flex-wrap:wrap;">
-        ${items.map(([icon, label, s]) => {
+    const live = items.filter(([, , s]) => s === "published").length;
+    const pct = Math.round((live / items.length) * 100);
+    return `<div class="card" style="padding:14px 16px;margin-bottom:16px;">
+        <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:8px;">
+            <b style="font-size:15px;">${live} of ${items.length} live</b>
+            <div style="flex:1;min-width:140px;height:6px;background:var(--surface-dim);border-radius:999px;overflow:hidden;">
+                <div style="width:${pct}%;height:100%;background:var(--success);border-radius:999px;"></div>
+            </div>
+            <span style="font-size:11.5px;color:var(--on-surface-secondary);">work top to bottom — each step is preview-first</span>
+        </div>
+        <div style="display:flex;gap:16px;flex-wrap:wrap;">
+        ${items.map(([key, label, s]) => {
             const pub = s === "published";
-            return `<div style="display:flex;align-items:center;gap:6px;font-size:13px;">
-                <span class="material-symbols-rounded" style="font-size:17px;color:${pub ? "var(--success)" : "var(--on-surface-secondary)"};">${pub ? "check_circle" : "radio_button_unchecked"}</span>
+            return `<a href="#" onclick="document.getElementById('aeo-card-${key}')?.scrollIntoView({behavior:'smooth'});return false;" style="display:flex;align-items:center;gap:6px;font-size:13px;text-decoration:none;color:var(--on-surface);">
+                <span class="material-symbols-rounded" style="font-size:17px;color:${pub ? "var(--success)" : s === "issues" ? "var(--error)" : "var(--on-surface-secondary)"};">${pub ? "check_circle" : s === "issues" ? "error" : "radio_button_unchecked"}</span>
                 <span>${label}</span>
-                <span style="font-size:11px;color:${pub ? "var(--success)" : "var(--on-surface-secondary)"};">${pub ? "live" : "off"}</span>
-            </div>`;
+                <span style="font-size:11px;color:${pub ? "var(--success)" : "var(--on-surface-secondary)"};">${pub ? "live" : s === "issues" ? "issues" : "off"}</span>
+            </a>`;
         }).join("")}
+        </div>
     </div>`;
 }
 
@@ -1166,12 +1302,15 @@ function aeoProposed(label, text) {
 
 // Compact asset card: header (icon/title/status) + one-line desc + concise target
 // + visible actions, with all verbose detail folded into a "Details & preview" panel.
-function aeoCard({ icon, title, status, desc, target, body, actions, details }) {
-    return `<div class="card" style="padding:0;margin-bottom:12px;">
+// step + cardId render the guided-checklist chrome; optional marks low-evidence extras.
+function aeoCard({ icon, title, status, desc, target, body, actions, details, step, cardId, optional }) {
+    return `<div class="card" ${cardId ? `id="aeo-card-${cardId}"` : ""} style="padding:0;margin-bottom:12px;">
         <div style="padding:14px 16px;">
             <div style="display:flex;align-items:center;gap:10px;">
+                ${step ? `<span style="width:24px;height:24px;flex-shrink:0;border-radius:50%;background:var(--primary-light);color:var(--primary);display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;">${step}</span>` : ""}
                 <span class="material-symbols-rounded" style="color:var(--primary);">${icon}</span>
                 <h3 style="margin:0;font-size:15px;flex:1;">${title}</h3>
+                ${optional ? '<span class="badge" style="background:var(--surface-dim);color:var(--on-surface-secondary);">optional</span>' : ""}
                 ${status || ""}
             </div>
             <p style="font-size:12.5px;color:var(--on-surface-secondary);margin:8px 0 0;line-height:1.5;">${desc}</p>
@@ -1203,6 +1342,7 @@ function robotsCard(r) {
         <div style="font-size:12px;margin-top:10px;">${improveLine((r.impact || {}).signal, (r.impact || {}).current, (r.impact || {}).projected)}</div>
         ${aeoProposed("View proposed robots.txt", r.proposed)}`;
     return aeoCard({
+        step: 2, cardId: "robots",
         icon: "smart_toy",
         title: "robots.txt AI rules",
         status: statusPill(r.published_status),
@@ -1237,6 +1377,7 @@ function botCheckCard(b) {
             ${!controlOk && names.length ? `<div style="font-size:12px;color:var(--on-surface-secondary);margin-top:8px;">Control fetch also failed — results may reflect a store-wide issue, not bot blocking.</div>` : ""}`;
     }
     return aeoCard({
+        step: 1, cardId: "bot_check",
         icon: "travel_explore",
         title: "AI crawler access — live verification",
         status: b.tested ? `<span class="badge ${b.ok === b.tested ? "badge-success" : "badge-error"}">${b.ok}/${b.tested} ok</span>` : "",
@@ -1268,6 +1409,7 @@ function llmsCard(l) {
         <div style="font-size:12px;margin-top:10px;">${improveLine((l.impact || {}).signal, (l.impact || {}).current, (l.impact || {}).projected)}</div>
         ${aeoProposed("View proposed llms.txt", l.proposed)}`;
     return aeoCard({
+        step: 5, cardId: "llms", optional: true,
         icon: "description",
         title: "llms.txt index",
         status: statusPill(l.published_status),
@@ -1313,6 +1455,7 @@ function indexnowCard(x) {
         </ol>`;
     const fallback = `<div style="font-size:12px;color:var(--on-surface-secondary);margin-top:8px;"><b>If Bing keeps rejecting the key:</b> host <code>&lt;key&gt;.txt</code> containing the key at your domain root via your CDN (e.g. a Cloudflare rule) and set the <code>indexnow.key_location_override</code> setting.</div>`;
     return aeoCard({
+        step: 4, cardId: "indexnow",
         icon: "send",
         title: "IndexNow — instant Bing indexing",
         status: statusPill(x.published_status),
@@ -1409,6 +1552,7 @@ function siteSchemaCard(o) {
         ${aeoDetails("View generated Organization JSON-LD", JSON.stringify(o.proposed_org, null, 2))}
         ${aeoDetails("View theme snippet (ai-seo-schema.liquid)", o.proposed_snippet)}`;
     return aeoCard({
+        step: 3, cardId: "site_schema",
         icon: "schema",
         title: "Site-wide Schema — Organization + Breadcrumbs + per-item JSON-LD",
         status: statusPill(o.published_status) + (updateAvail ? ' <span class="badge badge-warning">Update available</span>' : ""),
@@ -1475,6 +1619,7 @@ function a11yCard(x) {
         ${published ? `<button class="btn btn-secondary btn-sm" onclick="unpublishA11y(this)"><span class="material-symbols-rounded">undo</span> Unpublish</button>` : ""}
         <button class="btn btn-primary btn-sm" onclick="publishA11y(this)"><span class="material-symbols-rounded">cloud_upload</span> ${published ? "Re-publish" : "Publish to theme"}</button>`;
     return aeoCard({
+        step: 6, cardId: "a11y", optional: true,
         icon: "accessibility_new",
         title: "Storefront Accessibility",
         status: statusPill(x && x.published_status),
@@ -1647,6 +1792,20 @@ function pollRun(runId, btn, idleLabel = '<span class="material-symbols-rounded"
     }, 3000);
 }
 
+// ── Visibility sub-sections (Answers · Competitors · Actions · Settings) ──
+function switchVisSub(name) {
+    if (!document.getElementById(`vis-sub-${name}`)) name = "answers";
+    document.querySelectorAll("#vis-pills .filter-chip").forEach((c) =>
+        c.classList.toggle("active", c.dataset.sub === name));
+    document.querySelectorAll(".vis-sub").forEach((w) =>
+        (w.style.display = w.id === `vis-sub-${name}` ? "" : "none"));
+    if (document.querySelector(".tab.active")?.dataset.tab === "visibility") {
+        const url = new URL(window.location);
+        url.searchParams.set("sub", name);
+        history.replaceState(null, "", url);
+    }
+}
+
 async function loadRuns() {
     const storeId = getStoreId();
     const metrics = document.getElementById("visibility-metrics");
@@ -1656,6 +1815,9 @@ async function loadRuns() {
         const runs = await apiRequest(`/api/ai-seo/tracking/runs?store_id=${storeId}`);
         const latest = runs.find((r) => ["completed", "budget_capped", "reanalyzing"].includes(r.status));
         renderHeadline(latest, summary, metrics);
+
+        // Pills only make sense once there's a run to slice into sub-sections.
+        document.getElementById("vis-pills").style.display = latest ? "" : "none";
 
         latestRunId = latest ? latest.id : null;
         ["models-panel", "competitors-panel", "brands-panel", "gap-panel", "breakdown-panel"].forEach(
@@ -1672,8 +1834,17 @@ async function loadRuns() {
 
 function renderHeadline(latest, summary, metrics) {
     if (!latest) {
-        summary.innerHTML = "";
-        metrics.innerHTML = `<div class="empty-state" style="grid-column:1/-1;"><span class="material-symbols-rounded">travel_explore</span><p>No tracking runs yet — click <b>Run tracking</b> to see how the AI models answer your buyers.</p></div>`;
+        // Zero state: the prerequisite (a prompt set) is otherwise buried in
+        // Settings — walk a new user through both steps right here.
+        metrics.innerHTML = "";
+        summary.innerHTML = `<div style="padding:14px 0 4px;">
+            <p style="font-size:13px;margin:0 0 10px;">Two steps to see how AI models answer your buyers:</p>
+            <div style="display:flex;gap:10px;flex-wrap:wrap;">
+                <button class="btn btn-secondary" onclick="generatePrompts()"><span class="material-symbols-rounded">auto_awesome</span> 1. Auto-generate buyer prompts</button>
+                <button class="btn btn-primary" onclick="runTracking()"><span class="material-symbols-rounded">travel_explore</span> 2. Run tracking</button>
+            </div>
+            <p style="font-size:11.5px;color:var(--on-surface-secondary);margin:8px 0 0;">Tracking probes each prompt across the configured AI models and is capped by your daily AI budget.</p>
+        </div>`;
         return;
     }
     const s = latest.summary || {};
@@ -1690,7 +1861,13 @@ function renderHeadline(latest, summary, metrics) {
                 <div style="font-size:12.5px;line-height:1.45;">AI models never recommended your store for these buyer questions — your share of voice is going to the retailers in the list below. The <b>gap analysis</b> shows what to change to start appearing.</div>
                </div>`
             : "";
-    summary.innerHTML = `<p style="font-size:13px;color:var(--on-surface-secondary);margin:12px 0 0;">${summaryLine}</p>${zeroCallout}`;
+    const truncCallout = s.truncated
+        ? `<div style="display:flex;gap:10px;align-items:flex-start;background:var(--warning-light);border:1px solid var(--outline);border-radius:var(--radius-sm);padding:10px 12px;margin-top:10px;">
+            <span class="material-symbols-rounded" style="color:var(--warning);font-size:20px;">hourglass_bottom</span>
+            <div style="font-size:12.5px;line-height:1.45;">${escapeHtml(s.truncated)}</div>
+           </div>`
+        : "";
+    summary.innerHTML = `<p style="font-size:13px;color:var(--on-surface-secondary);margin:12px 0 0;">${summaryLine}</p>${zeroCallout}${truncCallout}`;
 
     const brandKnown = s.brand_known_rate;
     const retr = s.retrieval;
@@ -1717,7 +1894,10 @@ function renderHeadline(latest, summary, metrics) {
 
 function renderModels(d) {
     const panel = document.getElementById("models-panel");
-    const models = d.models || [];
+    // Grounded (live-retrieval) models lead: they mirror what AI search surfaces
+    // actually say today and respond to site changes within weeks — memory models
+    // track slow-moving training-data knowledge.
+    const models = (d.models || []).slice().sort((a, b) => (b.grounded === true) - (a.grounded === true));
     if (!models.length) {
         panel.innerHTML = "";
         return;
@@ -1741,7 +1921,7 @@ function renderModels(d) {
                 : "";
             return `<tr>
                 <td><div style="font-weight:500;font-size:13px;">${escapeHtml(shortName(m.model))}${m.grounded ? ' <span title="Answers with live web retrieval">🌐</span>' : ""}</div>
-                    <div style="font-size:11px;color:var(--on-surface-secondary);">${m.grounded ? "live web search" : "training-data memory"}</div>${answerFold}</td>
+                    <div style="font-size:11px;color:var(--on-surface-secondary);">${m.grounded ? "live web search — responds to your changes" : "training-data memory (moves slowly)"}</div>${answerFold}</td>
                 <td>${pctBadge(m.brand_known_rate, 100)}</td>
                 <td>${pctBadge(m.mention_rate, 10)}<div style="font-size:11px;color:var(--on-surface-secondary);">${m.buyer_answers} answers</div></td>
                 <td>${pctBadge(m.citation_rate, 5)}</td>
@@ -1750,7 +1930,7 @@ function renderModels(d) {
         .join("");
     panel.innerHTML = `<div class="card" style="padding:16px;">
         <h3 style="margin:0 0 4px;">Model scoreboard</h3>
-        <p style="font-size:12px;color:var(--on-surface-secondary);margin:0 0 10px;">Which AI models know your store, recommend it to buyers, and cite your site. Expand a model to read its actual answers about your brand.</p>
+        <p style="font-size:12px;color:var(--on-surface-secondary);margin:0 0 10px;">Which AI models know your store, recommend it to buyers, and cite your site. Live-search models (🌐) lead — they show what AI search actually surfaces today. Expand a model to read its actual answers about your brand.</p>
         <div class="table-container"><table>
             <thead><tr>
                 <th>Model</th>
@@ -1828,6 +2008,15 @@ async function loadRunDetail(runId) {
         renderProductBrands(d.product_brands || []);
         renderGap(d.gap_analysis);
         renderBreakdown(d.results || []);
+        // Pill counts: buyer questions + competitors on the leaderboard.
+        const buyers = (d.results || []).filter((r) => (r.intent || "buyer") !== "brand");
+        const qCount = new Set(buyers.map((r) => r.prompt)).size;
+        const setCount = (key, n) => {
+            const el = document.querySelector(`.vis-pill-count[data-count="${key}"]`);
+            if (el) el.textContent = n ? `(${n})` : "";
+        };
+        setCount("answers", qCount);
+        setCount("competitors", (d.competitors || []).length);
     } catch (err) {
         /* non-fatal */
     }
@@ -2045,6 +2234,7 @@ function renderBreakdown(results) {
                 </summary>
                 <div style="padding:6px 0 4px 8px;">
                     ${top.length ? `<div style="font-size:12px;color:var(--on-surface-secondary);margin-bottom:4px;">AI recommends: ${top.map(([n, c]) => `${escapeHtml(n)} (${c}×)`).join(", ")}</div>` : ""}
+                    ${hits ? "" : `<div style="margin:4px 0 8px;display:flex;gap:8px;flex-wrap:wrap;"><button class="btn btn-secondary btn-sm" data-q="${escapeHtml(prompt)}" onclick="findQuestionTargets(this)"><span class="material-symbols-rounded">travel_explore</span> Find your pages to optimize for this</button><a class="btn btn-secondary btn-sm" href="/blog?tab=create&topic=${encodeURIComponent(prompt)}" title="Open the blog wizard with this buyer question as the topic"><span class="material-symbols-rounded">post_add</span> Draft post</a><div class="qt-results" style="flex-basis:100%;"></div></div>`}
                     ${perAnswer}
                 </div>
             </details>`;
@@ -2117,6 +2307,7 @@ async function runGapAnalysis(btn) {
         const res = await apiRequest(`/api/ai-seo/tracking/${latestRunId}/gap-analysis`, { method: "POST", body: {} });
         renderGap(res.gap_analysis);
         showToast("Gap analysis ready", "success");
+        switchVisSub("actions"); // the result renders in the Actions sub-section
     } catch (err) {
         gap.innerHTML = `<div class="empty-state"><span class="material-symbols-rounded">error</span><p>${escapeHtml(err.message)}</p></div>`;
     }
@@ -2127,7 +2318,15 @@ async function runGapAnalysis(btn) {
 function renderGap(gap) {
     const panel = document.getElementById("gap-panel");
     if (!gap) {
-        panel.innerHTML = "";
+        // Actions sub-section zero state: the analysis is generated from
+        // Competitors — offer it right here too so the tab isn't a dead end.
+        panel.innerHTML = latestRunId
+            ? `<div class="card" style="padding:24px;text-align:center;">
+                <span class="material-symbols-rounded" style="font-size:36px;color:var(--on-surface-secondary);opacity:.5;">analytics</span>
+                <p style="font-size:13px;color:var(--on-surface-secondary);margin:8px auto 12px;max-width:480px;">No gap analysis yet for this run. It crawls the top competitors AI recommends and turns the difference into page improvements and content ideas.</p>
+                <button class="btn btn-primary" onclick="runGapAnalysis(this)"><span class="material-symbols-rounded">analytics</span> Analyze competitive gap</button>
+            </div>`
+            : "";
         return;
     }
     const chip = "background:var(--surface-dim);color:var(--on-surface);";
@@ -2142,9 +2341,11 @@ function renderGap(gap) {
             </div>`;
         })
         .join("");
+    window._gapIdeas = gap.content_ideas || [];
     const contentRecs = (gap.content_ideas || [])
-        .map((r) => `<div style="padding:10px 0;border-bottom:1px solid var(--outline);">
-            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">${r.format ? `<span class="badge" style="${chip}">${escapeHtml(r.format)}</span>` : ""}<b>${escapeHtml(r.title || "")}</b></div>
+        .map((r, i) => `<div style="padding:10px 0;border-bottom:1px solid var(--outline);">
+            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">${r.format ? `<span class="badge" style="${chip}">${escapeHtml(r.format)}</span>` : ""}<b>${escapeHtml(r.title || "")}</b>
+                <button class="btn btn-secondary btn-sm" style="margin-left:auto;" title="Queue as a blog topic suggestion — schedule it from the Blog section" onclick="sendIdeaToBlog(${i}, this)"><span class="material-symbols-rounded">post_add</span> Send to blog pipeline</button></div>
             ${r.target_query ? `<div style="font-size:12px;color:var(--on-surface-secondary);margin:3px 0;">Targets query: “${escapeHtml(r.target_query)}”</div>` : ""}
             <div style="font-size:13px;">${escapeHtml(r.why || "")}</div>
         </div>`)
@@ -2158,11 +2359,71 @@ function renderGap(gap) {
     </div>`;
 }
 
+async function findQuestionTargets(btn) {
+    const q = btn.dataset.q || "";
+    btn.disabled = true;
+    const box = btn.parentElement.querySelector(".qt-results");
+    box.innerHTML = `<div style="font-size:12px;color:var(--on-surface-secondary);padding:4px 0;">Matching your pages…</div>`;
+    try {
+        const res = await apiRequest(
+            `/api/ai-seo/tracking/question-targets?store_id=${getStoreId()}&q=${encodeURIComponent(q)}`
+        );
+        const targets = res.targets || [];
+        box.innerHTML = targets.length
+            ? targets
+                  .map(
+                      (t) => `<div style="display:flex;gap:8px;align-items:baseline;padding:3px 0;font-size:12px;">
+                    <span class="badge" style="background:var(--surface-dim);color:var(--on-surface);flex-shrink:0;">${t.type}</span>
+                    <b>${escapeHtml(t.title || "")}</b>
+                    <span style="color:var(--on-surface-secondary);">AI score ${t.score ?? "not scanned"}${t.weak_signals?.length ? ` · weakest: ${t.weak_signals.map(escapeHtml).join(", ")}` : ""}</span>
+                </div>`
+                  )
+                  .join("") +
+              `<div style="font-size:11.5px;color:var(--on-surface-secondary);padding:4px 0;">Optimize these from the <b>AI Readiness</b> tab (select them → Optimize selected).</div>`
+            : `<div style="font-size:12px;color:var(--on-surface-secondary);padding:4px 0;">No matching pages found — this question likely needs new content (see the gap analysis content ideas).</div>`;
+    } catch (err) {
+        box.innerHTML = "";
+        showToast(`Failed: ${err.message}`, "error");
+        btn.disabled = false;
+    }
+}
+
+async function sendIdeaToBlog(idx, btn) {
+    const idea = (window._gapIdeas || [])[idx];
+    if (!idea) return;
+    btn.disabled = true;
+    try {
+        const res = await apiRequest("/api/ai-seo/gap/send-to-blog", {
+            method: "POST",
+            body: { store_id: getStoreId(), idea },
+        });
+        showToast(
+            res.already_queued
+                ? "Already queued in blog topic suggestions"
+                : res.enrich_task_id
+                    ? "Queued & researching — review it in Blog → Create Post shortly"
+                    : "Queued as a blog topic suggestion — research & schedule it from Blog → Create Post",
+            "success"
+        );
+        btn.innerHTML = '<span class="material-symbols-rounded">check</span> Sent';
+    } catch (err) {
+        showToast(`Failed: ${err.message}`, "error");
+        btn.disabled = false;
+    }
+}
+
 document.addEventListener("DOMContentLoaded", async () => {
-    initThemeToggle();
-    initSidebar();
+    // Theme/sidebar init is app.js's job — calling it again here attached a
+    // second click listener, making each toggle click flip twice (a no-op).
     setScanType(scanType);
     await loadStores();
+    // UITabs owns tab clicks + ?tab= sync; its initial activation fires
+    // handleTabChange, so deep links lazy-load their tab automatically.
+    aiTabs = UITabs.init(document.querySelector(".tabs"), { defaultTab: "overview", onChange: handleTabChange });
     loadOverview();
     loadItems();
+    const boot = focusFromQuery({});
+    if (boot.focus || boot.action || new URLSearchParams(location.search).get("sub")) {
+        applyAiFocus(boot.focus, boot.action, new URLSearchParams(location.search).get("sub"));
+    }
 });

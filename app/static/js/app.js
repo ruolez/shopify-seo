@@ -140,9 +140,19 @@ function showLoading(container) {
         '<div class="loading-spinner"><div class="spinner"></div><p>Loading...</p></div>';
 }
 
+function parseServerDate(isoStr) {
+    // Server timestamps are UTC but serialized WITHOUT a timezone marker
+    // ("2026-07-23T18:08:05.383109"). new Date() would parse that as LOCAL
+    // time and display hours off — mark it UTC unless an offset is present.
+    if (typeof isoStr === "string" && isoStr.includes("T") && !/([zZ]|[+-]\d{2}:?\d{2})$/.test(isoStr)) {
+        return new Date(isoStr + "Z");
+    }
+    return new Date(isoStr);
+}
+
 function formatDate(isoStr) {
     if (!isoStr) return "—";
-    const d = new Date(isoStr);
+    const d = parseServerDate(isoStr);
     return d.toLocaleDateString("en-US", {
         month: "short",
         day: "numeric",
@@ -161,7 +171,7 @@ function getScoreBadge(score) {
 
 function formatRelativeTime(isoStr) {
     if (!isoStr) return "—";
-    const d = new Date(isoStr);
+    const d = parseServerDate(isoStr);
     const now = new Date();
     const diffMs = now - d;
     const diffMin = Math.floor(diffMs / 60000);
@@ -261,6 +271,19 @@ const TasksPanel = (() => {
     let open = false;
     let dismissed = new Set();
     let clearedBefore = "";
+    let mode = "running"; // running (24h) | history (7d archive)
+    let filterGroup = "all";
+
+    // Domain filter chips — predicate on the task's origin page/source.
+    const GROUPS = {
+        all: { label: "All", test: () => true },
+        ai: { label: "AI Search", test: (t) => t.page === "/ai-seo" },
+        seo: { label: "SEO", test: (t) => ["/seo", "/technical-seo", "/interlinking", "/images", "/duplicates"].includes(t.page) },
+        content: { label: "Content", test: (t) => ["/blog", "/news", "/landing-pages", "/home-page", "/brands"].includes(t.page) },
+        insights: { label: "Insights", test: (t) => ["/gsc", "/semrush", "/keyword-strategy", "/content-gaps", "/competitors"].includes(t.page) },
+        sync: { label: "Sync", test: (t) => t.source === "sync" },
+    };
+    const PAGE_TO_GROUP = { "/ai-seo": "ai", "/seo": "seo", "/blog": "content", "/news": "content", "/gsc": "insights", "/stores": "sync" };
 
     function loadDismissState() {
         try {
@@ -330,6 +353,15 @@ const TasksPanel = (() => {
             html += `<div class="task-row-error">${escapeHtml(String(t.error).slice(0, 200))}</div>`;
         }
 
+        // Failed AI SEO batches are retryable right here — parity with the old
+        // AI SEO Activity tab's "Retry failed" button.
+        const retryable = t.source === "bulk" && ["geo_optimize", "fact_boost"].includes(t.kind) &&
+            !active && (t.status === "failed" || (t.progress && t.progress.failed > 0));
+        if (retryable) {
+            html += `<button type="button" class="btn btn-secondary btn-sm task-row-retry" data-retry="${t.id}" style="margin-top:6px;">
+                <span class="material-symbols-rounded">refresh</span> Retry failed</button>`;
+        }
+
         const ts = t.completed_at || t.started_at;
         const abs = formatDate(ts);
         const rel = formatRelativeTime(ts);
@@ -341,20 +373,24 @@ const TasksPanel = (() => {
     function render(tasks) {
         if (!panelEl) return;
         const body = panelEl.querySelector(".tasks-panel-body");
+        const test = (GROUPS[filterGroup] || GROUPS.all).test;
+        tasks = tasks.filter(test);
         const active = tasks.filter(t => t.status === "running" || t.status === "pending");
-        const recent = tasks.filter(t => !(t.status === "running" || t.status === "pending") && !isDismissed(t));
+        // History is the archive — the local dismiss ledger doesn't hide rows there.
+        const recent = tasks.filter(t => !(t.status === "running" || t.status === "pending") &&
+            (mode === "history" || !isDismissed(t)));
 
         let html = "";
         if (active.length === 0 && recent.length === 0) {
-            html = `<div class="tasks-empty">No active tasks</div>`;
+            html = `<div class="tasks-empty">${mode === "history" ? "No tasks in the last 7 days" : "No active tasks"}</div>`;
         } else {
             if (active.length) {
                 html += `<div class="tasks-group-label">Running</div>`;
                 html += active.map(taskRow).join("");
             }
             if (recent.length) {
-                html += `<div class="tasks-group-label tasks-group-label-row">Recent (24h)` +
-                    `<button type="button" class="tasks-clear-btn" id="tasksClearAll">Clear</button></div>`;
+                html += `<div class="tasks-group-label tasks-group-label-row">${mode === "history" ? "History (7d)" : "Recent (24h)"}` +
+                    (mode === "history" ? "" : `<button type="button" class="tasks-clear-btn" id="tasksClearAll">Clear</button>`) + `</div>`;
                 html += recent.map(taskRow).join("");
             }
         }
@@ -376,6 +412,19 @@ const TasksPanel = (() => {
                 const row = btn.closest(".task-row");
                 if (row) row.remove();
                 if (!body.querySelector(".task-row")) pollList();
+            });
+        });
+        body.querySelectorAll(".task-row-retry").forEach(btn => {
+            btn.addEventListener("click", async () => {
+                btn.disabled = true;
+                try {
+                    await apiRequest(`/api/ai-seo/batches/${btn.dataset.retry}/retry`, { method: "POST" });
+                    showToast("Retrying failed items", "success");
+                    pollList();
+                } catch (err) {
+                    showToast(`Retry failed: ${err.message}`, "error");
+                    btn.disabled = false;
+                }
             });
         });
     }
@@ -401,7 +450,8 @@ const TasksPanel = (() => {
 
     async function pollList() {
         try {
-            const d = await apiRequest("/api/tasks/active");
+            const url = mode === "history" ? "/api/tasks/active?hours=168" : "/api/tasks/active";
+            const d = await apiRequest(url);
             if (d) {
                 render(d.tasks || []);
                 updateBadge(d.active_count || 0);
@@ -436,16 +486,46 @@ const TasksPanel = (() => {
     function buildPanel() {
         panelEl = document.createElement("div");
         panelEl.className = "tasks-panel";
+        const chips = Object.entries(GROUPS)
+            .map(([k, g]) => `<button type="button" class="tasks-filter-chip ${k === filterGroup ? "active" : ""}" data-filter="${k}">${g.label}</button>`)
+            .join("");
         panelEl.innerHTML = `
             <div class="tasks-panel-header">
-                <span>Background Tasks</span>
+                <span>Activity</span>
                 <button type="button" class="tasks-panel-close" title="Close">
                     <span class="material-symbols-rounded">close</span>
                 </button>
             </div>
+            <div class="tasks-panel-tabs">
+                <button type="button" class="tasks-mode-tab active" data-mode="running">Running</button>
+                <button type="button" class="tasks-mode-tab" data-mode="history">History</button>
+            </div>
+            <div class="tasks-panel-filters">${chips}</div>
             <div class="tasks-panel-body"><div class="tasks-empty">Loading…</div></div>`;
         panelEl.querySelector(".tasks-panel-close").addEventListener("click", () => setOpen(false));
+        panelEl.querySelectorAll(".tasks-mode-tab").forEach(btn => {
+            btn.addEventListener("click", () => {
+                mode = btn.dataset.mode;
+                panelEl.querySelectorAll(".tasks-mode-tab").forEach(b => b.classList.toggle("active", b === btn));
+                pollList();
+            });
+        });
+        panelEl.querySelectorAll(".tasks-filter-chip").forEach(btn => {
+            btn.addEventListener("click", () => {
+                filterGroup = btn.dataset.filter;
+                panelEl.querySelectorAll(".tasks-filter-chip").forEach(b => b.classList.toggle("active", b === btn));
+                pollList();
+            });
+        });
         document.body.appendChild(panelEl);
+    }
+
+    function setFilterGroup(key) {
+        filterGroup = GROUPS[key] ? key : "all";
+        if (panelEl) {
+            panelEl.querySelectorAll(".tasks-filter-chip").forEach(b =>
+                b.classList.toggle("active", b.dataset.filter === filterGroup));
+        }
     }
 
     function init() {
@@ -462,7 +542,14 @@ const TasksPanel = (() => {
         setOpen(restoreOpen);
     }
 
-    return { init };
+    /** Programmatic open, optionally pre-filtered: TasksPanel.open({ page: "/ai-seo" }) */
+    function openPanel(opts = {}) {
+        if (opts.page) setFilterGroup(PAGE_TO_GROUP[opts.page] || "all");
+        if (opts.group) setFilterGroup(opts.group);
+        setOpen(true);
+    }
+
+    return { init, open: openPanel };
 })();
 
 function initTasksPanel() {

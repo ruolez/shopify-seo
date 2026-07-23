@@ -24,7 +24,8 @@ document.addEventListener("keydown", (e) => {
 });
 
 function initBlogTabs() {
-    const savedTab = loadFilter("blogTab", "articles");
+    const params = new URLSearchParams(window.location.search);
+    const savedTab = params.get("tab") || loadFilter("blogTab", "articles");
 
     document.querySelectorAll(".tab").forEach((tab) => {
         tab.addEventListener("click", () => {
@@ -45,6 +46,16 @@ function initBlogTabs() {
         tabBtn.click();
     } else {
         loadArticles();
+    }
+
+    // /blog?tab=create&topic=<q> deep link (AI Search visibility → Draft post)
+    const topic = params.get("topic");
+    if (topic) {
+        if (savedTab !== "create") document.querySelector('.tab[data-tab="create"]')?.click();
+        setTimeout(() => {
+            const el = document.getElementById("wizard-topic");
+            if (el && !el.value) el.value = topic;
+        }, 400);
     }
 }
 
@@ -611,6 +622,7 @@ async function getFirstStoreId() {
 // ── Topic Discovery ──────────────────────────────────────────────
 
 let topicRunsCache = [];
+let topicPipelineCache = [];
 
 const TOPIC_INTENT_COLORS = {
     Informational: "#1a73e8",
@@ -623,9 +635,11 @@ async function loadTopicSuggestions() {
     const storeId = await getFirstStoreId();
     if (!storeId) return;
     try {
-        const { runs } = await apiRequest(`/api/blog/topics?store_id=${storeId}`);
+        const { runs, pipeline } = await apiRequest(`/api/blog/topics?store_id=${storeId}`);
         topicRunsCache = runs || [];
+        topicPipelineCache = pipeline || [];
         renderTopicRuns();
+        if (topicPipelineCache.some((s) => s.enriching)) pollTopicEnrichment();
     } catch (err) {
         console.error("Failed to load topic suggestions", err);
     }
@@ -640,13 +654,33 @@ function renderTopicRuns() {
     const completed = topicRunsCache.filter((r) => r.status === "completed");
     const latest = completed[0];
 
-    if (!latest) {
+    // Ideas sent from AI Search (gap analysis → "Send to blog pipeline") arrive
+    // outside a research run — show them as their own always-visible group.
+    const pipelineVisible = topicPipelineCache.filter((s) => s.status !== "scheduled");
+    const pipelineScheduled = topicPipelineCache.length - pipelineVisible.length;
+    let pipelineHtml = "";
+    if (pipelineVisible.length || pipelineScheduled) {
+        pipelineHtml = `<div class="topic-run" style="margin-bottom:16px;">
+            <p style="font-size:12px;color:var(--on-surface-secondary);margin:0 0 8px;display:flex;align-items:center;gap:6px;">
+                <span class="material-symbols-rounded" style="font-size:16px;">smart_toy</span>
+                Sent from <a href="/ai-seo?tab=visibility&sub=actions">AI Search — gap analysis</a>
+            </p>
+            ${pipelineVisible.map((s) => renderTopicSuggestion(s)).join("")}
+            ${pipelineScheduled ? `<p style="font-size:13px;color:var(--on-surface-secondary);margin:4px 0 8px;">${pipelineScheduled} idea${pipelineScheduled > 1 ? "s" : ""} moved to the <a href="#" onclick="document.querySelector('.tab[data-tab=\\'scheduled\\']').click(); return false;">Scheduled tab</a>.</p>` : ""}
+        </div>`;
+    }
+
+    if (!latest && !pipelineHtml) {
         container.innerHTML = "";
         history.style.display = "none";
         return;
     }
 
-    container.innerHTML = renderTopicRun(latest, false);
+    container.innerHTML = pipelineHtml + (latest ? renderTopicRun(latest, false) : "");
+    if (!latest) {
+        history.style.display = "none";
+        return;
+    }
 
     const older = completed.slice(1);
     if (older.length) {
@@ -706,6 +740,7 @@ function renderTopicSuggestion(s) {
     if (s.status === "used") html += `<span class="badge" style="background: var(--success); color: #fff;">Used</span>`;
     if (s.status === "dismissed") html += `<span class="badge" style="background: var(--on-surface-secondary); color: #fff;">Dismissed</span>`;
     if (s.status === "scheduled") html += `<span class="badge" style="background: var(--primary); color: #fff;">Scheduled</span>`;
+    if (s.enriching) html += `<span class="badge badge-warning" style="display:inline-flex;align-items:center;gap:5px;"><span class="spinner-sm" style="width:11px;height:11px;border-width:2px;"></span> Researching…</span>`;
     html += `</div>`;
     if (s.meta_title) {
         html += `<p style="margin: 8px 0 0; font-size: 13px;"><strong>Meta title</strong> <span style="color: var(--on-surface-secondary);">(${s.meta_title.length}/60)</span>: ${escapeHtml(s.meta_title)}</p>`;
@@ -742,13 +777,46 @@ function renderTopicSuggestion(s) {
     html += `</div>`;
     html += `<div style="display: flex; flex-direction: column; gap: 8px;">`;
     if (s.status === "suggested") {
-        html += `<button class="btn btn-sm btn-primary" onclick="scheduleTopicSuggestion(${s.id})"><span class="material-symbols-rounded">event</span> Schedule</button>`;
+        // Pipeline-sent ideas that haven't been researched yet get a Research
+        // button (fills meta, keyword groups, overlap guard, link targets).
+        if (!s.meta_title && !s.enriching) {
+            html += `<button class="btn btn-sm btn-primary" onclick="researchTopicSuggestion(${s.id}, this)"><span class="material-symbols-rounded">science</span> Research</button>`;
+        }
+        html += `<button class="btn btn-sm ${!s.meta_title ? "btn-secondary" : "btn-primary"}" onclick="scheduleTopicSuggestion(${s.id})"><span class="material-symbols-rounded">event</span> Schedule</button>`;
         html += `<button class="btn btn-sm btn-secondary" onclick="useTopicSuggestion(${s.id})"><span class="material-symbols-rounded">edit_note</span> Use this topic</button>`;
         html += `<button class="btn btn-sm btn-secondary" onclick="dismissTopicSuggestion(${s.id})">Dismiss</button>`;
     }
     html += `<button class="btn btn-sm btn-secondary" onclick="copyTopicKeywords(${s.id})"><span class="material-symbols-rounded">content_copy</span> Copy keywords</button>`;
     html += `</div></div></div>`;
     return html;
+}
+
+let topicEnrichPollTimer = null;
+
+function pollTopicEnrichment() {
+    if (topicEnrichPollTimer) return;
+    topicEnrichPollTimer = setInterval(async () => {
+        await loadTopicSuggestions();
+        if (!topicPipelineCache.some((s) => s.enriching)) {
+            clearInterval(topicEnrichPollTimer);
+            topicEnrichPollTimer = null;
+        }
+    }, 5000);
+}
+
+async function researchTopicSuggestion(id, btn) {
+    btn.disabled = true;
+    btn.innerHTML = '<span class="material-symbols-rounded">hourglass_empty</span> Starting…';
+    try {
+        await apiRequest(`/api/blog/topics/suggestions/${id}/enrich`, { method: "POST", body: {} });
+        showToast("Researching this topic — meta, keywords and link targets will fill in shortly", "success");
+        await loadTopicSuggestions();
+        pollTopicEnrichment();
+    } catch (err) {
+        showToast(`Research failed to start: ${err.message}`, "error");
+        btn.disabled = false;
+        btn.innerHTML = '<span class="material-symbols-rounded">science</span> Research';
+    }
 }
 
 async function startTopicResearch() {
@@ -804,6 +872,9 @@ function pollTopicResearchTask(taskId) {
 }
 
 function findTopicSuggestion(id) {
+    // Pipeline-sent ideas (AI Search → blog) live outside any research run.
+    const pipelineHit = topicPipelineCache.find((s) => s.id === id);
+    if (pipelineHit) return pipelineHit;
     for (const run of topicRunsCache) {
         for (const s of run.suggestions || []) {
             if (s.id === id) return s;

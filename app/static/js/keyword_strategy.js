@@ -20,7 +20,18 @@ async function loadKsStores() {
     const stores = await apiRequest("/api/stores");
     const sel = document.getElementById("ks-store-select");
     stores.forEach(s => { const o = document.createElement("option"); o.value = s.id; o.textContent = s.name; sel.appendChild(o); });
-    if (stores.length === 1) { sel.value = stores[0].id; onKsStore(stores[0].id); }
+    // The select is hidden — the global topbar StoreSelector (ui.js) drives it.
+    StoreSelector.bindLegacy(sel);
+    const globalId = StoreSelector.getStoreId();
+    if (globalId && stores.some(s => s.id === globalId)) { sel.value = globalId; onKsStore(globalId); }
+    else if (stores.length === 1) { sel.value = stores[0].id; onKsStore(stores[0].id); }
+    else {
+        // StoreSelector.init() may still be resolving — try once more shortly.
+        setTimeout(() => {
+            const g = StoreSelector.getStoreId();
+            if (g && !sel.value) { sel.value = g; onKsStore(g); }
+        }, 600);
+    }
 }
 
 document.getElementById("ks-store-select").addEventListener("change", e => { if (e.target.value) onKsStore(parseInt(e.target.value)); });

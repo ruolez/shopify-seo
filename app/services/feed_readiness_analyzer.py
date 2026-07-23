@@ -156,12 +156,13 @@ def _schema_has_rating(schema):
     return any(v.get("aggregateRating") for v in (schema.get("hasVariant") or []) if isinstance(v, dict))
 
 
-def _review_signals(pushed_schema, live_schema_types):
+def _review_signals(pushed_schema, live_schema_types, fixables):
     if _schema_has_rating(pushed_schema):
         return 100, "aggregateRating present in pushed Product schema"
     types = set(live_schema_types or [])
     if types & {"Review", "AggregateRating"}:
         return 100, "Review schema detected on the live page"
+    fixables.append("Install a review app and publish ratings (aggregateRating) — reviews are a primary AI-shopping trust signal")
     return 0, "No review/rating data — AI shopping ranks reviewed products higher (install a review app)"
 
 
@@ -203,7 +204,7 @@ def analyze_feed_readiness(product, pushed_schema=None, live_schema_types=None):
     scores["price"], details["price"] = _price(variants, thresholds, fixables)
     scores["availability"], details["availability"] = _availability(variants, product.get("status"), fixables)
     scores["brand"], details["brand"] = _brand(product.get("vendor"), fixables)
-    scores["review_signals"], details["review_signals"] = _review_signals(pushed_schema, live_schema_types)
+    scores["review_signals"], details["review_signals"] = _review_signals(pushed_schema, live_schema_types, fixables)
 
     overall = sum(scores[k] * weights.get(k, 0) for k in scores)
     return {

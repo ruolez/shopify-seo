@@ -142,6 +142,52 @@ def blog_page():
     return render_template("blog.html")
 
 
+@blog_bp.route("/content/calendar")
+def content_calendar_page():
+    return render_template("calendar.html")
+
+
+@blog_bp.route("/api/calendar")
+def content_calendar_data():
+    """Merged month view of the blog + news publishing pipeline."""
+    store_id = request.args.get("store_id", type=int)
+    month = request.args.get("month") or datetime.now(timezone.utc).strftime("%Y-%m")
+    if not store_id:
+        return jsonify({"error": "store_id is required"}), 400
+    try:
+        start = datetime.strptime(month + "-01", "%Y-%m-%d")
+    except ValueError:
+        return jsonify({"error": "month must be YYYY-MM"}), 400
+    end = (start + timedelta(days=32)).replace(day=1)
+
+    with db.get_cursor() as cur:
+        cur.execute(
+            """SELECT id, 'blog' AS kind, COALESCE(generated_article->>'title', topic) AS title,
+                      status, scheduled_for
+               FROM article_wizard_sessions
+               WHERE store_id = %s AND scheduled_for >= %s AND scheduled_for < %s
+               UNION ALL
+               SELECT id, 'news', COALESCE(edited_result->>'headline', analyze_result->>'headline', 'News article'),
+                      status, scheduled_for
+               FROM news_sessions
+               WHERE store_id = %s AND scheduled_for >= %s AND scheduled_for < %s
+               ORDER BY scheduled_for""",
+            (store_id, start, end, store_id, start, end),
+        )
+        rows = cur.fetchall()
+    entries = [
+        {
+            "id": r["id"],
+            "kind": r["kind"],
+            "title": r["title"],
+            "status": r["status"],
+            "scheduled_for": r["scheduled_for"].isoformat() if r["scheduled_for"] else None,
+        }
+        for r in rows
+    ]
+    return jsonify({"month": month, "entries": entries})
+
+
 # ── Blog Sync ───────────────────────────────────────────────────
 
 @blog_bp.route("/api/blog/sync", methods=["POST"])
@@ -1695,16 +1741,99 @@ def topic_research_list():
             )
             for s in cur.fetchall():
                 suggestions_by_run.setdefault(s["run_id"], []).append(dict(s))
+        # Ideas queued from outside topic research (AI Search gap analysis →
+        # "Send to blog pipeline") have no run — surface them as their own group.
+        cur.execute(
+            "SELECT * FROM topic_suggestions WHERE store_id = %s AND run_id IS NULL ORDER BY id DESC LIMIT 30",
+            (store_id,),
+        )
+        pipeline = [dict(s) for s in cur.fetchall()]
+        if pipeline:
+            cur.execute(
+                """SELECT input->>'suggestion_id' AS sid FROM ai_tasks
+                   WHERE task_type = 'topic_enrich' AND status IN ('pending','running')""",
+            )
+            enriching_ids = {int(r["sid"]) for r in cur.fetchall() if r["sid"]}
+            for s in pipeline:
+                s["enriching"] = s["id"] in enriching_ids
+
+    def _iso_suggestion(s):
+        s["created_at"] = s["created_at"].isoformat() if s.get("created_at") else None
+        s["updated_at"] = s["updated_at"].isoformat() if s.get("updated_at") else None
 
     for r in runs:
         r["created_at"] = r["created_at"].isoformat() if r.get("created_at") else None
         r["completed_at"] = r["completed_at"].isoformat() if r.get("completed_at") else None
         r["suggestions"] = suggestions_by_run.get(r["id"], [])
         for s in r["suggestions"]:
-            s["created_at"] = s["created_at"].isoformat() if s.get("created_at") else None
-            s["updated_at"] = s["updated_at"].isoformat() if s.get("updated_at") else None
+            _iso_suggestion(s)
+    for s in pipeline:
+        _iso_suggestion(s)
 
-    return jsonify({"runs": runs})
+    return jsonify({"runs": runs, "pipeline": pipeline})
+
+
+def start_topic_enrich(store_id, suggestion_id):
+    """Spawn the single-topic research task for a pipeline-sent suggestion.
+    Returns the ai_tasks id, or None when one is already pending/running or the
+    AI isn't configured (the suggestion still lands — manual Research remains)."""
+    from app.services.task_runner import spawn as spawn_task
+
+    with db.get_cursor() as cur:
+        cur.execute("SELECT api_key_enc FROM ai_config ORDER BY id LIMIT 1")
+        cfg = cur.fetchone()
+        if not cfg or not cfg.get("api_key_enc"):
+            return None
+        cur.execute(
+            """SELECT 1 FROM ai_tasks WHERE task_type = 'topic_enrich'
+               AND status IN ('pending','running') AND input->>'suggestion_id' = %s""",
+            (str(suggestion_id),),
+        )
+        if cur.fetchone():
+            return None
+        cur.execute(
+            "INSERT INTO ai_tasks (store_id, task_type, input) VALUES (%s, 'topic_enrich', %s) RETURNING id",
+            (store_id, json.dumps({"suggestion_id": suggestion_id})),
+        )
+        task_id = cur.fetchone()["id"]
+    spawn_task("ai_tasks", task_id, _execute_topic_enrich, task_id, suggestion_id, store_id)
+    return task_id
+
+
+def _execute_topic_enrich(task_id, suggestion_id, store_id):
+    from app.ai_agent import run_task
+
+    with db.get_cursor() as cur:
+        cur.execute("UPDATE ai_tasks SET status = 'running' WHERE id = %s", (task_id,))
+    try:
+        result = run_task("topic_enrich", {"suggestion_id": suggestion_id}, store_id)
+        if result.get("error"):
+            raise RuntimeError(result["error"])
+        with db.get_cursor() as cur:
+            cur.execute(
+                "UPDATE ai_tasks SET status = 'completed', result = %s, completed_at = NOW() WHERE id = %s",
+                (json.dumps(result), task_id),
+            )
+    except Exception as e:
+        logger.exception("Topic enrich failed for suggestion %s: %s", suggestion_id, e)
+        with db.get_cursor() as cur:
+            cur.execute(
+                "UPDATE ai_tasks SET status = 'failed', error = %s, completed_at = NOW() WHERE id = %s",
+                (str(e), task_id),
+            )
+
+
+@blog_bp.route("/api/blog/topics/suggestions/<int:suggestion_id>/enrich", methods=["POST"])
+def enrich_topic_suggestion(suggestion_id):
+    with db.get_cursor() as cur:
+        cur.execute("SELECT store_id FROM topic_suggestions WHERE id = %s", (suggestion_id,))
+        sug = cur.fetchone()
+    if not sug:
+        return jsonify({"error": "Suggestion not found"}), 404
+    task_id = start_topic_enrich(sug["store_id"], suggestion_id)
+    if task_id is None:
+        return jsonify({"error": "Already researching (or AI not configured in Settings)"}), 409
+    return jsonify({"ok": True, "task_id": task_id}), 201
 
 
 @blog_bp.route("/api/blog/topics/suggestions/<int:suggestion_id>", methods=["PATCH"])

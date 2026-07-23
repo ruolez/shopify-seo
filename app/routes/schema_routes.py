@@ -29,6 +29,25 @@ def _spec_properties_for(product, include_metafields=True):
         logger.warning("Spec-property fetch failed for product %s: %s", product.get("id"), e)
         return None
 
+def _apply_review_rating(product, client):
+    """Populate rating_value/rating_count from review-app metafields (reviews.rating /
+    reviews.rating_count — the Judge.me / Shopify review-app convention) so the schema
+    generator can emit a real aggregateRating. Best-effort; never fabricates."""
+    try:
+        rating = client.get_product_metafield(product["shopify_id"], "reviews", "rating")
+        count = client.get_product_metafield(product["shopify_id"], "reviews", "rating_count")
+        if not rating or not count:
+            return
+        value = (rating.get("value") or "").strip()
+        if value[:1] == "{":
+            value = ((json.loads(value) or {}).get("value") or "").strip()
+        if value and (count.get("value") or "").strip():
+            product["rating_value"] = value
+            product["rating_count"] = count["value"].strip()
+    except Exception as e:
+        logger.debug("Review rating fetch failed for product %s: %s", product.get("id"), e)
+
+
 schema_bp = Blueprint("schema", __name__)
 
 
@@ -48,6 +67,14 @@ def generate_and_push_product_schema(product_id, client=None):
     store_domain = product["domain"]
     if not store_domain.endswith(".myshopify.com"):
         store_domain = f"{store_domain}.myshopify.com"
+
+    if client is None:
+        client = ShopifyClient(
+            product["domain"],
+            decrypt_value(product["access_token_enc"]),
+            product["api_version"],
+        )
+    _apply_review_rating(product, client)
 
     org_settings = _get_org_settings(product["store_id"])
     schema = generate_product_schema(product, store_domain, org_settings, _spec_properties_for(product))
@@ -73,13 +100,6 @@ def generate_and_push_product_schema(product_id, client=None):
     if not is_valid:
         logger.warning("Schema invalid for product %s: %s", product_id, errors)
         return
-
-    if client is None:
-        client = ShopifyClient(
-            product["domain"],
-            decrypt_value(product["access_token_enc"]),
-            product["api_version"],
-        )
 
     schema_value = json.dumps(schema)
     client.set_product_metafield(

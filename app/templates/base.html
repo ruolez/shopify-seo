@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}SEO Platform{% endblock %} — SEO Platform</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+{% block head_extra %}{% endblock %}
+</head>
+<body>
+    <div class="app-layout">
+        {% include '_sidebar.html' %}
+        <div class="main-content">
+            <div class="topbar">
+                <div class="topbar-left">
+                    <button id="sidebar-toggle" class="icon-btn"><span class="material-symbols-rounded">menu</span></button>
+                    <h2>{% block page_title %}{% endblock %}</h2>
+                </div>
+                <div class="topbar-right">
+                    {% block topbar_extra %}{% endblock %}
+                    <div id="global-store-select"></div>
+                    <button id="cmdk-button" class="icon-btn" title="Jump to… (Cmd+K)"><span class="material-symbols-rounded">keyboard_command_key</span></button>
+                    <button id="theme-toggle" class="icon-btn"><span class="material-symbols-rounded">dark_mode</span></button>
+                </div>
+            </div>
+            <div class="page-content">
+{% block content %}{% endblock %}
+            </div>
+        </div>
+    </div>
+{% block modals %}{% endblock %}
+    <script src="/static/js/app.js"></script>
+    <script src="/static/js/ui.js"></script>
+{% block scripts %}{% endblock %}
+</body>
+</html>

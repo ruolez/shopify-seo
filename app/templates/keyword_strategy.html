@@ -1,10 +1,8 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Keyword Strategy — SEO Platform</title>
-    <link rel="stylesheet" href="/static/css/style.css">
+{% extends "base.html" %}
+
+{% block title %}Keyword Strategy{% endblock %}
+
+{% block head_extra %}
     <style>
         /* Workflow stepper */
         .ks-workflow {
@@ -159,27 +157,19 @@
         }
         .ks-empty p { font-size: 14px; margin-bottom: 16px; }
     </style>
-</head>
-<body>
-    <div class="app-layout">
-        {% include '_sidebar.html' %}
-        <div class="main-content">
-            <div class="topbar">
-                <div class="topbar-left">
-                    <button id="sidebar-toggle" class="icon-btn"><span class="material-symbols-rounded">menu</span></button>
-                    <h2>Keyword Strategy</h2>
-                </div>
-                <div class="topbar-right">
-                    <div class="form-group" style="margin-bottom:0;min-width:180px;">
-                        <select id="ks-store-select" class="form-control" style="font-size:13px;">
-                            <option value="">Select a store...</option>
-                        </select>
-                    </div>
-                    <button id="theme-toggle" class="icon-btn"><span class="material-symbols-rounded">dark_mode</span></button>
-                </div>
-            </div>
-            <div class="page-content">
+{% endblock %}
 
+{% block page_title %}Keyword Strategy{% endblock %}
+
+{% block topbar_extra %}
+                    {# Hidden legacy select: page JS still reads it; the global
+                       topbar StoreSelector drives it via bindLegacy (ui.js). #}
+                    <select id="ks-store-select" style="display:none;">
+                        <option value="">Select a store...</option>
+                    </select>
+{% endblock %}
+
+{% block content %}
                 <!-- Workflow Steps -->
                 <div class="ks-workflow" id="ks-workflow">
                     <div class="ks-step active" data-step="keywords">
@@ -350,6 +340,11 @@
                     </div>
 
                     <div id="audit-sub-cannibalization" class="audit-subtab" style="display:none;">
+                        <div style="display:flex;gap:10px;align-items:center;background:var(--primary-light);border:1px solid var(--outline);border-radius:var(--radius-sm);padding:10px 12px;margin-bottom:12px;font-size:12.5px;">
+                            <span class="material-symbols-rounded" style="color:var(--primary);font-size:20px;">call_split</span>
+                            <span style="flex:1;">This is the corpus-level view. The full cannibalization workflow — live GSC data, pick a winner, AI fixes, verification — lives in Search Console.</span>
+                            <a href="/gsc?tab=cannibalization" class="btn btn-secondary btn-sm">Open full suite</a>
+                        </div>
                         <div class="card">
                             <table class="data-table">
                                 <thead><tr>
@@ -518,10 +513,9 @@
                         </div>
                     </div>
                 </div>
-            </div>
-        </div>
-    </div>
-    <script src="/static/js/app.js"></script>
+            
+{% endblock %}
+
+{% block scripts %}
     <script src="/static/js/keyword_strategy.js"></script>
-</body>
-</html>
+{% endblock %}

@@ -413,7 +413,7 @@ function handleDeepLink() {
 }
 
 function initTabs() {
-    const savedTab = loadFilter("seoTab", "products");
+    const savedTab = loadFilter("seoTab", "priorities");
 
     document.querySelectorAll(".tab").forEach((tab) => {
         tab.addEventListener("click", () => {
@@ -437,12 +437,9 @@ function initTabs() {
         });
     });
 
-    const tabBtn = document.querySelector(`.tab[data-tab="${savedTab}"]`);
-    if (tabBtn && savedTab !== "products") {
-        tabBtn.click();
-    } else {
-        loadProducts();
-    }
+    const tabBtn = document.querySelector(`.tab[data-tab="${savedTab}"]`) ||
+        document.querySelector('.tab[data-tab="priorities"]');
+    tabBtn.click();
 }
 
 async function loadStatusCounts() {
@@ -1069,8 +1066,59 @@ function renderOptimizedTable(container, items, skipCache) {
     container.innerHTML = html;
 }
 
+// ── Work session: walk the priority queue in the detail modal ──────────
+let _prioritySession = [];
+let _sessionIndex = -1;
+
+function startWorkSession(index) {
+    _sessionIndex = index;
+    openSessionItem(index);
+}
+
+async function openSessionItem(index) {
+    if (!_prioritySession.length) return;
+    _sessionIndex = Math.max(0, Math.min(index, _prioritySession.length - 1));
+    const it = _prioritySession[_sessionIndex];
+    if (it.type === "product") analyzeProduct(it.id, it.action);
+    else analyzeCollection(it.id, it.action);
+    renderSessionNav();
+}
+
+function renderSessionNav() {
+    const header = document.querySelector("#product-modal .modal-header");
+    if (!header) return;
+    let nav = document.getElementById("session-nav");
+    if (_sessionIndex < 0 || !_prioritySession.length) {
+        if (nav) nav.remove();
+        return;
+    }
+    if (!nav) {
+        nav = document.createElement("div");
+        nav.id = "session-nav";
+        nav.style.cssText = "display:flex;align-items:center;gap:8px;margin-left:auto;margin-right:10px;font-size:12px;color:var(--on-surface-secondary);";
+        header.insertBefore(nav, header.querySelector(".icon-btn"));
+    }
+    nav.innerHTML = `
+        <button class="btn btn-secondary btn-sm" title="Previous (K)" ${_sessionIndex <= 0 ? "disabled" : ""} onclick="openSessionItem(${_sessionIndex - 1})"><span class="material-symbols-rounded">chevron_left</span></button>
+        <span style="white-space:nowrap;">${_sessionIndex + 1} of ${_prioritySession.length}</span>
+        <button class="btn btn-secondary btn-sm" title="Next (J)" ${_sessionIndex >= _prioritySession.length - 1 ? "disabled" : ""} onclick="openSessionItem(${_sessionIndex + 1})"><span class="material-symbols-rounded">chevron_right</span></button>`;
+}
+
+document.addEventListener("keydown", (e) => {
+    const modal = document.getElementById("product-modal");
+    if (!modal || !modal.classList.contains("active") || _sessionIndex < 0 || !_prioritySession.length) return;
+    if (e.target && e.target.matches && e.target.matches("input, textarea, select, [contenteditable]")) return;
+    if (e.key === "j" || e.key === "ArrowRight") openSessionItem(_sessionIndex + 1);
+    else if (e.key === "k" || e.key === "ArrowLeft") openSessionItem(_sessionIndex - 1);
+});
+
 function renderPrioritiesTable(container, items) {
     let html = _priorityToolbar();
+
+    // The ranked list doubles as the work-session queue.
+    _prioritySession = items.map((i) => ({ id: i.id, type: i.item_type, action: i.recommended_action || null }));
+    _sessionIndex = -1;
+    renderSessionNav();
 
     if (items.length === 0) {
         html += '<div class="empty-state"><span class="material-symbols-rounded">check_circle</span><p>No priority items found. Connect GSC or import Semrush data to see SEO priorities.</p></div>';
@@ -1086,6 +1134,9 @@ function renderPrioritiesTable(container, items) {
         <span class="stat-item" style="color:var(--warning);"><strong>${items.filter(i => i.priority_score >= 60 && i.priority_score < 80).length}</strong> medium</span>
         <span class="stat-item" style="color:var(--on-surface-secondary);"><strong>${items.filter(i => i.priority_score < 60).length}</strong> low</span>
         ${cannibalCount > 0 ? `<span class="stat-divider"></span><span class="stat-item" style="color:var(--error);"><span class="material-symbols-rounded" style="font-size:14px;vertical-align:middle;">warning</span> <strong>${cannibalCount}</strong> cannibalization risk${cannibalCount > 1 ? 's' : ''}</span>` : ''}
+        <span style="flex:1;"></span>
+        <button class="btn btn-primary btn-sm" onclick="startWorkSession(0)" title="Open the top item and walk the queue with Prev/Next (J/K)">
+            <span class="material-symbols-rounded">play_arrow</span> Start work session</button>
     </div>`;
 
     html += '<div class="table-container"><table><thead><tr>';
@@ -1117,7 +1168,7 @@ function renderPrioritiesTable(container, items) {
             <td>${item.potential_clicks_gain > 0 ? '+' + item.potential_clicks_gain.toLocaleString() : '—'}</td>
             <td>
                 <div class="actions-cell">
-                    <button class="btn btn-sm btn-primary" onclick="${item.item_type === 'product' ? 'analyzeProduct' : 'analyzeCollection'}(${item.id})" title="${recommendedAction}">
+                    <button class="btn btn-sm btn-primary" onclick="startWorkSession(${i})" title="${recommendedAction}">
                         <span class="material-symbols-rounded" style="font-size:16px;">bolt</span>
                     </button>
                     ${item.last_optimized_at ? `<button class="action-icon" title="View optimization impact" onclick="viewImpact(${item.id}, '${item.item_type}')"><span class="material-symbols-rounded">trending_up</span></button>` : ''}

@@ -736,7 +736,49 @@ def get_opportunities(store_id, date_from, date_to, limit=200, device=None, coun
                 "action": "Improve meta title & description" if position <= 10 else "Improve rankings first",
             })
     results.sort(key=lambda x: x["potential_clicks"], reverse=True)
-    return results[:limit]
+    results = results[:limit]
+    _attach_matched_items(store_id, results)
+    return results
+
+
+def _attach_matched_items(store_id, rows):
+    """Resolve /products/<handle> and /collections/<handle> pages to synced items
+    so the UI can deep-link straight into the SEO optimize modal."""
+    def _handle(path, seg):
+        return path.split(seg, 1)[1].split("?")[0].split("#")[0].strip("/")
+
+    handles = {"product": set(), "collection": set()}
+    for r in rows:
+        path = r["page"]
+        if "/products/" in path:
+            handles["product"].add(_handle(path, "/products/"))
+        elif "/collections/" in path:
+            handles["collection"].add(_handle(path, "/collections/"))
+    maps = {"product": {}, "collection": {}}
+    with db.get_cursor() as cur:
+        if handles["product"]:
+            cur.execute(
+                "SELECT id, handle, title FROM synced_products WHERE store_id = %s AND handle = ANY(%s)",
+                (store_id, list(handles["product"])),
+            )
+            maps["product"] = {m["handle"]: m for m in cur.fetchall()}
+        if handles["collection"]:
+            cur.execute(
+                "SELECT id, handle, title FROM synced_collections WHERE store_id = %s AND handle = ANY(%s)",
+                (store_id, list(handles["collection"])),
+            )
+            maps["collection"] = {m["handle"]: m for m in cur.fetchall()}
+    for r in rows:
+        r["matched_item"] = None
+        path = r["page"]
+        if "/products/" in path:
+            m = maps["product"].get(_handle(path, "/products/"))
+            if m:
+                r["matched_item"] = {"item_type": "product", "id": m["id"], "title": m["title"]}
+        elif "/collections/" in path:
+            m = maps["collection"].get(_handle(path, "/collections/"))
+            if m:
+                r["matched_item"] = {"item_type": "collection", "id": m["id"], "title": m["title"]}
 
 
 def get_cannibalization(store_id, date_from, date_to, min_impressions=3, device=None, country=None):

@@ -295,22 +295,28 @@ def analyze_store_crawlability(robots_txt, llms_txt_present, bot_access=None):
 
     70 pts robots.txt bot allowance + 15 pts sensitive paths blocked + 15 pts
     live bot-access verification (real fetches with AI-crawler user agents).
-    Without verification data the last 15 fall back to the robots allowance
-    ratio so unverified stores aren't penalized. llms.txt is informational
-    only — evidence shows AI crawlers don't read it.
+    When live checks fail, the robots allowance credit is scaled down by the
+    live pass ratio — a robots.txt Allow means nothing if the WAF/CDN turns
+    the bot away. Without verification data the last 15 fall back to the
+    robots allowance ratio so unverified stores aren't penalized. llms.txt is
+    informational only — evidence shows AI crawlers don't read it.
     """
     if robots_txt is None:
         return 50, "robots.txt not fetched"
     rules = _parse_robots_ai_rules(robots_txt)
     allowed = [b for b, ok in rules["bots"].items() if ok]
     allowed_ratio = len(allowed) / len(AI_BOTS)
-    score = round(allowed_ratio * 70)
+    ok, tested = summarize_bot_access(bot_access)
+    allowance = round(allowed_ratio * 70)
     parts = [f"{len(allowed)}/{len(AI_BOTS)} AI crawlers allowed"]
+    if tested and ok < tested:
+        allowance = round(allowance * ok / tested)
+        parts[0] += f" (capped: only {ok}/{tested} pass live fetch)"
+    score = allowance
     if rules["blocks_sensitive"]:
         score += 15
         parts.append("cart/checkout blocked")
 
-    ok, tested = summarize_bot_access(bot_access)
     if tested:
         score += round(ok / tested * 15)
         parts.append(f"{ok}/{tested} AI bots verified live")
@@ -350,6 +356,7 @@ def analyze_ai_visibility(
 
     pushed_types = [r["schema_type"] for r in (schema_markup or []) if r.get("schema_type")]
     site_types = list(site_schema_types or [])
+    base_types = []
     if live is not None or pushed_types or site_types:
         base_types = (live.get("schema_types") if live is not None else []) or []
         schema_types = list(dict.fromkeys(base_types + pushed_types + site_types))
@@ -377,6 +384,13 @@ def analyze_ai_visibility(
     scores["structured_data"], details["structured_data"] = _structured_data_score(
         schema_types, resource_type, thresholds, primary_schema
     )
+    # Two copies of the primary schema (theme-native + pushed metafield) can carry
+    # conflicting price/availability — flag it so the user keeps a single source.
+    dupes = [t for t in ("Product", "ProductGroup", "CollectionPage", "FAQPage") if base_types.count(t) > 1]
+    if dupes:
+        details["structured_data"] += (
+            f" — duplicate {'/'.join(dupes)} JSON-LD on the live page (theme + pushed schema may conflict)"
+        )
     scores["extractability"], details["extractability"] = _extractability(text, html, h2s)
     scores["fact_density"], details["fact_density"] = _fact_density(text, thresholds)
     scores["crawlability"], details["crawlability"] = (

@@ -296,8 +296,8 @@ async function applyDuplicateFix(fieldKey, itemType, itemId, inputId, btn) {
 }
 
 document.addEventListener("DOMContentLoaded", async () => {
-    initThemeToggle();
-    initSidebar();
+    // Theme/sidebar init is app.js's job — a second call here double-attached
+    // the toggle listeners, making each click a no-op.
     await loadStores();
     loadDuplicates();
 });

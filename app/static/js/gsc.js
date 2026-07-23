@@ -346,9 +346,18 @@ function initGSCTabs() {
             tab.classList.add("active");
             const panel = document.getElementById("gsc-tab-" + tab.dataset.gscTab);
             if (panel) panel.style.display = "";
+            const url = new URL(window.location);
+            url.searchParams.set("tab", tab.dataset.gscTab);
+            history.replaceState(null, "", url);
             loadActiveTab();
         });
     });
+    // /gsc?tab=<name> deep link (dashboard queue + keyword-strategy card land here)
+    const wanted = new URLSearchParams(window.location.search).get("tab");
+    if (wanted) {
+        const btn = document.querySelector(`[data-gsc-tab="${CSS.escape(wanted)}"]`);
+        if (btn && !btn.classList.contains("active")) btn.click();
+    }
 }
 
 function loadActiveTab() {
@@ -522,7 +531,9 @@ function renderOpportunitiesTable() {
             <td style="color: var(--error);">${(r.ctr * 100).toFixed(1)}%</td>
             <td>${positionBadge(r.position)}</td>
             <td style="color: var(--success); font-weight: 600;">+${Math.round(r.potential_clicks)}</td>
-            <td style="font-size: 12px; color: var(--on-surface-secondary);">${escapeHtml(r.action)}</td>
+            <td style="font-size: 12px;">${r.matched_item
+                ? `<a class="btn btn-secondary btn-sm" href="/seo?optimize=${r.matched_item.item_type}&id=${r.matched_item.id}&action=${encodeURIComponent(r.action)}" style="white-space:nowrap;">Rewrite title/meta</a>`
+                : `<span style="color: var(--on-surface-secondary);">${escapeHtml(r.action)}</span>`}</td>
         </tr>
     `).join("");
 }

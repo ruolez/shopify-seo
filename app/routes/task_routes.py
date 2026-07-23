@@ -947,6 +947,7 @@ AI_TASK_META = {
     "article_seo": ("Article SEO Analysis", "/blog"),
     "article_research": ("Article Research", "/blog"),
     "topic_discovery": ("Topic Discovery", "/blog"),
+    "topic_enrich": ("Blog Topic Research (idea)", "/blog"),
     "article_outline": ("Article Outline", "/blog"),
     "article_generate": ("Article Generation", "/blog"),
     "article_refresh_links": ("Article Link Refresh", "/blog"),
@@ -1020,6 +1021,7 @@ def _iso(dt):
 @task_bp.route("/api/tasks/active", methods=["GET"])
 def active_tasks():
     sweep_stale_jobs()
+    hours = min(max(request.args.get("hours", 24, type=int), 1), 24 * 14)
 
     if request.args.get("count_only"):
         with db.get_cursor() as cur:
@@ -1042,11 +1044,11 @@ def active_tasks():
     with db.get_cursor() as cur:
         # 1. ai_tasks
         cur.execute(
-            """SELECT id, store_id, task_type, status, error, created_at, completed_at,
+            f"""SELECT id, store_id, task_type, status, error, created_at, completed_at,
                       COALESCE(input->>'title', input->>'topic', input->>'handle') AS detail
                FROM ai_tasks
                WHERE status IN ('pending','running')
-                  OR (status IN ('completed','failed') AND completed_at > NOW() - INTERVAL '24 hours')
+                  OR (status IN ('completed','failed') AND completed_at > NOW() - INTERVAL '{hours} hours')
                ORDER BY id DESC LIMIT 50"""
         )
         for r in cur.fetchall():
@@ -1061,11 +1063,11 @@ def active_tasks():
 
         # 2. bulk_tasks (discriminator spans two columns: kind holds geo_optimize/fact_boost)
         cur.execute(
-            """SELECT id, store_id, kind, task_type, status, total, completed, failed,
+            f"""SELECT id, store_id, kind, task_type, status, total, completed, failed,
                       current_product_title, created_at, completed_at
                FROM bulk_tasks
                WHERE status IN ('pending','running')
-                  OR (status IN ('completed','failed') AND completed_at > NOW() - INTERVAL '24 hours')
+                  OR (status IN ('completed','failed') AND completed_at > NOW() - INTERVAL '{hours} hours')
                ORDER BY id DESC LIMIT 50"""
         )
         for r in cur.fetchall():
@@ -1073,7 +1075,7 @@ def active_tasks():
             label, page = BULK_TASK_META.get(key, (_fallback_label(key), None))
             tasks.append({
                 "source": "bulk", "id": r["id"], "label": label, "page": page,
-                "detail": None, "status": r["status"],
+                "detail": None, "status": r["status"], "kind": r["kind"],
                 "progress": {"completed": r["completed"] or 0, "failed": r["failed"] or 0, "total": r["total"] or 0},
                 "current_item": r["current_product_title"], "store_id": r["store_id"],
                 "started_at": _iso(r["created_at"]), "completed_at": _iso(r["completed_at"]),
@@ -1082,12 +1084,12 @@ def active_tasks():
 
         # 3. sync_jobs
         cur.execute(
-            """SELECT id, store_id, status, current_phase, products_synced, collections_synced,
+            f"""SELECT id, store_id, status, current_phase, products_synced, collections_synced,
                       blogs_synced, articles_synced, total_products, error, started_at, completed_at
                FROM sync_jobs
                WHERE status IN ('pending','running')
                   OR (status IN ('completed','failed','completed_with_errors')
-                      AND completed_at > NOW() - INTERVAL '24 hours')
+                      AND completed_at > NOW() - INTERVAL '{hours} hours')
                ORDER BY id DESC LIMIT 20"""
         )
         for r in cur.fetchall():
@@ -1108,11 +1110,11 @@ def active_tasks():
 
         # 4. keyword_strategy_runs
         cur.execute(
-            """SELECT id, store_id, run_type, status, total_items, completed_items, failed_items,
+            f"""SELECT id, store_id, run_type, status, total_items, completed_items, failed_items,
                       error, started_at, completed_at
                FROM keyword_strategy_runs
                WHERE status IN ('pending','running')
-                  OR (status IN ('completed','failed') AND completed_at > NOW() - INTERVAL '24 hours')
+                  OR (status IN ('completed','failed') AND completed_at > NOW() - INTERVAL '{hours} hours')
                ORDER BY id DESC LIMIT 20"""
         )
         for r in cur.fetchall():
@@ -1130,10 +1132,10 @@ def active_tasks():
 
         # 5. ai_tracking_runs
         cur.execute(
-            """SELECT id, store_id, status, error, started_at, completed_at
+            f"""SELECT id, store_id, status, error, started_at, completed_at
                FROM ai_tracking_runs
                WHERE status IN ('pending','running')
-                  OR (status IN ('completed','failed') AND completed_at > NOW() - INTERVAL '24 hours')
+                  OR (status IN ('completed','failed') AND completed_at > NOW() - INTERVAL '{hours} hours')
                ORDER BY id DESC LIMIT 20"""
         )
         for r in cur.fetchall():
@@ -1147,10 +1149,10 @@ def active_tasks():
 
         # 5b. offsite_runs (off-site visibility audits)
         cur.execute(
-            """SELECT id, store_id, status, queries_run, error, started_at, completed_at
+            f"""SELECT id, store_id, status, queries_run, error, started_at, completed_at
                FROM offsite_runs
                WHERE status IN ('pending','running')
-                  OR (status IN ('completed','failed') AND completed_at > NOW() - INTERVAL '24 hours')
+                  OR (status IN ('completed','failed') AND completed_at > NOW() - INTERVAL '{hours} hours')
                ORDER BY id DESC LIMIT 20"""
         )
         for r in cur.fetchall():
@@ -1165,10 +1167,10 @@ def active_tasks():
 
         # 6. gsc_data_pulls
         cur.execute(
-            """SELECT id, store_id, pull_type, rows_pulled, status, error_message, started_at, completed_at
+            f"""SELECT id, store_id, pull_type, rows_pulled, status, error_message, started_at, completed_at
                FROM gsc_data_pulls
                WHERE status IN ('pending','running')
-                  OR (status IN ('completed','failed') AND completed_at > NOW() - INTERVAL '24 hours')
+                  OR (status IN ('completed','failed') AND completed_at > NOW() - INTERVAL '{hours} hours')
                ORDER BY id DESC LIMIT 20"""
         )
         for r in cur.fetchall():
@@ -1184,10 +1186,10 @@ def active_tasks():
 
         # 7. semrush_imports (no completed_at column — window on created_at)
         cur.execute(
-            """SELECT id, store_id, import_type, filename, row_count, status, error_message, created_at
+            f"""SELECT id, store_id, import_type, filename, row_count, status, error_message, created_at
                FROM semrush_imports
                WHERE status IN ('pending','running')
-                  OR (status IN ('completed','failed') AND created_at > NOW() - INTERVAL '24 hours')
+                  OR (status IN ('completed','failed') AND created_at > NOW() - INTERVAL '{hours} hours')
                ORDER BY id DESC LIMIT 20"""
         )
         for r in cur.fetchall():
@@ -1200,12 +1202,23 @@ def active_tasks():
                 "error": r["error_message"],
             })
 
+    # Optional filters for the Activity Center (backward compatible: absent = all)
+    source = request.args.get("source")
+    page_filter = request.args.get("page")
+    store_filter = request.args.get("store_id", type=int)
+    if source:
+        tasks = [t for t in tasks if t["source"] == source]
+    if page_filter:
+        tasks = [t for t in tasks if t.get("page") == page_filter]
+    if store_filter:
+        tasks = [t for t in tasks if t.get("store_id") in (store_filter, None)]
+
     active = [t for t in tasks if t["status"] in _ACTIVE_STATUSES]
     finished = [t for t in tasks if t["status"] not in _ACTIVE_STATUSES]
 
     # running first, then pending — newest first within each
     active.sort(key=lambda t: (t["status"] != "running", -(t["id"] or 0)))
     finished.sort(key=lambda t: (t["completed_at"] or t["started_at"] or ""), reverse=True)
-    finished = finished[:20]
+    finished = finished[: 100 if hours > 24 else 20]
 
     return jsonify({"tasks": active + finished, "active_count": len(active)})

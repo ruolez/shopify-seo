@@ -593,6 +593,10 @@ async def scrape_page_seo_metadata(client, url):
                     for item in sd:
                         if isinstance(item, dict) and "@type" in item:
                             schema_types.append(item["@type"])
+                # Review apps (Stamped, Judge.me) nest aggregateRating inside their
+                # own Product block — surface it as a type so review detection sees it.
+                if '"aggregateRating"' in (script.string or ""):
+                    schema_types.append("AggregateRating")
             except (json.JSONDecodeError, TypeError):
                 pass
 

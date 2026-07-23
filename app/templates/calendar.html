@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+
+{% block title %}Content Calendar{% endblock %}
+
+{% block page_title %}Content Calendar <span style="font-size:13px;color:var(--on-surface-secondary);font-weight:400;">blog + news pipeline</span>{% endblock %}
+
+{% block content %}
+                <div class="toolbar-row" style="align-items:center;gap:12px;margin-bottom:16px;flex-wrap:wrap;">
+                    <button class="icon-btn" onclick="calShiftMonth(-1)" title="Previous month"><span class="material-symbols-rounded">chevron_left</span></button>
+                    <h3 id="cal-month-label" style="margin:0;min-width:170px;text-align:center;">—</h3>
+                    <button class="icon-btn" onclick="calShiftMonth(1)" title="Next month"><span class="material-symbols-rounded">chevron_right</span></button>
+                    <button class="btn btn-secondary btn-sm" onclick="calToday()">Today</button>
+                    <span style="flex:1;"></span>
+                    <span style="display:flex;gap:12px;font-size:11.5px;color:var(--on-surface-secondary);align-items:center;">
+                        <span><span class="cal-dot" style="background:var(--primary);"></span> Scheduled</span>
+                        <span><span class="cal-dot" style="background:var(--success);"></span> Published</span>
+                        <span><span class="cal-dot" style="background:var(--error);"></span> Failed</span>
+                        <span><span class="cal-dot" style="background:var(--warning);"></span> Processing</span>
+                    </span>
+                    <a href="/blog?tab=scheduled" class="btn btn-secondary btn-sm"><span class="material-symbols-rounded">edit_note</span> Blog schedule</a>
+                    <a href="/news" class="btn btn-secondary btn-sm"><span class="material-symbols-rounded">newspaper</span> News</a>
+                </div>
+                <div class="card" style="padding:12px;">
+                    <div class="cal-grid" id="cal-weekdays"></div>
+                    <div class="cal-grid" id="cal-days"></div>
+                </div>
+{% endblock %}
+
+{% block scripts %}
+    <script src="/static/js/calendar.js"></script>
+{% endblock %}

@@ -1,26 +1,10 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Search Console — SEO Platform</title>
-    <link rel="stylesheet" href="/static/css/style.css">
-</head>
-<body>
-    <div class="app-layout">
-        {% include '_sidebar.html' %}
-        <div class="main-content">
-            <div class="topbar">
-                <div class="topbar-left">
-                    <button id="sidebar-toggle" class="icon-btn"><span class="material-symbols-rounded">menu</span></button>
-                    <h2>Search Console</h2>
-                </div>
-                <div class="topbar-right">
-                    <button id="theme-toggle" class="icon-btn"><span class="material-symbols-rounded">dark_mode</span></button>
-                </div>
-            </div>
-            <div class="page-content">
+{% extends "base.html" %}
 
+{% block title %}Search Console{% endblock %}
+
+{% block page_title %}Search Console{% endblock %}
+
+{% block content %}
                 <!-- Store selector -->
                 <div style="margin-bottom: 24px;">
                     <div class="form-group" style="max-width: 320px; margin-bottom: 0;">
@@ -136,17 +120,17 @@
                         <div id="gsc-trend-chart" style="width: 100%; height: 260px; position: relative;"></div>
                     </div>
 
-                    <!-- Tabs: Pages / Queries / Opportunities / Cannibalization / Score Trends -->
+                    <!-- Tabs: action surfaces lead; reference tables follow -->
                     <div class="tabs" style="margin-bottom: 0;">
-                        <button class="tab active" data-gsc-tab="pages">Top Pages</button>
-                        <button class="tab" data-gsc-tab="queries">Top Queries</button>
-                        <button class="tab" data-gsc-tab="opportunities">Opportunities</button>
+                        <button class="tab active" data-gsc-tab="opportunities">Opportunities</button>
                         <button class="tab" data-gsc-tab="cannibalization">Cannibalization</button>
+                        <button class="tab" data-gsc-tab="pages">Top Pages</button>
+                        <button class="tab" data-gsc-tab="queries">Top Queries</button>
                         <button class="tab" data-gsc-tab="scores">SEO Scores</button>
                     </div>
 
                     <!-- Top Pages -->
-                    <div class="gsc-tab-panel active" id="gsc-tab-pages">
+                    <div class="gsc-tab-panel" id="gsc-tab-pages" style="display: none;">
                         <div class="card" style="border-top-left-radius: 0; border-top-right-radius: 0;">
                             <table class="data-table">
                                 <thead>
@@ -184,7 +168,7 @@
                     </div>
 
                     <!-- Opportunities -->
-                    <div class="gsc-tab-panel" id="gsc-tab-opportunities" style="display: none;">
+                    <div class="gsc-tab-panel active" id="gsc-tab-opportunities">
                         <div class="card" style="border-top-left-radius: 0; border-top-right-radius: 0;">
                             <p style="color: var(--on-surface-secondary); font-size: 13px; margin: 0 0 16px;">
                                 Pages with high impressions but low CTR (&lt;5%). Improving meta titles and descriptions on these pages can quickly boost traffic.
@@ -336,11 +320,9 @@
                     </div>
                 </div>
 
-            </div>
-        </div>
-    </div>
+            
+{% endblock %}
 
-    <script src="/static/js/app.js"></script>
+{% block scripts %}
     <script src="/static/js/gsc.js"></script>
-</body>
-</html>
+{% endblock %}
