@@ -64,7 +64,7 @@ def _fetch_keyword_analysis(store_id, item_type, item_id):
         cur.execute(
             """
             SELECT score, detected_keywords, checks, issues_count, fixable_count,
-                   ai_fixes, updated_at
+                   ai_fixes, keyword_resolution, updated_at
             FROM technical_seo_analyses
             WHERE store_id = %s AND item_type = %s AND item_id = %s
             """,
@@ -80,6 +80,7 @@ def _fetch_keyword_analysis(store_id, item_type, item_id):
         "issues_count": row["issues_count"],
         "fixable_count": row["fixable_count"],
         "ai_fixes": row["ai_fixes"],
+        "keyword_resolution": row["keyword_resolution"],
         "analyzed_at": row["updated_at"].isoformat() if row["updated_at"] else None,
     }
 

@@ -202,7 +202,8 @@ def _get_search_context_for_item(item_type, item_id, store_id):
             scored.sort(key=lambda x: (x[0], x[1]), reverse=True)
             semrush_keywords = [s[2] for s in scored[:15]]
 
-        if not gsc_queries and not semrush_keywords:
+        assigned_primary = _get_assigned_primary(effective_store_id, item_type, item_id)
+        if not gsc_queries and not semrush_keywords and not assigned_primary:
             return ""
 
         extra_kw = {}
@@ -213,7 +214,7 @@ def _get_search_context_for_item(item_type, item_id, store_id):
         faq_schema_status = _get_faq_schema_status(item_type, item_id, effective_store_id)
         cannibalization_risks = _get_cannibalization_risks(item_type, handle, effective_store_id, semrush_keywords, gsc_queries, **extra_kw)
 
-        return _format_search_context(gsc_totals, gsc_queries, semrush_keywords, inbound_links, image_alt_status, faq_schema_status, cannibalization_risks)
+        return _format_search_context(gsc_totals, gsc_queries, semrush_keywords, inbound_links, image_alt_status, faq_schema_status, cannibalization_risks, assigned_primary=assigned_primary)
 
     except Exception as e:
         logger.warning("Search context fetch failed for %s %s: %s", item_type, item_id, e)
@@ -428,9 +429,41 @@ def _get_faq_schema_status(item_type, item_id, store_id):
         return None
 
 
-def _format_search_context(gsc_totals, gsc_queries, semrush_keywords, inbound_links=None, image_alt_status=None, faq_schema_status=None, cannibalization_risks=None):
+def _norm_kw(kw):
+    return re.sub(r"\s+", " ", (kw or "").strip().lower())
+
+
+def _get_assigned_primary(store_id, item_type, item_id):
+    """Manually assigned primary keyword (accepted/applied) for an item, or None."""
+    try:
+        with db.get_cursor() as cur:
+            cur.execute(
+                """SELECT mk.keyword, mk.search_volume
+                   FROM keyword_assignments ka
+                   JOIN master_keywords mk ON mk.id = ka.master_keyword_id
+                   WHERE ka.store_id = %s AND ka.assigned_item_type = %s
+                     AND ka.assigned_item_id = %s AND ka.status IN ('accepted', 'applied')
+                   ORDER BY ka.updated_at DESC LIMIT 1""",
+                (store_id, item_type, item_id),
+            )
+            return cur.fetchone()
+    except Exception:
+        return None
+
+
+def _format_search_context(gsc_totals, gsc_queries, semrush_keywords, inbound_links=None, image_alt_status=None, faq_schema_status=None, cannibalization_risks=None, assigned_primary=None):
     """Format GSC + Semrush data as markdown for AI prompt injection."""
     lines = ["## REAL SEARCH PERFORMANCE DATA (Google Search Console + Semrush)"]
+
+    if assigned_primary:
+        ap_vol = int(assigned_primary.get("search_volume") or 0)
+        lines.append(
+            f"\n### USER-ASSIGNED PRIMARY KEYWORD (must use)\n"
+            f"\"{assigned_primary['keyword']}\""
+            + (f" — volume: {ap_vol:,}" if ap_vol else "")
+            + " — assigned manually by the store owner; use it as the primary keyword "
+              "regardless of the recommendations below."
+        )
 
     if gsc_totals and float(gsc_totals.get("impressions") or 0) > 0:
         clicks = int(float(gsc_totals["clicks"] or 0))
@@ -518,16 +551,25 @@ def _format_search_context(gsc_totals, gsc_queries, semrush_keywords, inbound_li
         best_gsc = gsc_queries[0]
         primary_kw = {"keyword": best_gsc["query"], "search_volume": 0, "position": float(best_gsc.get("position") or 0)}
 
+    if assigned_primary:
+        # The manual assignment owns slot 1; demand-ranked picks become secondaries.
+        if primary_kw and _norm_kw(primary_kw.get("keyword")) != _norm_kw(assigned_primary.get("keyword")):
+            secondary_kws = [primary_kw] + list(secondary_kws)
+        primary_kw = {"keyword": assigned_primary["keyword"],
+                      "search_volume": assigned_primary.get("search_volume") or 0,
+                      "position": assigned_primary.get("position") or 0}
+
     if primary_kw:
         vol = int(primary_kw.get("search_volume") or 0)
         pos = float(primary_kw.get("position") or 0)
         lines.append(f"\n### RECOMMENDED TARGET KEYWORDS (sorted by search volume — use #1 as primary)")
-        lines.append(f"1. \"{primary_kw['keyword']}\" — volume: {vol:,}, position: {pos:.0f} ← USE THIS AS PRIMARY")
+        marker = "← USE THIS AS PRIMARY (user-assigned)" if assigned_primary else "← USE THIS AS PRIMARY"
+        lines.append(f"1. \"{primary_kw['keyword']}\" — volume: {vol:,}, position: {pos:.0f} {marker}")
         for i, kw in enumerate(secondary_kws):
             sv = int(kw.get("search_volume") or 0)
             sp = float(kw.get("position") or 0)
             lines.append(f"{i+2}. \"{kw['keyword']}\" — volume: {sv:,}, position: {sp:.0f}")
-        if vol == 0 and secondary_kws:
+        if vol == 0 and secondary_kws and not assigned_primary:
             best_sec = max(secondary_kws, key=lambda k: int(k.get("search_volume") or 0))
             best_vol = int(best_sec.get("search_volume") or 0)
             if best_vol > 0:
@@ -3916,6 +3958,28 @@ def run_task(task_type, task_input, store_id=None):
             "failing_checks": failing_checks,
             "item_data": item_context,
         }
+        # Demand-grounded resolution (when the item has been re-analyzed since
+        # the keyword resolver shipped) — tells the AI WHY this primary matters.
+        resolution = analysis.get("keyword_resolution")
+        if isinstance(resolution, str):
+            try:
+                resolution = json.loads(resolution)
+            except (ValueError, TypeError):
+                resolution = None
+        if resolution and resolution.get("primary"):
+            analysis_payload["primary_keyword"] = resolution["primary"]
+            demand_candidates = [
+                {k: c.get(k) for k in ("keyword", "volume", "gsc_clicks", "gsc_impressions",
+                                       "gsc_position", "semrush_position", "sources")}
+                for c in (resolution.get("candidates") or [])
+                if c.get("volume") or c.get("gsc_impressions")
+            ][:5]
+            analysis_payload["search_demand"] = {
+                "note": "The primary keyword was selected from real search demand "
+                        "(GSC queries + Semrush volume), not just page text. Optimize for it.",
+                "top_queries": demand_candidates,
+                "manual": bool(resolution["primary"].get("manual")),
+            }
         if sibling_context:
             analysis_payload["sibling_products"] = json.loads(sibling_context)
         if category_context:
