@@ -61,7 +61,13 @@ function renderScoreRing(score, size = 44, item = null) {
     const offset = circ - (score / 100) * circ;
     const isLg = size > 60;
     let tooltip = "";
-    if (item && item.on_page_score != null) {
+    if (item && item.content_score != null) {
+        const parts = [`Content: ${item.content_score}`];
+        if (item.keyword_score != null) parts.push(`Keywords: ${item.keyword_score}`);
+        if (item.search_score != null) parts.push(`Search: ${item.search_score}`);
+        parts.push(`Unified: ${score}`);
+        tooltip = `title="${parts.join(' | ')}"`;
+    } else if (item && item.on_page_score != null) {
         const parts = [`On-Page: ${item.on_page_score}`];
         if (item.search_score != null) parts.push(`Search: ${item.search_score}`);
         parts.push(`Composite: ${score}`);
@@ -433,6 +439,7 @@ function initTabs() {
             if (tab.dataset.tab === "products") loadProducts();
             if (tab.dataset.tab === "collections") loadCollections();
             if (tab.dataset.tab === "priorities") loadPriorities();
+            if (tab.dataset.tab === "issues") loadIssues();
             if (tab.dataset.tab === "schema") loadSchemaTab();
         });
     });
@@ -589,7 +596,8 @@ function renderProductsTable(container, products) {
         { key: "title", label: "Product" },
         { key: "store", label: "Store" },
         { key: "status", label: "Status" },
-        { key: "seo_score", label: "SEO Score" },
+        { key: "seo_score", label: "Score" },
+        { key: "issues_count", label: "Issues" },
         { key: "gsc_clicks", label: "Clicks" },
         { key: "gsc_impressions", label: "Impr." },
         { key: "gsc_position", label: "Pos." },
@@ -618,6 +626,7 @@ function renderProductsTable(container, products) {
             <td>${escapeHtml(p.store_name)}</td>
             <td><span class="badge badge-info">${escapeHtml(p.status)}</span></td>
             <td>${renderScoreRing(p.seo_score, 44, p)}</td>
+            <td>${renderIssuesBadge(p)}</td>
             <td>${p.gsc_clicks != null ? Math.round(p.gsc_clicks).toLocaleString() : '<span style="color:var(--on-surface-secondary)">—</span>'}</td>
             <td>${p.gsc_impressions != null ? Math.round(p.gsc_impressions).toLocaleString() : '<span style="color:var(--on-surface-secondary)">—</span>'}</td>
             <td>${p.gsc_position != null ? renderPositionBadge(p.gsc_position) : '<span style="color:var(--on-surface-secondary)">—</span>'}</td>
@@ -1347,7 +1356,8 @@ function renderCollectionsTable(container, collections) {
         { key: "collection_type", label: "Status" },
         { key: "image_url", label: "Img" },
         { key: "products_count", label: "Products" },
-        { key: "seo_score", label: "SEO Score" },
+        { key: "seo_score", label: "Score" },
+        { key: "issues_count", label: "Issues" },
         { key: "gsc_clicks", label: "Clicks" },
         { key: "gsc_impressions", label: "Impr." },
         { key: "gsc_position", label: "Pos." },
@@ -1384,6 +1394,7 @@ function renderCollectionsTable(container, collections) {
             <td style="text-align:center;">${imgIcon}</td>
             <td>${c.products_count}</td>
             <td>${renderScoreRing(c.seo_score, 44, c)}</td>
+            <td>${renderIssuesBadge(c)}</td>
             <td>${c.gsc_clicks != null ? Math.round(c.gsc_clicks).toLocaleString() : '<span style="color:var(--on-surface-secondary)">—</span>'}</td>
             <td>${c.gsc_impressions != null ? Math.round(c.gsc_impressions).toLocaleString() : '<span style="color:var(--on-surface-secondary)">—</span>'}</td>
             <td>${c.gsc_position != null ? renderPositionBadge(c.gsc_position) : '<span style="color:var(--on-surface-secondary)">—</span>'}</td>
@@ -1731,6 +1742,12 @@ async function viewProduct(id) {
             ? '<span class="badge badge-success">Active</span>'
             : `<span class="badge badge-warning">${escapeHtml(p.status || "Unknown")}</span>`;
 
+        // Unified score hero: ring + 3 pillar bars + issue stats
+        html += renderUnifiedHero(p, "product");
+        if (p.keyword_analysis) {
+            html += renderKeywordChips(p.keyword_analysis.detected_keywords);
+        }
+
         html += '<div class="modal-two-col">';
 
         // ── Left Column (Main) ──
@@ -1828,37 +1845,6 @@ async function viewProduct(id) {
             }
         }
 
-        // SEO Score Card
-        html += '<div class="score-card">';
-        html += '<div class="score-card-title"><span class="material-symbols-rounded" style="font-size:16px;">analytics</span> SEO Score</div>';
-        const overallScore = p.seo_score || 0;
-        html += renderScoreRing(overallScore, 80, p);
-
-        // On-Page Quality
-        html += '<div style="font-size:12px;font-weight:600;margin:12px 0 6px;color:var(--on-surface-secondary);">On-Page Quality' + (p.on_page_score != null ? ` (${p.on_page_score})` : '') + '</div>';
-        for (const [key, info] of Object.entries(p.seo_breakdown)) {
-            const fillCls = info.score >= 80 ? "high" : info.score >= 50 ? "medium" : "low";
-            html += `<div class="score-item">
-                <span class="score-item-label">${escapeHtml(key.replace(/_/g, " "))}</span>
-                <div class="score-item-bar"><div class="score-item-bar-fill ${fillCls}" style="width: ${info.score}%;"></div></div>
-                <span class="score-item-num">${info.score}</span>
-            </div>`;
-        }
-
-        // Search Performance
-        if (p.search_breakdown) {
-            html += '<div style="font-size:12px;font-weight:600;margin:12px 0 6px;color:var(--on-surface-secondary);">Search Performance' + (p.search_score != null ? ` (${p.search_score})` : '') + '</div>';
-            for (const [key, info] of Object.entries(p.search_breakdown)) {
-                const fillCls = info.score >= 80 ? "high" : info.score >= 50 ? "medium" : "low";
-                html += `<div class="score-item">
-                    <span class="score-item-label">${escapeHtml(key.replace(/_/g, " "))}</span>
-                    <div class="score-item-bar"><div class="score-item-bar-fill ${fillCls}" style="width: ${info.score}%;"></div></div>
-                    <span class="score-item-num">${info.score}</span>
-                </div>`;
-            }
-        }
-        html += '</div>';
-
         // Variants
         let variants = [];
         if (p.variants) {
@@ -1892,6 +1878,10 @@ async function viewProduct(id) {
 
         html += '</div>'; // end modal-col-aside
         html += '</div>'; // end modal-two-col
+
+        // Check-by-check breakdown (completeness + keyword + search) replaces
+        // the old aside score-card — the hero at the top carries the scores.
+        html += renderCheckGroups(p);
 
         html += '<div id="ai-results-container"></div>';
 
@@ -2010,6 +2000,16 @@ async function pollTaskResult(taskId, container, productId) {
     }
 }
 
+function _applyFieldToggle(field) {
+    return `<label style="float: right; display: inline-flex; align-items: center; gap: 4px; font-size: 11px; font-weight: 400; color: var(--on-surface-secondary); cursor: pointer;">
+        <input type="checkbox" class="ai-apply-field" data-apply-field="${field}" checked> apply</label>`;
+}
+
+function _applyFieldEnabled(field) {
+    const cb = document.querySelector(`.ai-apply-field[data-apply-field="${field}"]`);
+    return !cb || cb.checked;
+}
+
 function renderAIResults(container, result, productId) {
     if (!result) {
         container.innerHTML = "";
@@ -2034,26 +2034,26 @@ function renderAIResults(container, result, productId) {
             value="${escapeAttr(result.h1_tag || result.optimized_meta_title || "")}">
     </div>`;
     html += `<div class="form-group">
-        <label>Meta Title</label>
+        <label>Meta Title ${_applyFieldToggle("meta_title")}</label>
         <input type="text" class="ai-field-editable" id="ai-meta-title"
             value="${escapeAttr(result.optimized_meta_title || "")}">
     </div>`;
     html += '</div>';
 
     html += `<div class="form-group">
-        <label>Meta Description</label>
+        <label>Meta Description ${_applyFieldToggle("meta_description")}</label>
         <textarea class="ai-field-editable" id="ai-meta-description" rows="3">${escapeHtml(result.optimized_meta_description || "")}</textarea>
     </div>`;
 
     html += `<div class="form-group">
-        <label>Product Description</label>
+        <label>Product Description ${_applyFieldToggle("description")}</label>
         <textarea class="ai-field-editable" id="ai-description" rows="5">${escapeHtml(result.optimized_description || "")}</textarea>
     </div>`;
 
     html += '<div class="side-by-side">';
 
     html += '<div class="form-group">';
-    html += '<label>Tags</label>';
+    html += `<label>Tags ${_applyFieldToggle("tags")}</label>`;
     const tags = result.suggested_tags || [];
     html += `<div class="chip-input-container" id="ai-tags-container">`;
     for (const tag of tags) {
@@ -2108,7 +2108,7 @@ function renderAIResults(container, result, productId) {
     }
 
     if (result.image_alt_suggestions && result.image_alt_suggestions.length > 0) {
-        html += '<div class="form-group"><label>Image Alt Text Suggestions</label>';
+        html += `<div class="form-group"><label>Image Alt Text Suggestions ${_applyFieldToggle("image_alts")}</label>`;
         for (let i = 0; i < result.image_alt_suggestions.length; i++) {
             const alt = result.image_alt_suggestions[i];
             const mediaId = typeof alt === "object" ? (alt.media_id || "") : "";
@@ -2198,11 +2198,11 @@ async function applyChanges(productId) {
 
     const payload = {};
     if (!keepTitle && title) payload.title = title;
-    if (description) payload.description_html = description;
-    if (metaTitle) payload.meta_title = metaTitle;
-    if (metaDescription) payload.meta_description = metaDescription;
-    if (tags.length > 0) payload.tags = tags;
-    if (imageAlts.length > 0) payload.image_alts = imageAlts;
+    if (description && _applyFieldEnabled("description")) payload.description_html = description;
+    if (metaTitle && _applyFieldEnabled("meta_title")) payload.meta_title = metaTitle;
+    if (metaDescription && _applyFieldEnabled("meta_description")) payload.meta_description = metaDescription;
+    if (tags.length > 0 && _applyFieldEnabled("tags")) payload.tags = tags;
+    if (imageAlts.length > 0 && _applyFieldEnabled("image_alts")) payload.image_alts = imageAlts;
 
     if (Object.keys(payload).length === 0) {
         showToast("No changes to apply", "warning");
@@ -2261,6 +2261,12 @@ async function viewCollection(id) {
             ? '<span class="badge badge-success">Published</span>'
             : '<span class="badge badge-error">Unpublished</span>';
 
+        // Unified score hero: ring + 3 pillar bars + issue stats
+        html += renderUnifiedHero(c, "collection");
+        if (c.keyword_analysis) {
+            html += renderKeywordChips(c.keyword_analysis.detected_keywords);
+        }
+
         html += `<div class="preview-info-grid">
             <div class="info-item"><span class="info-label">Type</span><span class="info-value">${typeBadge}</span></div>
             <div class="info-item"><span class="info-label">Published</span><span class="info-value">${publishedBadge}</span></div>
@@ -2294,33 +2300,9 @@ async function viewCollection(id) {
             </div>`;
         }
 
-        // SEO Score Card (composite)
-        html += '<div class="score-card">';
-        html += '<div class="score-card-title"><span class="material-symbols-rounded" style="font-size:16px;">analytics</span> SEO Score</div>';
-        html += renderScoreRing(c.seo_score || 0, 80, c);
-
-        html += '<div style="font-size:12px;font-weight:600;margin:12px 0 6px;color:var(--on-surface-secondary);">On-Page Quality' + (c.on_page_score != null ? ` (${c.on_page_score})` : '') + '</div>';
-        for (const [key, info] of Object.entries(c.seo_breakdown)) {
-            const fillClass = info.score >= 80 ? "high" : info.score >= 50 ? "medium" : "low";
-            html += `<div class="score-item">
-                <span class="score-item-label">${escapeHtml(key.replace(/_/g, " "))}</span>
-                <div class="score-item-bar"><div class="score-item-bar-fill ${fillClass}" style="width: ${info.score}%;"></div></div>
-                <span class="score-item-num">${info.score}</span>
-            </div>`;
-        }
-
-        if (c.search_breakdown) {
-            html += '<div style="font-size:12px;font-weight:600;margin:12px 0 6px;color:var(--on-surface-secondary);">Search Performance' + (c.search_score != null ? ` (${c.search_score})` : '') + '</div>';
-            for (const [key, info] of Object.entries(c.search_breakdown)) {
-                const fillClass = info.score >= 80 ? "high" : info.score >= 50 ? "medium" : "low";
-                html += `<div class="score-item">
-                    <span class="score-item-label">${escapeHtml(key.replace(/_/g, " "))}</span>
-                    <div class="score-item-bar"><div class="score-item-bar-fill ${fillClass}" style="width: ${info.score}%;"></div></div>
-                    <span class="score-item-num">${info.score}</span>
-                </div>`;
-            }
-        }
-        html += '</div>';
+        // Check-by-check breakdown (completeness + keyword + search) replaces
+        // the old score-card — the hero at the top carries the scores.
+        html += renderCheckGroups(c);
 
         html += `
             <div class="form-group">

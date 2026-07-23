@@ -7,6 +7,7 @@
 {% block content %}
                 <div class="tabs">
                     <button class="tab active" data-tab="priorities">Priorities</button>
+                    <button class="tab" data-tab="issues">Issues</button>
                     <button class="tab" data-tab="products">Products</button>
                     <button class="tab" data-tab="collections">Collections</button>
                     <button class="tab" data-tab="schema">Schema Markup</button>
@@ -15,6 +16,12 @@
                 <div class="tab-panel active" id="tab-priorities">
                     <div id="priorities-container">
                         <div class="loading-spinner"><div class="spinner"></div><p>Loading priorities...</p></div>
+                    </div>
+                </div>
+
+                <div class="tab-panel" id="tab-issues">
+                    <div id="issues-container">
+                        <div class="loading-spinner"><div class="spinner"></div><p>Loading issues...</p></div>
                     </div>
                 </div>
 
@@ -136,4 +143,5 @@
 
 {% block scripts %}
     <script src="/static/js/seo.js"></script>
+    <script src="/static/js/seo_issues.js"></script>
 {% endblock %}
