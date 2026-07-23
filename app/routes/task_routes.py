@@ -972,7 +972,7 @@ AI_TASK_META = {
     "news_links": ("News Link Building", "/news"),
     "news_regen_hero": ("News Hero Regeneration", "/news"),
     "news_regen_inline": ("News Inline Image Regeneration", "/news"),
-    "technical_seo_fix": ("Technical SEO Fix", "/technical-seo"),
+    "technical_seo_fix": ("Keyword SEO Fix", "/seo"),
     "interlinking_analysis": ("Interlinking Analysis", "/interlinking"),
 }
 
@@ -994,8 +994,8 @@ BULK_TASK_META = {
     "generate_taxonomy_collections": ("Taxonomy Collection Generation", "/seo"),
     "placeholder_image": ("Placeholder Image Generation", "/images"),
     "replace_placeholder_image": ("Placeholder Image Replacement", "/images"),
-    "technical_seo": ("Technical SEO Bulk Fix", "/technical-seo"),
-    "tseo_analyze": ("Technical SEO Analysis", "/technical-seo"),
+    "technical_seo": ("Keyword SEO Bulk Fix", "/seo?tab=issues"),
+    "tseo_analyze": ("Keyword Analysis", "/seo?tab=issues"),
     "seo_issue_fix": ("SEO Issue Fix", "/seo?tab=issues"),
     "collection_publish": ("Publish Collections", "/seo"),
     "collection_delete": ("Delete Collections", "/seo"),

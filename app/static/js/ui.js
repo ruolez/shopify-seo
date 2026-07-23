@@ -264,7 +264,7 @@ const CommandPalette = (() => {
         { label: "Home", icon: "dashboard", href: "/" },
         { label: "SEO", icon: "search", href: "/seo" },
         { label: "Duplicates", icon: "difference", href: "/duplicates" },
-        { label: "Technical SEO", icon: "speed", href: "/technical-seo" },
+        { label: "SEO Issues", icon: "speed", href: "/seo?tab=issues" },
         { label: "AI Search", icon: "smart_toy", href: "/ai-seo" },
         { label: "Interlinking", icon: "link", href: "/interlinking" },
         { label: "Image Manager", icon: "image", href: "/images" },

@@ -278,7 +278,8 @@ const TasksPanel = (() => {
     const GROUPS = {
         all: { label: "All", test: () => true },
         ai: { label: "AI Search", test: (t) => t.page === "/ai-seo" },
-        seo: { label: "SEO", test: (t) => ["/seo", "/technical-seo", "/interlinking", "/images", "/duplicates"].includes(t.page) },
+        // "/technical-seo" stays: pre-merge tasks carry that page for up to 7 days of history
+        seo: { label: "SEO", test: (t) => ["/seo", "/seo?tab=issues", "/technical-seo", "/interlinking", "/images", "/duplicates"].includes(t.page) },
         content: { label: "Content", test: (t) => ["/blog", "/news", "/landing-pages", "/home-page", "/brands"].includes(t.page) },
         insights: { label: "Insights", test: (t) => ["/gsc", "/semrush", "/keyword-strategy", "/content-gaps", "/competitors"].includes(t.page) },
         sync: { label: "Sync", test: (t) => t.source === "sync" },

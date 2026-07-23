@@ -550,11 +550,12 @@ def build_action_queue(store_id, limit=15):
         summary_row("cannibalization", "high", f"{cann} keyword cannibalization issue{'s' if cann != 1 else ''}",
                     "Queries ranking on multiple pages", "/gsc")
 
+    # action_key stays "technical:summary" so existing dismissals keep applying
     tech = insights.get("technical_seo") or {}
     counts["technical"] = tech.get("total_issues", 0)
     if tech.get("total_issues"):
-        summary_row("technical", "med", f"{tech['total_issues']} technical SEO issues",
-                    f"{tech.get('fixable_issues', 0)} auto-fixable", "/technical-seo")
+        summary_row("technical", "med", f"{tech['total_issues']} SEO issues",
+                    f"{tech.get('fixable_issues', 0)} auto-fixable", "/seo?tab=issues")
 
     gaps = insights.get("content_gaps") or {}
     counts["gaps"] = gaps.get("new", 0)
@@ -628,14 +629,13 @@ def get_nav_badges(store_id):
         )
         content_stuck = cur.fetchone()["n"]
     # Counts are "work you'd queue", not raw issue sums — a sidebar of permanent
-    # 99+ chips is noise. seo = bounded priority/CTR items; technical = pages
-    # with issues (not summed issues); cannibalization stays off (lives on GSC).
+    # 99+ chips is noise. seo = bounded priority/CTR items plus pages with
+    # keyword issues (the merged Issues tab); cannibalization stays off (GSC).
     insights = get_store_insights(store_id)
     tech_pages = (insights.get("technical_seo") or {}).get("items_with_issues", 0)
     badges = {
         "home": len(q["items"]),
-        "seo": c.get("priority", 0) + c.get("ctr", 0),
-        "technical-seo": tech_pages,
+        "seo": c.get("priority", 0) + c.get("ctr", 0) + tech_pages,
         "interlinking": c.get("links", 0),
         "content-gaps": c.get("gaps", 0),
         "competitors": c.get("competitor", 0),

@@ -2,7 +2,7 @@ import json
 import logging
 import threading
 
-from flask import Blueprint, jsonify, render_template, request
+from flask import Blueprint, jsonify, redirect, request
 
 from app.auth import decrypt_value
 from app.database import db
@@ -60,7 +60,9 @@ def _enrich_collection_data(collection_dict):
 
 @technical_seo_bp.route("/technical-seo")
 def technical_seo_page():
-    return render_template("technical_seo.html")
+    # The page merged into the SEO section (Issues tab). The /api/technical-seo/*
+    # endpoints below stay — they power the merged page's keyword analysis.
+    return redirect("/seo?tab=issues", code=301)
 
 
 @technical_seo_bp.route("/api/technical-seo/products", methods=["GET"])
