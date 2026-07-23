@@ -996,6 +996,7 @@ BULK_TASK_META = {
     "replace_placeholder_image": ("Placeholder Image Replacement", "/images"),
     "technical_seo": ("Technical SEO Bulk Fix", "/technical-seo"),
     "tseo_analyze": ("Technical SEO Analysis", "/technical-seo"),
+    "seo_issue_fix": ("SEO Issue Fix", "/seo?tab=issues"),
     "collection_publish": ("Publish Collections", "/seo"),
     "collection_delete": ("Delete Collections", "/seo"),
 }

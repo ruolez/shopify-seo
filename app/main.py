@@ -17,6 +17,7 @@ from app.database import db
 from app.routes.auth_routes import auth_bp
 from app.routes.dashboard_routes import dashboard_bp
 from app.routes.seo_routes import seo_bp
+from app.routes.seo_issues_routes import seo_issues_bp
 from app.routes.settings_routes import settings_bp
 from app.routes.store_routes import store_bp
 from app.routes.schema_routes import schema_bp
@@ -49,6 +50,7 @@ app.register_blueprint(dashboard_bp)
 app.register_blueprint(store_bp)
 app.register_blueprint(settings_bp)
 app.register_blueprint(seo_bp)
+app.register_blueprint(seo_issues_bp)
 app.register_blueprint(task_bp)
 app.register_blueprint(schema_bp)
 app.register_blueprint(interlinking_bp)

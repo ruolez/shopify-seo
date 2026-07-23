@@ -694,7 +694,9 @@ def bulk_fix_apply():
     return jsonify({"ok": True, "bulk_task_id": bulk_task_id, "total": len(item_ids)}), 201
 
 
-def _execute_bulk_fix_apply(bulk_task_id, item_type):
+def _execute_bulk_fix_apply(bulk_task_id, item_type, only_fields=None):
+    """Analyze → AI fix → apply for each item. When only_fields is set (issue-type
+    bulk fixes), the AI and the apply step are scoped to those fix fields."""
     import time
     from app.ai_agent import run_task
 
@@ -772,7 +774,14 @@ def _execute_bulk_fix_apply(bulk_task_id, item_type):
                 analysis_row = cur.fetchone()
                 analysis_id = analysis_row["id"]
 
-            if analysis["fixable_count"] == 0:
+            if only_fields:
+                relevant_fixable = sum(
+                    1 for c in analysis["checks"].values()
+                    if c.get("issue") and c.get("fix_type") in only_fields
+                )
+            else:
+                relevant_fixable = analysis["fixable_count"]
+            if relevant_fixable == 0:
                 with db.get_cursor() as cur:
                     cur.execute(
                         "UPDATE bulk_task_items SET status = 'completed', ai_result = %s, completed_at = NOW() WHERE id = %s",
@@ -783,6 +792,8 @@ def _execute_bulk_fix_apply(bulk_task_id, item_type):
 
             # Step 2: AI fix
             task_input = {"item_type": item_type, "item_id": ref_id, "analysis_id": analysis_id}
+            if only_fields:
+                task_input["only_fields"] = list(only_fields)
             ai_result = run_task("technical_seo_fix", task_input, store_id)
 
             with db.get_cursor() as cur:
@@ -806,9 +817,11 @@ def _execute_bulk_fix_apply(bulk_task_id, item_type):
                     (json.dumps(ai_result), analysis_id),
                 )
 
-            # Step 3: Apply
+            # Step 3: Apply (defense in depth: never apply outside only_fields)
             item_error = None
             ai_fixes = ai_result.get("fixes", [])
+            if only_fields:
+                ai_fixes = [f for f in ai_fixes if f.get("field") in only_fields]
             if ai_fixes:
                 try:
                     client = ShopifyClient(

@@ -3845,6 +3845,15 @@ def run_task(task_type, task_input, store_id=None):
 
         failing_checks = {k: v for k, v in checks.items() if v.get("issue") and v.get("fix_type")}
 
+        # Issue-type bulk fixes scope the AI to specific fields — everything
+        # downstream (prompt, density/tags instructions) derives from
+        # failing_checks, so filtering here scopes the whole fix.
+        only_fields = task_input.get("only_fields")
+        if only_fields:
+            failing_checks = {
+                k: v for k, v in failing_checks.items() if v.get("fix_type") in only_fields
+            }
+
         sibling_context = ""
         category_context = ""
         if item_type == "product":
