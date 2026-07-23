@@ -27,7 +27,6 @@ from app.services.seo_analyzer import (
     analyze_collection_seo,
     analyze_product_seo,
     analyze_search_performance,
-    compute_composite_score,
     compute_unified_score,
 )
 from app.shopify_client import ShopifyClient
@@ -396,6 +395,7 @@ def recently_optimized():
 
     today = datetime.now(timezone.utc).date()
     gsc_metrics = _get_gsc_metrics_for_store(store_id)
+    sr_metrics = _get_semrush_metrics_for_store(store_id)
 
     results = []
     seen = set()
@@ -426,18 +426,21 @@ def recently_optimized():
             full_item = cur.fetchone()
         current_seo = seo_fn(dict(full_item)) if full_item else {"score": 0}
 
-        sr_metrics = _get_semrush_metrics_for_store(store_id)
         sr = sr_metrics.get(path, {})
         search_perf = analyze_search_performance(
             {"gsc_clicks": gsc.get("gsc_clicks"), "gsc_impressions": gsc.get("gsc_impressions"),
              "gsc_ctr": gsc.get("gsc_ctr"), "gsc_position": gsc.get("gsc_position")},
             {"semrush_volume": sr.get("semrush_volume"), "semrush_position": sr.get("semrush_position"),
              "semrush_keyword_count": sr.get("semrush_keyword_count")},
+            _get_store_baselines(store_id),
         )
-        composite = compute_composite_score(current_seo, search_perf)
+        # Unified blend; historical *_before values were recorded on the old
+        # composite blend — deltas normalize as new events accrue.
+        kw = _fetch_keyword_analysis(store_id, ev["item_type"], ev["item_id"])
+        unified = compute_unified_score(current_seo, kw["score"] if kw else None, search_perf)
 
         score_before = ev.get("composite_score_before") or ev.get("seo_score_before") or 0
-        score_now = composite["composite_score"]
+        score_now = unified["seo_score"]
         score_change = score_now - score_before
 
         results.append({
@@ -1054,8 +1057,10 @@ def apply_product_changes(product_id):
                  "gsc_ctr": gsc_item.get("gsc_ctr"), "gsc_position": gsc_item.get("gsc_position")},
                 {"semrush_volume": sr_item.get("semrush_volume"), "semrush_position": sr_item.get("semrush_position"),
                  "semrush_keyword_count": sr_item.get("semrush_keyword_count")},
+                _get_store_baselines(product["store_id"]),
             )
-            comp_before = compute_composite_score(seo_before, search_before)
+            kw_before = _fetch_keyword_analysis(product["store_id"], "product", product_id)
+            unified_before = compute_unified_score(seo_before, kw_before["score"] if kw_before else None, search_before)
 
             changes_map = {}
             for field in ("title", "description_html", "meta_title", "meta_description"):
@@ -1069,9 +1074,9 @@ def apply_product_changes(product_id):
                 product["store_id"], product_id,
                 data.get("change_type", "ai_optimization"),
                 json.dumps(changes_map) if changes_map else None,
-                comp_before["on_page_score"],
-                comp_before.get("search_score"),
-                comp_before["composite_score"],
+                unified_before["content_score"],
+                unified_before.get("search_score"),
+                unified_before["seo_score"],
             )
         except Exception:
             _event_params = None
@@ -1370,8 +1375,10 @@ def apply_collection_changes(collection_id):
                  "gsc_ctr": gsc_item.get("gsc_ctr"), "gsc_position": gsc_item.get("gsc_position")},
                 {"semrush_volume": sr_item.get("semrush_volume"), "semrush_position": sr_item.get("semrush_position"),
                  "semrush_keyword_count": sr_item.get("semrush_keyword_count")},
+                _get_store_baselines(collection["store_id"]),
             )
-            comp_before = compute_composite_score(seo_before, search_before)
+            kw_before = _fetch_keyword_analysis(collection["store_id"], "collection", collection_id)
+            unified_before = compute_unified_score(seo_before, kw_before["score"] if kw_before else None, search_before)
 
             changes_map = {}
             for field in ("title", "description_html", "meta_title", "meta_description"):
@@ -1383,9 +1390,9 @@ def apply_collection_changes(collection_id):
                 collection["store_id"], collection_id,
                 data.get("change_type", "ai_optimization"),
                 json.dumps(changes_map) if changes_map else None,
-                comp_before["on_page_score"],
-                comp_before.get("search_score"),
-                comp_before["composite_score"],
+                unified_before["content_score"],
+                unified_before.get("search_score"),
+                unified_before["seo_score"],
             )
         except Exception:
             _event_params = None

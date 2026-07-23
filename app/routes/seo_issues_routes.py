@@ -39,7 +39,21 @@ CONTENT_DEDUP_CHECK_KEYS = {
 }
 
 # key -> {label, severity, source, fixable, fix_fields, item_types}
+# Optional action_label/action_href: non-AI-fixable issues that have a
+# dedicated fixing surface elsewhere in the app link there instead.
 ISSUE_DEFS = {
+    "meta_title_duplicate": {
+        "label": "Duplicate meta title",
+        "severity": "high", "source": "content", "fixable": False,
+        "fix_fields": [], "item_types": ("product", "collection"),
+        "action_label": "Fix in Duplicates", "action_href": "/duplicates",
+    },
+    "meta_description_duplicate": {
+        "label": "Duplicate meta description",
+        "severity": "high", "source": "content", "fixable": False,
+        "fix_fields": [], "item_types": ("product", "collection"),
+        "action_label": "Fix in Duplicates", "action_href": "/duplicates",
+    },
     "meta_description_missing": {
         "label": "Missing meta description",
         "severity": "high", "source": "content", "fixable": True,
@@ -74,6 +88,12 @@ ISSUE_DEFS = {
         "label": "Images missing alt text",
         "severity": "med", "source": "content", "fixable": True,
         "fix_fields": ["image_alt"], "item_types": ("product",),
+    },
+    "schema_missing": {
+        "label": "Product schema not pushed",
+        "severity": "med", "source": "content", "fixable": False,
+        "fix_fields": [], "item_types": ("product",),
+        "action_label": "Fix in Schema", "action_href": "/seo?tab=schema",
     },
     "meta_title_has_keyword": {
         "label": "Keyword missing from meta title",
@@ -238,6 +258,30 @@ def _scan_store(store_id):
         )
         collections = cur.fetchall()
 
+        cur.execute(
+            """
+            SELECT resource_id FROM schema_markup
+            WHERE store_id = %s AND resource_type = 'product'
+              AND schema_type = 'Product' AND pushed_to_shopify = TRUE
+            """,
+            (store_id,),
+        )
+        schema_pushed = {str(r["resource_id"]) for r in cur.fetchall()}
+
+    # Duplicate metas: group effective titles / non-empty descriptions across
+    # both entity types in the rows already fetched (no extra queries).
+    title_groups = {}
+    desc_groups = {}
+    for row in list(products) + list(collections):
+        t = ((row.get("meta_title") or row.get("title") or "").strip().lower())
+        if t:
+            title_groups.setdefault(t, []).append(row)
+        d = (row.get("meta_description") or "").strip().lower()
+        if d:
+            desc_groups.setdefault(d, []).append(row)
+    dup_titles = {k: len(v) for k, v in title_groups.items() if len(v) >= 2}
+    dup_descs = {k: len(v) for k, v in desc_groups.items() if len(v) >= 2}
+
     items_by_issue = {}
     coverage = {
         "products": {"total": len(products), "keyword_analyzed": 0},
@@ -268,11 +312,24 @@ def _scan_store(store_id):
             if check.get("issue"):
                 add(key, item_type, row, check.get("detail") or check["issue"])
 
+    def duplicate_issues(row, item_type):
+        t = ((row.get("meta_title") or row.get("title") or "").strip().lower())
+        if t in dup_titles:
+            add("meta_title_duplicate", item_type, row,
+                f"Shared with {dup_titles[t] - 1} other item(s): “{t[:60]}”")
+        d = (row.get("meta_description") or "").strip().lower()
+        if d in dup_descs:
+            add("meta_description_duplicate", item_type, row,
+                f"Shared with {dup_descs[d] - 1} other item(s): “{d[:60]}”")
+
     for p in products:
         if p.get("kw_analyzed_at"):
             coverage["products"]["keyword_analyzed"] += 1
         for key, detail in _live_issues_for_product(p, product_thresholds).items():
             add(key, "product", p, detail)
+        duplicate_issues(p, "product")
+        if str(p["shopify_id"]) not in schema_pushed:
+            add("schema_missing", "product", p, "No Product schema generated and pushed to Shopify")
         keyword_issues(p, "product")
 
     for c in collections:
@@ -280,6 +337,7 @@ def _scan_store(store_id):
             coverage["collections"]["keyword_analyzed"] += 1
         for key, detail in _live_issues_for_collection(c, collection_thresholds).items():
             add(key, "collection", c, detail)
+        duplicate_issues(c, "collection")
         keyword_issues(c, "collection")
 
     return items_by_issue, coverage
@@ -309,6 +367,8 @@ def list_issues():
             "source": definition["source"],
             "fixable": definition["fixable"],
             "fix_fields": definition["fix_fields"],
+            "action_label": definition.get("action_label"),
+            "action_href": definition.get("action_href"),
             "count": len(items),
             "by_type": by_type,
             "sample_items": [
@@ -353,6 +413,8 @@ def issue_items(issue_key):
             "severity": definition["severity"],
             "fixable": definition["fixable"],
             "fix_fields": definition["fix_fields"],
+            "action_label": definition.get("action_label"),
+            "action_href": definition.get("action_href"),
         },
         "total": len(items),
         "items": items[offset:offset + limit],
@@ -417,12 +479,14 @@ def fix_issue(issue_key):
 
 @seo_issues_bp.route("/api/seo/issues/analyze", methods=["POST"])
 def analyze_unanalyzed():
-    """Queue keyword-alignment analysis for every item that has never been
-    analyzed — one bulk task per item type that has any."""
+    """Queue keyword-alignment analysis — one bulk task per item type.
+    Default: only never-analyzed items. With {"force": true}: ALL visible
+    items (used after scoring-threshold changes make stored analyses stale)."""
     from app.routes.technical_seo_routes import _execute_bulk_analyze
 
     data = request.get_json(silent=True) or {}
     store_id = data.get("store_id")
+    force = bool(data.get("force"))
     if not store_id:
         return jsonify({"error": "store_id required"}), 400
 
@@ -433,17 +497,23 @@ def analyze_unanalyzed():
     ]
     for item_type, table, item_col, visibility in specs:
         with db.get_cursor() as cur:
-            cur.execute(
-                f"""
-                SELECT t.id FROM {table} t
-                LEFT JOIN technical_seo_analyses tsa
-                  ON tsa.store_id = t.store_id AND tsa.item_type = %s AND tsa.item_id = t.id
-                WHERE t.store_id = %s AND {visibility}
-                  AND tsa.id IS NULL
-                ORDER BY t.id
-                """,
-                (item_type, store_id),
-            )
+            if force:
+                cur.execute(
+                    f"SELECT t.id FROM {table} t WHERE t.store_id = %s AND {visibility} ORDER BY t.id",
+                    (store_id,),
+                )
+            else:
+                cur.execute(
+                    f"""
+                    SELECT t.id FROM {table} t
+                    LEFT JOIN technical_seo_analyses tsa
+                      ON tsa.store_id = t.store_id AND tsa.item_type = %s AND tsa.item_id = t.id
+                    WHERE t.store_id = %s AND {visibility}
+                      AND tsa.id IS NULL
+                    ORDER BY t.id
+                    """,
+                    (item_type, store_id),
+                )
             ids = [r["id"] for r in cur.fetchall()]
 
         if not ids:

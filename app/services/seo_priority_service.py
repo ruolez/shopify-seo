@@ -8,7 +8,7 @@ from app.services.seo_analyzer import (
     analyze_collection_seo,
     analyze_product_seo,
     analyze_search_performance,
-    compute_composite_score,
+    compute_unified_score,
 )
 
 logger = logging.getLogger(__name__)
@@ -171,6 +171,13 @@ def get_priority_ranked_items(store_id, item_type="product", limit=50):
         analyze_fn = analyze_collection_seo
         prefix = "collections"
 
+    with db.get_cursor() as cur:
+        cur.execute(
+            "SELECT item_id, score FROM technical_seo_analyses WHERE store_id = %s AND item_type = %s",
+            (store_id, item_type),
+        )
+        kw_scores = {r["item_id"]: r["score"] for r in cur.fetchall()}
+
     results = []
     for item in items:
         handle = item.get("handle") or ""
@@ -195,7 +202,12 @@ def get_priority_ranked_items(store_id, item_type="product", limit=50):
             },
             {"ctr_curve": ctr_curve},
         )
-        composite = compute_composite_score(seo, search_perf)
+        unified = compute_unified_score(seo, kw_scores.get(item["id"]), search_perf)
+        composite = {
+            "composite_score": unified["seo_score"],
+            "on_page_score": unified["content_score"],
+            "search_score": unified["search_score"],
+        }
 
         striking = _get_striking_keywords_for_url(store_id, path, base_url)
 

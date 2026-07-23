@@ -237,7 +237,11 @@ def analyze_search_performance(gsc_data, semrush_data, store_baselines=None):
 
 
 def compute_composite_score(on_page_result, search_result):
-    """Blend on-page and search performance scores into a composite."""
+    """Blend on-page and search performance scores into a composite.
+
+    DEPRECATED: superseded by compute_unified_score (3-pillar blend); kept
+    for settings back-compat and any external callers.
+    """
     config = get_setting("rules.composite_scoring", DEFAULT_COMPOSITE_SCORING)
 
     on_page_score = on_page_result["score"] if on_page_result else 0

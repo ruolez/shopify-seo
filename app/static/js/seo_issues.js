@@ -287,7 +287,8 @@ function renderIssuesTab() {
         <div class="stat-card">
             <div class="stat-value" style="color:${covPct >= 90 ? "var(--success)" : "var(--warning)"};">${covPct}%</div>
             <div class="stat-label">Keyword Coverage</div>
-            <div class="stat-sub">${covAnalyzed.toLocaleString()} of ${covTotal.toLocaleString()} analyzed</div>
+            <div class="stat-sub">${covAnalyzed.toLocaleString()} of ${covTotal.toLocaleString()} analyzed ·
+                <a href="#" data-issues-reanalyze-all style="color: var(--primary);">Re-analyze all</a></div>
         </div>
     </div>`;
 
@@ -333,7 +334,7 @@ function renderIssuesTab() {
     // Re-render any previously expanded rows from cache
     for (const key of expandedIssueKeys) {
         const body = container.querySelector(`.issue-row[data-issue-key="${key}"] .issue-row-body`);
-        if (body && issueItemsCache.has(key)) body.innerHTML = renderIssueItems(issueItemsCache.get(key));
+        if (body && issueItemsCache.has(key)) body.innerHTML = renderIssueItems(issueItemsCache.get(key), key);
     }
 }
 
@@ -350,17 +351,23 @@ function renderIssueRow(issue) {
             <span class="issue-pillar-tag">${issue.source === "keyword" ? "Keywords" : "Content"}</span>
             ${issue.fixable
                 ? `<button class="btn btn-primary btn-sm" data-issue-fix="${issue.key}"><span class="material-symbols-rounded">auto_fix_high</span> Fix all with AI</button>`
-                : `<span class="badge badge-not-analyzed" title="Informational — no safe automatic fix">info only</span>`}
+                : issue.action_href
+                    ? `<a class="btn btn-secondary btn-sm" href="${escapeAttr(issue.action_href)}" data-issue-action><span class="material-symbols-rounded">arrow_outward</span> ${escapeHtml(issue.action_label || "Open")}</a>`
+                    : `<span class="badge badge-not-analyzed" title="Informational — no safe automatic fix">info only</span>`}
             <span class="material-symbols-rounded issue-chevron">expand_more</span>
         </div>
         <div class="issue-row-body">${expanded ? '<div class="loading-spinner" style="padding:20px 0;"><div class="spinner"></div></div>' : ""}</div>
     </div>`;
 }
 
-function renderIssueItems(items) {
+function renderIssueItems(items, issueKey) {
     if (!items || items.length === 0) {
         return '<p style="padding: 10px 14px; font-size: 13px; color: var(--on-surface-secondary);">No items.</p>';
     }
+    const issue = (issuesData?.issues || []).find(i => i.key === issueKey);
+    const actionLink = issue && issue.action_href
+        ? `<a class="btn btn-secondary btn-sm" href="${escapeAttr(issue.action_href)}" data-issue-action>${escapeHtml(issue.action_label || "Open")}</a>`
+        : "";
     return items.map(it => `<div class="issue-item-row">
         ${it.keyword_score != null ? renderScoreRing(it.keyword_score, 32) : '<span class="badge badge-not-analyzed">—</span>'}
         <div class="issue-item-main">
@@ -368,6 +375,7 @@ function renderIssueItems(items) {
             <div class="issue-item-detail">${escapeHtml(it.detail || "")}</div>
         </div>
         <span class="badge badge-info" style="font-size: 10px;">${it.item_type}</span>
+        ${actionLink}
         <button class="btn btn-secondary btn-sm" data-view-item="${it.item_type}:${it.id}">View</button>
     </div>`).join("");
 }
@@ -388,7 +396,7 @@ async function toggleIssueRow(key) {
     row.classList.add("expanded");
 
     if (issueItemsCache.has(key)) {
-        body.innerHTML = renderIssueItems(issueItemsCache.get(key));
+        body.innerHTML = renderIssueItems(issueItemsCache.get(key), key);
         return;
     }
 
@@ -399,7 +407,7 @@ async function toggleIssueRow(key) {
         if (issuesTypeFilter) url += `&item_type=${issuesTypeFilter}`;
         const data = await apiRequest(url);
         issueItemsCache.set(key, data.items);
-        if (expandedIssueKeys.has(key)) body.innerHTML = renderIssueItems(data.items);
+        if (expandedIssueKeys.has(key)) body.innerHTML = renderIssueItems(data.items, key);
     } catch (err) {
         body.innerHTML = `<p style="padding: 10px 14px; color: var(--error); font-size: 13px;">${escapeHtml(err.message)}</p>`;
     }
@@ -474,23 +482,25 @@ async function fixIssueType(key) {
     _openConfirmDialog();
 }
 
-async function analyzeAllForIssues() {
+async function analyzeAllForIssues(force = false) {
     const cov = issuesData?.coverage || {};
+    const total = (cov.products?.total || 0) + (cov.collections?.total || 0);
     const missing = ((cov.products?.total || 0) - (cov.products?.keyword_analyzed || 0))
         + ((cov.collections?.total || 0) - (cov.collections?.keyword_analyzed || 0));
 
-    document.getElementById("confirm-dialog-title").textContent = "Analyze Keyword Alignment";
-    document.getElementById("confirm-dialog-message").innerHTML =
-        `This will run the keyword-alignment analysis on <strong>${missing.toLocaleString()}</strong> unanalyzed item${missing !== 1 ? "s" : ""}. It runs locally (no AI cost) and doesn't change anything on Shopify.`;
+    document.getElementById("confirm-dialog-title").textContent = force ? "Re-analyze All Items" : "Analyze Keyword Alignment";
+    document.getElementById("confirm-dialog-message").innerHTML = force
+        ? `This will re-run the keyword-alignment analysis on <strong>ALL ${total.toLocaleString()}</strong> items (useful after scoring rules change). It runs locally (no AI cost) and doesn't change anything on Shopify.`
+        : `This will run the keyword-alignment analysis on <strong>${missing.toLocaleString()}</strong> unanalyzed item${missing !== 1 ? "s" : ""}. It runs locally (no AI cost) and doesn't change anything on Shopify.`;
     const okBtn = document.getElementById("confirm-dialog-ok");
-    okBtn.textContent = "Analyze all";
+    okBtn.textContent = force ? "Re-analyze all" : "Analyze all";
     okBtn.onclick = async () => {
         closeConfirmDialog();
         try {
             const storeId = await _ensureStoreId();
             const resp = await apiRequest("/api/seo/issues/analyze", {
                 method: "POST",
-                body: { store_id: parseInt(storeId) },
+                body: { store_id: parseInt(storeId), force },
             });
             for (const t of resp.tasks || []) {
                 await pollIssuesBulk(t.bulk_task_id, t.total, `Analyzing ${t.item_type}s...`);
@@ -509,6 +519,7 @@ function initIssuesEvents() {
     if (!container) return;
 
     container.addEventListener("click", (e) => {
+        if (e.target.closest("a[data-issue-action]")) return; // navigate, don't toggle
         const fixBtn = e.target.closest("[data-issue-fix]");
         if (fixBtn) {
             e.stopPropagation();
@@ -525,6 +536,12 @@ function initIssuesEvents() {
         const analyzeBtn = e.target.closest("[data-issues-analyze-all]");
         if (analyzeBtn) {
             analyzeAllForIssues();
+            return;
+        }
+        const reanalyzeBtn = e.target.closest("[data-issues-reanalyze-all]");
+        if (reanalyzeBtn) {
+            e.preventDefault();
+            analyzeAllForIssues(true);
             return;
         }
         const sevChip = e.target.closest("[data-sev-filter]");
