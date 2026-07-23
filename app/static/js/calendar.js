@@ -4,12 +4,20 @@
 let calCursor = new Date();
 calCursor.setDate(1);
 
-const CAL_STATUS_COLOR = (status) => {
-    if (status === "published") return "var(--success)";
-    if (status === "error" || status === "failed") return "var(--error)";
-    if (status === "scheduled" || status === "auto_queued") return "var(--primary)";
-    return "var(--warning)"; // researching / generating / auto_publishing …
-};
+// Dot COLOR encodes the content type (unmistakably distinct); dot SHAPE
+// encodes status: filled = published, outlined = scheduled/processing.
+// Failed entries override to red so problems always stand out.
+const CAL_KIND_COLOR = { blog: "#8b5cf6", news: "#f59e0b" }; // violet / amber
+
+function calDot(entry) {
+    if (entry.status === "error" || entry.status === "failed") {
+        return `<span class="cal-dot" style="background:var(--error);"></span>`;
+    }
+    const color = CAL_KIND_COLOR[entry.kind] || "var(--on-surface-secondary)";
+    return entry.status === "published"
+        ? `<span class="cal-dot" style="background:${color};"></span>`
+        : `<span class="cal-dot" style="background:transparent;border:2px solid ${color};"></span>`;
+}
 
 function calMonthParam() {
     return `${calCursor.getFullYear()}-${String(calCursor.getMonth() + 1).padStart(2, "0")}`;
@@ -74,8 +82,8 @@ async function loadCalendar() {
                     ? new Date(e.scheduled_for).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" })
                     : "";
                 return `<a class="cal-entry" href="${href}" title="${escapeAttr(`${e.kind}: ${e.title || ""} · ${e.status} · ${time}`)}">
-                    <span class="cal-dot" style="background:${CAL_STATUS_COLOR(e.status)};"></span>
-                    <span class="cal-entry-kind">${e.kind === "blog" ? "B" : "N"}</span>
+                    ${calDot(e)}
+                    <span class="cal-entry-kind" style="color:${CAL_KIND_COLOR[e.kind] || "var(--on-surface-secondary)"};">${e.kind === "blog" ? "B" : "N"}</span>
                     <span class="cal-entry-title">${escapeHtml(e.title || "Untitled")}</span>
                 </a>`;
             })
