@@ -1618,20 +1618,27 @@ def topic_research_start():
     if not store_id:
         return jsonify({"error": "store_id is required"}), 400
 
+    # Optional focus seed from the Keyword Strategy coverage gaps view:
+    # {family, intent, keywords: [{keyword, volume}], count}
+    seed = data.get("seed") or None
+
     with db.get_cursor() as cur:
         cur.execute("SELECT topic_suggestion_count FROM ai_config ORDER BY id LIMIT 1")
         cfg = cur.fetchone()
-        count = int((cfg or {}).get("topic_suggestion_count") or 3)
+        count = int(data.get("count") or (cfg or {}).get("topic_suggestion_count") or 3)
 
         cur.execute(
             "INSERT INTO topic_research_runs (store_id, status) VALUES (%s, 'pending') RETURNING id",
             (store_id,),
         )
         run_id = cur.fetchone()["id"]
+        task_input = {"run_id": run_id, "store_id": store_id, "count": count}
+        if seed:
+            task_input["seed"] = seed
         cur.execute(
             """INSERT INTO ai_tasks (store_id, task_type, status, input)
             VALUES (%s, 'topic_discovery', 'pending', %s) RETURNING id""",
-            (store_id, json.dumps({"run_id": run_id, "store_id": store_id, "count": count})),
+            (store_id, json.dumps(task_input)),
         )
         task_id = cur.fetchone()["id"]
         cur.execute(
@@ -1649,7 +1656,7 @@ def topic_research_start():
 
             result = ai_run_task(
                 "topic_discovery",
-                {"run_id": run_id, "store_id": store_id, "count": count},
+                task_input,
                 store_id=store_id,
             )
             if is_failed_result(result):

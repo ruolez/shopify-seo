@@ -696,13 +696,112 @@ async function ksActionAssignTop(cid, intent) {
     } catch (e) { showToast("Failed: " + e.message, "error"); }
 }
 
-// Gap actions (wired to topic research / page assignment)
-function ksActionResearch(clusterId, intent) {
-    showToast("Topic research wiring lands in the next update", "info");
+// ── Gap actions ──────────────────────────────────────────────────────────
+async function ksActionResearch(cid, intent) {
+    if (!ksStoreId) return;
+    try {
+        if (!ksFamilyCache[cid]) ksFamilyCache[cid] = await apiRequest(`/api/keyword-strategy/families/${cid}?store_id=${ksStoreId}`);
+        const fam = ksFamilyCache[cid];
+        const bucket = ((fam.keywords_by_intent || {})[intent] || []);
+        const targets = (bucket.filter(k => !k.owner).length ? bucket.filter(k => !k.owner) : bucket).slice(0, 15);
+        if (!targets.length) { showToast("No keywords to research in this bucket", "info"); return; }
+        const kwList = targets.map(k => `<li>${escapeHtml(k.keyword)} <span style="color:var(--on-surface-secondary);">(${(k.search_volume || 0).toLocaleString()})</span></li>`).join("");
+        const modal = UIModal.open({
+            title: "Research blog topics",
+            bodyHtml: `<p style="font-size:13.5px;margin-bottom:10px;">
+                    AI topic research will look for blog topics targeting these uncovered
+                    <strong>${escapeHtml(intent)}</strong> keywords from the
+                    <strong>${escapeHtml(fam.cluster.name)}</strong> family:</p>
+                <ul style="font-size:13px;margin:0 0 12px 18px;max-height:220px;overflow-y:auto;">${kwList}</ul>
+                <p style="font-size:12px;color:var(--on-surface-secondary);">Suggestions appear in Blog Posts &rarr; Research Topics. Money-page keywords stay protected.</p>`,
+            footerHtml: `<button class="btn btn-outline" data-ks-cancel>Cancel</button>
+                <button class="btn btn-primary" data-ks-go><span class="material-symbols-rounded" style="font-size:16px;vertical-align:middle;">edit_note</span> Start research</button>`,
+        });
+        modal.el.querySelector("[data-ks-cancel]").addEventListener("click", () => modal.close());
+        modal.el.querySelector("[data-ks-go]").addEventListener("click", async (ev) => {
+            ev.target.disabled = true;
+            try {
+                await apiRequest("/api/blog/topics/research", {
+                    method: "POST", headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        store_id: ksStoreId, count: 2,
+                        seed: {
+                            cluster_id: fam.cluster.id, family: fam.cluster.name, intent,
+                            keywords: targets.map(k => ({ keyword: k.keyword, volume: k.search_volume || 0 })),
+                        },
+                    }),
+                });
+                modal.close();
+                showToast("Topic research started — suggestions will appear in Blog Posts", "success");
+            } catch (e) { showToast("Failed to start research: " + e.message, "error"); ev.target.disabled = false; }
+        });
+    } catch (e) { showToast("Failed: " + e.message, "error"); }
 }
 
-function ksActionAssign(keywordId) {
-    showToast("Page assignment wiring lands in the next update", "info");
+async function ksActionAssign(keywordId) {
+    if (!ksStoreId) return;
+    let kw;
+    try {
+        kw = (await apiRequest(`/api/keyword-strategy/keywords/${keywordId}/detail?store_id=${ksStoreId}`)).keyword;
+    } catch (e) { showToast("Failed: " + e.message, "error"); return; }
+
+    let pickType = "collection";
+    const modal = UIModal.open({
+        title: `Assign "${escapeHtml(kw.keyword)}" to a page`,
+        bodyHtml: `<div style="display:flex;gap:8px;margin-bottom:10px;">
+                <select id="ks-pick-type" class="form-control" style="width:auto;font-size:13px;">
+                    <option value="collection">Collection</option>
+                    <option value="product">Product</option>
+                </select>
+                <input type="text" id="ks-pick-search" class="form-control" placeholder="Search pages..." style="flex:1;font-size:13px;">
+            </div>
+            <div id="ks-pick-results" style="max-height:280px;overflow-y:auto;"></div>
+            <p style="font-size:12px;color:var(--on-surface-secondary);margin-top:10px;">
+                The keyword becomes the page's manual primary — the resolver re-analyzes
+                the page and every AI flow will optimize toward it.</p>`,
+    });
+    const results = modal.el.querySelector("#ks-pick-results");
+    const searchInput = modal.el.querySelector("#ks-pick-search");
+    modal.el.querySelector("#ks-pick-type").addEventListener("change", e => { pickType = e.target.value; doSearch(); });
+
+    let t;
+    searchInput.addEventListener("input", () => { clearTimeout(t); t = setTimeout(doSearch, 300); });
+    searchInput.value = kw.keyword;
+    setTimeout(doSearch, 50);
+
+    async function doSearch() {
+        const q = searchInput.value.trim();
+        if (!q) { results.innerHTML = ""; return; }
+        results.innerHTML = '<div class="spinner" style="margin:14px auto"></div>';
+        try {
+            const items = await apiRequest(`/api/blog/wizard/search/${pickType}s?store_id=${ksStoreId}&q=${encodeURIComponent(q)}`);
+            if (!items.length) { results.innerHTML = '<div style="font-size:13px;color:var(--on-surface-secondary);padding:10px;">No matches.</div>'; return; }
+            results.innerHTML = items.map(it => `<div class="ks-fam-kw-row" data-item-id="${it.id}">
+                <span class="badge badge-${typeBadge(pickType)}" style="font-size:10px;">${pickType}</span>
+                <span style="flex:1;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(it.title)}</span>
+            </div>`).join("");
+            results.querySelectorAll("[data-item-id]").forEach(row => row.addEventListener("click", () => pick(parseInt(row.dataset.itemId))));
+        } catch (e) { results.innerHTML = ""; }
+    }
+
+    async function pick(itemId) {
+        results.innerHTML = '<div class="spinner" style="margin:14px auto"></div>';
+        try {
+            // Full resolver pipeline: manual assignment + re-resolve + re-analysis
+            await apiRequest(`/api/seo/items/${pickType}/${itemId}/primary-keyword?store_id=${ksStoreId}`, {
+                method: "POST", headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ keyword: kw.keyword }),
+            });
+            modal.close();
+            showToast(`"${kw.keyword}" assigned as primary`, "success");
+            ksFamilyCache = {};
+            loadFamilies(); loadCoverageMatrix();
+            if (ksKwDrawer && ksKwDrawer.isOpen()) openKeywordDrawer(keywordId);
+        } catch (e) {
+            showToast("Assign failed: " + e.message, "error");
+            doSearch();
+        }
+    }
 }
 
 // ── Phase 2: Content Audit ───────────────────────────────────────────────

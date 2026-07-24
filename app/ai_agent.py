@@ -5464,6 +5464,22 @@ def run_task(task_type, task_input, store_id=None):
                 "a distinct informational/commercial query:\n"
                 + td_reserved_block + "\n"
             )
+        td_seed = task_input.get("seed") or {}
+        if td_seed.get("keywords"):
+            td_seed_lines = "\n".join(
+                f"- \"{k.get('keyword', k) if isinstance(k, dict) else k}\""
+                + (f" (vol {int(k['volume']):,})" if isinstance(k, dict) and k.get("volume") else "")
+                for k in td_seed["keywords"][:15]
+            )
+            td_user_prompt += (
+                f"\nPRIORITY FOCUS — the user explicitly requested topics for the "
+                f"'{td_seed.get('family', 'requested')}' keyword family. These "
+                f"{td_seed.get('intent', 'informational')} keywords currently have NO "
+                f"covering article on this store:\n{td_seed_lines}\n"
+                "Every suggestion must target one of these keywords (or a close variant) "
+                "as its primary, while still respecting the reserved money-page keyword "
+                "rules and avoiding topics already covered above.\n"
+            )
         td_user_prompt += (
             f"\nResearch the market with your tools (search_web, get_keyword_opportunities, "
             f"search_store_products, get_store_overview), validate winnability and inventory "
