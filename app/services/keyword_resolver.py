@@ -26,7 +26,10 @@ logger = logging.getLogger(__name__)
 
 
 def _norm(kw):
-    return re.sub(r"\s+", " ", (kw or "").strip().lower())
+    """Lowercase, strip punctuation, collapse whitespace — so GSC queries like
+    'loose leaf.' merge with 'loose leaf' instead of evading dedup."""
+    cleaned = re.sub(r"[^\w\s'&-]", " ", (kw or "").lower())
+    return re.sub(r"\s+", " ", cleaned).strip()
 
 
 def _rules():
@@ -353,10 +356,59 @@ def resolve_item_keywords(store_id, item_type, item_id, item=None, prefetch=None
     rel_rules = rules.get("relevance", {})
     dem = rules.get("demand", {})
     opp = rules.get("opportunity", {})
+    spec = rules.get("specificity", {})
+    vendor_norm = _norm(item.get("vendor"))
+    ptype_norm = _norm(item.get("product_type"))
 
     for cand in candidates.values():
         relevance = _relevance(cand, fields, rel_rules)
         cand["relevance"] = round(relevance, 3)
+
+        # Specificity: a bare brand or category term is a collection keyword,
+        # not a product primary — dozens of sibling products sharing it would
+        # cannibalize each other. Such terms stay listed but are flagged
+        # generic and can never win a product's primary slot, no matter the
+        # volume.
+        kw_tokens = set(cand["keyword"].split())
+        vendor_tokens = set(vendor_norm.split()) if vendor_norm else set()
+        word_count = len(kw_tokens)
+        generic = False
+
+        # Family-generic: keyword built ONLY from brand/category tokens (with
+        # light plural folding) carries no distinguishing token of this item —
+        # every sibling product would share it. Head terms like that belong to
+        # the brand/category collection; product pages target the long tail.
+        def _stem(t):
+            return t[:-1] if t.endswith("s") and len(t) > 3 else t
+        family_stems = {_stem(t) for t in vendor_tokens} | {_stem(t) for t in ptype_norm.split()}
+        kw_stems = {_stem(t) for t in kw_tokens}
+
+        if item_type == "product" and vendor_tokens and kw_tokens.issubset(vendor_tokens):
+            specificity = spec.get("vendor_only_product", 0.4)
+            generic = True
+        elif item_type == "product" and ptype_norm and cand["keyword"] == ptype_norm:
+            specificity = spec.get("type_only_product", 0.5)
+            generic = True
+        elif item_type == "product" and family_stems and kw_stems and kw_stems.issubset(family_stems):
+            specificity = spec.get("vendor_only_product", 0.4)
+            generic = True
+        elif word_count == 1:
+            specificity = (spec.get("single_word_product", 0.5) if item_type == "product"
+                           else spec.get("single_word_collection", 0.8))
+        elif word_count >= 3:
+            specificity = spec.get("multi_word_bonus", 1.05)
+        else:
+            specificity = 1.0
+        # A primary must actually describe the item: it has to match the title
+        # or handle (token-wise). High-volume store-level terms bleeding in via
+        # body text stay listed as candidates but can never win the slot.
+        identity_match = (_keyword_in_text(cand["keyword"], fields["title"])
+                          or _keyword_in_text(cand["keyword"], fields["handle"]))
+        if not identity_match:
+            generic = True
+        cand["specificity"] = specificity
+        if generic:
+            cand["generic"] = True
 
         vol_part = math.log1p(cand["volume"] or 0) / math.log1p(dem.get("volume_ref", 10000))
         impr_part = math.log1p(cand["gsc_impressions"] or 0) / math.log1p(dem.get("impressions_ref", 1000))
@@ -376,7 +428,7 @@ def resolve_item_keywords(store_id, item_type, item_id, item=None, prefetch=None
         else:
             opportunity = opp.get("beyond_mult", 0.9)
 
-        cand["score"] = round(100 * relevance * demand * opportunity, 1)
+        cand["score"] = round(100 * relevance * demand * opportunity * specificity, 1)
 
     # ── Cannibalization (batched over top candidates with demand) ────
     ranked = sorted(candidates.values(), key=lambda c: c["score"], reverse=True)
@@ -425,9 +477,13 @@ def resolve_item_keywords(store_id, item_type, item_id, item=None, prefetch=None
         if best_auto and best_auto["score"] > primary["score"]:
             note = f"higher-scoring alternative: {best_auto['keyword']}"
     else:
-        primary = next((c for c in ranked if c["relevance"] >= min_rel and not c.get("packaging_only")), None)
+        primary = next(
+            (c for c in ranked
+             if c["relevance"] >= min_rel and not c.get("packaging_only") and not c.get("generic")),
+            None,
+        )
         if primary is None:
-            primary = ranked[0] if ranked else None
+            primary = next((c for c in ranked if not c.get("generic")), None) or (ranked[0] if ranked else None)
 
     final = []
     if primary:

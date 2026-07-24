@@ -1074,6 +1074,13 @@ DEFAULTS = {
         "opportunity": {"striking_band": [4, 20], "striking_mult": 1.3,
                         "top_mult": 1.1, "beyond_mult": 0.9},
         "cannibalization_mult": 0.5,
+        "specificity": {
+            "single_word_product": 0.5,
+            "single_word_collection": 0.6,
+            "vendor_only_product": 0.4,
+            "type_only_product": 0.5,
+            "multi_word_bonus": 1.05,
+        },
         "max_candidates": 15,
         "gsc_days": 30,
     },
