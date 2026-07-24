@@ -905,6 +905,25 @@ DEFAULTS = {
     "rules.unified_scoring": {
         "weights": {"content": 0.30, "keyword": 0.30, "search": 0.40},
     },
+    "rules.keyword_coverage": {
+        # Which content types can satisfy each search intent. A family's
+        # intent cell counts as covered when any keyword in that intent
+        # bucket is owned by an item of a required type.
+        "required_types": {
+            "transactional": ["product", "collection"],
+            "commercial": ["collection", "article", "page"],
+            "informational": ["article"],
+            "navigational": ["collection", "page"],
+        },
+        "gap_weights": {
+            "transactional": 1.0,
+            "commercial": 0.8,
+            "informational": 0.6,
+            "navigational": 0.2,
+        },
+        # Intent cells whose total volume is below this are "n/a", not gaps.
+        "min_intent_volume": 10,
+    },
     "rules.product_seo": {
         "weights": {
             "meta_title": 0.30,

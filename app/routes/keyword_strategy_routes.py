@@ -161,6 +161,72 @@ def update_kw_status(keyword_id):
 
 
 # ---------------------------------------------------------------------------
+# Coverage / ownership
+# ---------------------------------------------------------------------------
+
+
+@keyword_strategy_bp.route("/api/keyword-strategy/coverage/matrix")
+def coverage_matrix():
+    store_id = _get_store_id()
+    if not store_id:
+        return jsonify({"error": "store_id required"}), 400
+    from app.services import keyword_coverage as kc
+
+    data = kc.get_coverage_matrix(
+        store_id,
+        min_volume=request.args.get("min_volume", 0, type=int),
+        search=request.args.get("search"),
+        only_gaps=request.args.get("only_gaps") == "1",
+        sort_by=request.args.get("sort_by", "gap_score"),
+        limit=request.args.get("limit", 50, type=int),
+        offset=request.args.get("offset", 0, type=int),
+    )
+    return jsonify(data)
+
+
+@keyword_strategy_bp.route("/api/keyword-strategy/families/<int:cluster_id>")
+def family_coverage(cluster_id):
+    store_id = _get_store_id()
+    if not store_id:
+        return jsonify({"error": "store_id required"}), 400
+    from app.services import keyword_coverage as kc
+
+    data = kc.get_family_coverage(store_id, cluster_id or None)
+    if data is None:
+        return jsonify({"error": "Family not found"}), 404
+    return jsonify(data)
+
+
+@keyword_strategy_bp.route("/api/keyword-strategy/keywords/<int:keyword_id>/detail")
+def keyword_detail(keyword_id):
+    store_id = _get_store_id()
+    if not store_id:
+        return jsonify({"error": "store_id required"}), 400
+    from app.services import keyword_coverage as kc
+
+    data = kc.get_keyword_detail(store_id, keyword_id)
+    if data is None:
+        return jsonify({"error": "Keyword not found"}), 404
+    return jsonify(data)
+
+
+@keyword_strategy_bp.route("/api/keyword-strategy/keywords/<int:keyword_id>/mentions")
+def keyword_mentions(keyword_id):
+    store_id = _get_store_id()
+    if not store_id:
+        return jsonify({"error": "store_id required"}), 400
+    from app.services import keyword_coverage as kc
+
+    data = kc.get_keyword_mentions(
+        store_id,
+        keyword_id,
+        limit=request.args.get("limit", 25, type=int),
+        offset=request.args.get("offset", 0, type=int),
+    )
+    return jsonify(data)
+
+
+# ---------------------------------------------------------------------------
 # Clusters
 # ---------------------------------------------------------------------------
 
