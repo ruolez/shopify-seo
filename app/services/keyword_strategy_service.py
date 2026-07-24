@@ -132,8 +132,8 @@ def consolidate_master_keywords(store_id):
                     """INSERT INTO master_keywords
                        (store_id, keyword, search_volume, cpc, competition,
                         best_position, clicks, impressions, ctr,
-                        intent, source, current_url, updated_at)
-                       VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s, NOW())
+                        intent, source, current_url, intent_source, updated_at)
+                       VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s, 'rules', NOW())
                        ON CONFLICT (store_id, keyword) DO UPDATE SET
                          search_volume = EXCLUDED.search_volume,
                          cpc = EXCLUDED.cpc,
@@ -142,7 +142,16 @@ def consolidate_master_keywords(store_id):
                          clicks = EXCLUDED.clicks,
                          impressions = EXCLUDED.impressions,
                          ctr = EXCLUDED.ctr,
-                         intent = EXCLUDED.intent,
+                         intent = CASE
+                             WHEN master_keywords.intent_source IN ('ai', 'manual')
+                             THEN master_keywords.intent
+                             ELSE EXCLUDED.intent
+                         END,
+                         intent_source = CASE
+                             WHEN master_keywords.intent_source IN ('ai', 'manual')
+                             THEN master_keywords.intent_source
+                             ELSE 'rules'
+                         END,
                          source = CASE
                              WHEN master_keywords.source = 'manual' THEN 'manual'
                              ELSE EXCLUDED.source
@@ -175,18 +184,31 @@ def add_manual_keyword(store_id, keyword, search_volume=None, intent=None):
     if not keyword or not keyword.strip():
         raise ValueError("Keyword is required")
     kw = keyword.strip().lower()
+    # Only a caller-supplied intent is authoritative; a rules-derived fallback
+    # must stay overridable by the AI classification pass.
+    explicit_intent = bool(intent)
     if not intent:
         intent = classify_intent(kw)
+    intent_source = "manual" if explicit_intent else "rules"
     with db.get_cursor() as cur:
         cur.execute(
-            """INSERT INTO master_keywords (store_id, keyword, search_volume, intent, source)
-               VALUES (%s, %s, %s, %s, 'manual')
+            """INSERT INTO master_keywords (store_id, keyword, search_volume, intent, intent_source, source)
+               VALUES (%s, %s, %s, %s, %s, 'manual')
                ON CONFLICT (store_id, keyword) DO UPDATE SET
                  search_volume = COALESCE(EXCLUDED.search_volume, master_keywords.search_volume),
-                 intent = COALESCE(EXCLUDED.intent, master_keywords.intent),
+                 intent = CASE
+                     WHEN EXCLUDED.intent_source = 'manual' THEN EXCLUDED.intent
+                     WHEN master_keywords.intent_source IN ('ai', 'manual') THEN master_keywords.intent
+                     ELSE EXCLUDED.intent
+                 END,
+                 intent_source = CASE
+                     WHEN EXCLUDED.intent_source = 'manual' THEN 'manual'
+                     WHEN master_keywords.intent_source IN ('ai', 'manual') THEN master_keywords.intent_source
+                     ELSE COALESCE(master_keywords.intent_source, 'rules')
+                 END,
                  updated_at = NOW()
                RETURNING id""",
-            (store_id, kw, search_volume, intent),
+            (store_id, kw, search_volume, intent, intent_source),
         )
         return cur.fetchone()["id"]
 
@@ -204,6 +226,17 @@ def delete_keyword(store_id, keyword_id):
         cur.execute(
             "DELETE FROM master_keywords WHERE id = %s AND store_id = %s",
             (keyword_id, store_id),
+        )
+
+
+def update_keyword_intent(store_id, keyword_id, intent):
+    if intent not in ("transactional", "commercial", "informational", "navigational"):
+        raise ValueError("Invalid intent")
+    with db.get_cursor() as cur:
+        cur.execute(
+            "UPDATE master_keywords SET intent = %s, intent_source = 'manual', "
+            "updated_at = NOW() WHERE id = %s AND store_id = %s",
+            (intent, keyword_id, store_id),
         )
 
 
@@ -290,6 +323,8 @@ def get_master_keyword_overview(store_id):
                  COUNT(*) FILTER (WHERE intent = 'transactional' AND status = 'active') AS intent_transactional,
                  COUNT(*) FILTER (WHERE intent = 'commercial' AND status = 'active') AS intent_commercial,
                  COUNT(*) FILTER (WHERE intent = 'informational' AND status = 'active') AS intent_informational,
+                 COUNT(*) FILTER (WHERE intent = 'navigational' AND status = 'active') AS intent_navigational,
+                 COUNT(*) FILTER (WHERE intent_source IN ('ai', 'manual') AND status = 'active') AS ai_classified,
                  COUNT(DISTINCT cluster_id) FILTER (WHERE cluster_id IS NOT NULL AND status = 'active') AS clusters_count
                FROM master_keywords WHERE store_id = %s""",
             (store_id,),

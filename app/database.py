@@ -1290,6 +1290,28 @@ class Database:
             cur.execute("CREATE INDEX IF NOT EXISTS idx_master_kw_cluster ON master_keywords(store_id, cluster_id)")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_master_kw_volume ON master_keywords(store_id, search_volume DESC)")
             cur.execute("""
+                DO $$ BEGIN
+                    ALTER TABLE master_keywords ADD COLUMN intent_source VARCHAR(20);
+                EXCEPTION WHEN duplicate_column THEN NULL;
+                END $$
+            """)
+            cur.execute("""
+                DO $$ BEGIN
+                    ALTER TABLE master_keywords ADD COLUMN ai_classified_at TIMESTAMP;
+                EXCEPTION WHEN duplicate_column THEN NULL;
+                END $$
+            """)
+            cur.execute("""
+                DO $$ BEGIN
+                    ALTER TABLE master_keyword_clusters ADD COLUMN description TEXT;
+                EXCEPTION WHEN duplicate_column THEN NULL;
+                END $$
+            """)
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_tsa_resolved_kw ON technical_seo_analyses
+                (store_id, ((keyword_resolution->'primary'->>'keyword')))
+            """)
+            cur.execute("""
                 CREATE TABLE IF NOT EXISTS content_keyword_map (
                     id SERIAL PRIMARY KEY,
                     store_id INTEGER REFERENCES stores(id) ON DELETE CASCADE,

@@ -42,6 +42,16 @@ def consolidate_keywords():
                 kws.consolidate_master_keywords(store_id)
             except Exception as e:
                 logger.error("Consolidation thread failed: %s", e)
+                return
+            try:
+                # New keywords arrive with rules-based intents and no family —
+                # classify them against the existing taxonomy. Must not break
+                # consolidation when no AI key is configured.
+                from app.services.keyword_ai_classifier import run_ai_classification
+
+                run_ai_classification(store_id, mode="incremental")
+            except Exception as e:
+                logger.warning("Post-consolidation classification skipped: %s", e)
 
         thread = threading.Thread(target=_run, daemon=True)
         thread.start()
@@ -105,6 +115,36 @@ def remove_keyword(keyword_id):
         return jsonify({"error": "store_id required"}), 400
     kws.delete_keyword(store_id, keyword_id)
     return jsonify({"deleted": True})
+
+
+@keyword_strategy_bp.route("/api/keyword-strategy/ai/classify", methods=["POST"])
+def ai_classify():
+    store_id = _get_store_id()
+    if not store_id:
+        return jsonify({"error": "store_id required"}), 400
+    body = request.get_json(silent=True) or {}
+    mode = body.get("mode", "full")
+    if mode not in ("full", "incremental"):
+        return jsonify({"error": "mode must be 'full' or 'incremental'"}), 400
+    from app.services.keyword_ai_classifier import run_ai_classification
+
+    result = run_ai_classification(store_id, mode=mode)
+    if result.get("error"):
+        return jsonify(result), 409
+    return jsonify(result)
+
+
+@keyword_strategy_bp.route("/api/keyword-strategy/keywords/<int:keyword_id>/intent", methods=["PUT"])
+def update_kw_intent(keyword_id):
+    store_id = _get_store_id()
+    if not store_id:
+        return jsonify({"error": "store_id required"}), 400
+    body = request.get_json(force=True)
+    try:
+        kws.update_keyword_intent(store_id, keyword_id, body.get("intent", ""))
+        return jsonify({"updated": True})
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
 
 
 @keyword_strategy_bp.route("/api/keyword-strategy/keywords/<int:keyword_id>/status", methods=["PUT"])
