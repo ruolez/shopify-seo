@@ -662,6 +662,24 @@ def _apply_internal_linking(data, store_id, client):
             results.append({"article_id": article_id, "status": "error", "reason": str(e)})
 
     applied = sum(1 for r in results if r["status"] == "applied")
+
+    if applied:
+        target_url = (items[0].get("target_url") or "").strip("/")
+        parts = target_url.split("/")
+        if len(parts) == 2 and parts[0] in ("products", "collections"):
+            t_type = "product" if parts[0] == "products" else "collection"
+            table = "synced_products" if t_type == "product" else "synced_collections"
+            with db.get_cursor() as cur:
+                cur.execute(f"SELECT * FROM {table} WHERE store_id = %s AND handle = %s", (store_id, parts[1]))
+                target = cur.fetchone()
+            if target:
+                from app.routes.technical_seo_routes import _record_change_event
+                _record_change_event(
+                    t_type, target,
+                    [{"field": "internal_links", "value": f"{applied} inbound link(s) added"}],
+                    "internal_linking",
+                )
+
     return jsonify({"ok": True, "links_added": applied, "results": results, "message": f"Added links in {applied} article(s)"})
 
 
@@ -782,9 +800,15 @@ def _apply_image_alt_text(data, store_id, client):
             client.update_product_media(product_shopify_id, media_updates)
 
             with db.get_cursor() as cur:
-                cur.execute("SELECT images FROM synced_products WHERE id = %s", (product_id,))
+                cur.execute("SELECT * FROM synced_products WHERE id = %s", (product_id,))
                 row = cur.fetchone()
             if row:
+                from app.routes.technical_seo_routes import _record_change_event
+                _record_change_event(
+                    "product", row,
+                    [{"field": "image_alt", "value": f"{len(updates)} image(s) updated"}],
+                    "image_alt_text",
+                )
                 images = row.get("images") or []
                 if isinstance(images, str):
                     images = json.loads(images)
@@ -878,6 +902,19 @@ def _apply_faq_schema(data, store_id, client):
                SET schema_json = EXCLUDED.schema_json, pushed_to_shopify = TRUE, pushed_at = NOW()""",
             (store_id, str(item_shopify_id), item_type, json.dumps(faq_schema)),
         )
+
+    if item_id:
+        table = "synced_products" if item_type == "product" else "synced_collections"
+        with db.get_cursor() as cur:
+            cur.execute(f"SELECT * FROM {table} WHERE id = %s", (item_id,))
+            target = cur.fetchone()
+        if target:
+            from app.routes.technical_seo_routes import _record_change_event
+            _record_change_event(
+                item_type, target,
+                [{"field": "faq_schema", "value": f"{len(faqs)} FAQ(s) pushed"}],
+                "faq_schema",
+            )
 
     return jsonify({"ok": True, "faqs_count": len(faqs), "message": f"Pushed {len(faqs)} FAQ(s) as schema markup"})
 
