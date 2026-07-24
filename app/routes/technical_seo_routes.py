@@ -343,6 +343,7 @@ def _execute_bulk_analyze(bulk_task_id, item_type):
 
     # Batch the store-level demand-data queries once for the whole run
     prefetch = None
+    run_store_id = None
     if items:
         try:
             from app.services.keyword_resolver import build_prefetch
@@ -350,7 +351,8 @@ def _execute_bulk_analyze(bulk_task_id, item_type):
                 cur.execute(f"SELECT store_id FROM {table} WHERE id = %s", (items[0]["ref_id"],))
                 first = cur.fetchone()
             if first:
-                prefetch = build_prefetch(first["store_id"], item_type, [r["ref_id"] for r in items])
+                run_store_id = first["store_id"]
+                prefetch = build_prefetch(run_store_id, item_type, [r["ref_id"] for r in items])
         except Exception:
             logger.warning("Keyword prefetch failed for bulk task %s", bulk_task_id)
 
@@ -388,6 +390,22 @@ def _execute_bulk_analyze(bulk_task_id, item_type):
                     (str(e), bti_id),
                 )
                 cur.execute("UPDATE bulk_tasks SET failed = failed + 1 WHERE id = %s", (bulk_task_id,))
+
+    # Ownership pass: one keyword, one page — redistribute duplicate
+    # auto-primaries now that every item's candidates are fresh.
+    if run_store_id:
+        try:
+            from app.services.keyword_resolver import dedupe_primary_ownership
+            with db.get_cursor() as cur:
+                cur.execute(
+                    "UPDATE bulk_tasks SET current_product_title = 'Deduplicating keyword ownership...' WHERE id = %s",
+                    (bulk_task_id,),
+                )
+            reassigned = dedupe_primary_ownership(run_store_id, item_type)
+            if reassigned:
+                logger.info("Keyword ownership pass reassigned %s %ss", reassigned, item_type)
+        except Exception:
+            logger.warning("Keyword ownership pass failed for bulk task %s", bulk_task_id)
 
     with db.get_cursor() as cur:
         cur.execute(

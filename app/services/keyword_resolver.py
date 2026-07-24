@@ -11,6 +11,7 @@ Without any demand data the ranking degenerates to relevance order, which
 matches the old pure-n-gram behavior — a safe fallback.
 """
 
+import json
 import logging
 import math
 import re
@@ -509,3 +510,108 @@ def resolve_item_keywords(store_id, item_type, item_id, item=None, prefetch=None
     if note:
         result["note"] = note
     return result
+
+
+def dedupe_primary_ownership(store_id, item_type):
+    """One keyword, one page. After a bulk resolution, redistribute auto-picked
+    primaries so no two items of a type share one — the anti-cannibalization
+    rule from keyword clustering. The highest-scoring claimant keeps the
+    keyword; every other item walks its candidate list for the best eligible
+    unclaimed alternative (falling back to the shared keyword only when it has
+    none). Manual assignments are untouchable and their keywords reserved.
+
+    Returns the number of items reassigned.
+    """
+    from app.services.technical_seo_analyzer import (
+        analyze_collection_technical_seo,
+        analyze_product_technical_seo,
+    )
+
+    rules = _rules()
+    min_rel = rules.get("relevance", {}).get("min_relevance", 10) / 100.0
+
+    with db.get_cursor() as cur:
+        cur.execute(
+            """SELECT item_id, keyword_resolution FROM technical_seo_analyses
+               WHERE store_id = %s AND item_type = %s AND keyword_resolution IS NOT NULL""",
+            (store_id, item_type),
+        )
+        rows = cur.fetchall()
+
+    entries = []
+    claimed = set()
+    for r in rows:
+        res = r["keyword_resolution"]
+        if not res or not res.get("primary"):
+            continue
+        if res["primary"].get("manual"):
+            claimed.add(res["primary"]["keyword"])
+            continue
+        entries.append({"item_id": r["item_id"], "res": res})
+
+    # Strongest claim wins each keyword; process in descending score order.
+    entries.sort(key=lambda e: e["res"]["primary"].get("score") or 0, reverse=True)
+
+    demoted = []
+    for e in entries:
+        res = e["res"]
+        primary_kw = res["primary"]["keyword"]
+        if primary_kw not in claimed:
+            claimed.add(primary_kw)
+            continue
+        replacement = None
+        for c in res.get("candidates", []):
+            kw = c["keyword"]
+            if kw == primary_kw or kw in claimed:
+                continue
+            if c.get("generic") or c.get("packaging_only") or c.get("manual"):
+                continue
+            if (c.get("relevance") or 0) < min_rel:
+                continue
+            replacement = c
+            break
+        if replacement is None:
+            continue  # no viable alternative — sharing beats nothing
+        claimed.add(replacement["keyword"])
+        old_kw = res["primary"]["keyword"]
+        res["primary"] = replacement
+        res["note"] = f"'{old_kw}' is owned by a higher-scoring page; using next-best candidate"
+        res["candidates"] = [replacement] + [c for c in res["candidates"] if c["keyword"] != replacement["keyword"]]
+        demoted.append(e)
+
+    if not demoted:
+        return 0
+
+    table = _item_table(item_type)
+    changed = 0
+    for e in demoted:
+        try:
+            with db.get_cursor() as cur:
+                cur.execute(f"SELECT * FROM {table} WHERE id = %s", (e["item_id"],))
+                item = cur.fetchone()
+            if not item:
+                continue
+            item = dict(item)
+            if item_type == "collection":
+                from app.routes.technical_seo_routes import _enrich_collection_data
+                item = _enrich_collection_data(item)
+                analysis = analyze_collection_technical_seo(item, primary_keyword=e["res"]["primary"]["keyword"])
+            else:
+                analysis = analyze_product_technical_seo(item, primary_keyword=e["res"]["primary"]["keyword"])
+            analysis["detected_keywords"] = e["res"]["candidates"]
+            with db.get_cursor() as cur:
+                cur.execute(
+                    """UPDATE technical_seo_analyses SET
+                         score = %s, detected_keywords = %s, checks = %s,
+                         issues_count = %s, fixable_count = %s,
+                         keyword_resolution = %s, updated_at = NOW()
+                       WHERE store_id = %s AND item_type = %s AND item_id = %s""",
+                    (analysis["score"], json.dumps(analysis["detected_keywords"]),
+                     json.dumps(analysis["checks"]), analysis["issues_count"],
+                     analysis["fixable_count"], json.dumps(e["res"]),
+                     store_id, item_type, e["item_id"]),
+                )
+            changed += 1
+        except Exception:
+            logger.warning("Ownership reassignment failed for %s %s", item_type, e["item_id"])
+    return changed
