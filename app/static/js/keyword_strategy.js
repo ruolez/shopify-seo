@@ -1,19 +1,23 @@
-/* Keyword Strategy & Site Audit */
+/* Keyword Strategy — explorer, coverage gaps, audit, plan, changes */
 let ksStoreId = null;
 let ksPlanPage = 0;
 let ksKwSort = { col: "search_volume", dir: "desc" };
 let ksKwPage = 1;
 const KS_PAGE_SIZE = 50;
-let ksActiveStep = "keywords";
+let ksActiveStep = "explorer";
 let ksAuditSort = { col: "keyword_count", dir: "desc" };
 let ksAuditPage = 1;
 const KS_AUDIT_PAGE_SIZE = 50;
+let ksFamilyCache = {};
+let ksKwDrawer = null;
 
 // ── Init ─────────────────────────────────────────────────────────────────
 document.addEventListener("DOMContentLoaded", () => {
     loadKsStores();
     initStepNav();
     initKsEvents();
+    const tab = new URLSearchParams(location.search).get("tab");
+    if (tab && document.getElementById("panel-" + tab)) switchToStep(tab);
 });
 
 async function loadKsStores() {
@@ -38,8 +42,11 @@ document.getElementById("ks-store-select").addEventListener("change", e => { if 
 
 function onKsStore(id) {
     ksStoreId = id;
+    ksFamilyCache = {};
     loadKwOverview();
-    loadKeywords();
+    updateExplorerView();
+    loadCoverageMatrix();
+    resumeClassifyRun();
     loadAuditStatus();
     loadPlanData();
     loadChanges();
@@ -76,24 +83,36 @@ function switchToStep(step) {
     document.querySelectorAll(".tab-panel").forEach(p => p.classList.remove("active"));
     const panel = document.getElementById("panel-" + step);
     if (panel) panel.classList.add("active");
+
+    // Deep-linkable ?tab=
+    const url = new URL(location.href);
+    url.searchParams.set("tab", step);
+    history.replaceState(null, "", url);
 }
 
 // ── Events ───────────────────────────────────────────────────────────────
 function initKsEvents() {
-    // Consolidate
+    // Explorer actions
     document.getElementById("ks-consolidate-btn").addEventListener("click", runConsolidate);
-    document.getElementById("ks-cluster-btn").addEventListener("click", runClustering);
+    document.getElementById("ks-classify-btn").addEventListener("click", runAiClassify);
     document.getElementById("ks-add-kw-btn").addEventListener("click", () => document.getElementById("ks-add-modal").classList.add("active"));
     document.getElementById("ks-save-kw-btn").addEventListener("click", saveManualKeyword);
 
-    // Search / filters
+    // Search / filters — any active filter flips the explorer into the flat
+    // keyword list; clearing them all returns to the family view
     let kwSearchT;
-    document.getElementById("ks-kw-search").addEventListener("input", () => { clearTimeout(kwSearchT); kwSearchT = setTimeout(() => { ksKwPage = 1; loadKeywords(); }, 300); });
+    document.getElementById("ks-kw-search").addEventListener("input", () => { clearTimeout(kwSearchT); kwSearchT = setTimeout(() => { ksKwPage = 1; updateExplorerView(); }, 300); });
     ["ks-intent-filter", "ks-source-filter", "ks-cluster-filter"].forEach(id =>
-        document.getElementById(id).addEventListener("change", () => { ksKwPage = 1; loadKeywords(); }));
+        document.getElementById(id).addEventListener("change", () => { ksKwPage = 1; updateExplorerView(); }));
+    document.getElementById("ks-fam-sort").addEventListener("change", () => loadFamilies());
+
+    // Coverage matrix filters
+    document.getElementById("ks-cov-gaps-only").addEventListener("change", loadCoverageMatrix);
+    document.getElementById("ks-cov-min").addEventListener("change", loadCoverageMatrix);
+    document.addEventListener("click", () => closeKsPopover());
 
     // Sort
-    document.querySelectorAll("#panel-keywords .sortable").forEach(th => {
+    document.querySelectorAll("#panel-explorer .sortable").forEach(th => {
         th.addEventListener("click", () => {
             const col = th.dataset.sort;
             if (ksKwSort.col === col) ksKwSort.dir = ksKwSort.dir === "asc" ? "desc" : "asc";
@@ -174,17 +193,61 @@ async function runConsolidate() {
     });
 }
 
-async function runClustering() {
+const KS_CLASSIFY_BTN_HTML = '<span class="material-symbols-rounded" style="font-size:16px;vertical-align:middle;">psychology</span> AI Classify &amp; Cluster';
+
+async function runAiClassify() {
     if (!ksStoreId) return;
-    const btn = document.getElementById("ks-cluster-btn");
+    const btn = document.getElementById("ks-classify-btn");
     btn.disabled = true;
-    btn.innerHTML = '<span class="spinner" style="width:14px;height:14px;border-width:2px;"></span> Clustering...';
+    btn.innerHTML = '<span class="spinner" style="width:14px;height:14px;border-width:2px;"></span> Classifying...';
+    showProgress("Building topic-family taxonomy...", 3);
     try {
-        const r = await apiRequest(`/api/keyword-strategy/clusters/generate?store_id=${ksStoreId}`, { method: "POST" });
-        showToast(`Created ${r.clusters} clusters from ${r.keywords} keywords`, "success");
-        loadKwOverview(); loadKeywords(); loadClusters();
-    } catch (e) { showToast("Clustering failed: " + e.message, "error"); }
-    finally { btn.disabled = false; btn.innerHTML = '<span class="material-symbols-rounded" style="font-size:16px;vertical-align:middle;">hub</span> Auto-Cluster'; }
+        await apiRequest(`/api/keyword-strategy/ai/classify?store_id=${ksStoreId}`, {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ mode: "full" }),
+        });
+        pollClassifyRun();
+    } catch (e) {
+        showToast("Classification failed to start: " + e.message, "error");
+        hideProgress();
+        btn.disabled = false;
+        btn.innerHTML = KS_CLASSIFY_BTN_HTML;
+    }
+}
+
+function pollClassifyRun() {
+    pollRun("ai_classify", (run) => {
+        hideProgress();
+        const btn = document.getElementById("ks-classify-btn");
+        btn.disabled = false;
+        btn.innerHTML = KS_CLASSIFY_BTN_HTML;
+        const s = typeof run.summary === "string" ? JSON.parse(run.summary) : (run.summary || {});
+        showToast(`Classified keywords into ${s.families || 0} families`, "success");
+        ksFamilyCache = {};
+        loadKwOverview(); updateExplorerView(); loadCoverageMatrix();
+    }, (run) => {
+        const pct = run.total_items > 0 ? Math.round((run.completed_items / run.total_items) * 100) : 3;
+        showProgress(`AI classifying keywords... ${(run.completed_items || 0).toLocaleString()} / ${(run.total_items || 0).toLocaleString()}`, pct);
+    }, () => {
+        const btn = document.getElementById("ks-classify-btn");
+        btn.disabled = false;
+        btn.innerHTML = KS_CLASSIFY_BTN_HTML;
+    });
+}
+
+async function resumeClassifyRun() {
+    // A classification may be running from a previous page load or the
+    // post-consolidation hook — surface its progress instead of sitting idle.
+    try {
+        const d = await apiRequest(`/api/keyword-strategy/runs?store_id=${ksStoreId}`);
+        const latest = (d.runs || []).find(r => r.run_type === "ai_classify");
+        if (latest && latest.status === "running") {
+            const btn = document.getElementById("ks-classify-btn");
+            btn.disabled = true;
+            btn.innerHTML = '<span class="spinner" style="width:14px;height:14px;border-width:2px;"></span> Classifying...';
+            pollClassifyRun();
+        }
+    } catch (e) {}
 }
 
 async function saveManualKeyword() {
@@ -217,13 +280,11 @@ async function loadKwOverview() {
         document.getElementById("ks-overview").style.display = "";
         document.getElementById("ks-total").textContent = (d.total_active || 0).toLocaleString();
         document.getElementById("ks-volume").textContent = (d.total_volume || 0).toLocaleString();
-        document.getElementById("ks-semrush").textContent = (d.from_semrush || 0).toLocaleString();
-        document.getElementById("ks-gsc").textContent = (d.from_gsc || 0).toLocaleString();
-        document.getElementById("ks-both").textContent = (d.from_both || 0).toLocaleString();
         document.getElementById("ks-clusters").textContent = (d.clusters_count || 0).toLocaleString();
+        const pct = d.total_active ? Math.round(((d.ai_classified || 0) / d.total_active) * 100) : 0;
+        document.getElementById("ks-classified").textContent = pct + "%";
         // Update step description
         document.getElementById("ks-step-kw-desc").textContent = `${(d.total_active || 0).toLocaleString()} keywords`;
-        if (d.total_active > 0) markStepCompleted("keywords");
         loadClusters();
     } catch (e) {}
 }
@@ -234,7 +295,7 @@ async function loadClusters() {
         const d = await apiRequest(`/api/keyword-strategy/clusters?store_id=${ksStoreId}`);
         const sel = document.getElementById("ks-cluster-filter");
         const val = sel.value;
-        sel.innerHTML = '<option value="">All Clusters</option>';
+        sel.innerHTML = '<option value="">All Families</option>';
         (d.clusters || []).forEach(c => {
             const o = document.createElement("option");
             o.value = c.id;
@@ -276,7 +337,7 @@ async function loadKeywords() {
         }
         document.getElementById("ks-kw-empty").style.display = "none";
 
-        tbody.innerHTML = kws.map(kw => `<tr>
+        tbody.innerHTML = kws.map(kw => `<tr style="cursor:pointer;" onclick="openKeywordDrawer(${kw.id})">
             <td style="max-width:250px;word-break:break-word;">${escapeHtml(kw.keyword)}</td>
             <td>${(kw.search_volume || 0).toLocaleString()}</td>
             <td>${kw.best_position ? parseFloat(kw.best_position).toFixed(1) : '-'}</td>
@@ -286,7 +347,7 @@ async function loadKeywords() {
             <td><span class="badge badge-${intentBadge(kw.intent)}">${kw.intent || '-'}</span></td>
             <td><span class="badge badge-${sourceBadge(kw.source)}">${kw.source || '-'}</span></td>
             <td>${kw.cluster_name ? escapeHtml(kw.cluster_name) : '-'}</td>
-            <td>
+            <td onclick="event.stopPropagation();">
                 <button class="icon-btn" title="Ignore" onclick="toggleKwStatus(${kw.id}, '${kw.status === 'ignored' ? 'active' : 'ignored'}')">
                     <span class="material-symbols-rounded" style="font-size:18px;">${kw.status === 'ignored' ? 'visibility' : 'visibility_off'}</span>
                 </button>
@@ -316,6 +377,332 @@ async function deleteKeyword(id) {
         showToast("Keyword deleted", "success");
         loadKwOverview(); loadKeywords();
     } catch (e) { showToast("Failed: " + e.message, "error"); }
+}
+
+// ── Explorer: family view ────────────────────────────────────────────────
+function _explorerFiltersActive() {
+    return !!(document.getElementById("ks-kw-search").value.trim()
+        || document.getElementById("ks-intent-filter").value
+        || document.getElementById("ks-source-filter").value
+        || document.getElementById("ks-cluster-filter").value);
+}
+
+function updateExplorerView() {
+    if (!ksStoreId) return;
+    document.getElementById("ks-kw-content").style.display = "";
+    const flat = _explorerFiltersActive();
+    document.getElementById("ks-fam-view").style.display = flat ? "none" : "";
+    document.getElementById("ks-flat-view").style.display = flat ? "" : "none";
+    document.getElementById("ks-fam-sort").style.display = flat ? "none" : "";
+    if (flat) loadKeywords();
+    else loadFamilies();
+}
+
+async function loadFamilies() {
+    if (!ksStoreId) return;
+    const tbody = document.getElementById("ks-fam-tbody");
+    tbody.innerHTML = '<tr><td colspan="9" style="text-align:center"><div class="spinner" style="margin:20px auto"></div></td></tr>';
+    const sortBy = document.getElementById("ks-fam-sort").value;
+    try {
+        const d = await apiRequest(`/api/keyword-strategy/coverage/matrix?store_id=${ksStoreId}&sort_by=${sortBy}&limit=200`);
+        const fams = d.families || [];
+        document.getElementById("ks-kw-count").textContent = `${d.total || 0} families`;
+        document.getElementById("ks-gap-volume").textContent = (d.gap_volume || 0).toLocaleString();
+        document.getElementById("ks-step-coverage-desc").textContent = `${(d.gap_volume || 0).toLocaleString()} weighted gap volume`;
+        if (!fams.length) {
+            tbody.innerHTML = "";
+            document.getElementById("ks-fam-empty").style.display = "";
+            return;
+        }
+        document.getElementById("ks-fam-empty").style.display = "none";
+        tbody.innerHTML = fams.map(f => {
+            const cid = f.cluster_id === null ? 0 : f.cluster_id;
+            return `<tr class="ks-fam-row" data-cid="${cid}" onclick="toggleFamily(${cid}, this)">
+                <td><span class="material-symbols-rounded ks-fam-caret" style="font-size:18px;color:var(--on-surface-secondary);">chevron_right</span></td>
+                <td style="font-weight:600;">${escapeHtml(f.name)}${f.unclustered ? ' <span class="badge" style="font-size:10px;">needs classification</span>' : ''}</td>
+                <td>${f.keyword_count}</td>
+                <td>${(f.total_volume || 0).toLocaleString()}</td>
+                ${["transactional", "commercial", "informational", "navigational"].map(i => `<td>${renderIntentCell(f.intents[i])}</td>`).join("")}
+                <td>${f.gap_score ? f.gap_score.toLocaleString() : '—'}</td>
+            </tr>
+            <tr class="ks-fam-expand" id="ks-fam-expand-${cid}" style="display:none;"><td colspan="9"><div class="ks-fam-kws" id="ks-fam-kws-${cid}"></div></td></tr>`;
+        }).join("");
+    } catch (e) {
+        tbody.innerHTML = `<tr><td colspan="9" style="text-align:center;color:var(--error);">Error loading families</td></tr>`;
+    }
+}
+
+function renderIntentCell(cell) {
+    if (!cell || (!cell.count && !cell.volume)) return '<span class="ks-intent-cell na">—</span>';
+    if (cell.na) return `<span class="ks-intent-cell na" title="${cell.count} keyword(s), volume too low to matter">—</span>`;
+    if (!cell.covered) return `<span class="ks-intent-cell gap" title="${(cell.volume || 0).toLocaleString()} vol uncovered"><span class="material-symbols-rounded" style="font-size:16px;">close</span></span>`;
+    const partial = cell.covered_volume < cell.volume;
+    const cls = partial ? "partial" : "covered";
+    const title = `${(cell.covered_volume || 0).toLocaleString()} of ${(cell.volume || 0).toLocaleString()} vol covered`;
+    return `<span class="ks-intent-cell ${cls}" title="${title}"><span class="material-symbols-rounded" style="font-size:16px;">${partial ? 'remove' : 'check'}</span></span>`;
+}
+
+async function toggleFamily(cid, rowEl) {
+    const expand = document.getElementById(`ks-fam-expand-${cid}`);
+    const isOpen = expand.style.display !== "none";
+    document.querySelectorAll(".ks-fam-expand").forEach(r => r.style.display = "none");
+    document.querySelectorAll(".ks-fam-row").forEach(r => r.classList.remove("expanded"));
+    if (isOpen) return;
+    expand.style.display = "";
+    rowEl.classList.add("expanded");
+    const box = document.getElementById(`ks-fam-kws-${cid}`);
+    if (!ksFamilyCache[cid]) {
+        box.innerHTML = '<div class="spinner" style="margin:14px auto"></div>';
+        try {
+            ksFamilyCache[cid] = await apiRequest(`/api/keyword-strategy/families/${cid}?store_id=${ksStoreId}`);
+        } catch (e) {
+            box.innerHTML = '<div style="color:var(--error);font-size:13px;padding:10px;">Failed to load family</div>';
+            return;
+        }
+    }
+    box.innerHTML = renderFamilyKeywords(ksFamilyCache[cid]);
+}
+
+function renderFamilyKeywords(fam) {
+    let html = "";
+    ["transactional", "commercial", "informational", "navigational"].forEach(intent => {
+        const kws = (fam.keywords_by_intent || {})[intent] || [];
+        if (!kws.length) return;
+        const cell = (fam.coverage || {})[intent] || {};
+        html += `<div style="margin-top:10px;">
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">
+                <span class="badge badge-${intentBadge(intent)}" style="text-transform:capitalize;">${intent}</span>
+                <span style="font-size:12px;color:var(--on-surface-secondary);">${(cell.volume || 0).toLocaleString()} vol</span>
+                ${renderIntentCell(cell)}
+            </div>`;
+        kws.slice(0, 12).forEach(k => {
+            html += `<div class="ks-fam-kw-row" onclick="openKeywordDrawer(${k.id})">
+                <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(k.keyword)}</span>
+                <span style="color:var(--on-surface-secondary);font-size:12px;white-space:nowrap;">${(k.search_volume || 0).toLocaleString()}</span>
+                ${k.owner
+                    ? `<span class="ks-owner-chip"><span class="badge badge-${typeBadge(k.owner.item_type)}" style="font-size:9.5px;">${k.owner.item_type}</span><span style="overflow:hidden;text-overflow:ellipsis;max-width:200px;">${escapeHtml(k.owner.title || '')}</span></span>`
+                    : '<span style="font-size:11.5px;color:var(--on-surface-secondary);font-style:italic;">unowned</span>'}
+            </div>`;
+        });
+        if (kws.length > 12) html += `<div style="font-size:11.5px;color:var(--on-surface-secondary);padding:2px 8px;">+ ${kws.length - 12} more</div>`;
+        html += '</div>';
+    });
+    return html || '<div style="font-size:13px;color:var(--on-surface-secondary);padding:10px;">No keywords in this family.</div>';
+}
+
+// ── Keyword detail drawer ────────────────────────────────────────────────
+async function openKeywordDrawer(keywordId) {
+    if (!ksKwDrawer) ksKwDrawer = UIDrawer.create({ id: "ks-kw-drawer", title: "Keyword", width: 560 });
+    ksKwDrawer.setBody('<div class="spinner" style="margin:40px auto"></div>').open();
+    try {
+        const d = await apiRequest(`/api/keyword-strategy/keywords/${keywordId}/detail?store_id=${ksStoreId}`);
+        renderKeywordDrawer(d);
+    } catch (e) {
+        ksKwDrawer.setBody(`<div style="color:var(--error);padding:20px;">Failed to load keyword: ${escapeHtml(e.message)}</div>`);
+    }
+}
+
+function renderKeywordDrawer(d) {
+    const kw = d.keyword;
+    ksKwDrawer.setTitle(escapeHtml(kw.keyword));
+    const intents = ["transactional", "commercial", "informational", "navigational"];
+    const metrics = [];
+    if (kw.search_volume) metrics.push(`vol ${(kw.search_volume || 0).toLocaleString()}`);
+    if (kw.cpc) metrics.push(`cpc $${parseFloat(kw.cpc).toFixed(2)}`);
+    if (kw.clicks) metrics.push(`${Math.round(kw.clicks).toLocaleString()} clicks`);
+    if (kw.impressions) metrics.push(`${Math.round(kw.impressions).toLocaleString()} impr`);
+    if (kw.best_position) metrics.push(`pos ${parseFloat(kw.best_position).toFixed(1)}`);
+
+    let html = `<div class="ks-drawer-section" style="padding-top:0;">
+        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+            <span class="ks-drawer-kw">${escapeHtml(kw.keyword)}</span>
+            <select id="ks-drawer-intent" class="form-control" style="width:auto;font-size:12px;padding:3px 8px;"
+                    onchange="setKeywordIntent(${kw.id}, this.value)">
+                ${intents.map(i => `<option value="${i}" ${kw.intent === i ? 'selected' : ''}>${i}</option>`).join("")}
+            </select>
+            <span class="badge" style="font-size:10px;">${kw.intent_source === 'manual' ? 'manual' : kw.intent_source === 'ai' ? 'ai classified' : 'rules'}</span>
+            <span class="badge badge-${sourceBadge(kw.source)}" style="font-size:10px;">${kw.source || ''}</span>
+        </div>
+        <div class="ks-drawer-metrics">${metrics.join(" · ") || "no demand data"}</div>
+    </div>`;
+
+    // Owner
+    html += '<div class="ks-drawer-section"><div class="ks-drawer-label">Owner</div>';
+    if (d.owner) {
+        const roleLabels = { resolved_primary: "resolved primary", assigned: "assigned", mapped_primary: "audit primary" };
+        html += `<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+            <span class="ks-owner-chip">
+                <span class="badge badge-${typeBadge(d.owner.item_type)}" style="font-size:10px;">${d.owner.item_type}</span>
+                <strong style="overflow:hidden;text-overflow:ellipsis;">${escapeHtml(d.owner.title || '#' + d.owner.item_id)}</strong>
+            </span>
+            <span style="font-size:11.5px;color:var(--on-surface-secondary);">${roleLabels[d.owner.role] || d.owner.role}</span>
+        </div>`;
+    } else {
+        html += '<div style="font-size:13px;color:var(--on-surface-secondary);">No page owns this keyword yet.</div>';
+    }
+    if (d.mentions_count) {
+        html += `<div style="font-size:12px;color:var(--on-surface-secondary);margin-top:6px;cursor:pointer;" onclick="loadKeywordMentions(${kw.id}, this)">
+            Mentioned on ${d.mentions_count} page(s) <span class="material-symbols-rounded" style="font-size:14px;vertical-align:middle;">expand_more</span>
+        </div><div id="ks-drawer-mentions"></div>`;
+    }
+    html += '</div>';
+
+    // Family
+    if (d.family) {
+        const fam = d.family;
+        html += `<div class="ks-drawer-section">
+            <div class="ks-drawer-label">Family — ${escapeHtml(fam.cluster.name)} (${fam.keyword_count} keywords, ${(fam.total_volume || 0).toLocaleString()} vol)</div>
+            ${renderFamilyKeywords(fam)}
+        </div>`;
+        const gaps = fam.gaps || [];
+        if (gaps.length) {
+            html += '<div class="ks-drawer-section"><div class="ks-drawer-label">Gaps</div>';
+            gaps.forEach((g, i) => {
+                html += `<div class="ks-gap-item">
+                    <span class="material-symbols-rounded">${g.action === 'research_topic' ? 'edit_note' : 'link_off'}</span>
+                    <span style="flex:1;">${escapeHtml(g.message)}${g.volume ? ` <span style="color:var(--on-surface-secondary);">(${g.volume.toLocaleString()} vol)</span>` : ''}</span>
+                    ${renderGapAction(g, fam.cluster.id)}
+                </div>`;
+            });
+            html += '</div>';
+        }
+    } else {
+        html += `<div class="ks-drawer-section">
+            <div class="ks-drawer-label">Family</div>
+            <div style="font-size:13px;color:var(--on-surface-secondary);">Not assigned to a topic family yet — run AI Classify &amp; Cluster.</div>
+        </div>`;
+    }
+    ksKwDrawer.setBody(html);
+}
+
+function renderGapAction(gap, clusterId) {
+    if (gap.action === "research_topic") {
+        return `<button class="btn btn-sm btn-outline" style="font-size:11px;white-space:nowrap;" onclick='ksActionResearch(${clusterId || 0}, ${JSON.stringify(gap.intent)})'>Research topic</button>`;
+    }
+    const kwArg = gap.keyword_id || (gap.keywords && gap.keywords[0] ? gap.keywords[0].id : null);
+    if (!kwArg) return "";
+    return `<button class="btn btn-sm btn-outline" style="font-size:11px;white-space:nowrap;" onclick="ksActionAssign(${kwArg})">Assign to page</button>`;
+}
+
+async function loadKeywordMentions(keywordId, trigger) {
+    const box = document.getElementById("ks-drawer-mentions");
+    if (!box) return;
+    if (box.innerHTML) { box.innerHTML = ""; return; }
+    box.innerHTML = '<div class="spinner" style="margin:10px auto"></div>';
+    try {
+        const d = await apiRequest(`/api/keyword-strategy/keywords/${keywordId}/mentions?store_id=${ksStoreId}&limit=25`);
+        box.innerHTML = (d.mentions || []).map(m => `<div style="display:flex;align-items:center;gap:8px;font-size:12.5px;padding:3px 0;">
+            <span class="badge badge-${typeBadge(m.item_type)}" style="font-size:9.5px;">${m.item_type}</span>
+            <span style="flex:1;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(m.title || '#' + m.item_id)}</span>
+            ${m.is_primary ? '<span class="badge badge-success" style="font-size:9.5px;">primary</span>' : ''}
+        </div>`).join("") || '<div style="font-size:12px;color:var(--on-surface-secondary);">No mentions.</div>';
+    } catch (e) { box.innerHTML = ""; }
+}
+
+async function setKeywordIntent(keywordId, intent) {
+    try {
+        await apiRequest(`/api/keyword-strategy/keywords/${keywordId}/intent?store_id=${ksStoreId}`, {
+            method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ intent }),
+        });
+        showToast(`Intent set to ${intent}`, "success");
+        ksFamilyCache = {};
+        loadFamilies(); loadCoverageMatrix();
+        openKeywordDrawer(keywordId);
+    } catch (e) { showToast("Failed: " + e.message, "error"); }
+}
+
+// ── Coverage matrix ──────────────────────────────────────────────────────
+async function loadCoverageMatrix() {
+    if (!ksStoreId) return;
+    const tbody = document.getElementById("ks-cov-tbody");
+    tbody.innerHTML = '<tr><td colspan="7" style="text-align:center"><div class="spinner" style="margin:20px auto"></div></td></tr>';
+    const minVol = parseInt(document.getElementById("ks-cov-min").value) || 0;
+    const gapsOnly = document.getElementById("ks-cov-gaps-only").checked ? 1 : 0;
+    try {
+        const d = await apiRequest(`/api/keyword-strategy/coverage/matrix?store_id=${ksStoreId}&min_volume=${minVol}&only_gaps=${gapsOnly}&limit=200`);
+        const fams = d.families || [];
+        if (!fams.length) {
+            tbody.innerHTML = "";
+            document.getElementById("ks-cov-empty").style.display = "";
+            return;
+        }
+        document.getElementById("ks-cov-empty").style.display = "none";
+        tbody.innerHTML = fams.map(f => {
+            const cid = f.cluster_id === null ? 0 : f.cluster_id;
+            return `<tr>
+                <td style="font-weight:600;">${escapeHtml(f.name)}</td>
+                <td>${f.keyword_count}</td>
+                ${["transactional", "commercial", "informational", "navigational"].map(i =>
+                    `<td>${renderMatrixCell(f.intents[i], cid, i)}</td>`).join("")}
+                <td>${f.gap_score ? f.gap_score.toLocaleString() : '—'}</td>
+            </tr>`;
+        }).join("");
+    } catch (e) {
+        tbody.innerHTML = `<tr><td colspan="7" style="text-align:center;color:var(--error);">Error loading matrix</td></tr>`;
+    }
+}
+
+function renderMatrixCell(cell, cid, intent) {
+    if (!cell || (!cell.count && !cell.volume)) return '<div class="ks-matrix-cell na">—</div>';
+    if (cell.na) return `<div class="ks-matrix-cell na" title="Volume below threshold">${(cell.volume || 0).toLocaleString()}</div>`;
+    const partial = cell.covered && cell.covered_volume < cell.volume;
+    const cls = !cell.covered ? "gap" : partial ? "partial" : "covered";
+    const actionable = cls !== "covered";
+    return `<div class="ks-matrix-cell ${cls}${actionable ? ' actionable' : ''}"
+                 ${actionable ? `onclick='event.stopPropagation();openGapPopover(event, ${cid}, ${JSON.stringify(intent)})'` : ''}>
+        <div class="ks-matrix-vol">${(cell.covered_volume || 0).toLocaleString()} / ${(cell.volume || 0).toLocaleString()}</div>
+        <div class="ks-matrix-sub">${cell.count} kw${cell.count !== 1 ? 's' : ''}</div>
+    </div>`;
+}
+
+let ksPopoverEl = null;
+
+function closeKsPopover() {
+    if (ksPopoverEl) { ksPopoverEl.remove(); ksPopoverEl = null; }
+}
+
+function openGapPopover(ev, cid, intent) {
+    closeKsPopover();
+    const el = document.createElement("div");
+    el.className = "ks-popover";
+    const research = intent === "informational" || intent === "commercial"
+        ? `<button onclick='closeKsPopover();ksActionResearch(${cid}, ${JSON.stringify(intent)})'><span class="material-symbols-rounded">edit_note</span> Research blog topic</button>` : "";
+    el.innerHTML = `${research}
+        <button onclick="closeKsPopover();ksActionAssignTop(${cid}, '${intent}')"><span class="material-symbols-rounded">link</span> Assign top keyword to page</button>
+        <button onclick="closeKsPopover();ksViewFamily(${cid})"><span class="material-symbols-rounded">travel_explore</span> View keywords</button>`;
+    document.body.appendChild(el);
+    const x = Math.min(ev.clientX, window.innerWidth - 240);
+    const y = Math.min(ev.clientY + 8, window.innerHeight - 140);
+    el.style.left = x + "px";
+    el.style.top = y + "px";
+    el.addEventListener("click", e => e.stopPropagation());
+    ksPopoverEl = el;
+}
+
+function ksViewFamily(cid) {
+    switchToStep("explorer");
+    const row = document.querySelector(`.ks-fam-row[data-cid="${cid}"]`);
+    if (row) { row.scrollIntoView({ block: "center" }); toggleFamily(cid, row); }
+}
+
+async function ksActionAssignTop(cid, intent) {
+    // Resolve the family's highest-volume unowned keyword for that intent
+    try {
+        if (!ksFamilyCache[cid]) ksFamilyCache[cid] = await apiRequest(`/api/keyword-strategy/families/${cid}?store_id=${ksStoreId}`);
+        const bucket = (ksFamilyCache[cid].keywords_by_intent || {})[intent] || [];
+        const target = bucket.find(k => !k.owner) || bucket[0];
+        if (!target) { showToast("No keywords in this intent bucket", "info"); return; }
+        ksActionAssign(target.id);
+    } catch (e) { showToast("Failed: " + e.message, "error"); }
+}
+
+// Gap actions (wired to topic research / page assignment)
+function ksActionResearch(clusterId, intent) {
+    showToast("Topic research wiring lands in the next update", "info");
+}
+
+function ksActionAssign(keywordId) {
+    showToast("Page assignment wiring lands in the next update", "info");
 }
 
 // ── Phase 2: Content Audit ───────────────────────────────────────────────
@@ -924,7 +1311,7 @@ function pollRun(runType, onComplete, onProgress, onFail) {
 }
 
 function intentBadge(intent) {
-    const m = { transactional: "success", commercial: "warning", informational: "info" };
+    const m = { transactional: "success", commercial: "warning", informational: "info", navigational: "" };
     return m[intent] || "";
 }
 
