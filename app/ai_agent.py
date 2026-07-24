@@ -5390,6 +5390,30 @@ def run_task(task_type, task_input, store_id=None):
                 (td_store_id,),
             )
             td_queued = cur.fetchall()
+            # Keywords owned by money pages (resolver primaries + accepted
+            # manual assignments) — a blog post must never target these as its
+            # own primary. Cap by volume: the high-demand terms are the ones a
+            # blog primary could realistically collide with.
+            cur.execute(
+                """SELECT DISTINCT ON (kw) kw, vol, item_type FROM (
+                       SELECT keyword_resolution->'primary'->>'keyword' AS kw,
+                              NULLIF(keyword_resolution->'primary'->>'volume', '')::numeric AS vol,
+                              item_type
+                       FROM technical_seo_analyses
+                       WHERE store_id = %s AND keyword_resolution->'primary'->>'keyword' IS NOT NULL
+                       UNION ALL
+                       SELECT mk.keyword, mk.search_volume::numeric, ka.assigned_item_type
+                       FROM keyword_assignments ka
+                       JOIN master_keywords mk ON mk.id = ka.master_keyword_id
+                       WHERE ka.store_id = %s AND ka.status IN ('accepted', 'applied')
+                   ) sub WHERE kw IS NOT NULL
+                   ORDER BY kw, vol DESC NULLS LAST""",
+                (td_store_id, td_store_id),
+            )
+            td_reserved_all = cur.fetchall()
+            td_reserved = sorted(
+                td_reserved_all, key=lambda r: float(r["vol"] or 0), reverse=True
+            )[:200]
 
         if not td_store:
             return {"error": "Store not found"}
@@ -5424,6 +5448,21 @@ def run_task(task_type, task_input, store_id=None):
             td_user_prompt += (
                 "\nPREVIOUSLY SUGGESTED TOPICS - DO NOT REPEAT OR CLOSELY PARAPHRASE ANY OF THESE:\n"
                 + td_prior_block + "\n"
+            )
+        if td_reserved:
+            td_reserved_block = "\n".join(
+                f"- \"{r['kw']}\"" + (f" (vol {int(r['vol']):,})" if r["vol"] else "") + f" — {r['item_type']} page"
+                for r in td_reserved
+            )
+            td_user_prompt += (
+                "\nRESERVED MONEY-PAGE KEYWORDS — each of these is the assigned primary "
+                "keyword of a product or collection page on this store. A blog post must "
+                "NEVER use any of them (or a trivial variation) as its own primary keyword; "
+                "that would cannibalize the money page. Writing SUPPORTING informational "
+                "content around them (how-to guides, education, comparisons) that links to "
+                "the owning page is encouraged — but the article's primary keyword must be "
+                "a distinct informational/commercial query:\n"
+                + td_reserved_block + "\n"
             )
         td_user_prompt += (
             f"\nResearch the market with your tools (search_web, get_keyword_opportunities, "
