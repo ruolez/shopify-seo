@@ -1,3 +1,4 @@
+import html as html_lib
 import json
 import logging
 import re
@@ -10,9 +11,10 @@ from app.prompt_defaults import DEFAULTS
 
 logger = logging.getLogger(__name__)
 
-# LINK_RE is retained only for the in-place HTML edit helpers in
-# interlinking_routes.py (_link_already_exists / _replace_href_in_html), which
-# operate on exact match spans. Link *extraction* uses the HTML parser below.
+# LINK_RE is the regex fallback for extract_links_from_html when the HTML
+# parser chokes on malformed markup. Link extraction and the in-place edit
+# helpers in interlinking_routes.py otherwise use the parser + normalized
+# href comparison.
 LINK_RE = re.compile(r'<a\s+[^>]*href=["\']([^"\']*)["\'][^>]*>(.*?)</a>', re.IGNORECASE | re.DOTALL)
 
 # Optional Shopify locale/market path prefix, e.g. /en, /fr-ca, /en-us.
@@ -98,6 +100,21 @@ def build_store_hosts(*domains):
 def _strip_locale(path):
     stripped = _LOCALE_PREFIX_RE.sub("", path, count=1)
     return stripped or "/"
+
+
+def normalize_href_path(href):
+    """Canonical path form for comparing hrefs across extraction and editing:
+    entity-decode, drop scheme/host/query/fragment, strip the locale prefix,
+    trim the trailing slash. Extraction decodes entities while raw HTML does
+    not, so both sides of any comparison must go through this."""
+    if not href:
+        return ""
+    parsed = urlparse(html_lib.unescape(href.strip()))
+    path = parsed.path or "/"
+    if not path.startswith("/"):
+        path = "/" + path
+    path = _strip_locale(path)
+    return path.rstrip("/") or "/"
 
 
 def classify_href(href, store_hosts):
@@ -214,14 +231,35 @@ def compute_interlinking_score(incoming_count, in_collection):
     return 0
 
 
-def find_missing_crosslinks(collections, products_by_collection, link_graph):
+def find_missing_crosslinks(collections, products_by_collection, link_graph, total_products=None):
+    """Suggest collection pairs to cross-link, ranked by relatedness (Jaccard
+    overlap of their product sets), not raw shared counts — raw counts are
+    dominated by whichever collections happen to be huge."""
     suggestions = []
+
+    rules = get_setting("rules.interlinking", DEFAULTS["rules.interlinking"])
+    ct = rules.get("crosslink_thresholds", {})
+    min_shared = ct.get("shared_products", 3)
+    min_relatedness = ct.get("min_relatedness", 0.25)
+    max_share = ct.get("max_collection_share", 0.5)
+
+    # Catch-all collections (holding most of the catalog) overlap with
+    # everything, so any pair involving one says nothing about relatedness.
+    if total_products:
+        size_limit = max_share * total_products
+        eligible = {
+            sid for sid, prods in products_by_collection.items() if len(prods) <= size_limit
+        }
+    else:
+        eligible = set(products_by_collection)
 
     coll_by_sid = {}
     product_to_collections = {}
     for c in collections:
         sid = c.get("shopify_id")
         coll_by_sid[sid] = c
+        if sid not in eligible:
+            continue
         for pid in products_by_collection.get(sid, set()):
             product_to_collections.setdefault(pid, set()).add(sid)
 
@@ -231,10 +269,6 @@ def find_missing_crosslinks(collections, products_by_collection, link_graph):
         for i in range(len(coll_list)):
             for j in range(i + 1, len(coll_list)):
                 candidate_pairs.add((coll_list[i], coll_list[j]))
-
-    rules = get_setting("rules.interlinking", DEFAULTS["rules.interlinking"])
-    ct = rules.get("crosslink_thresholds", {})
-    min_shared = ct.get("shared_products", 3)
 
     for sid_a, sid_b in candidate_pairs:
         coll_a = coll_by_sid.get(sid_a)
@@ -253,20 +287,26 @@ def find_missing_crosslinks(collections, products_by_collection, link_graph):
 
         prods_a = products_by_collection.get(sid_a, set())
         prods_b = products_by_collection.get(sid_b, set())
-        shared_products = prods_a & prods_b
+        shared = len(prods_a & prods_b)
+        if shared < min_shared:
+            continue
+        union = len(prods_a | prods_b)
+        relatedness = shared / union if union else 0
+        if relatedness < min_relatedness:
+            continue
 
-        if len(shared_products) >= min_shared:
-            suggestions.append({
-                "collection_a_title": coll_a["title"],
-                "collection_a_handle": handle_a,
-                "collection_b_title": coll_b["title"],
-                "collection_b_handle": handle_b,
-                "shared_tags": 0,
-                "shared_products": len(shared_products),
-                "a_links_to_b": a_links_to_b,
-                "b_links_to_a": b_links_to_a,
-            })
+        suggestions.append({
+            "collection_a_title": coll_a["title"],
+            "collection_a_handle": handle_a,
+            "collection_b_title": coll_b["title"],
+            "collection_b_handle": handle_b,
+            "shared_products": shared,
+            "relatedness": round(relatedness, 3),
+            "a_links_to_b": a_links_to_b,
+            "b_links_to_a": b_links_to_a,
+        })
 
+    suggestions.sort(key=lambda s: (-s["relatedness"], -s["shared_products"]))
     return suggestions
 
 
@@ -324,6 +364,214 @@ def _verify_broken_candidates(candidates, shopify_client):
     return confirmed
 
 
+# Merchandising boilerplate that says nothing about a collection's topic.
+_GENERIC_TITLE_WORDS = {
+    "collection", "collections", "shop", "store", "products", "best",
+    "premium", "online", "sale", "new", "our", "your", "with", "from",
+}
+
+
+def _title_words(title):
+    return {
+        w for w in re.findall(r"[a-z0-9']+", (title or "").lower())
+        if len(w) >= 4 and w not in _GENERIC_TITLE_WORDS
+    }
+
+
+def build_collection_fix_candidates(
+    store_id, coll, analysis, max_products=10, max_collections=8, max_articles=5
+):
+    """Rank candidate source pages for inbound links into one collection.
+
+    Pure heuristics, no AI: products inside the collection, related collections
+    by vendor/product-type overlap (catch-alls excluded), and articles whose
+    titles mention the collection's topic words. Pages that already link to the
+    collection are dropped.
+    """
+    handle = coll.get("handle")
+    sid = coll.get("shopify_id")
+    title = coll.get("title") or handle
+
+    linked_from = set()
+    for e in analysis.get("all_links") or []:
+        if e.get("to_type") == "collection" and e.get("to_handle") == handle:
+            linked_from.add((e.get("from_type"), e.get("from_handle")))
+
+    words = _title_words(title)
+
+    with db.get_cursor() as cur:
+        cur.execute(
+            """SELECT p.title, p.handle FROM collection_product_map m
+               JOIN synced_products p
+                 ON p.shopify_id = m.product_shopify_id AND p.store_id = m.store_id
+               WHERE m.store_id = %s AND m.collection_shopify_id = %s
+                 AND p.status = 'ACTIVE'
+               ORDER BY p.title LIMIT 60""",
+            (store_id, sid),
+        )
+        member_products = cur.fetchall()
+
+    scored_products = []
+    for p in member_products:
+        if ("product", p["handle"]) in linked_from:
+            continue
+        overlap = len(words & _title_words(p["title"]))
+        scored_products.append((overlap, p))
+    scored_products.sort(key=lambda x: (-x[0], x[1]["title"]))
+    products = [
+        {"type": "product", "handle": p["handle"], "title": p["title"]}
+        for _, p in scored_products[:max_products]
+    ]
+
+    rules = get_setting("rules.interlinking", DEFAULTS["rules.interlinking"])
+    max_share = rules.get("crosslink_thresholds", {}).get("max_collection_share", 0.5)
+    total_products = (analysis.get("summary") or {}).get("total_products") or 0
+    my_vendors = set(coll.get("top_vendors") or [])
+    my_types = set(coll.get("top_product_types") or [])
+
+    scored_colls = []
+    for c in analysis.get("collection_details") or []:
+        if c.get("handle") == handle:
+            continue
+        if total_products and (c.get("product_count") or 0) > max_share * total_products:
+            continue
+        if ("collection", c.get("handle")) in linked_from:
+            continue
+        score = (
+            len(my_vendors & set(c.get("top_vendors") or [])) * 2
+            + len(my_types & set(c.get("top_product_types") or []))
+            + len(words & _title_words(c.get("title")))
+        )
+        if score > 0:
+            scored_colls.append((score, c))
+    scored_colls.sort(key=lambda x: -x[0])
+    collections = [
+        {"type": "collection", "handle": c["handle"], "title": c["title"]}
+        for _, c in scored_colls[:max_collections]
+    ]
+
+    articles = []
+    if words:
+        pattern = "|".join(re.escape(w) for w in sorted(words)[:4])
+        with db.get_cursor() as cur:
+            cur.execute(
+                """SELECT sa.title, sa.handle, sa.body, sb.handle AS blog_handle
+                   FROM synced_articles sa
+                   JOIN synced_blogs sb ON sb.id = sa.blog_id
+                   WHERE sa.store_id = %s AND sa.is_published = TRUE AND sa.title ~* %s
+                   ORDER BY sa.id DESC LIMIT 20""",
+                (store_id, pattern),
+            )
+            rows = cur.fetchall()
+        for a in rows:
+            if ("article", a["handle"]) in linked_from:
+                continue
+            articles.append({
+                "type": "article",
+                "handle": a["handle"],
+                "blog_handle": a["blog_handle"],
+                "title": a["title"],
+                "snippet": re.sub(r"<[^>]+>", "", a["body"] or "")[:200],
+            })
+            if len(articles) >= max_articles:
+                break
+
+    return {"products": products, "collections": collections, "articles": articles}
+
+
+def build_article_fix_candidates(
+    store_id, article, analysis, max_products=4, max_collections=5, max_articles=8
+):
+    """Rank candidate source pages for inbound links into one blog article:
+    other articles on the topic (blogs naturally reference each other),
+    topically matching collections ("read our guide"), and strongly matching
+    products. Pages already linking to the article are dropped."""
+    handle = article.get("handle")
+    blog_handle = article.get("blog_handle")
+    title = article.get("title") or handle
+
+    linked_from = set()
+    for e in analysis.get("all_links") or []:
+        if (
+            e.get("to_type") == "article"
+            and e.get("to_handle") == handle
+            and (not blog_handle or not e.get("to_blog_handle") or e.get("to_blog_handle") == blog_handle)
+        ):
+            linked_from.add((e.get("from_type"), e.get("from_handle")))
+
+    words = _title_words(title)
+    if not words:
+        return {"products": [], "collections": [], "articles": []}
+    pattern = "|".join(re.escape(w) for w in sorted(words)[:5])
+
+    articles_out = []
+    with db.get_cursor() as cur:
+        cur.execute(
+            """SELECT sa.title, sa.handle, sa.body, sb.handle AS blog_handle
+               FROM synced_articles sa
+               JOIN synced_blogs sb ON sb.id = sa.blog_id
+               WHERE sa.store_id = %s AND sa.is_published = TRUE
+                 AND sa.handle <> %s AND sa.title ~* %s
+               ORDER BY sa.id DESC LIMIT 25""",
+            (store_id, handle, pattern),
+        )
+        rows = cur.fetchall()
+    scored = sorted(rows, key=lambda a: -len(words & _title_words(a["title"])))
+    for a in scored:
+        if ("article", a["handle"]) in linked_from:
+            continue
+        articles_out.append({
+            "type": "article",
+            "handle": a["handle"],
+            "blog_handle": a["blog_handle"],
+            "title": a["title"],
+            "snippet": re.sub(r"<[^>]+>", "", a["body"] or "")[:200],
+        })
+        if len(articles_out) >= max_articles:
+            break
+
+    rules = get_setting("rules.interlinking", DEFAULTS["rules.interlinking"])
+    max_share = rules.get("crosslink_thresholds", {}).get("max_collection_share", 0.5)
+    total_products = (analysis.get("summary") or {}).get("total_products") or 0
+
+    scored_colls = []
+    for c in analysis.get("collection_details") or []:
+        if total_products and (c.get("product_count") or 0) > max_share * total_products:
+            continue
+        if ("collection", c.get("handle")) in linked_from:
+            continue
+        score = len(words & _title_words(c.get("title")))
+        if score > 0:
+            scored_colls.append((score, c))
+    scored_colls.sort(key=lambda x: -x[0])
+    collections_out = [
+        {"type": "collection", "handle": c["handle"], "title": c["title"]}
+        for _, c in scored_colls[:max_collections]
+    ]
+
+    products_out = []
+    with db.get_cursor() as cur:
+        cur.execute(
+            """SELECT title, handle FROM synced_products
+               WHERE store_id = %s AND status = 'ACTIVE' AND title ~* %s
+               ORDER BY title LIMIT 20""",
+            (store_id, pattern),
+        )
+        rows = cur.fetchall()
+    scored_prods = sorted(rows, key=lambda p: -len(words & _title_words(p["title"])))
+    for p in scored_prods:
+        if ("product", p["handle"]) in linked_from:
+            continue
+        # products should only link out to genuinely on-topic guides
+        if len(words & _title_words(p["title"])) < 2:
+            continue
+        products_out.append({"type": "product", "handle": p["handle"], "title": p["title"]})
+        if len(products_out) >= max_products:
+            break
+
+    return {"products": products_out, "collections": collections_out, "articles": articles_out}
+
+
 def analyze_store_interlinking(store_id, store_hosts=None, shopify_client=None):
     logger.info("Starting interlinking analysis for store %s", store_id)
     store_hosts = store_hosts or set()
@@ -349,11 +597,16 @@ def analyze_store_interlinking(store_id, store_hosts=None, shopify_client=None):
         )
         mappings = cur.fetchall()
 
+    # Only active products count toward collection membership — draft and
+    # archived mappings inflate product counts and crosslink overlaps.
+    active_sids = {p["shopify_id"] for p in products}
     products_by_collection = {}
     product_collections = {}
     for m in mappings:
         cid = m["collection_shopify_id"]
         pid = m["product_shopify_id"]
+        if pid not in active_sids:
+            continue
         products_by_collection.setdefault(cid, set()).add(pid)
         product_collections.setdefault(pid, set()).add(cid)
 
@@ -461,6 +714,9 @@ def analyze_store_interlinking(store_id, store_hosts=None, shopify_client=None):
         _process_links(key, "article", a["handle"], a["title"], links, entity_blog_handle=a["blog_handle"])
 
     broken_links = _verify_broken_candidates(broken_candidates, shopify_client)
+    if not shopify_client:
+        for entry in broken_links:
+            entry["unverified"] = True
 
     def _incoming(key):
         return len(incoming_sources.get(key, ()))
@@ -485,6 +741,7 @@ def analyze_store_interlinking(store_id, store_hosts=None, shopify_client=None):
             "shopify_id": p["shopify_id"],
             "title": p["title"],
             "handle": p["handle"],
+            "item_type": "product",
             "vendor": p.get("vendor") or "",
             "product_type": p.get("product_type") or "",
             "tags": p.get("tags") or "",
@@ -532,6 +789,7 @@ def analyze_store_interlinking(store_id, store_hosts=None, shopify_client=None):
             "shopify_id": c["shopify_id"],
             "title": c["title"],
             "handle": c["handle"],
+            "item_type": "collection",
             "incoming_count": inc,
             "outgoing_count": out,
             "score": score,
@@ -573,7 +831,7 @@ def analyze_store_interlinking(store_id, store_hosts=None, shopify_client=None):
             under_linked.append({**detail, "item_type": "article"})
 
     missing_crosslinks = find_missing_crosslinks(
-        collections, products_by_collection, link_graph
+        collections, products_by_collection, link_graph, total_products=len(products)
     )
 
     not_in_collection = [
@@ -612,6 +870,8 @@ def analyze_store_interlinking(store_id, store_hosts=None, shopify_client=None):
                 vendor_type_index[v]["(untyped)"] = vendor_type_index[v].get("(untyped)", 0) + 1
 
     analysis = {
+        "stale": False,
+        "verification": {"live_checked": bool(shopify_client)},
         "vendor_type_index": vendor_type_index,
         "summary": {
             "total_links": total_links,

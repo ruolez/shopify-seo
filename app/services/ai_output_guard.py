@@ -63,7 +63,12 @@ def validate_injected_html(original_html, new_html, expected_hrefs=None, min_len
         return False, "AI returned empty content"
 
     for href in expected_hrefs or []:
-        if href and href not in new_html:
+        # Exact attribute match, not substring — a hallucinated URL that merely
+        # starts with the expected one (e.g. /collections/x-extra-words) must
+        # not pass as /collections/x.
+        if href and not re.search(
+            r"href\s*=\s*[\"']" + re.escape(href) + r"/?[\"']", new_html, re.IGNORECASE
+        ):
             return False, f"AI output is missing the requested link ({href})"
 
     original_len = len(original_html or "")

@@ -2,53 +2,44 @@
 
 {% block title %}Interlinking{% endblock %}
 
-{% block page_title %}Interlinking Analysis{% endblock %}
+{% block page_title %}Interlinking <span style="font-size:13px;color:var(--on-surface-secondary);font-weight:400;">internal link health</span>{% endblock %}
 
 {% block content %}
-                <div id="interlinking-store-select" style="margin-bottom: 24px;">
-                    <div class="form-group" style="max-width: 320px; margin-bottom: 0;">
-                        <label for="store-select">Store</label>
-                        <select id="store-select" class="form-control">
-                            <option value="">Select a store...</option>
-                        </select>
-                    </div>
-                </div>
+<div class="toolbar-row" style="justify-content:space-between;align-items:center;">
+    <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+        <button id="il-analyze-btn" class="btn btn-primary">
+            <span class="material-symbols-rounded">travel_explore</span>
+            <span id="il-analyze-label">Analyze</span>
+        </button>
+        <span id="il-status-chip" class="il-status-chip" style="display:none;"></span>
+        <span id="il-stale-badge" class="il-stale-badge" style="display:none;"
+              title="Counts are approximate after applied fixes — re-analyze for exact numbers">
+            <span class="material-symbols-rounded" style="font-size:14px;">history</span> Approximate
+        </span>
+    </div>
+    <div style="display:flex;align-items:center;gap:12px;">
+        <span id="il-last-analyzed" style="font-size:13px;color:var(--on-surface-secondary);"></span>
+        <button class="btn btn-secondary btn-sm" onclick="TasksPanel.open({ page: '/interlinking' })">
+            <span class="material-symbols-rounded">checklist</span> Activity
+        </button>
+    </div>
+</div>
 
-                <div id="interlinking-content">
-                    <div class="empty-state">
-                        <span class="material-symbols-rounded">link</span>
-                        <p>Select a store and run analysis to view interlinking data.</p>
-                    </div>
-                </div>
+<div id="il-banner"></div>
 
-                <!-- Item Detail Modal -->
-                <div class="modal-overlay" id="item-detail-modal">
-                    <div class="modal modal-fullscreen">
-                        <div class="modal-header">
-                            <h3 id="item-detail-title">Link Details</h3>
-                            <button class="icon-btn" onclick="closeItemModal()"><span class="material-symbols-rounded">close</span></button>
-                        </div>
-                        <div class="modal-body" id="item-detail-content"></div>
-                    </div>
-                </div>
+<div id="il-stats" class="summary-strip" style="display:none;margin-top:12px;"></div>
 
-                <!-- Broken Link Fix Modal -->
-                <div class="modal-overlay" id="broken-link-fix-modal">
-                    <div class="modal" style="max-width: 560px;">
-                        <div class="modal-header">
-                            <h3>Fix Broken Link</h3>
-                            <button class="icon-btn" onclick="window._closeBrokenLinkModal()">
-                                <span class="material-symbols-rounded">close</span>
-                            </button>
-                        </div>
-                        <div class="modal-body" id="broken-link-fix-content"></div>
-                        <div class="modal-footer">
-                            <button class="btn btn-secondary" onclick="window._closeBrokenLinkModal()">Cancel</button>
-                            <button class="btn btn-primary" id="confirm-broken-fix-btn" onclick="window._confirmBrokenLinkFix()">Apply Fix</button>
-                        </div>
-                    </div>
-                </div>
-            
+<div class="tabs il-tabs" style="margin-top:16px;">
+    <button class="tab" data-tab="overview">Overview</button>
+    <button class="tab" data-tab="issues">Issues<span class="il-tab-count" data-count="issues"></span></button>
+    <button class="tab" data-tab="coverage">Coverage<span class="il-tab-count" data-count="coverage"></span></button>
+    <button class="tab" data-tab="opportunities">Opportunities<span class="il-tab-count" data-count="opportunities"></span></button>
+</div>
+
+<div class="tab-panel active" id="il-tab-overview"></div>
+<div class="tab-panel" id="il-tab-issues"></div>
+<div class="tab-panel" id="il-tab-coverage"></div>
+<div class="tab-panel" id="il-tab-opportunities"></div>
 {% endblock %}
 
 {% block scripts %}

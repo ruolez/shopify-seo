@@ -3826,6 +3826,247 @@ def run_task(task_type, task_input, store_id=None):
             "summary": summary_text or "Analysis complete.",
         }
 
+    elif task_type == "interlinking_orphan_fix":
+        from app.services.interlinking_analyzer import (
+            build_article_fix_candidates,
+            build_collection_fix_candidates,
+        )
+
+        with db.get_cursor() as cur:
+            cur.execute(
+                "SELECT analysis_data FROM interlinking_analysis WHERE store_id = %s",
+                (store_id,),
+            )
+            row = cur.fetchone()
+        if not row or not row.get("analysis_data"):
+            return {"error": "No interlinking analysis data found. Run analysis first."}
+        analysis = row["analysis_data"]
+        if isinstance(analysis, str):
+            analysis = json.loads(analysis)
+
+        item_type = task_input.get("item_type") or "collection"
+        if item_type not in ("collection", "article"):
+            return {"error": f"Unsupported item_type: {item_type}"}
+
+        try:
+            links_per_page = int(task_input.get("links_per_page") or 3)
+        except (TypeError, ValueError):
+            links_per_page = 3
+        links_per_page = max(1, min(5, links_per_page))
+
+        detail_key = "collection_details" if item_type == "collection" else "article_details"
+        orphan_key = "orphan_collections" if item_type == "collection" else "orphan_articles"
+        details_by_handle = {c.get("handle"): c for c in analysis.get(detail_key, [])}
+        requested = task_input.get("handles") or []
+        if requested:
+            targets = [details_by_handle[h] for h in requested if h in details_by_handle]
+        else:
+            targets = [
+                details_by_handle.get(c.get("handle"), c)
+                for c in analysis.get(orphan_key, [])
+            ]
+        if not targets:
+            return {"error": f"No matching {item_type}s found in the analysis."}
+
+        build_candidates = (
+            build_collection_fix_candidates if item_type == "collection"
+            else build_article_fix_candidates
+        )
+
+        prompt_template = get_setting(
+            "prompts.interlink_orphan_fix",
+            DEFAULTS["prompts.interlink_orphan_fix"],
+        )
+        system_prompt = prompt_template.replace("{links_per_page}", str(links_per_page))
+
+        plans = []
+        planned_handles = set()
+        seen_fix_keys = set()
+        chunk_size = 5
+
+        for start_i in range(0, len(targets), chunk_size):
+            batch = targets[start_i:start_i + chunk_size]
+            batch_ctx = []
+            candidates_by_handle = {}
+            for coll in batch:
+                cands = build_candidates(store_id, coll, analysis)
+                candidates_by_handle[coll["handle"]] = cands
+                if not (cands["products"] or cands["collections"] or cands["articles"]):
+                    plans.append({
+                        "item_type": item_type,
+                        "handle": coll["handle"],
+                        "title": coll.get("title") or coll["handle"],
+                        "blog_handle": coll.get("blog_handle"),
+                        "fixes": [],
+                        "note": f"No good source pages found for this {item_type}.",
+                    })
+                    planned_handles.add(coll["handle"])
+                    continue
+                target_desc = {
+                    "item_type": item_type,
+                    "handle": coll["handle"],
+                    "title": coll.get("title"),
+                    "needs_outbound": (coll.get("outgoing_count") or 0) == 0,
+                }
+                if item_type == "collection":
+                    target_desc.update({
+                        "product_count": coll.get("product_count", 0),
+                        "top_vendors": coll.get("top_vendors", []),
+                        "top_product_types": coll.get("top_product_types", []),
+                    })
+                else:
+                    target_desc["blog_handle"] = coll.get("blog_handle")
+                batch_ctx.append({"target": target_desc, "candidates": cands})
+            if not batch_ctx:
+                continue
+
+            user_prompt = (
+                "Here are the target pages and their candidate source pages:\n\n"
+                + json.dumps(batch_ctx, indent=2)
+                + "\n\nReturn your link plans."
+            )
+            try:
+                response = client.chat.completions.create(
+                    model=config["model"],
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    temperature=0.3,
+                    max_tokens=4096,
+                )
+                content = response.choices[0].message.content or ""
+                s, e = content.find("{"), content.rfind("}") + 1
+                if s < 0 or e <= s:
+                    raise ValueError("no JSON object in response")
+                chunk_result = json.loads(content[s:e])
+            except (json.JSONDecodeError, ValueError) as exc:
+                logger.warning("Orphan-fix chunk returned unusable output: %s", exc)
+                for coll in batch:
+                    if coll["handle"] not in planned_handles:
+                        plans.append({
+                            "item_type": item_type,
+                            "handle": coll["handle"],
+                            "title": coll.get("title") or coll["handle"],
+                            "blog_handle": coll.get("blog_handle"),
+                            "fixes": [],
+                            "note": "AI returned unusable output for this batch.",
+                        })
+                        planned_handles.add(coll["handle"])
+                continue
+            except Exception as exc:
+                logger.exception("Orphan-fix API call failed")
+                return {"error": f"AI request failed: {exc}"}
+
+            plans_by_handle = {
+                p.get("handle") or p.get("collection_handle"): p
+                for p in chunk_result.get("plans", [])
+            }
+            for coll in batch:
+                h = coll["handle"]
+                if h in planned_handles:
+                    continue
+                planned_handles.add(h)
+                cands = candidates_by_handle[h]
+                valid_sources = {
+                    (c["type"], c["handle"]): c
+                    for kind in ("products", "collections", "articles")
+                    for c in cands[kind]
+                }
+                raw_plan = plans_by_handle.get(h) or {}
+                fixes = []
+                for f in (raw_plan.get("fixes") or []):
+                    src = valid_sources.get((f.get("from_type"), f.get("from_handle")))
+                    if not src:
+                        continue  # invented or already-linked source — discard
+                    dedupe = (f.get("from_handle"), h)
+                    if dedupe in seen_fix_keys:
+                        continue
+                    seen_fix_keys.add(dedupe)
+                    fix = {
+                        "action": f"add_{item_type}_link",
+                        "direction": "inbound",
+                        "from_type": src["type"],
+                        "from_handle": src["handle"],
+                        "from_title": src.get("title") or src["handle"],
+                        "to_type": item_type,
+                        "to_handle": h,
+                        "to_title": coll.get("title") or h,
+                        "suggested_anchor": (f.get("suggested_anchor") or coll.get("title") or h)[:120],
+                        "reason": f.get("reason") or "",
+                    }
+                    if item_type == "article" and coll.get("blog_handle"):
+                        fix["to_blog_handle"] = coll["blog_handle"]
+                    if src.get("blog_handle"):
+                        fix["from_blog_handle"] = src["blog_handle"]
+                    fixes.append(fix)
+                    if len(fixes) >= links_per_page:
+                        break
+
+                # Dead-end targets also get outbound links, from the same
+                # validated candidate pool — the target page links out to them.
+                outbound = []
+                if (coll.get("outgoing_count") or 0) == 0:
+                    for o in (raw_plan.get("outbound") or []):
+                        src = valid_sources.get(
+                            (o.get("type") or o.get("from_type"), o.get("handle") or o.get("from_handle"))
+                        )
+                        if not src:
+                            continue
+                        dedupe = (h, src["handle"])
+                        if dedupe in seen_fix_keys:
+                            continue
+                        seen_fix_keys.add(dedupe)
+                        fix = {
+                            "action": "add_outbound_link",
+                            "direction": "outbound",
+                            "from_type": item_type,
+                            "from_handle": h,
+                            "from_title": coll.get("title") or h,
+                            "to_type": src["type"],
+                            "to_handle": src["handle"],
+                            "to_title": src.get("title") or src["handle"],
+                            "suggested_anchor": (o.get("suggested_anchor") or src.get("title") or src["handle"])[:120],
+                            "reason": o.get("reason") or "",
+                        }
+                        if item_type == "article" and coll.get("blog_handle"):
+                            fix["from_blog_handle"] = coll["blog_handle"]
+                        if src.get("blog_handle"):
+                            fix["to_blog_handle"] = src["blog_handle"]
+                        outbound.append(fix)
+                        if len(outbound) >= links_per_page:
+                            break
+
+                plan = {
+                    "item_type": item_type,
+                    "handle": h,
+                    "title": coll.get("title") or h,
+                    "blog_handle": coll.get("blog_handle"),
+                    "fixes": fixes + outbound,
+                }
+                if not plan["fixes"]:
+                    plan["note"] = f"AI selected no viable links for this {item_type}."
+                plans.append(plan)
+
+        inbound_total = sum(
+            1 for p in plans for f in p["fixes"] if f.get("direction") != "outbound"
+        )
+        outbound_total = sum(
+            1 for p in plans for f in p["fixes"] if f.get("direction") == "outbound"
+        )
+        summary = (
+            f"Proposed {inbound_total} inbound"
+            + (f" and {outbound_total} outbound" if outbound_total else "")
+            + f" link{'s' if inbound_total + outbound_total != 1 else ''} "
+            + f"across {len(plans)} {item_type}{'s' if len(plans) != 1 else ''}."
+        )
+        return {
+            "plans": plans,
+            "item_type": item_type,
+            "links_per_page": links_per_page,
+            "summary": summary,
+        }
+
     elif task_type == "technical_seo_fix":
         item_type = task_input.get("item_type", "product")
         item_id = task_input.get("item_id")

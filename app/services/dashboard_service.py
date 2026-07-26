@@ -573,8 +573,9 @@ def build_action_queue(store_id, limit=15):
     orphans = il.get("orphan_products", 0) + il.get("orphan_collections", 0)
     counts["links"] = orphans + il.get("broken_links", 0)
     if counts["links"]:
+        il_href = "/interlinking?tab=issues" if il.get("broken_links", 0) else "/interlinking?tab=coverage"
         summary_row("links", "low", f"{orphans} orphan pages · {il.get('broken_links', 0)} broken links",
-                    f"{il.get('under_linked', 0)} under-linked", "/interlinking")
+                    f"{il.get('under_linked', 0)} under-linked", il_href)
 
     severity_rank = {"high": 0, "med": 1, "low": 2}
     items.sort(key=lambda i: (-(i["est_clicks_gain"] or 0), severity_rank[i["severity"]]))

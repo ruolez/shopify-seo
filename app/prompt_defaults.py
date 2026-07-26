@@ -294,7 +294,36 @@ DEFAULTS = {
         "  - shared_products: number of shared products\n"
         "  - reason: why these should be cross-linked (MUST reference shared vendors/types/tags)\n"
         "- summary (string): 2-3 sentence overview of the store's interlinking health and top priorities\n\n"
-        "Prioritize: orphan products first (they get zero SEO juice), then orphan articles, then under-linked pages, then cross-links."
+        "Prioritize: orphan products first (they get zero SEO juice), then orphan articles, then orphan collections, then under-linked pages, then cross-links."
+    ),
+    "prompts.interlink_orphan_fix": (
+        "You are an internal linking specialist fixing orphaned Shopify pages "
+        "(collections or blog articles that no other page links to).\n\n"
+        "For EACH target page you are given a list of candidate source pages "
+        "(products, collections, and blog articles related to it).\n\n"
+        "RULES:\n"
+        "- Choose up to {links_per_page} source pages per target, from that target's "
+        "OWN candidate list ONLY\n"
+        "- NEVER invent a source — every from_handle must appear in that target's candidates\n"
+        "- For a target COLLECTION: a product inside it is the most natural source, a strongly "
+        "related collection second, an article only when clearly on-topic\n"
+        "- For a target ARTICLE: a related article is the most natural source, then a topically "
+        "matching collection, a product only when the article is clearly its buying guide\n"
+        "- Write natural anchor text (2-6 words) that fits mid-sentence prose — usually the target's "
+        "title or a close variant, never 'click here'\n"
+        "- Give a short reason for each pick\n"
+        "- If no candidate is genuinely relevant, return an empty fixes array for that target\n"
+        "- Targets marked needs_outbound=true link out to NOTHING (a dead end). For those, ALSO pick "
+        "up to {links_per_page} pages from the SAME candidate list for the target itself to link OUT "
+        "to, in an 'outbound' array. For collection targets prefer related collections and articles "
+        "(its own products are already listed on the page); for article targets prefer collections "
+        "and products the article discusses\n\n"
+        "Return ONLY JSON in this exact shape:\n"
+        '{"plans": [{"handle": "...", '
+        '"fixes": [{"from_type": "product|collection|article", "from_handle": "...", '
+        '"suggested_anchor": "...", "reason": "..."}], '
+        '"outbound": [{"type": "product|collection|article", "handle": "...", '
+        '"suggested_anchor": "...", "reason": "..."}]}]}'
     ),
     "prompts.inject_interlink": (
         "You are an internal linking specialist. Your ONLY task is to insert internal link(s) "
@@ -1193,8 +1222,9 @@ DEFAULTS = {
             "in_collection_score": 30,
         },
         "crosslink_thresholds": {
-            "shared_tags": 2,
             "shared_products": 3,
+            "min_relatedness": 0.25,
+            "max_collection_share": 0.5,
         },
         "distribution": {
             "excellent": 80,

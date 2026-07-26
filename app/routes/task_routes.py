@@ -974,6 +974,10 @@ AI_TASK_META = {
     "news_regen_inline": ("News Inline Image Regeneration", "/news"),
     "technical_seo_fix": ("Keyword SEO Fix", "/seo"),
     "interlinking_analysis": ("Interlinking Analysis", "/interlinking"),
+    "interlinking_recommendations": ("Interlinking AI Recommendations", "/interlinking?tab=opportunities"),
+    "interlinking_apply": ("Interlinking Apply", "/interlinking"),
+    "interlinking_collection_fix": ("Orphan Collection Fix Plan", "/interlinking?tab=coverage"),
+    "interlinking_orphan_fix": ("Orphan Page Fix Plan", "/interlinking?tab=coverage"),
 }
 
 BULK_TASK_META = {
@@ -1046,7 +1050,8 @@ def active_tasks():
         # 1. ai_tasks
         cur.execute(
             f"""SELECT id, store_id, task_type, status, error, created_at, completed_at,
-                      COALESCE(input->>'title', input->>'topic', input->>'handle') AS detail
+                      COALESCE(input->>'title', input->>'topic', input->>'handle') AS detail,
+                      result->'progress' AS progress
                FROM ai_tasks
                WHERE status IN ('pending','running')
                   OR (status IN ('completed','failed') AND completed_at > NOW() - INTERVAL '{hours} hours')
@@ -1056,7 +1061,7 @@ def active_tasks():
             label, page = AI_TASK_META.get(r["task_type"], (_fallback_label(r["task_type"]), None))
             tasks.append({
                 "source": "ai_tasks", "id": r["id"], "label": label, "page": page,
-                "detail": r["detail"], "status": r["status"], "progress": None,
+                "detail": r["detail"], "status": r["status"], "progress": r["progress"],
                 "current_item": None, "store_id": r["store_id"],
                 "started_at": _iso(r["created_at"]), "completed_at": _iso(r["completed_at"]),
                 "error": r["error"],

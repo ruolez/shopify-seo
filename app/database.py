@@ -208,6 +208,13 @@ class Database:
                     completed_at TIMESTAMP
                 )
             """)
+            # At most one live interlinking analysis per store — enforced by
+            # the database so concurrent workers can't double-start one.
+            cur.execute("""
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_ai_tasks_live_interlinking_analysis
+                ON ai_tasks (store_id)
+                WHERE task_type = 'interlinking_analysis' AND status IN ('pending', 'running')
+            """)
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS sync_jobs (
                     id SERIAL PRIMARY KEY,
