@@ -572,6 +572,95 @@ def build_article_fix_candidates(
     return {"products": products_out, "collections": collections_out, "articles": articles_out}
 
 
+def build_product_fix_candidates(
+    store_id, product, analysis, max_products=8, max_collections=5, max_articles=4
+):
+    """Rank candidate source pages for inbound links into one product:
+    sibling products (same vendor/type, similar titles), collections related
+    to it, and articles mentioning it. Pages already linking are dropped."""
+    handle = product.get("handle")
+    title = product.get("title") or handle
+    vendor = (product.get("vendor") or "").strip()
+    ptype = (product.get("product_type") or "").strip()
+
+    linked_from = set()
+    for e in analysis.get("all_links") or []:
+        if e.get("to_type") == "product" and e.get("to_handle") == handle:
+            linked_from.add((e.get("from_type"), e.get("from_handle")))
+
+    words = _title_words(title)
+
+    scored_prods = []
+    for p in analysis.get("product_details") or []:
+        if p.get("handle") == handle:
+            continue
+        if ("product", p.get("handle")) in linked_from:
+            continue
+        score = (
+            (2 if vendor and p.get("vendor") == vendor else 0)
+            + (2 if ptype and p.get("product_type") == ptype else 0)
+            + len(words & _title_words(p.get("title")))
+        )
+        if score >= 2:
+            scored_prods.append((score, p))
+    scored_prods.sort(key=lambda x: -x[0])
+    products_out = [
+        {"type": "product", "handle": p["handle"], "title": p["title"]}
+        for _, p in scored_prods[:max_products]
+    ]
+
+    rules = get_setting("rules.interlinking", DEFAULTS["rules.interlinking"])
+    max_share = rules.get("crosslink_thresholds", {}).get("max_collection_share", 0.5)
+    total_products = (analysis.get("summary") or {}).get("total_products") or 0
+
+    scored_colls = []
+    for c in analysis.get("collection_details") or []:
+        if total_products and (c.get("product_count") or 0) > max_share * total_products:
+            continue
+        if ("collection", c.get("handle")) in linked_from:
+            continue
+        score = (
+            (2 if vendor and vendor in (c.get("top_vendors") or []) else 0)
+            + (2 if ptype and ptype in (c.get("top_product_types") or []) else 0)
+            + len(words & _title_words(c.get("title")))
+        )
+        if score >= 2:
+            scored_colls.append((score, c))
+    scored_colls.sort(key=lambda x: -x[0])
+    collections_out = [
+        {"type": "collection", "handle": c["handle"], "title": c["title"]}
+        for _, c in scored_colls[:max_collections]
+    ]
+
+    articles_out = []
+    if words:
+        pattern = "|".join(re.escape(w) for w in sorted(words)[:4])
+        with db.get_cursor() as cur:
+            cur.execute(
+                """SELECT sa.title, sa.handle, sa.body, sb.handle AS blog_handle
+                   FROM synced_articles sa
+                   JOIN synced_blogs sb ON sb.id = sa.blog_id
+                   WHERE sa.store_id = %s AND sa.is_published = TRUE AND sa.title ~* %s
+                   ORDER BY sa.id DESC LIMIT 15""",
+                (store_id, pattern),
+            )
+            rows = cur.fetchall()
+        for a in rows:
+            if ("article", a["handle"]) in linked_from:
+                continue
+            articles_out.append({
+                "type": "article",
+                "handle": a["handle"],
+                "blog_handle": a["blog_handle"],
+                "title": a["title"],
+                "snippet": re.sub(r"<[^>]+>", "", a["body"] or "")[:200],
+            })
+            if len(articles_out) >= max_articles:
+                break
+
+    return {"products": products_out, "collections": collections_out, "articles": articles_out}
+
+
 def analyze_store_interlinking(store_id, store_hosts=None, shopify_client=None):
     logger.info("Starting interlinking analysis for store %s", store_id)
     store_hosts = store_hosts or set()

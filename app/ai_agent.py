@@ -3830,7 +3830,19 @@ def run_task(task_type, task_input, store_id=None):
         from app.services.interlinking_analyzer import (
             build_article_fix_candidates,
             build_collection_fix_candidates,
+            build_product_fix_candidates,
         )
+
+        _BUILDERS = {
+            "collection": build_collection_fix_candidates,
+            "article": build_article_fix_candidates,
+            "product": build_product_fix_candidates,
+        }
+        _DETAIL_KEYS = {
+            "collection": "collection_details",
+            "article": "article_details",
+            "product": "product_details",
+        }
 
         with db.get_cursor() as cur:
             cur.execute(
@@ -3844,34 +3856,52 @@ def run_task(task_type, task_input, store_id=None):
         if isinstance(analysis, str):
             analysis = json.loads(analysis)
 
-        item_type = task_input.get("item_type") or "collection"
-        if item_type not in ("collection", "article"):
-            return {"error": f"Unsupported item_type: {item_type}"}
-
         try:
             links_per_page = int(task_input.get("links_per_page") or 3)
         except (TypeError, ValueError):
             links_per_page = 3
         links_per_page = max(1, min(5, links_per_page))
 
-        detail_key = "collection_details" if item_type == "collection" else "article_details"
-        orphan_key = "orphan_collections" if item_type == "collection" else "orphan_articles"
-        details_by_handle = {c.get("handle"): c for c in analysis.get(detail_key, [])}
-        requested = task_input.get("handles") or []
-        if requested:
-            targets = [details_by_handle[h] for h in requested if h in details_by_handle]
-        else:
-            targets = [
-                details_by_handle.get(c.get("handle"), c)
-                for c in analysis.get(orphan_key, [])
-            ]
-        if not targets:
-            return {"error": f"No matching {item_type}s found in the analysis."}
+        scope = task_input.get("scope") or task_input.get("item_type") or "collection"
 
-        build_candidates = (
-            build_collection_fix_candidates if item_type == "collection"
-            else build_article_fix_candidates
-        )
+        # Build (item_type, detail) target pairs. under_linked is mixed-type
+        # and worst-first; orphan scopes are single-type.
+        targets = []
+        if scope == "under_linked":
+            try:
+                limit = int(task_input.get("limit") or 25)
+            except (TypeError, ValueError):
+                limit = 25
+            limit = max(1, min(50, limit))
+            for d in (analysis.get("under_linked") or [])[:limit]:
+                t = d.get("item_type") or "product"
+                if t in _BUILDERS:
+                    targets.append((t, d))
+        else:
+            item_type = scope
+            if item_type not in _BUILDERS:
+                return {"error": f"Unsupported item_type: {item_type}"}
+            details_by_handle = {
+                c.get("handle"): c for c in analysis.get(_DETAIL_KEYS[item_type], [])
+            }
+            requested = task_input.get("handles") or []
+            if requested:
+                targets = [
+                    (item_type, details_by_handle[h])
+                    for h in requested if h in details_by_handle
+                ]
+            else:
+                orphan_key = {
+                    "collection": "orphan_collections",
+                    "article": "orphan_articles",
+                    "product": "orphan_products",
+                }[item_type]
+                targets = [
+                    (item_type, details_by_handle.get(c.get("handle"), c))
+                    for c in analysis.get(orphan_key, [])
+                ]
+        if not targets:
+            return {"error": "No matching targets found in the analysis."}
 
         prompt_template = get_setting(
             "prompts.interlink_orphan_fix",
@@ -3887,35 +3917,41 @@ def run_task(task_type, task_input, store_id=None):
         for start_i in range(0, len(targets), chunk_size):
             batch = targets[start_i:start_i + chunk_size]
             batch_ctx = []
-            candidates_by_handle = {}
-            for coll in batch:
-                cands = build_candidates(store_id, coll, analysis)
-                candidates_by_handle[coll["handle"]] = cands
+            candidates_by_key = {}
+            for t_type, coll in batch:
+                key = (t_type, coll["handle"])
+                cands = _BUILDERS[t_type](store_id, coll, analysis)
+                candidates_by_key[key] = cands
                 if not (cands["products"] or cands["collections"] or cands["articles"]):
                     plans.append({
-                        "item_type": item_type,
+                        "item_type": t_type,
                         "handle": coll["handle"],
                         "title": coll.get("title") or coll["handle"],
                         "blog_handle": coll.get("blog_handle"),
                         "fixes": [],
-                        "note": f"No good source pages found for this {item_type}.",
+                        "note": f"No good source pages found for this {t_type}.",
                     })
-                    planned_handles.add(coll["handle"])
+                    planned_handles.add(key)
                     continue
                 target_desc = {
-                    "item_type": item_type,
+                    "item_type": t_type,
                     "handle": coll["handle"],
                     "title": coll.get("title"),
                     "needs_outbound": (coll.get("outgoing_count") or 0) == 0,
                 }
-                if item_type == "collection":
+                if t_type == "collection":
                     target_desc.update({
                         "product_count": coll.get("product_count", 0),
                         "top_vendors": coll.get("top_vendors", []),
                         "top_product_types": coll.get("top_product_types", []),
                     })
-                else:
+                elif t_type == "article":
                     target_desc["blog_handle"] = coll.get("blog_handle")
+                else:
+                    target_desc.update({
+                        "vendor": coll.get("vendor") or "",
+                        "product_type": coll.get("product_type") or "",
+                    })
                 batch_ctx.append({"target": target_desc, "candidates": cands})
             if not batch_ctx:
                 continue
@@ -3942,38 +3978,42 @@ def run_task(task_type, task_input, store_id=None):
                 chunk_result = json.loads(content[s:e])
             except (json.JSONDecodeError, ValueError) as exc:
                 logger.warning("Orphan-fix chunk returned unusable output: %s", exc)
-                for coll in batch:
-                    if coll["handle"] not in planned_handles:
+                for t_type, coll in batch:
+                    key = (t_type, coll["handle"])
+                    if key not in planned_handles:
                         plans.append({
-                            "item_type": item_type,
+                            "item_type": t_type,
                             "handle": coll["handle"],
                             "title": coll.get("title") or coll["handle"],
                             "blog_handle": coll.get("blog_handle"),
                             "fixes": [],
                             "note": "AI returned unusable output for this batch.",
                         })
-                        planned_handles.add(coll["handle"])
+                        planned_handles.add(key)
                 continue
             except Exception as exc:
                 logger.exception("Orphan-fix API call failed")
                 return {"error": f"AI request failed: {exc}"}
 
-            plans_by_handle = {
-                p.get("handle") or p.get("collection_handle"): p
-                for p in chunk_result.get("plans", [])
-            }
-            for coll in batch:
+            plans_by_handle = {}
+            for p in chunk_result.get("plans", []):
+                ph = p.get("handle") or p.get("collection_handle")
+                plans_by_handle[(p.get("item_type"), ph)] = p
+                plans_by_handle.setdefault((None, ph), p)
+            for t_type, coll in batch:
                 h = coll["handle"]
-                if h in planned_handles:
+                key = (t_type, h)
+                if key in planned_handles:
                     continue
-                planned_handles.add(h)
-                cands = candidates_by_handle[h]
+                planned_handles.add(key)
+                item_type = t_type
+                cands = candidates_by_key[key]
                 valid_sources = {
                     (c["type"], c["handle"]): c
                     for kind in ("products", "collections", "articles")
                     for c in cands[kind]
                 }
-                raw_plan = plans_by_handle.get(h) or {}
+                raw_plan = plans_by_handle.get((t_type, h)) or plans_by_handle.get((None, h)) or {}
                 fixes = []
                 for f in (raw_plan.get("fixes") or []):
                     src = valid_sources.get((f.get("from_type"), f.get("from_handle")))
@@ -4058,11 +4098,11 @@ def run_task(task_type, task_input, store_id=None):
             f"Proposed {inbound_total} inbound"
             + (f" and {outbound_total} outbound" if outbound_total else "")
             + f" link{'s' if inbound_total + outbound_total != 1 else ''} "
-            + f"across {len(plans)} {item_type}{'s' if len(plans) != 1 else ''}."
+            + f"across {len(plans)} page{'s' if len(plans) != 1 else ''}."
         )
         return {
             "plans": plans,
-            "item_type": item_type,
+            "scope": scope,
             "links_per_page": links_per_page,
             "summary": summary,
         }

@@ -297,8 +297,8 @@ DEFAULTS = {
         "Prioritize: orphan products first (they get zero SEO juice), then orphan articles, then orphan collections, then under-linked pages, then cross-links."
     ),
     "prompts.interlink_orphan_fix": (
-        "You are an internal linking specialist fixing orphaned Shopify pages "
-        "(collections or blog articles that no other page links to).\n\n"
+        "You are an internal linking specialist fixing Shopify pages with weak internal linking "
+        "(products, collections, or blog articles with few or no links pointing at them).\n\n"
         "For EACH target page you are given a list of candidate source pages "
         "(products, collections, and blog articles related to it).\n\n"
         "RULES:\n"
@@ -309,6 +309,8 @@ DEFAULTS = {
         "related collection second, an article only when clearly on-topic\n"
         "- For a target ARTICLE: a related article is the most natural source, then a topically "
         "matching collection, a product only when the article is clearly its buying guide\n"
+        "- For a target PRODUCT: a sibling product (same brand or type) is the most natural source, "
+        "then a collection it belongs to, an article only when it discusses the product\n"
         "- Write natural anchor text (2-6 words) that fits mid-sentence prose — usually the target's "
         "title or a close variant, never 'click here'\n"
         "- Give a short reason for each pick\n"
@@ -317,9 +319,10 @@ DEFAULTS = {
         "up to {links_per_page} pages from the SAME candidate list for the target itself to link OUT "
         "to, in an 'outbound' array. For collection targets prefer related collections and articles "
         "(its own products are already listed on the page); for article targets prefer collections "
-        "and products the article discusses\n\n"
-        "Return ONLY JSON in this exact shape:\n"
-        '{"plans": [{"handle": "...", '
+        "and products the article discusses; for product targets prefer its collections and "
+        "complementary products\n\n"
+        "Return ONLY JSON in this exact shape (echo each target's item_type and handle exactly):\n"
+        '{"plans": [{"item_type": "product|collection|article", "handle": "...", '
         '"fixes": [{"from_type": "product|collection|article", "from_handle": "...", '
         '"suggested_anchor": "...", "reason": "..."}], '
         '"outbound": [{"type": "product|collection|article", "handle": "...", '

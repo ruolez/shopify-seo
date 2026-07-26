@@ -20,7 +20,7 @@
     let drawer = null;
     let targetsCache = null;    // available replacement targets
     let recs = null;            // {result, completed_at}
-    const orphanPlans = { collection: null, article: null }; // {result, completed_at} per type
+    const orphanPlans = { collection: null, article: null, under_linked: null }; // {result, completed_at} per scope
     let brokenGroups = [];
     let noncanonGroups = [];
     let fixCtx = null;          // live fix-modal context
@@ -98,6 +98,7 @@
         recs = null;
         orphanPlans.collection = null;
         orphanPlans.article = null;
+        orphanPlans.under_linked = null;
         brokenGroups = [];
         noncanonGroups = [];
         session = null;
@@ -111,12 +112,13 @@
         UISkeleton.show("#il-tab-" + activeTab, { type: "table", rows: 6 });
         targetsCache = null;
         try {
-            const [analysisResp, statusResp, recsResp, collPlanResp, artPlanResp] = await Promise.all([
+            const [analysisResp, statusResp, recsResp, collPlanResp, artPlanResp, ulPlanResp] = await Promise.all([
                 apiRequest(`/api/interlinking/analysis?store_id=${storeId}`),
                 apiRequest(`/api/interlinking/status?store_id=${storeId}`),
                 apiRequest(`/api/interlinking/recommendations/latest?store_id=${storeId}`).catch(() => null),
-                apiRequest(`/api/interlinking/orphan-fix/latest?store_id=${storeId}&item_type=collection`).catch(() => null),
-                apiRequest(`/api/interlinking/orphan-fix/latest?store_id=${storeId}&item_type=article`).catch(() => null),
+                apiRequest(`/api/interlinking/orphan-fix/latest?store_id=${storeId}&scope=collection`).catch(() => null),
+                apiRequest(`/api/interlinking/orphan-fix/latest?store_id=${storeId}&scope=article`).catch(() => null),
+                apiRequest(`/api/interlinking/orphan-fix/latest?store_id=${storeId}&scope=under_linked`).catch(() => null),
             ]);
             analysis = analysisResp.analysis;
             createdAt = analysisResp.created_at;
@@ -128,6 +130,9 @@
             }
             if (artPlanResp && artPlanResp.result) {
                 orphanPlans.article = { result: artPlanResp.result, completed_at: artPlanResp.completed_at };
+            }
+            if (ulPlanResp && ulPlanResp.result) {
+                orphanPlans.under_linked = { result: ulPlanResp.result, completed_at: ulPlanResp.completed_at };
             }
             renderAll();
             handleStatus(statusResp);
@@ -525,7 +530,8 @@
         if (!analysis) { panel.innerHTML = emptyAnalysisState(); return; }
 
         const segType = coverageSegment === "orphan-collections" ? "collection"
-            : coverageSegment === "orphan-articles" ? "article" : null;
+            : coverageSegment === "orphan-articles" ? "article"
+            : coverageSegment === "under-linked" ? "under_linked" : null;
         const segOrphans = segType ? (analysis[ORPHAN_META[segType].listKey] || []) : [];
 
         panel.innerHTML = `
@@ -538,7 +544,7 @@
                 </div>
                 ${segType && segOrphans.length ? `
                     <button class="btn btn-primary btn-sm" data-il-orphanfix>
-                        <span class="material-symbols-rounded">auto_fix_high</span> AI fix orphan ${ORPHAN_META[segType].plural}…
+                        <span class="material-symbols-rounded">auto_fix_high</span> AI fix ${ORPHAN_META[segType].label}…
                     </button>` : ""}
                 ${segType && orphanPlans[segType] ? `
                     <button class="btn btn-secondary btn-sm" data-il-orphanfix-view title="Review the last generated fix plan">
@@ -587,13 +593,14 @@
                 { key: "score", label: "Score", sortable: true, render: (r) => getScoreBadge(r.score) },
                 ...(segType ? [{
                     key: "_fix", label: "", sortable: false,
-                    render: () => `<button class="btn btn-primary btn-sm" data-il-row-fix title="See the AI-recommended inbound links for this ${segType}">Fix…</button>`,
+                    render: () => `<button class="btn btn-primary btn-sm" data-il-row-fix title="See the AI-recommended links for this page">Fix…</button>`,
                 }] : []),
             ],
             onRow: (r) => openItemDrawer(r.item_type, r.id),
             onRender: segType ? (body, slice) => {
                 body.querySelectorAll("[data-il-row-fix]").forEach((btn, i) => {
-                    btn.addEventListener("click", () => openItemFixModal(segType, slice[i].handle));
+                    const t = segType === "under_linked" ? slice[i].item_type : segType;
+                    btn.addEventListener("click", () => openItemFixModal(t, slice[i].handle));
                 });
             } : null,
         });
@@ -601,8 +608,9 @@
 
     /* ── orphan page AI fix (collections + articles) ───────────────── */
     const ORPHAN_META = {
-        collection: { plural: "collections", listKey: "orphan_collections", segment: "orphan-collections" },
-        article: { plural: "articles", listKey: "orphan_articles", segment: "orphan-articles" },
+        collection: { plural: "collections", label: "orphan collections", listKey: "orphan_collections", segment: "orphan-collections" },
+        article: { plural: "articles", label: "orphan articles", listKey: "orphan_articles", segment: "orphan-articles" },
+        under_linked: { plural: "pages", label: "under-linked pages", listKey: "under_linked", segment: "under-linked" },
     };
 
     function planKey(p) { return p.handle || p.collection_handle; }
@@ -629,18 +637,28 @@
 
     function openOrphanFixConfig(itemType) {
         const meta = ORPHAN_META[itemType];
+        const isUL = itemType === "under_linked";
         const count = (analysis[meta.listKey] || []).length;
-        if (!count) { showToast(`No orphan ${meta.plural} to fix`, "info"); return; }
+        if (!count) { showToast(`No ${meta.label} to fix`, "info"); return; }
         const saved = loadFilter("interlinkLinksPerColl", "2");
+        const savedLimit = loadFilter("interlinkULLimit", "25");
         const modal = UIModal.open({
-            title: `AI fix orphan ${meta.plural}`,
+            title: `AI fix ${meta.label}`,
             bodyHtml: `
                 <p style="margin-top:0;">The AI will pick the best pages to link <em>into</em>
-                each of the <strong>${count}</strong> orphan ${meta.plural} — and for ${meta.plural} that
-                link out to nothing, it also adds outbound links to related pages. You review the plan
-                before anything is applied.</p>
+                ${isUL ? `the weakest of the <strong>${count}</strong> under-linked pages (worst first)` : `each of the <strong>${count}</strong> ${meta.label}`}
+                — and for pages that link out to nothing, it also adds outbound links to related pages.
+                You review the plan before anything is applied.</p>
+                ${isUL ? `
                 <div style="display:flex;align-items:center;gap:10px;margin:14px 0 4px;">
-                    <label style="font-size:14px;">Links per ${itemType}</label>
+                    <label style="font-size:14px;">Pages per run</label>
+                    <select id="il-cf-limit" class="form-control" style="width:auto;padding:6px 10px;">
+                        ${[10, 25, 50].map((v) => `<option value="${v}" ${String(v) === String(savedLimit) ? "selected" : ""}>${v}</option>`).join("")}
+                    </select>
+                    <span style="font-size:12px;color:var(--on-surface-secondary);">re-run after applying to work through the rest</span>
+                </div>` : ""}
+                <div style="display:flex;align-items:center;gap:10px;margin:14px 0 4px;">
+                    <label style="font-size:14px;">Links per page</label>
                     <select id="il-cf-links" class="form-control" style="width:auto;padding:6px 10px;">
                         ${[1, 2, 3].map((v) => `<option value="${v}" ${String(v) === String(saved) ? "selected" : ""}>${v}</option>`).join("")}
                     </select>
@@ -660,26 +678,34 @@
                 </button>`,
         });
         const sel = modal.el.querySelector("#il-cf-links");
+        const limitSel = modal.el.querySelector("#il-cf-limit");
         const est = modal.el.querySelector("#il-cf-est");
-        const updateEst = () => { est.textContent = `up to ${count * parseInt(sel.value, 10)} links`; };
+        const effCount = () => (isUL ? Math.min(count, parseInt(limitSel.value, 10)) : count);
+        const updateEst = () => { est.textContent = `up to ${effCount() * parseInt(sel.value, 10)} links`; };
         sel.addEventListener("change", () => { saveFilter("interlinkLinksPerColl", sel.value); updateEst(); });
+        if (limitSel) limitSel.addEventListener("change", () => { saveFilter("interlinkULLimit", limitSel.value); updateEst(); });
         updateEst();
         modal.el.querySelector("[data-c]").addEventListener("click", () => modal.close());
         modal.el.querySelector("[data-go]").addEventListener("click", async () => {
             const perPage = parseInt(sel.value, 10);
+            const limit = limitSel ? parseInt(limitSel.value, 10) : null;
             const auto = modal.el.querySelector("#il-cf-auto").checked;
             saveFilter("interlinkAutoApply", auto ? "1" : "");
+            const n = effCount();
             modal.close();
-            await runOrphanFixPlan(itemType, perPage, count, auto);
+            await runOrphanFixPlan(itemType, perPage, n, auto, limit);
         });
     }
 
-    async function runOrphanFixPlan(itemType, perPage, count, autoApply) {
+    async function runOrphanFixPlan(itemType, perPage, count, autoApply, limit) {
         setStatusChip("Planning inbound links…", true);
         try {
+            const body = itemType === "under_linked"
+                ? { store_id: storeId, scope: "under_linked", limit, links_per_page: perPage }
+                : { store_id: storeId, item_type: itemType, links_per_page: perPage };
             const start = await apiRequest("/api/interlinking/orphan-fix", {
                 method: "POST",
-                body: { store_id: storeId, item_type: itemType, links_per_page: perPage },
+                body,
             });
             showToast("Generating link plan — also tracked in Activity", "info");
             const task = await pollTaskUntilDone(`/api/interlinking/task/${start.task_id}?store_id=${storeId}`, {
@@ -727,12 +753,21 @@
         });
     }
 
+    function findCachedFixEntry(itemType, handle) {
+        for (const slot of [orphanPlans[itemType], orphanPlans.under_linked]) {
+            const plans = slot && slot.result && slot.result.plans;
+            const hit = plans && plans.find(
+                (p) => planKey(p) === handle
+                    && (p.item_type || itemType) === itemType
+                    && (p.fixes || []).length
+            );
+            if (hit) return hit;
+        }
+        return null;
+    }
+
     async function openItemFixModal(itemType, handle, forceRegen) {
-        const cachedPlans = (orphanPlans[itemType] && orphanPlans[itemType].result
-            && orphanPlans[itemType].result.plans) || [];
-        const cached = !forceRegen
-            ? cachedPlans.find((p) => planKey(p) === handle && (p.fixes || []).length)
-            : null;
+        const cached = !forceRegen ? findCachedFixEntry(itemType, handle) : null;
         const modal = openPlanModalShell("Link fix");
         if (cached) {
             populatePlanModal(modal, [cached], { itemType, showRegenerate: true, handle });
@@ -990,8 +1025,8 @@
                     <span class="material-symbols-rounded">open_in_new</span> Storefront</a>` : ""}
                 ${urls.admin ? `<a class="btn btn-secondary btn-sm" href="${escapeAttr(urls.admin)}" target="_blank" rel="noopener">
                     <span class="material-symbols-rounded">edit</span> Shopify admin</a>` : ""}
-                ${["collection", "article"].includes(item.item_type)
-                    && (num(detail.incoming_count) === 0 || num(detail.outgoing_count) === 0) ? `
+                ${["product", "collection", "article"].includes(item.item_type)
+                    && (num(detail.incoming_count) < 2 || num(detail.outgoing_count) === 0) ? `
                     <button class="btn btn-primary btn-sm" data-il-drawer-collfix
                             data-handle="${escapeAttr(item.handle || "")}" data-type="${escapeAttr(item.item_type)}">
                         <span class="material-symbols-rounded">auto_fix_high</span> Suggest links (AI)

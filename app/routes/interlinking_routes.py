@@ -510,18 +510,22 @@ def latest_recommendations():
     })
 
 
-_ORPHAN_FIX_KEYS = {"collection": "orphan_collections", "article": "orphan_articles"}
+_ORPHAN_FIX_KEYS = {
+    "collection": "orphan_collections",
+    "article": "orphan_articles",
+    "product": "orphan_products",
+}
 
 
 @interlinking_bp.route("/api/interlinking/orphan-fix", methods=["POST"])
 def trigger_orphan_fix():
     data = request.get_json(silent=True) or {}
     store_id = data.get("store_id")
-    item_type = data.get("item_type") or "collection"
+    scope = data.get("scope") or data.get("item_type") or "collection"
     if not store_id:
         return jsonify({"error": "store_id is required"}), 400
-    if item_type not in _ORPHAN_FIX_KEYS:
-        return jsonify({"error": f"Unsupported item_type: {item_type}"}), 400
+    if scope != "under_linked" and scope not in _ORPHAN_FIX_KEYS:
+        return jsonify({"error": f"Unsupported scope: {scope}"}), 400
 
     with db.get_cursor() as cur:
         cur.execute(
@@ -532,22 +536,37 @@ def trigger_orphan_fix():
     if not row or not row["analysis_data"]:
         return jsonify({"error": "Run analysis first"}), 400
 
-    handles = data.get("handles") or [
-        c.get("handle")
-        for c in (row["analysis_data"].get(_ORPHAN_FIX_KEYS[item_type]) or [])
-        if c.get("handle")
-    ]
-    if not handles:
-        return jsonify({"error": f"No orphan {item_type}s to fix"}), 400
-
     from app.ai_agent import run_task
 
-    task_input = {
-        "store_id": store_id,
-        "item_type": item_type,
-        "handles": handles,
-        "links_per_page": data.get("links_per_page", 3),
-    }
+    if scope == "under_linked":
+        if not (row["analysis_data"].get("under_linked") or []):
+            return jsonify({"error": "No under-linked pages to fix"}), 400
+        task_input = {
+            "store_id": store_id,
+            "scope": "under_linked",
+            "limit": data.get("limit", 25),
+            "links_per_page": data.get("links_per_page", 3),
+        }
+        target_count = min(
+            int(data.get("limit") or 25),
+            len(row["analysis_data"].get("under_linked") or []),
+        )
+    else:
+        handles = data.get("handles") or [
+            c.get("handle")
+            for c in (row["analysis_data"].get(_ORPHAN_FIX_KEYS[scope]) or [])
+            if c.get("handle")
+        ]
+        if not handles:
+            return jsonify({"error": f"No orphan {scope}s to fix"}), 400
+        task_input = {
+            "store_id": store_id,
+            "scope": scope,
+            "item_type": scope,
+            "handles": handles,
+            "links_per_page": data.get("links_per_page", 3),
+        }
+        target_count = len(handles)
 
     with db.get_cursor() as cur:
         cur.execute(
@@ -578,13 +597,13 @@ def trigger_orphan_fix():
 
     spawn_task("ai_tasks", task_id, _run_orphan_fix, task_id)
 
-    return jsonify({"ok": True, "task_id": task_id, "target_count": len(handles)}), 202
+    return jsonify({"ok": True, "task_id": task_id, "target_count": target_count}), 202
 
 
 @interlinking_bp.route("/api/interlinking/orphan-fix/latest")
 def latest_orphan_fix():
     store_id = request.args.get("store_id", type=int)
-    item_type = request.args.get("item_type", "collection")
+    scope = request.args.get("scope") or request.args.get("item_type") or "collection"
     if not store_id:
         return jsonify({"error": "store_id is required"}), 400
 
@@ -592,11 +611,11 @@ def latest_orphan_fix():
         cur.execute(
             """SELECT id, result, completed_at FROM ai_tasks
                WHERE store_id = %s AND task_type = 'interlinking_orphan_fix'
-                 AND input->>'item_type' = %s
+                 AND COALESCE(input->>'scope', input->>'item_type') = %s
                  AND status = 'completed'
                  AND completed_at > NOW() - INTERVAL '7 days'
                ORDER BY id DESC LIMIT 1""",
-            (store_id, item_type),
+            (store_id, scope),
         )
         row = cur.fetchone()
 
