@@ -316,6 +316,10 @@ async function startScheduledBatch() {
         if (!when || isNaN(when.getTime())) {
             return showToast(`Pick a publish date/time for “${item.name}”.`, "error");
         }
+        if (when.getTime() < Date.now()) {
+            // a mistyped day (e.g. 08 instead of 28) must not publish immediately
+            return showToast(`“${item.name}” is scheduled in the past (${when.toLocaleString()}) — check the date.`, "error");
+        }
         articles.push({
             source_text: item.source_text,
             source_urls: item.sources,

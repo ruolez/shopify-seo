@@ -8,6 +8,7 @@ from flask import Blueprint, jsonify, render_template, request
 
 from app.database import db
 from app.routes.blog_routes import _get_store_client
+from app.services import url_utils
 from app.services.news_body import insert_inline_images, render_sources_html
 from app.services.news_template import (
     NEWS_SECTION_FILE,
@@ -52,8 +53,7 @@ def _get_news_blog(store_id, client):
 
 def _store_base_url(store):
     """Absolute storefront origin — article URLs are store-relative, not app-relative."""
-    host = (store.get("primary_domain") or store.get("domain") or "").rstrip("/")
-    return f"https://{host}" if host else ""
+    return url_utils.store_base_url(store) or ""
 
 
 def _publisher_identity(store_id, store):
@@ -1316,13 +1316,15 @@ def _parse_scheduled_at(value):
 def news_schedule_batch():
     """Schedule multiple articles: run the AI pipeline now (analyze → images → links),
     then park each session as 'scheduled' until its per-article scheduled_at, when the
-    news scheduler publishes it. Past datetimes publish on the next scheduler tick."""
+    news scheduler publishes it. Past datetimes are rejected — a mistyped date must
+    not silently publish immediately."""
     data = request.get_json(silent=True) or {}
     store_id = data.get("store_id")
     articles = data.get("articles")
     if not store_id or not isinstance(articles, list) or not articles:
         return jsonify({"error": "store_id and a non-empty articles list are required"}), 400
 
+    now_utc = datetime.utcnow()
     parsed = []
     for i, art in enumerate(articles):
         source_text = (art.get("source_text") or "").strip() if isinstance(art, dict) else ""
@@ -1332,6 +1334,13 @@ def news_schedule_batch():
             scheduled_for = _parse_scheduled_at(art.get("scheduled_at"))
         except (ValueError, TypeError):
             return jsonify({"error": f"Article {i + 1} has a missing or invalid scheduled_at"}), 400
+        if scheduled_for < now_utc:
+            return jsonify({
+                "error": (
+                    f"Article {i + 1} is scheduled in the past "
+                    f"({scheduled_for.strftime('%Y-%m-%d %H:%M')} UTC) — check the date and try again"
+                )
+            }), 400
         parsed.append((source_text, _normalize_sources(art), scheduled_for))
 
     store, client = _get_store_client(store_id)
@@ -1392,6 +1401,8 @@ def reschedule_session(session_id):
         scheduled_for = _parse_scheduled_at(data.get("scheduled_at"))
     except (ValueError, TypeError):
         return jsonify({"error": "A valid scheduled_at is required"}), 400
+    if scheduled_for < datetime.utcnow():
+        return jsonify({"error": "The new publish time is in the past — pick a future date/time"}), 400
     with db.get_cursor() as cur:
         cur.execute(
             """UPDATE news_sessions SET scheduled_for = %s, updated_at = NOW()
