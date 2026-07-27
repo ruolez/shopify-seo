@@ -552,6 +552,55 @@ def brave_image_search(query, count=5):
     return None
 
 
+def _walk_schema_types(node, types, depth=0):
+    """Collect @type strings from a JSON-LD node, descending into the containers
+    that commonly wrap or nest entities (@graph, hasVariant, mainEntity,
+    itemListElement). One level of entity nesting is enough for scoring."""
+    if depth > 2 or not isinstance(node, dict):
+        return
+    t = node.get("@type")
+    if isinstance(t, str):
+        types.append(t)
+    elif isinstance(t, list):
+        types.extend(x for x in t if isinstance(x, str))
+    for key in ("@graph", "hasVariant", "mainEntity", "itemListElement"):
+        child = node.get(key)
+        if isinstance(child, dict):
+            _walk_schema_types(child, types, depth + 1)
+        elif isinstance(child, list):
+            for item in child:
+                _walk_schema_types(item, types, depth + 1)
+
+
+def collect_schema_types(schema_scripts):
+    """Flatten the @type values of every JSON-LD script on a page.
+
+    Handles @graph-wrapped documents (which have no top-level @type), array
+    documents, @type arrays, and multi-child script tags (where BeautifulSoup's
+    .string is None — get_text() is required). Appends the synthesized
+    "AggregateRating" pseudo-type whenever rating markup is present anywhere in
+    a script — feed-readiness review detection depends on that contract."""
+    types = []
+    for script in schema_scripts:
+        raw = script.get_text() if hasattr(script, "get_text") else str(script or "")
+        raw = (raw or "").strip()
+        if not raw:
+            continue
+        # Pure string check — must run even when the JSON fails to parse.
+        has_rating = '"aggregateRating"' in raw
+        try:
+            sd = json.loads(raw)
+            nodes = sd if isinstance(sd, list) else [sd]
+            for node in nodes:
+                _walk_schema_types(node, types)
+        except (json.JSONDecodeError, TypeError):
+            pass
+        if has_rating:
+            types.append("AggregateRating")
+    seen = set()
+    return [t for t in types if not (t in seen or seen.add(t))]
+
+
 async def scrape_page_seo_metadata(client, url):
     """Fetch a single URL and extract SEO metadata."""
     try:
@@ -583,22 +632,7 @@ async def scrape_page_seo_metadata(client, url):
         word_count = len(body_text.split())
 
         schema_scripts = soup.find_all("script", attrs={"type": "application/ld+json"})
-        schema_types = []
-        for script in schema_scripts:
-            try:
-                sd = json.loads(script.string or "")
-                if isinstance(sd, dict) and "@type" in sd:
-                    schema_types.append(sd["@type"])
-                elif isinstance(sd, list):
-                    for item in sd:
-                        if isinstance(item, dict) and "@type" in item:
-                            schema_types.append(item["@type"])
-                # Review apps (Stamped, Judge.me) nest aggregateRating inside their
-                # own Product block — surface it as a type so review detection sees it.
-                if '"aggregateRating"' in (script.string or ""):
-                    schema_types.append("AggregateRating")
-            except (json.JSONDecodeError, TypeError):
-                pass
+        schema_types = collect_schema_types(schema_scripts)
 
         og_title_tag = soup.find("meta", attrs={"property": "og:title"})
         og_title = og_title_tag.get("content", "") if og_title_tag else ""

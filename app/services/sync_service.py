@@ -24,6 +24,42 @@ def _get_sync_lock(store_id):
         return _sync_locks[store_id]
 
 
+def _enqueue_schema_drift_repush(store_id):
+    """Post-sync guard: enqueue a schema_repush batch for items whose schema
+    record is missing or unpushed (new products, failed pushes). Offers and
+    ratings render live in the theme snippet, so this only needs to cover
+    enrichment gaps — price/availability drift no longer exists.
+
+    Gated by the `schema.drift_guard_enabled` setting (off by default) so it
+    stays inert until the initial full repush has established a baseline."""
+    from app.settings_manager import get_setting
+
+    if not get_setting("schema.drift_guard_enabled", False):
+        return
+
+    with db.get_cursor() as cur:
+        cur.execute(
+            "SELECT 1 FROM bulk_tasks WHERE store_id = %s AND kind = 'schema_repush' "
+            "AND status IN ('pending', 'running') LIMIT 1",
+            (store_id,),
+        )
+        if cur.fetchone():
+            return
+
+    # Lazy route import — established precedent for services calling batch
+    # spawners (see blog_scheduler); avoids a circular import at module load.
+    from app.routes.ai_seo_routes import _schema_repush_candidate_ids, _spawn_ai_seo_batch
+
+    for resource_type in ("product", "collection"):
+        ids = _schema_repush_candidate_ids(store_id, resource_type, "stale")
+        if ids:
+            batch_id = _spawn_ai_seo_batch(int(store_id), "schema_repush", resource_type, ids)
+            logger.info(
+                "Drift guard enqueued schema_repush batch %s (%d %ss) for store %s",
+                batch_id, len(ids), resource_type, store_id,
+            )
+
+
 def _upsert_product_batch(store_id, batch):
     # De-dupe by shopify_id (keep the newest occurrence) — ON CONFLICT raises
     # "cannot affect row a second time" if a product appears twice in one batch.
@@ -491,6 +527,11 @@ def _sync_store_inner(store_id):
             logger.info("Interlinking analysis refreshed for store %s", store_id)
         except Exception:
             logger.exception("Interlinking re-analysis failed for store %s (non-fatal)", store_id)
+
+        try:
+            _enqueue_schema_drift_repush(store_id)
+        except Exception:
+            logger.exception("Schema drift check failed for store %s (non-fatal)", store_id)
 
         with db.get_cursor() as cur:
             cur.execute(

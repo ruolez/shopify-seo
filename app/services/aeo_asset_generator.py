@@ -8,6 +8,7 @@ happens in the route layer via ShopifyClient and is always preview-first.
 import json
 
 from app.database import db
+from app.services import url_utils
 from app.services.ai_seo_analyzer import AI_BOTS
 
 
@@ -73,12 +74,16 @@ def generate_llms_txt(store_id):
 
 
 def _store_host(store):
-    return (store.get("primary_domain") or store.get("domain") or "").replace("https://", "").replace("http://", "").strip("/")
+    return url_utils.store_host(store)
 
 
-def generate_organization_jsonld(store_id):
+def generate_organization_jsonld(store_id, base_override=None):
     """Full-entity Organization schema — the signals AI engines use to recognise a
-    brand as a named entity (@id, sameAs, description, contactPoint, knowsAbout)."""
+    brand as a named entity (@id, sameAs, description, contactPoint, knowsAbout).
+
+    `base_override` swaps the computed base URL for a sentinel so the snippet
+    builder can substitute `{{ shop.url }}` — keeping @id on whatever domain
+    actually serves the page. Previews omit it and get the real domain."""
     with db.get_cursor() as cur:
         cur.execute("SELECT * FROM schema_settings WHERE store_id = %s", (store_id,))
         settings = cur.fetchone() or {}
@@ -88,7 +93,7 @@ def generate_organization_jsonld(store_id):
         return None
 
     host = _store_host(store)
-    base = f"https://{host}" if host else ""
+    base = base_override or (f"https://{host}" if host else "")
     url = settings.get("organization_url") or base
     org = {
         "@context": "https://schema.org",
@@ -121,7 +126,7 @@ def generate_organization_jsonld(store_id):
     return {k: v for k, v in org.items() if v}
 
 
-def generate_website_jsonld(store_id):
+def generate_website_jsonld(store_id, base_override=None):
     """WebSite schema with SearchAction (sitelinks searchbox / site recognition)."""
     with db.get_cursor() as cur:
         cur.execute("SELECT * FROM schema_settings WHERE store_id = %s", (store_id,))
@@ -131,7 +136,7 @@ def generate_website_jsonld(store_id):
     if not store:
         return None
     host = _store_host(store)
-    base = f"https://{host}" if host else ""
+    base = base_override or (f"https://{host}" if host else "")
     if not base:
         return None
     return {
@@ -140,6 +145,7 @@ def generate_website_jsonld(store_id):
         "@id": f"{base}/#website",
         "name": settings.get("organization_name") or store.get("name"),
         "url": base,
+        "publisher": {"@id": f"{base}/#organization"},
         "potentialAction": {
             "@type": "SearchAction",
             "target": {"@type": "EntryPoint", "urlTemplate": f"{base}/search?q={{search_term_string}}"},
@@ -170,27 +176,98 @@ _BREADCRUMB_LIQUID = """{%- capture _crumbs -%}
 {%- assign _crumbs = _crumbs | strip -%}
 {%- if _crumbs != '' -%}
 <script type="application/ld+json">
-{"@context":"https://schema.org","@type":"BreadcrumbList","itemListElement":[{{ _crumbs }}]}
+{"@context":"https://schema.org","@type":"BreadcrumbList","@id":"{{ canonical_url }}#breadcrumb","itemListElement":[{{ _crumbs }}]}
 </script>
 {%- endif -%}"""
 
 
-# Per-item JSON-LD pushed by the optimizer lives in `seo.schema_json_ld` /
-# `seo.faq_schema_json_ld` metafields (type json). Metafields are invisible to
-# crawlers until the theme prints them — this block renders them on product and
-# collection templates. `.value` parses the json metafield; `| json` re-serializes
-# it safely into the script tag.
+# Product / ProductGroup / CollectionPage JSON-LD, built natively in Liquid so
+# price, availability and ratings are always request-time fresh and every URL /
+# @id lives on the serving (primary) domain via `shop.url`. The optional
+# `seo.schema_enrichment` metafield (json) contributes only what Liquid cannot
+# know: AI-verified additionalProperty specs plus optional description/category
+# overrides. Ratings are read from review-app metafields (`reviews.*` standard
+# namespace first, Stamped's `stamped.*` as fallback), strictly gated on a
+# review count > 0 — never fabricated. FAQPage metafields are replayed verbatim.
 _ITEM_SCHEMA_LIQUID = """{%- if template contains 'product' and product -%}
-{%- if product.metafields.seo.schema_json_ld != blank -%}
-<script type="application/ld+json">{{ product.metafields.seo.schema_json_ld.value | json }}</script>
+{%- assign _base = shop.url | append: '/products/' | append: product.handle -%}
+{%- assign _enr = product.metafields.seo.schema_enrichment.value -%}
+{%- assign _rc = 0 -%}
+{%- assign _rv = '' -%}
+{%- if product.metafields.reviews.rating_count.value and product.metafields.reviews.rating.value -%}
+{%- assign _rc = product.metafields.reviews.rating_count.value | plus: 0 -%}
+{%- comment -%} metafield type `rating` -> object exposing .rating; plain numbers pass through {%- endcomment -%}
+{%- assign _rv = product.metafields.reviews.rating.value.rating | default: product.metafields.reviews.rating.value.value | default: product.metafields.reviews.rating.value -%}
+{%- elsif product.metafields.stamped.reviews_count.value and product.metafields.stamped.reviews_average.value -%}
+{%- assign _rc = product.metafields.stamped.reviews_count.value | plus: 0 -%}
+{%- assign _rv = product.metafields.stamped.reviews_average.value -%}
+{%- endif -%}
+{%- assign _rvnum = _rv | plus: 0.0 | round: 1 -%}
+{%- capture _rating -%}
+{%- if _rc > 0 and _rvnum > 0 -%},"aggregateRating":{"@type":"AggregateRating","ratingValue":{{ _rvnum }},"reviewCount":{{ _rc }},"bestRating":5,"worstRating":1}{%- endif -%}
+{%- endcapture -%}
+{%- capture _entity -%}
+"name":{{ product.title | json }}
+,"description":{{ _enr.description | default: product.description | strip_html | truncate: 5000 | json }}
+,"url":{{ _base | json }}
+,"brand":{"@type":"Brand","name":{{ product.vendor | default: shop.name | json }}}
+{%- assign _cat = _enr.category | default: product.type -%}
+{%- if _cat != blank -%},"category":{{ _cat | json }}{%- endif -%}
+{%- if product.images.size > 0 -%},"image":[{%- for _img in product.images limit: 8 -%}{{ _img | image_url: width: 1200 | prepend: 'https:' | json }}{%- unless forloop.last -%},{%- endunless -%}{%- endfor -%}]{%- endif -%}
+,"mainEntityOfPage":{"@type":"WebPage","@id":{{ _base | json }},"url":{{ _base | json }},"isPartOf":{"@id":"{{ shop.url }}/#website"}}
+{%- if _enr.additionalProperty -%},"additionalProperty":{{ _enr.additionalProperty | json }}{%- endif -%}
+{%- endcapture -%}
+{%- if product.variants.size > 1 -%}
+<script type="application/ld+json">
+{"@context":"https://schema.org","@type":"ProductGroup","@id":"{{ _base }}#product"
+,"productGroupID":"{{ product.id }}"
+,{{ _entity }}
+,"variesBy":[{%- for _opt in product.options -%}{{ _opt | json }}{%- unless forloop.last -%},{%- endunless -%}{%- endfor -%}]
+,"hasVariant":[
+{%- for v in product.variants -%}
+{"@type":"Product","@id":"{{ _base }}#variant-{{ v.id }}"
+,"name":{{ product.title | append: ' - ' | append: v.title | json }}
+{%- if v.sku != blank -%},"sku":{{ v.sku | json }},"mpn":{{ v.sku | json }}{%- endif -%}
+{%- if v.barcode != blank -%}{%- assign _bl = v.barcode | size -%},"gtin{% case _bl %}{% when 8 %}8{% when 12 %}12{% when 13 %}13{% when 14 %}14{% endcase %}":{{ v.barcode | json }}{%- endif -%}
+{%- assign _vimg = v.featured_image | default: product.featured_image -%}
+{%- if _vimg -%},"image":{{ _vimg | image_url: width: 1200 | prepend: 'https:' | json }}{%- endif -%}
+,"additionalProperty":[{%- for _opt in product.options -%}{"@type":"PropertyValue","name":{{ _opt | json }},"value":{{ v.options[forloop.index0] | json }}}{%- unless forloop.last -%},{%- endunless -%}{%- endfor -%}]
+,"offers":{"@type":"Offer","url":"{{ _base }}?variant={{ v.id }}","priceCurrency":{{ cart.currency.iso_code | json }},"price":{{ v.price | divided_by: 100.0 }},"availability":"https://schema.org/{% if v.available %}InStock{% else %}OutOfStock{% endif %}","itemCondition":"https://schema.org/NewCondition","priceValidUntil":"{{ 'now' | date: '%s' | plus: 31536000 | date: '%Y-%m-%d' }}","seller":{"@id":"{{ shop.url }}/#organization"}}}
+{%- unless forloop.last -%},{%- endunless -%}
+{%- endfor -%}
+]{{ _rating }}}
+</script>
+{%- else -%}
+{%- assign v = product.variants.first -%}
+<script type="application/ld+json">
+{"@context":"https://schema.org","@type":"Product","@id":"{{ _base }}#product"
+,{{ _entity }}
+{%- if v.sku != blank -%},"sku":{{ v.sku | json }},"mpn":{{ v.sku | json }}{%- endif -%}
+{%- if v.barcode != blank -%}{%- assign _bl = v.barcode | size -%},"gtin{% case _bl %}{% when 8 %}8{% when 12 %}12{% when 13 %}13{% when 14 %}14{% endcase %}":{{ v.barcode | json }}{%- endif -%}
+,"offers":{"@type":"Offer","url":{{ _base | json }},"priceCurrency":{{ cart.currency.iso_code | json }},"price":{{ v.price | divided_by: 100.0 }},"availability":"https://schema.org/{% if v.available %}InStock{% else %}OutOfStock{% endif %}","itemCondition":"https://schema.org/NewCondition","priceValidUntil":"{{ 'now' | date: '%s' | plus: 31536000 | date: '%Y-%m-%d' }}","seller":{"@id":"{{ shop.url }}/#organization"}}{{ _rating }}}
+</script>
 {%- endif -%}
 {%- if product.metafields.seo.faq_schema_json_ld != blank -%}
 <script type="application/ld+json">{{ product.metafields.seo.faq_schema_json_ld.value | json }}</script>
 {%- endif -%}
 {%- elsif template contains 'collection' and collection -%}
-{%- if collection.metafields.seo.schema_json_ld != blank -%}
-<script type="application/ld+json">{{ collection.metafields.seo.schema_json_ld.value | json }}</script>
-{%- endif -%}
+{%- assign _cbase = shop.url | append: '/collections/' | append: collection.handle -%}
+<script type="application/ld+json">
+{"@context":"https://schema.org","@type":"CollectionPage","@id":"{{ _cbase }}#collection"
+,"name":{{ collection.title | json }}
+{%- if collection.description != blank -%},"description":{{ collection.description | strip_html | truncate: 5000 | json }}{%- endif -%}
+,"url":"{{ _cbase }}"
+,"mainEntityOfPage":"{{ _cbase }}"
+{%- if collection.image -%},"image":{{ collection.image | image_url: width: 1200 | prepend: 'https:' | json }}{%- endif -%}
+,"isPartOf":{"@id":"{{ shop.url }}/#website"}
+{%- if collection.products_count > 0 -%}
+,"mainEntity":{"@type":"ItemList","numberOfItems":{{ collection.products_count }},"itemListElement":[
+{%- for _p in collection.products limit: 12 -%}
+{"@type":"ListItem","position":{{ forloop.index }},"url":"{{ shop.url }}/products/{{ _p.handle }}","name":{{ _p.title | json }}}
+{%- unless forloop.last -%},{%- endunless -%}
+{%- endfor -%}]}
+{%- endif -%}}
+</script>
 {%- if collection.metafields.seo.faq_schema_json_ld != blank -%}
 <script type="application/ld+json">{{ collection.metafields.seo.faq_schema_json_ld.value | json }}</script>
 {%- endif -%}
@@ -230,17 +307,21 @@ def generate_a11y_snippet():
     )
 
 
+SNIPPET_VERSION = 2
+
+
 def generate_site_schema_snippet(store_id):
-    """Build the ai-seo-schema.liquid snippet: static Organization + WebSite JSON-LD,
-    a dynamic per-page BreadcrumbList, and the pushed per-item Product/CollectionPage
-    + FAQPage JSON-LD from `seo.*` metafields."""
-    org = generate_organization_jsonld(store_id)
-    website = generate_website_jsonld(store_id)
-    parts = ["{%- comment -%} AI SEO: site-wide schema (managed — edit via the app) {%- endcomment -%}"]
-    if org:
-        parts.append('<script type="application/ld+json">\n' + json.dumps(org, ensure_ascii=False) + "\n</script>")
-    if website:
-        parts.append('<script type="application/ld+json">\n' + json.dumps(website, ensure_ascii=False) + "\n</script>")
+    """Build the ai-seo-schema.liquid snippet: Organization + WebSite JSON-LD
+    (on `{{ shop.url }}` so @id identity always matches the serving domain), a
+    dynamic per-page BreadcrumbList, and Liquid-native Product / ProductGroup /
+    CollectionPage JSON-LD with request-time-fresh offers and ratings."""
+    org = generate_organization_jsonld(store_id, base_override="__BASE__")
+    website = generate_website_jsonld(store_id, base_override="__BASE__")
+    parts = ["{%- comment -%} AI SEO: site-wide schema v2 (managed — edit via the app) {%- endcomment -%}"]
+    for entity in (org, website):
+        if entity:
+            payload = json.dumps(entity, ensure_ascii=False).replace("__BASE__", "{{ shop.url }}")
+            parts.append('<script type="application/ld+json">\n' + payload + "\n</script>")
     parts.append(_BREADCRUMB_LIQUID)
     parts.append(_ITEM_SCHEMA_LIQUID)
     return "\n".join(parts)

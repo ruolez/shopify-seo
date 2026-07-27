@@ -13,6 +13,19 @@ _LOCALE_RE = re.compile(r"^[a-z]{2}(-[a-z]{2})?$", re.IGNORECASE)
 _SHOPIFY_ROOTS = ("products", "collections", "pages", "blogs")
 
 
+def store_host(store):
+    """Public storefront host: the primary (custom) domain when set, else the
+    myshopify domain. Schema/canonical URLs must always use this — the
+    myshopify host redirects and breaks @id entity identity."""
+    host = ((store or {}).get("primary_domain") or (store or {}).get("domain") or "").strip()
+    return host.replace("https://", "").replace("http://", "").rstrip("/")
+
+
+def store_base_url(store):
+    host = store_host(store)
+    return f"https://{host}" if host else None
+
+
 def url_path_key(url):
     """Normalize an absolute or relative URL to a path key like
     'products/some-handle' — insensitive to scheme, host, www, query,

@@ -118,42 +118,6 @@ def _styles():
     )
 
 
-def _json_ld(store, home_page):
-    """Home-page JSON-LD: Organization + WebSite (with SearchAction sitelinks)."""
-    domain = (store.get("primary_domain") or store.get("domain") or "").strip()
-    if domain and not domain.startswith("http"):
-        base_url = f"https://{domain}"
-    else:
-        base_url = domain
-    name = store.get("name") or domain
-    graph = [
-        {
-            "@type": "Organization",
-            "@id": f"{base_url}/#organization",
-            "name": name,
-            "url": base_url or None,
-        },
-        {
-            "@type": "WebSite",
-            "@id": f"{base_url}/#website",
-            "url": base_url or None,
-            "name": name,
-            "description": home_page.get("meta_description") or None,
-            "publisher": {"@id": f"{base_url}/#organization"},
-            "potentialAction": {
-                "@type": "SearchAction",
-                "target": {
-                    "@type": "EntryPoint",
-                    "urlTemplate": f"{base_url}/search?q={{search_term_string}}",
-                },
-                "query-input": "required name=search_term_string",
-            },
-        },
-    ]
-    payload = {"@context": "https://schema.org", "@graph": graph}
-    return json.dumps(payload, ensure_ascii=False)
-
-
 def _schema_block():
     """Minimal, valid section schema so the section is editable/removable in the
     theme editor. No settings — content is managed by this app."""
@@ -181,10 +145,13 @@ def _slides_of(home_page, store):
     return slides
 
 
-def render_carousel_body(home_page, store, include_schema_ld=True):
+def render_carousel_body(home_page, store):
     """Render just the carousel markup + CSS + JS (no Liquid wrappers).
 
     Used both for the live section body and for the editor preview iframe.
+    Emits NO JSON-LD — Organization/WebSite entities are owned exclusively by
+    ai-seo-schema.liquid, which renders on every page; a second copy here
+    shared the same @ids with a conflicting name and corrupted the graph.
     """
     slides = _slides_of(home_page, store)
     slides_html = "".join(_render_slide(s, i) for i, s in enumerate(slides))
@@ -204,11 +171,6 @@ def render_carousel_body(home_page, store, include_schema_ld=True):
             f'<button class="{_P}__arrow {_P}__arrow--next" aria-label="Next slide">&rsaquo;</button>'
         )
 
-    ld_html = (
-        f'<script type="application/ld+json">{_json_ld(store, home_page)}</script>'
-        if include_schema_ld else ""
-    )
-
     return (
         f'<section class="{_P}__hero" data-slide-count="{len(slides)}">'
         f'<div class="{_P}__slides">{slides_html}</div>'
@@ -216,13 +178,12 @@ def render_carousel_body(home_page, store, include_schema_ld=True):
         f'</section>'
         f'<style>{_styles()}</style>'
         f'<script>{_slider_js()}</script>'
-        f'{ld_html}'
     )
 
 
 def render_home_carousel_section(home_page, store):
     """Return the full body of the ``sections/ai-home-carousel.liquid`` file."""
-    body = render_carousel_body(home_page, store, include_schema_ld=True)
+    body = render_carousel_body(home_page, store)
     return f"{{% raw %}}\n{body}\n{{% endraw %}}\n{_schema_block()}\n"
 
 

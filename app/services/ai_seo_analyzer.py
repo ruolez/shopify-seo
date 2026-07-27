@@ -378,6 +378,18 @@ def analyze_ai_visibility(
                 primary_schema = pj
             break
 
+    # v2 enrichment records don't mirror the rendered schema — the theme snippet
+    # builds offers/brand/image/identifiers natively and reads ratings from
+    # review metafields at request time. Synthesize the rendered richness view
+    # (rows only reach here when the snippet is published — _credited_markup).
+    if primary_schema and primary_schema.get("schema_version"):
+        synthetic = {"offers": True, "brand": True, "image": True, "sku": True}
+        if primary_schema.get("additionalProperty"):
+            synthetic["additionalProperty"] = primary_schema["additionalProperty"]
+        if "AggregateRating" in ((live or {}).get("schema_types") or []):
+            synthetic["aggregateRating"] = True
+        primary_schema = synthetic
+
     scores = {}
     details = {}
 

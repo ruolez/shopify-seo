@@ -356,7 +356,7 @@ const TasksPanel = (() => {
 
         // Failed AI SEO batches are retryable right here — parity with the old
         // AI SEO Activity tab's "Retry failed" button.
-        const retryable = t.source === "bulk" && ["geo_optimize", "fact_boost"].includes(t.kind) &&
+        const retryable = t.source === "bulk" && ["geo_optimize", "fact_boost", "schema_repush"].includes(t.kind) &&
             !active && (t.status === "failed" || (t.progress && t.progress.failed > 0));
         if (retryable) {
             html += `<button type="button" class="btn btn-secondary btn-sm task-row-retry" data-retry="${t.id}" style="margin-top:6px;">

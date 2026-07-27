@@ -938,8 +938,8 @@ async function loadFeedOverview() {
                 <div class="stat-label">Image + alt coverage</div>
                 <div class="stat-label" style="color:var(--on-surface-secondary);">products fully imaged with alt text</div></div>
             <div class="stat-card"><div class="stat-value">${pct("review_signals")}%</div>
-                <div class="stat-label">With review data</div>
-                <div class="stat-label" style="color:var(--on-surface-secondary);">aggregateRating detected</div></div>`;
+                <div class="stat-label">With rating markup</div>
+                <div class="stat-label" style="color:var(--on-surface-secondary);">aggregateRating on live page</div></div>`;
         const chips = Object.keys(FEED_COMPONENT_LABELS)
             .map((c) => {
                 const avg = (cov[c] || {}).avg;
@@ -972,7 +972,7 @@ function feedChecklistCard(o) {
             <span class="material-symbols-rounded" style="color:var(--on-surface-secondary);">policy</span>
             <b>Eligibility &amp; policy</b>
             <span class="badge" style="background:var(--surface-dim);color:var(--on-surface);">restricted categories excluded</span>
-            ${noReviews ? '<span class="badge badge-error">no review data</span>' : ""}
+            ${noReviews ? '<span class="badge badge-error">no rating markup</span>' : ""}
             <span style="font-size:12px;color:var(--on-surface-secondary);margin-left:auto;">checklist + policy notes</span>
         </summary>
         <div style="padding:0 16px 16px;">
@@ -982,7 +982,7 @@ function feedChecklistCard(o) {
             </div>
             ${noReviews ? `<div style="display:flex;gap:10px;align-items:flex-start;background:var(--warning-light);border:1px solid var(--outline);border-radius:var(--radius-sm);padding:10px 12px;margin-bottom:12px;">
                 <span class="material-symbols-rounded" style="color:var(--warning);font-size:20px;">reviews</span>
-                <div style="font-size:12.5px;line-height:1.5;">No review data detected on any product. AI shopping ranks products with review stats higher — install a review app that writes <code>aggregateRating</code> JSON-LD (Judge.me, Loox, Okendo), then re-audit.</div></div>` : ""}
+                <div style="font-size:12.5px;line-height:1.5;">No rating markup detected on any product. AI shopping ranks products with review stats higher — if a review app is installed (Stamped, Bizrate, Judge.me), confirm it has published reviews and writes its rating metafields; otherwise install one, then re-audit.</div></div>` : ""}
             <div style="font-weight:600;font-size:12px;margin:12px 0 4px;">Agentic Storefront eligibility checklist <span style="font-weight:400;color:var(--on-surface-secondary);">— Shopify admin settings this app can't read, verify manually</span></div>
             <ol style="font-size:12.5px;line-height:1.5;padding-left:18px;margin:8px 0;">${items}</ol>
             <div style="font-weight:600;font-size:12px;margin:12px 0 4px;">Feed fields not yet audited (not in local sync)</div>

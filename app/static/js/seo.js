@@ -3230,28 +3230,34 @@ async function pushSchema(productId) {
 }
 
 async function batchGenerateSchemas() {
+    const storeId = parseInt(_getSeoStoreId());
+    if (!storeId) { showToast("Select a store first", "error"); return; }
     try {
-        showToast("Generating schemas for all products...", "info");
-        const resp = await apiRequest("/api/schema/batch/generate", { method: "POST", body: {} });
+        const resp = await apiRequest("/api/ai-seo/schema/repush", {
+            method: "POST",
+            body: { store_id: storeId, type: "all", ids: "all" },
+        });
         if (resp.ok) {
-            showToast(`Generated ${resp.generated}/${resp.total} schemas` + (resp.errors.length > 0 ? ` (${resp.errors.length} errors)` : ""), "success");
-            loadSchemaTab();
+            showToast("Schema regenerate + push started — progress in the background tasks panel", "success");
         }
     } catch (err) {
-        showToast(`Batch generate failed: ${err.message}`, "error");
+        showToast(`Batch schema job failed to start: ${err.message}`, "error");
     }
 }
 
 async function batchPushSchemas() {
+    const storeId = parseInt(_getSeoStoreId());
+    if (!storeId) { showToast("Select a store first", "error"); return; }
     try {
-        showToast("Pushing schemas to Shopify...", "info");
-        const resp = await apiRequest("/api/schema/batch/push", { method: "POST", body: {} });
+        const resp = await apiRequest("/api/ai-seo/schema/repush", {
+            method: "POST",
+            body: { store_id: storeId, type: "all", ids: "stale" },
+        });
         if (resp.ok) {
-            showToast(`Pushed ${resp.pushed}/${resp.total} schemas` + (resp.errors.length > 0 ? ` (${resp.errors.length} errors)` : ""), "success");
-            loadSchemaTab();
+            showToast("Push of pending schemas started — progress in the background tasks panel", "success");
         }
     } catch (err) {
-        showToast(`Batch push failed: ${err.message}`, "error");
+        showToast(`Batch schema job failed to start: ${err.message}`, "error");
     }
 }
 

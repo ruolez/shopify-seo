@@ -2978,7 +2978,7 @@ def seo_snippet_status():
             return jsonify({"installed": False})
 
         snippet_content = client.get_theme_asset(theme_id, "snippets/seo-fixes.liquid")
-        outdated = snippet_content is not None and "v2" not in snippet_content
+        outdated = snippet_content is not None and not any(v in snippet_content for v in ("v2", "v3", "v4"))
         return jsonify({"installed": True, "outdated": outdated})
     except Exception:
         return jsonify({"installed": False})

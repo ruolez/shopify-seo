@@ -162,8 +162,12 @@ def _review_signals(pushed_schema, live_schema_types, fixables):
     types = set(live_schema_types or [])
     if types & {"Review", "AggregateRating"}:
         return 100, "Review schema detected on the live page"
-    fixables.append("Install a review app and publish ratings (aggregateRating) — reviews are a primary AI-shopping trust signal")
-    return 0, "No review/rating data — AI shopping ranks reviewed products higher (install a review app)"
+    fixables.append(
+        "No rating markup on this product — if a review app is installed (Stamped, Bizrate, Judge.me), "
+        "make sure it has reviews for this product and writes its rating metafields; otherwise install one. "
+        "Reviews are a primary AI-shopping trust signal."
+    )
+    return 0, "No rating markup — AI shopping ranks reviewed products higher (needs review-app ratings for this product)"
 
 
 # Feed fields the sync doesn't capture yet — surfaced as informational only.

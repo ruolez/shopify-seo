@@ -300,7 +300,7 @@ def preview_home_page():
         return jsonify({"error": "Store not found"}), 404
     home = _get_or_create_home_page(store_id)
     home["slides"] = _normalize_slides(home.get("slides"))
-    html = render_carousel_body(dict(home), dict(store), include_schema_ld=False)
+    html = render_carousel_body(dict(home), dict(store))
     return jsonify({"html": html})
 
 

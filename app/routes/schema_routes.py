@@ -6,21 +6,20 @@ from flask import Blueprint, jsonify, request
 from app.auth import decrypt_value
 from app.database import db
 from app.services.schema_generator import (
-    generate_product_schema,
+    generate_product_enrichment,
     schema_to_script_tag,
-    validate_schema,
+    validate_enrichment,
 )
 from app.shopify_client import ShopifyClient
 
 logger = logging.getLogger(__name__)
 
+ENRICHMENT_METAFIELD_KEY = "schema_enrichment"
+
 
 def _spec_properties_for(product, include_metafields=True):
     """Verified store facts (variant options, pack size, metafield specs) for a product,
-    used as schema.org additionalProperty. Best-effort — never blocks schema generation.
-
-    include_metafields=False skips the Shopify metafield read (used by the synchronous
-    bulk generate to stay within the request timeout across the whole catalog)."""
+    used as schema.org additionalProperty. Best-effort — never blocks schema generation."""
     try:
         from app.ai_agent import _geo_product_facts
 
@@ -29,29 +28,15 @@ def _spec_properties_for(product, include_metafields=True):
         logger.warning("Spec-property fetch failed for product %s: %s", product.get("id"), e)
         return None
 
-def _apply_review_rating(product, client):
-    """Populate rating_value/rating_count from review-app metafields (reviews.rating /
-    reviews.rating_count — the Judge.me / Shopify review-app convention) so the schema
-    generator can emit a real aggregateRating. Best-effort; never fabricates."""
-    try:
-        rating = client.get_product_metafield(product["shopify_id"], "reviews", "rating")
-        count = client.get_product_metafield(product["shopify_id"], "reviews", "rating_count")
-        if not rating or not count:
-            return
-        value = (rating.get("value") or "").strip()
-        if value[:1] == "{":
-            value = ((json.loads(value) or {}).get("value") or "").strip()
-        if value and (count.get("value") or "").strip():
-            product["rating_value"] = value
-            product["rating_count"] = count["value"].strip()
-    except Exception as e:
-        logger.debug("Review rating fetch failed for product %s: %s", product.get("id"), e)
-
 
 schema_bp = Blueprint("schema", __name__)
 
 
 def generate_and_push_product_schema(product_id, client=None):
+    """Generate the enrichment payload for a product and push it to the
+    `seo.schema_enrichment` metafield. The theme snippet builds the full
+    Product/ProductGroup JSON-LD natively — offers, availability and ratings
+    are rendered fresh at request time, never baked in here."""
     with db.get_cursor() as cur:
         cur.execute(
             "SELECT sp.*, s.domain, s.access_token_enc, s.api_version "
@@ -64,9 +49,6 @@ def generate_and_push_product_schema(product_id, client=None):
         return
 
     product = dict(product)
-    store_domain = product["domain"]
-    if not store_domain.endswith(".myshopify.com"):
-        store_domain = f"{store_domain}.myshopify.com"
 
     if client is None:
         client = ShopifyClient(
@@ -74,11 +56,9 @@ def generate_and_push_product_schema(product_id, client=None):
             decrypt_value(product["access_token_enc"]),
             product["api_version"],
         )
-    _apply_review_rating(product, client)
 
-    org_settings = _get_org_settings(product["store_id"])
-    schema = generate_product_schema(product, store_domain, org_settings, _spec_properties_for(product))
-    is_valid, errors = validate_schema(schema)
+    enrichment = generate_product_enrichment(product, _spec_properties_for(product))
+    is_valid, errors = validate_enrichment(enrichment)
 
     with db.get_cursor() as cur:
         cur.execute("""
@@ -92,18 +72,17 @@ def generate_and_push_product_schema(product_id, client=None):
         """, (
             product["store_id"],
             product["shopify_id"],
-            json.dumps(schema),
+            json.dumps(enrichment),
             is_valid,
             json.dumps(errors) if errors else None,
         ))
 
     if not is_valid:
-        logger.warning("Schema invalid for product %s: %s", product_id, errors)
+        logger.warning("Enrichment invalid for product %s: %s", product_id, errors)
         return
 
-    schema_value = json.dumps(schema)
     client.set_product_metafield(
-        product["shopify_id"], "seo", "schema_json_ld", schema_value, "json"
+        product["shopify_id"], "seo", ENRICHMENT_METAFIELD_KEY, json.dumps(enrichment), "json"
     )
 
     with db.get_cursor() as cur:
@@ -160,7 +139,7 @@ def list_products_schema():
 def generate_schema(product_id):
     with db.get_cursor() as cur:
         cur.execute(
-            "SELECT sp.*, s.domain FROM synced_products sp JOIN stores s ON s.id = sp.store_id WHERE sp.id = %s",
+            "SELECT sp.* FROM synced_products sp WHERE sp.id = %s",
             (product_id,),
         )
         product = cur.fetchone()
@@ -169,13 +148,8 @@ def generate_schema(product_id):
         return jsonify({"error": "Product not found"}), 404
 
     product = dict(product)
-    store_domain = product["domain"]
-    if not store_domain.endswith(".myshopify.com"):
-        store_domain = f"{store_domain}.myshopify.com"
-
-    org_settings = _get_org_settings(product["store_id"])
-    schema = generate_product_schema(product, store_domain, org_settings, _spec_properties_for(product))
-    is_valid, errors = validate_schema(schema)
+    enrichment = generate_product_enrichment(product, _spec_properties_for(product))
+    is_valid, errors = validate_enrichment(enrichment)
 
     with db.get_cursor() as cur:
         cur.execute("""
@@ -189,7 +163,7 @@ def generate_schema(product_id):
         """, (
             product["store_id"],
             product["shopify_id"],
-            json.dumps(schema),
+            json.dumps(enrichment),
             is_valid,
             json.dumps(errors) if errors else None,
         ))
@@ -198,10 +172,11 @@ def generate_schema(product_id):
     return jsonify({
         "ok": True,
         "schema_id": row["id"],
-        "schema": schema,
+        "schema": enrichment,
         "is_valid": is_valid,
         "validation_errors": errors,
-        "script_tag": schema_to_script_tag(schema),
+        "script_tag": schema_to_script_tag(enrichment),
+        "note": "Enrichment payload only — offers, availability and ratings are rendered in-theme by ai-seo-schema.liquid.",
     })
 
 
@@ -284,7 +259,7 @@ def push_schema(product_id):
         client.set_product_metafield(
             product["shopify_id"],
             "seo",
-            "schema_json_ld",
+            ENRICHMENT_METAFIELD_KEY,
             schema_value,
             "json",
         )
@@ -302,124 +277,20 @@ def push_schema(product_id):
         return jsonify({"error": str(e)}), 500
 
 
+_BATCH_GONE_MESSAGE = (
+    "This synchronous endpoint was retired — use POST /api/ai-seo/schema/repush "
+    "(background batch with progress tracking) instead."
+)
+
+
 @schema_bp.route("/api/schema/batch/generate", methods=["POST"])
 def batch_generate():
-    data = request.get_json(silent=True) or {}
-    product_ids = data.get("product_ids", [])
-
-    if not product_ids:
-        with db.get_cursor() as cur:
-            cur.execute("SELECT id FROM synced_products ORDER BY id")
-            product_ids = [r["id"] for r in cur.fetchall()]
-
-    generated = 0
-    errors_list = []
-
-    for pid in product_ids:
-        try:
-            with db.get_cursor() as cur:
-                cur.execute(
-                    "SELECT sp.*, s.domain FROM synced_products sp JOIN stores s ON s.id = sp.store_id WHERE sp.id = %s",
-                    (pid,),
-                )
-                product = cur.fetchone()
-
-            if not product:
-                continue
-
-            product = dict(product)
-            store_domain = product["domain"]
-            if not store_domain.endswith(".myshopify.com"):
-                store_domain = f"{store_domain}.myshopify.com"
-
-            org_settings = _get_org_settings(product["store_id"])
-            # Skip the metafield read here — a full-catalog synchronous run would
-            # otherwise exceed the request timeout. The optimize flow keeps it.
-            schema = generate_product_schema(
-                product, store_domain, org_settings, _spec_properties_for(product, include_metafields=False)
-            )
-            is_valid, validation_errors = validate_schema(schema)
-
-            with db.get_cursor() as cur:
-                cur.execute("""
-                    INSERT INTO schema_markup (store_id, resource_id, resource_type, schema_type, schema_json, is_valid, validation_errors)
-                    VALUES (%s, %s, 'product', 'Product', %s, %s, %s)
-                    ON CONFLICT (store_id, resource_id, schema_type)
-                    DO UPDATE SET schema_json = EXCLUDED.schema_json, is_valid = EXCLUDED.is_valid,
-                                  validation_errors = EXCLUDED.validation_errors, updated_at = NOW(),
-                                  pushed_to_shopify = FALSE, pushed_at = NULL
-                """, (
-                    product["store_id"],
-                    product["shopify_id"],
-                    json.dumps(schema),
-                    is_valid,
-                    json.dumps(validation_errors) if validation_errors else None,
-                ))
-
-            generated += 1
-        except Exception as e:
-            errors_list.append({"product_id": pid, "error": str(e)})
-
-    return jsonify({
-        "ok": True,
-        "generated": generated,
-        "total": len(product_ids),
-        "errors": errors_list,
-    })
+    return jsonify({"error": _BATCH_GONE_MESSAGE}), 410
 
 
 @schema_bp.route("/api/schema/batch/push", methods=["POST"])
 def batch_push():
-    with db.get_cursor() as cur:
-        cur.execute("""
-            SELECT sm.*, sp.id as product_db_id, s.domain, s.access_token_enc, s.api_version
-            FROM schema_markup sm
-            JOIN synced_products sp ON sp.shopify_id = sm.resource_id AND sp.store_id = sm.store_id
-            JOIN stores s ON s.id = sm.store_id
-            WHERE sm.schema_type = 'Product' AND sm.is_valid = TRUE AND sm.pushed_to_shopify = FALSE
-        """)
-        rows = cur.fetchall()
-
-    pushed = 0
-    errors_list = []
-
-    for row in rows:
-        try:
-            schema_json = row["schema_json"]
-            if isinstance(schema_json, dict):
-                schema_value = json.dumps(schema_json)
-            else:
-                schema_value = schema_json
-
-            client = ShopifyClient(
-                row["domain"],
-                decrypt_value(row["access_token_enc"]),
-                row["api_version"],
-            )
-            client.set_product_metafield(
-                row["resource_id"],
-                "seo",
-                "schema_json_ld",
-                schema_value,
-                "json",
-            )
-
-            with db.get_cursor() as cur:
-                cur.execute("""
-                    UPDATE schema_markup SET pushed_to_shopify = TRUE, pushed_at = NOW()
-                    WHERE id = %s
-                """, (row["id"],))
-
-            pushed += 1
-        except Exception as e:
-            errors_list.append({"resource_id": row["resource_id"], "error": str(e)})
-
-    return jsonify({
-        "ok": True,
-        "pushed": pushed,
-        "total": len(rows),
-        "errors": errors_list,
-    })
+    return jsonify({"error": _BATCH_GONE_MESSAGE}), 410
 
 
 @schema_bp.route("/api/schema/stats", methods=["GET"])

@@ -84,10 +84,10 @@ _SECTION_TEMPLATE = """{% comment %} @@SECTION_MARKER@@ {% endcomment %}
   "headline": {{ article.title | truncate: 110, '' | json }},
   "datePublished": "{{ article.published_at | date: '%Y-%m-%dT%H:%M:%S%z' }}",
   "dateModified": "{% if dmod != blank %}{{ dmod | date: '%Y-%m-%dT%H:%M:%S%z' }}{% else %}{{ article.published_at | date: '%Y-%m-%dT%H:%M:%S%z' }}{% endif %}",
-  {% if article.image %}"image": ["{{ article.image | image_url: width: 1600 }}"],{% endif %}
+  {% if article.image %}"image": ["{{ article.image | image_url: width: 1600 | prepend: 'https:' }}"],{% endif %}
   {% if cat != blank %}"articleSection": {{ cat | json }},{% endif %}
-  "author": { "@type": "Organization", "name": "A2Z" },
-  "publisher": { "@type": "Organization", "name": @@PUBLISHER_NAME_JSON@@, "logo": { "@type": "ImageObject", "url": @@LOGO_URL_JSON@@ } },
+  "author": { "@id": "{{ shop.url }}/#organization" },
+  "publisher": { "@id": "{{ shop.url }}/#organization" },
   "mainEntityOfPage": { "@type": "WebPage", "@id": "{{ canonical_url }}" }
 }
 </script>

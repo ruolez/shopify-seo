@@ -12,6 +12,7 @@ import json
 import logging
 import re
 import threading
+import time
 from datetime import datetime, timezone
 
 import requests
@@ -23,6 +24,7 @@ from app.database import db
 from app.services.task_runner import spawn as spawn_task, sweep_stale_jobs
 from app.services import ai_seo_analyzer
 from app.services import indexnow_service
+from app.services import url_utils
 from app.services.serp_scraper import scrape_serp_pages
 from app.shopify_client import ShopifyClient
 
@@ -45,9 +47,7 @@ CRAWL_BATCH_SIZE = 100
 
 
 def _store_base_url(store):
-    host = (store.get("primary_domain") or store.get("domain") or "").strip()
-    host = host.replace("https://", "").replace("http://", "").rstrip("/")
-    return f"https://{host}" if host else None
+    return url_utils.store_base_url(store)
 
 
 def _item_url(base_url, resource_type, handle):
@@ -514,8 +514,9 @@ def _section_actions(store_id, pillars):
             review_covered = int(comps["review_signals"]["full_count"] or 0)
             if review_covered == 0:
                 row(high, "feed:reviews", "feed", "high", "reviews",
-                    "No review data on any product",
-                    "AI shopping ranks reviewed products higher — install a review app that writes aggregateRating.",
+                    "No rating markup on any product",
+                    "AI shopping ranks reviewed products higher — if a review app is installed (Stamped, Bizrate), "
+                    "confirm its rating metafields are populated; otherwise install one, then re-audit.",
                     href="/ai-seo?tab=feed&focus=eligibility")
             from app.services.feed_readiness_analyzer import UNSYNCED_SIGNALS  # noqa: F401 (import proximity)
             weak = [(c, int(v["avg"] or 0)) for c, v in comps.items()
@@ -1075,6 +1076,12 @@ def _push_and_rescore(store, resource_type, item, description_html, meta_title, 
         else:
             client.update_product(shopify_id, fields)
     if faqpage:
+        # Anchor the FAQPage into the page's entity graph — the metafield is
+        # replayed verbatim by the theme snippet, so @id must be set here.
+        page_url = _item_url(_store_base_url(store), resource_type, item.get("handle"))
+        if isinstance(faqpage, dict) and page_url:
+            faqpage.setdefault("@id", f"{page_url}#faq")
+            faqpage.setdefault("mainEntityOfPage", page_url)
         client.set_product_metafield(shopify_id, "seo", "faq_schema_json_ld", json.dumps(faqpage), "json")
         with db.get_cursor() as cur:
             cur.execute(
@@ -1108,16 +1115,15 @@ def _push_and_rescore(store, resource_type, item, description_html, meta_title, 
         "last_optimized_at": datetime.now(timezone.utc),
     }
 
-    # Also generate & push enriched Product / CollectionPage JSON-LD (seo.schema_json_ld) —
-    # the structured-data signal AI answer engines reward. Best-effort: a schema failure
-    # must not undo the content/meta/FAQ that already applied successfully.
+    # Also refresh the structured-data layer. Products get their enrichment
+    # metafield (seo.schema_enrichment) regenerated + pushed; collections only
+    # get their schema_markup record refreshed — the theme snippet renders
+    # CollectionPage JSON-LD natively, so there is nothing to push. Best-effort:
+    # a schema failure must not undo the content/meta/FAQ that already applied.
     try:
-        base = store["domain"] if store["domain"].endswith(".myshopify.com") else f"{store['domain']}.myshopify.com"
         if resource_type == "collection":
-            from app.routes.schema_routes import _get_org_settings
             from app.services.schema_generator import generate_collection_schema
-            col_schema = generate_collection_schema(updated_item, base, _get_org_settings(store_id))
-            client.set_product_metafield(shopify_id, "seo", "schema_json_ld", json.dumps(col_schema), "json")
+            col_schema = generate_collection_schema(updated_item, url_utils.store_host(store))
             with db.get_cursor() as cur:
                 cur.execute(
                     """
@@ -1132,7 +1138,7 @@ def _push_and_rescore(store, resource_type, item, description_html, meta_title, 
             from app.routes.schema_routes import generate_and_push_product_schema
             generate_and_push_product_schema(resource_id, client)
     except Exception as e:
-        logger.warning("Schema JSON-LD push failed for %s %s: %s", resource_type, resource_id, e)
+        logger.warning("Schema refresh failed for %s %s: %s", resource_type, resource_id, e)
 
     return _rescore_item(
         store_id,
@@ -1552,6 +1558,172 @@ def facts_batch():
     return jsonify({"ok": True, "batch_id": batch_id, "total": len(ids)}), 201
 
 
+# ── Schema regenerate + re-push (no LLM — enrichment metafields only) ──
+
+
+def _execute_schema_repush_batch(batch_id, store_id, resource_type, resource_ids):
+    from app.routes.schema_routes import _spec_properties_for
+    from app.services.schema_generator import (
+        generate_collection_schema,
+        generate_product_enrichment,
+        validate_enrichment,
+    )
+
+    with db.get_cursor() as cur:
+        cur.execute("UPDATE bulk_tasks SET status = 'running' WHERE id = %s", (batch_id,))
+        cur.execute("SELECT * FROM stores WHERE id = %s", (store_id,))
+        store = cur.fetchone()
+    if not store:
+        with db.get_cursor() as cur:
+            cur.execute("UPDATE bulk_tasks SET status = 'failed', completed_at = NOW() WHERE id = %s", (batch_id,))
+        return
+    store = dict(store)
+    client = ShopifyClient(store["domain"], decrypt_value(store["access_token_enc"]), store["api_version"])
+    host = url_utils.store_host(store)
+    is_collection = resource_type == "collection"
+    table = "synced_collections" if is_collection else "synced_products"
+    item_col = "collection_id" if is_collection else "product_id"
+    schema_type = "CollectionPage" if is_collection else "Product"
+
+    completed = failed = 0
+    for rid in resource_ids:
+        with db.get_cursor() as cur:
+            cur.execute(f"SELECT * FROM {table} WHERE id = %s AND store_id = %s", (rid, int(store_id)))
+            item = cur.fetchone()
+        if not item:
+            failed += 1
+            with db.get_cursor() as cur:
+                cur.execute("UPDATE bulk_tasks SET completed = %s, failed = %s WHERE id = %s", (completed, failed, batch_id))
+            continue
+        item = dict(item)
+        with db.get_cursor() as cur:
+            cur.execute("UPDATE bulk_tasks SET current_product_title = %s WHERE id = %s", (item.get("title"), batch_id))
+        try:
+            if is_collection:
+                payload = generate_collection_schema(item, host)
+                is_valid, errors = True, []
+            else:
+                payload = generate_product_enrichment(item, _spec_properties_for(item))
+                is_valid, errors = validate_enrichment(payload)
+
+            with db.get_cursor() as cur:
+                cur.execute(
+                    "SELECT schema_json, pushed_to_shopify FROM schema_markup "
+                    "WHERE store_id = %s AND resource_id = %s AND schema_type = %s",
+                    (int(store_id), item["shopify_id"], schema_type),
+                )
+                existing = cur.fetchone()
+            unchanged = (
+                existing
+                and existing["pushed_to_shopify"]
+                and json.dumps(existing["schema_json"], sort_keys=True) == json.dumps(payload, sort_keys=True)
+            )
+
+            if not unchanged:
+                with db.get_cursor() as cur:
+                    cur.execute(
+                        """
+                        INSERT INTO schema_markup (store_id, resource_id, resource_type, schema_type, schema_json, is_valid, validation_errors)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (store_id, resource_id, schema_type)
+                        DO UPDATE SET schema_json = EXCLUDED.schema_json, is_valid = EXCLUDED.is_valid,
+                                      validation_errors = EXCLUDED.validation_errors, updated_at = NOW(),
+                                      pushed_to_shopify = FALSE, pushed_at = NULL
+                        """,
+                        (int(store_id), item["shopify_id"], resource_type, schema_type,
+                         json.dumps(payload), is_valid, json.dumps(errors) if errors else None),
+                    )
+                if not is_valid:
+                    raise ValueError(f"Enrichment validation failed: {errors}")
+                # Collections have nothing to push — the theme snippet renders
+                # CollectionPage natively; the DB record alone carries scoring credit.
+                if not is_collection:
+                    client.set_product_metafield(
+                        item["shopify_id"], "seo", "schema_enrichment", json.dumps(payload), "json"
+                    )
+                with db.get_cursor() as cur:
+                    cur.execute(
+                        "UPDATE schema_markup SET pushed_to_shopify = TRUE, pushed_at = NOW() "
+                        "WHERE store_id = %s AND resource_id = %s AND schema_type = %s",
+                        (int(store_id), item["shopify_id"], schema_type),
+                    )
+                time.sleep(0.3)
+
+            completed += 1
+            with db.get_cursor() as cur:
+                cur.execute(
+                    f"UPDATE bulk_task_items SET status = 'completed', ai_result = %s, completed_at = NOW() "
+                    f"WHERE bulk_task_id = %s AND {item_col} = %s",
+                    (json.dumps({"pushed": not unchanged, "unchanged": bool(unchanged)}), batch_id, rid),
+                )
+        except Exception as e:
+            failed += 1
+            logger.exception("Schema repush item %s failed: %s", rid, e)
+            with db.get_cursor() as cur:
+                cur.execute(
+                    f"UPDATE bulk_task_items SET status = 'failed', error = %s, completed_at = NOW() "
+                    f"WHERE bulk_task_id = %s AND {item_col} = %s",
+                    (str(e), batch_id, rid),
+                )
+        with db.get_cursor() as cur:
+            cur.execute("UPDATE bulk_tasks SET completed = %s, failed = %s WHERE id = %s", (completed, failed, batch_id))
+
+    with db.get_cursor() as cur:
+        cur.execute("UPDATE bulk_tasks SET status = 'completed', completed_at = NOW(), current_product_title = NULL WHERE id = %s", (batch_id,))
+
+
+def _schema_repush_candidate_ids(store_id, resource_type, ids):
+    """Resolve the ids selector for a repush batch: 'all' → every synced item,
+    'stale' → items whose schema record is missing or not pushed."""
+    is_collection = resource_type == "collection"
+    table = "synced_collections" if is_collection else "synced_products"
+    schema_type = "CollectionPage" if is_collection else "Product"
+    with db.get_cursor() as cur:
+        if ids == "stale":
+            cur.execute(
+                f"""SELECT t.id FROM {table} t
+                    LEFT JOIN schema_markup sm ON sm.store_id = t.store_id
+                        AND sm.resource_id = t.shopify_id AND sm.schema_type = %s
+                    WHERE t.store_id = %s AND (sm.id IS NULL OR sm.pushed_to_shopify = FALSE)
+                    ORDER BY t.id""",
+                (schema_type, int(store_id)),
+            )
+        else:
+            cur.execute(f"SELECT id FROM {table} WHERE store_id = %s ORDER BY id", (int(store_id),))
+        return [r["id"] for r in cur.fetchall()]
+
+
+@ai_seo_bp.route("/api/ai-seo/schema/repush", methods=["POST"])
+def schema_repush():
+    """Regenerate + push schema enrichment for products (and refresh collection
+    schema records) as a tracked background batch. No LLM calls involved."""
+    _sweep_stale_jobs()
+    data = request.get_json(silent=True) or {}
+    store_id = data.get("store_id")
+    rtype = data.get("type", "product")
+    ids = data.get("ids", "all")
+    if not store_id:
+        return jsonify({"error": "store_id is required"}), 400
+    if rtype not in ("product", "collection", "all"):
+        return jsonify({"error": "type must be product, collection or all"}), 400
+
+    batches = []
+    for resource_type in (("product", "collection") if rtype == "all" else (rtype,)):
+        resolved = (
+            _schema_repush_candidate_ids(store_id, resource_type, ids)
+            if ids in ("all", "stale", None, [])
+            else [int(i) for i in ids]
+        )
+        if not resolved:
+            continue
+        batch_id = _spawn_ai_seo_batch(int(store_id), "schema_repush", resource_type, resolved)
+        batches.append({"batch_id": batch_id, "resource_type": resource_type, "total": len(resolved)})
+
+    if not batches:
+        return jsonify({"ok": True, "batches": [], "message": "Nothing to repush"}), 200
+    return jsonify({"ok": True, "batches": batches}), 201
+
+
 @ai_seo_bp.route("/api/ai-seo/batches", methods=["GET"])
 def list_batches():
     """Recent AI SEO batch jobs (optimize / fact-boost) with derived stats."""
@@ -1621,7 +1793,10 @@ def _spawn_ai_seo_batch(store_id, kind, resource_type, ids):
         batch_id = cur.fetchone()["id"]
         for rid in ids:
             cur.execute(f"INSERT INTO bulk_task_items (bulk_task_id, {item_col}) VALUES (%s, %s)", (batch_id, rid))
-    runner = _execute_fact_batch if kind == "fact_boost" else _execute_ai_seo_batch
+    runner = {
+        "fact_boost": _execute_fact_batch,
+        "schema_repush": _execute_schema_repush_batch,
+    }.get(kind, _execute_ai_seo_batch)
     spawn_task("bulk_tasks", batch_id, runner, batch_id, int(store_id), resource_type, ids)
     return batch_id
 
@@ -2483,6 +2658,7 @@ def aeo_schema_apply():
             json.dumps({
                 "types": _SITE_SCHEMA_TYPES,
                 "renders_item_schema": True,
+                "snippet_version": gen.SNIPPET_VERSION,
                 "snippet_sha": hashlib.sha256(snippet.encode()).hexdigest(),
             }),
             "published",

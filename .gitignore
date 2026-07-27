@@ -14,3 +14,7 @@ build/
 *.egg
 .DS_Store
 node_modules/
+data/reports/
+data/theme_backups/
+data/theme_sweep/
+data/*.liquid

@@ -365,6 +365,8 @@ class ShopifyClient:
             product_input["descriptionHtml"] = fields["description_html"]
         if "tags" in fields:
             product_input["tags"] = self._normalize_tags(fields["tags"])
+        if "product_type" in fields:
+            product_input["productType"] = fields["product_type"]
 
         seo = {}
         if "meta_title" in fields:
@@ -561,6 +563,81 @@ class ShopifyClient:
         if errors:
             raise Exception(f"Shopify metafieldsSet error: {errors[0].get('message', str(errors))}")
         return result.get("metafields", [])
+
+    def delete_metafields(self, triples):
+        """Bulk-delete metafields by (owner_gid, namespace, key) triples.
+        Owner-agnostic — works for Product, Collection and Shop GIDs. Chunks of
+        25 per mutation; raises on userErrors; returns deleted identifiers."""
+        mutation = """
+        mutation ($metafields: [MetafieldIdentifierInput!]!) {
+          metafieldsDelete(metafields: $metafields) {
+            deletedMetafields { ownerId namespace key }
+            userErrors { field message }
+          }
+        }
+        """
+        deleted = []
+        triples = list(triples)
+        for i in range(0, len(triples), 25):
+            chunk = [
+                {"ownerId": owner, "namespace": ns, "key": key}
+                for owner, ns, key in triples[i : i + 25]
+            ]
+            data = self._graphql(mutation, {"metafields": chunk})
+            result = data.get("metafieldsDelete", {})
+            errors = result.get("userErrors", [])
+            if errors:
+                raise Exception(f"Shopify metafieldsDelete error: {errors[0].get('message', str(errors))}")
+            deleted.extend(result.get("deletedMetafields") or [])
+        return deleted
+
+    def iter_products_metafields(self, namespace, first=100, mf_first=10):
+        """Yield {shopify_id, handle, title, metafields:[{id,namespace,key,value,type}]}
+        for every product, reading only the given metafield namespace — one
+        paginated query instead of per-product round-trips."""
+        query = """
+        query ($first: Int!, $cursor: String, $ns: String!, $mfFirst: Int!) {
+          products(first: $first, after: $cursor) {
+            pageInfo { hasNextPage endCursor }
+            edges {
+              node {
+                id
+                handle
+                title
+                metafields(first: $mfFirst, namespace: $ns) {
+                  edges { node { id namespace key value type } }
+                }
+              }
+            }
+          }
+        }
+        """
+        cursor = None
+        while True:
+            data = self._graphql(
+                query, {"first": first, "cursor": cursor, "ns": namespace, "mfFirst": mf_first}
+            )
+            products = data.get("products") or {}
+            for edge in products.get("edges", []):
+                node = edge.get("node") or {}
+                yield {
+                    "shopify_id": node.get("id"),
+                    "handle": node.get("handle"),
+                    "title": node.get("title"),
+                    "metafields": [
+                        m.get("node")
+                        for m in (node.get("metafields") or {}).get("edges", [])
+                        if m.get("node")
+                    ],
+                }
+            page = products.get("pageInfo") or {}
+            if not page.get("hasNextPage"):
+                break
+            cursor = page.get("endCursor")
+
+    def get_shop_id(self):
+        data = self._graphql("{ shop { id } }")
+        return (data.get("shop") or {}).get("id")
 
     def get_publications(self):
         # catalog.title is only set for catalog-backed publications (markets/B2B);

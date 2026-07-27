@@ -994,6 +994,7 @@ BULK_TASK_META = {
     "collection_images": ("Collection Image Generation", "/seo"),
     "fact_boost": ("Fact Boost", "/ai-seo"),
     "geo_optimize": ("GEO Optimization", "/ai-seo"),
+    "schema_repush": ("Schema Regenerate + Push", "/ai-seo"),
     "generate_collections": ("Collection Generation", "/seo"),
     "generate_taxonomy_collections": ("Taxonomy Collection Generation", "/seo"),
     "placeholder_image": ("Placeholder Image Generation", "/images"),
