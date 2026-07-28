@@ -22,11 +22,84 @@ def image_manager_page():
     return render_template("image_manager.html")
 
 
+_LIVE_MEDIA_QUERY = """
+query ($id: ID!) {
+  product(id: $id) {
+    media(first: 50) {
+      edges { node { ... on MediaImage { id alt preview { image { url } } } } }
+    }
+  }
+}
+"""
+
+
+def _refresh_images_from_shopify(store_id, limit=30):
+    """Re-pull live media for products whose mirror says no images (or that
+    carry a placeholder) so a re-scan reflects Shopify reality — images added
+    in the Shopify admin are otherwise invisible until the next full sync.
+    Returns the number of products whose mirror changed."""
+    with db.get_cursor() as cur:
+        cur.execute(
+            """SELECT sp.id, sp.shopify_id, sp.images
+               FROM synced_products sp
+               LEFT JOIN placeholder_images pi ON pi.product_id = sp.id
+               WHERE sp.store_id = %s AND sp.status = 'ACTIVE'
+                 AND (sp.images IS NULL OR sp.images::text IN ('[]', 'null') OR pi.id IS NOT NULL)
+               LIMIT %s""",
+            (store_id, limit),
+        )
+        candidates = cur.fetchall()
+        cur.execute(
+            "SELECT domain, access_token_enc, api_version FROM stores WHERE id = %s",
+            (store_id,),
+        )
+        store = cur.fetchone()
+    if not candidates or not store:
+        return 0
+
+    client = ShopifyClient(
+        store["domain"], decrypt_value(store["access_token_enc"]), store["api_version"]
+    )
+    changed = 0
+    for c in candidates:
+        try:
+            data = client._graphql(_LIVE_MEDIA_QUERY, {"id": c["shopify_id"]})
+            edges = (((data or {}).get("product") or {}).get("media") or {}).get("edges") or []
+            live_images = [
+                {
+                    "media_id": m["node"].get("id") or "",
+                    "url": ((m["node"].get("preview") or {}).get("image") or {}).get("url", ""),
+                    "alt": m["node"].get("alt") or "",
+                }
+                for m in edges
+                if m.get("node", {}).get("id")
+            ]
+            mirror = c["images"] or []
+            if isinstance(mirror, str):
+                mirror = json.loads(mirror)
+            if {i.get("media_id") for i in live_images} != {i.get("media_id") for i in mirror}:
+                with db.get_cursor() as cur:
+                    cur.execute(
+                        "UPDATE synced_products SET images = %s WHERE id = %s",
+                        (json.dumps(live_images), c["id"]),
+                    )
+                from app.services.analysis_refresh import refresh_item_analysis
+                refresh_item_analysis(store_id, "product", c["id"])
+                changed += 1
+        except Exception:
+            logger.warning("Live image refresh failed for product %s", c["id"])
+    return changed
+
+
 @image_bp.route("/api/images/scan", methods=["GET"])
 def scan_missing_images():
     store_id = request.args.get("store_id")
     if not store_id:
         return jsonify({"error": "store_id is required"}), 400
+
+    refreshed = 0
+    if request.args.get("refresh"):
+        refreshed = _refresh_images_from_shopify(store_id)
 
     with db.get_cursor() as cur:
         cur.execute(
@@ -103,6 +176,7 @@ def scan_missing_images():
 
     return jsonify({
         "products": results,
+        "refreshed_from_shopify": refreshed,
         "stats": {
             "total_active": total_active,
             "missing_images": missing_count,
@@ -308,6 +382,12 @@ def _execute_bulk_upload(bulk_task_id):
                     (json.dumps(images), product_id),
                 )
 
+            # The live schema picks the image up automatically (v2 renders
+            # from product media) — only the stored analysis needs refreshing
+            # so the "schema missing product image" issue clears.
+            from app.services.analysis_refresh import refresh_item_analysis
+            refresh_item_analysis(item["store_id"], "product", product_id)
+
             with db.get_cursor() as cur:
                 cur.execute(
                     "UPDATE bulk_task_items SET status = 'completed', ai_result = %s, completed_at = NOW() WHERE id = %s",
@@ -463,6 +543,9 @@ def _execute_bulk_replace(bulk_task_id):
                     "UPDATE synced_products SET images = %s WHERE id = %s",
                     (json.dumps(images), product_id),
                 )
+
+            from app.services.analysis_refresh import refresh_item_analysis
+            refresh_item_analysis(item["store_id"], "product", product_id)
 
             with db.get_cursor() as cur:
                 cur.execute(

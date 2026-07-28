@@ -71,16 +71,21 @@ function selectImgStore(storeId) {
     loadImgStores();
 }
 
-async function scanMissingImages() {
+async function scanMissingImages(liveRefresh) {
     const resultsContainer = document.getElementById("img-scan-results");
     if (!resultsContainer) return;
-    resultsContainer.innerHTML = '<div class="loading-spinner"><div class="spinner"></div><p>Scanning for products missing images...</p></div>';
+    resultsContainer.innerHTML = `<div class="loading-spinner"><div class="spinner"></div><p>${liveRefresh ? "Checking Shopify for image changes..." : "Scanning for products missing images..."}</p></div>`;
 
     try {
-        const data = await apiRequest(`/api/images/scan?store_id=${imgStoreFilter}`);
+        const data = await apiRequest(`/api/images/scan?store_id=${imgStoreFilter}${liveRefresh ? "&refresh=1" : ""}`);
         imgProducts = data.products;
         imgLastStats = data.stats;
         renderImgResults(resultsContainer, data);
+        if (liveRefresh) {
+            showToast(data.refreshed_from_shopify
+                ? `Updated ${data.refreshed_from_shopify} product(s) from Shopify`
+                : "Checked Shopify — no image changes found", "success");
+        }
     } catch (err) {
         resultsContainer.innerHTML = `<div class="empty-state"><p>${escapeHtml(err.message)}</p></div>`;
     }
@@ -139,7 +144,7 @@ function renderImgResults(container, data) {
         html += `<button class="filter-chip" onclick="clearImgStatusFilter()" style="border-style: dashed;">Clear filter</button>`;
     }
 
-    html += `<button class="btn btn-secondary btn-sm" onclick="scanMissingImages()" style="margin-left: auto;">
+    html += `<button class="btn btn-secondary btn-sm" onclick="scanMissingImages(true)" style="margin-left: auto;" title="Re-checks Shopify for image changes on imageless/placeholder products">
         <span class="material-symbols-rounded">refresh</span> Re-scan
     </button>`;
     html += '</div>';
