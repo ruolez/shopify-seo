@@ -701,6 +701,7 @@ def generate_content(store_id, gap_id, selected_title, content_type):
 
 def publish_content(store_id, gap_id, content_data):
     from app.auth import decrypt_value
+    from app.services.ai_output_guard import guard_shopify_fields
     from app.shopify_client import ShopifyClient
 
     gap = get_gap(store_id, gap_id)
@@ -709,9 +710,14 @@ def publish_content(store_id, gap_id, content_data):
 
     content_type = content_data.get("content_type", "collection")
     title = content_data.get("title", "")
-    body_html = content_data.get("body_html", "")
-    meta_title = content_data.get("meta_title", "")
-    meta_description = content_data.get("meta_description", "")
+    guarded = guard_shopify_fields({
+        "body_html": content_data.get("body_html", ""),
+        "meta_title": content_data.get("meta_title", ""),
+        "meta_description": content_data.get("meta_description", ""),
+    })
+    body_html = guarded["body_html"]
+    meta_title = guarded["meta_title"]
+    meta_description = guarded["meta_description"]
     tags = content_data.get("tags", [])
     slug = content_data.get("slug", "")
     generate_image = content_data.get("generate_image", False)
@@ -958,6 +964,30 @@ def optimize_existing_page(store_id, gap_id, override_keyword=None, override_vol
         seo_result = analyze_collection_seo(dict(item))
         seo_score = seo_result["score"]
 
+    # Resolver guard: never retarget a page onto a keyword another page owns,
+    # and never let the gap keyword displace this page's resolved primary.
+    resolved_primary = ""
+    try:
+        from app.services.keyword_resolver import _norm, get_or_refresh_resolution, get_owned_primary_keywords
+
+        resolution = get_or_refresh_resolution(store_id, item_type, item_id)
+        rp = (resolution or {}).get("primary")
+        if rp and rp.get("keyword"):
+            resolved_primary = rp["keyword"]
+        gap_kw = _norm(gap["keyword"])
+        if gap_kw and gap_kw != _norm(resolved_primary):
+            owner = get_owned_primary_keywords(store_id, exclude=(item_type, item_id)).get(gap_kw)
+            if owner:
+                raise ValueError(
+                    f'"{gap["keyword"]}" is already the primary keyword of another page '
+                    f'({owner["item_type"]} #{owner["item_id"]}). Optimizing this page for it '
+                    f"would cannibalize — target it on its owning page or pick a variation."
+                )
+    except ValueError:
+        raise
+    except Exception:
+        logger.warning("Content-gap resolver guard failed for %s %s", item_type, item_id)
+
     rankings_text = "\n".join([
         f"  - \"{r['keyword']}\" — pos {r['position']}, {r.get('impressions', 0)} impr, {r.get('clicks', 0)} clicks ({r['source']})"
         for r in current_rankings[:20]
@@ -987,7 +1017,10 @@ def optimize_existing_page(store_id, gap_id, override_keyword=None, override_vol
         f"- SEO Score: {seo_score}/100\n\n"
         f"CURRENT RANKINGS (keywords this page ranks for):\n{rankings_text}\n\n"
         f"PROTECTED KEYWORDS (top 10, do NOT weaken): {protected_text}\n\n"
-        f"NEW TARGET KEYWORD: \"{gap['keyword']}\"\n"
+        + (f"RESOLVED PRIMARY KEYWORD (this page's strategic target — it stays the primary; "
+           f"the new keyword below is ADDED as a secondary, never a replacement): \"{resolved_primary}\"\n\n"
+           if resolved_primary else "")
+        + f"NEW TARGET KEYWORD: \"{gap['keyword']}\"\n"
         f"- Monthly Search Volume: {gap.get('search_volume', 0)}\n"
         f"- Search Intent: {gap.get('intent', 'commercial')}\n"
         f"- Competition: {gap.get('competition', 'unknown')}\n\n"
@@ -1039,6 +1072,7 @@ def optimize_existing_page(store_id, gap_id, override_keyword=None, override_vol
 
 def apply_gap_optimization(store_id, gap_id, item_type, item_id, changes):
     from app.auth import decrypt_value
+    from app.services.ai_output_guard import guard_shopify_fields
     from app.shopify_client import ShopifyClient
 
     with db.get_cursor() as cur:
@@ -1066,6 +1100,8 @@ def apply_gap_optimization(store_id, gap_id, item_type, item_id, changes):
     if changes.get("new_description_html"):
         fields["description_html"] = changes["new_description_html"]
 
+    guard_shopify_fields(fields)
+
     if fields:
         if item_type == "product":
             client.update_product(item["shopify_id"], fields)
@@ -1073,15 +1109,18 @@ def apply_gap_optimization(store_id, gap_id, item_type, item_id, changes):
             client.update_collection(item["shopify_id"], fields)
 
     with db.get_cursor() as cur:
-        if changes.get("new_title"):
-            cur.execute(f"UPDATE {table} SET title = %s WHERE id = %s", (changes["new_title"], item_id))
-        if changes.get("new_meta_title"):
-            cur.execute(f"UPDATE {table} SET meta_title = %s WHERE id = %s", (changes["new_meta_title"], item_id))
-        if changes.get("new_meta_description"):
-            cur.execute(f"UPDATE {table} SET meta_description = %s WHERE id = %s", (changes["new_meta_description"], item_id))
-        if changes.get("new_description_html"):
-            cur.execute(f"UPDATE {table} SET description = %s WHERE id = %s", (changes["new_description_html"], item_id))
+        if fields.get("title"):
+            cur.execute(f"UPDATE {table} SET title = %s WHERE id = %s", (fields["title"], item_id))
+        if fields.get("meta_title"):
+            cur.execute(f"UPDATE {table} SET meta_title = %s WHERE id = %s", (fields["meta_title"], item_id))
+        if fields.get("meta_description"):
+            cur.execute(f"UPDATE {table} SET meta_description = %s WHERE id = %s", (fields["meta_description"], item_id))
+        if fields.get("description_html"):
+            cur.execute(f"UPDATE {table} SET description = %s WHERE id = %s", (fields["description_html"], item_id))
         cur.execute(f"UPDATE {table} SET last_optimized_at = NOW() WHERE id = %s", (item_id,))
         cur.execute("UPDATE content_gaps SET status = 'published', updated_at = NOW() WHERE id = %s AND store_id = %s", (gap_id, store_id))
+
+    from app.services.analysis_refresh import refresh_item_analysis
+    refresh_item_analysis(store_id, item_type, item_id)
 
     return {"ok": True, "updated_fields": list(fields.keys())}

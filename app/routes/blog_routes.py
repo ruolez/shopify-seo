@@ -9,6 +9,7 @@ from flask import Blueprint, jsonify, render_template, request
 
 from app.auth import decrypt_value
 from app.database import db
+from app.services.ai_output_guard import guard_shopify_fields
 from app.services.blog_seo_analyzer import analyze_article_seo
 from app.shopify_client import ShopifyClient
 
@@ -391,6 +392,7 @@ def apply_article(article_id):
         if key in data:
             fields[key] = data[key]
 
+    guard_shopify_fields(fields)
     client.update_article(article["shopify_id"], fields)
 
     update_parts = []
@@ -747,6 +749,7 @@ def bulk_optimize_articles():
                                 if result.get("optimized_summary"):
                                     fields["summary"] = result["optimized_summary"]
                                 if fields:
+                                    guard_shopify_fields(fields)
                                     client.update_article(item["article_shopify_id"], fields)
                                     apply_result = {"applied_fields": list(fields.keys())}
 
@@ -1421,6 +1424,7 @@ def _wizard_step_publish(session, store, client, is_published=True):
         "meta_description": generated.get("meta_description", ""),
         "is_published": is_published,
     }
+    guard_shopify_fields(fields)
 
     handle = (generated.get("handle") or "").strip()
     if handle:
@@ -1528,6 +1532,24 @@ def wizard_start():
     if not store_id or not topic:
         return jsonify({"error": "store_id and topic are required"}), 400
 
+    # Money-page keyword guard: a blog post whose primary keyword is a
+    # product/collection's resolved primary would cannibalize it.
+    keyword_warning = None
+    try:
+        from app.services.keyword_resolver import _norm, get_owned_primary_keywords
+
+        primary = _norm(keywords[0]) if keywords else ""
+        if primary:
+            owner = get_owned_primary_keywords(store_id).get(primary)
+            if owner:
+                keyword_warning = (
+                    f'"{keywords[0]}" is the primary keyword of a {owner["item_type"]} page in your '
+                    f"keyword strategy — a blog post targeting it would compete with your own money "
+                    f"page. Consider an informational long-tail variation instead."
+                )
+    except Exception:
+        pass
+
     with db.get_cursor() as cur:
         cur.execute(
             """INSERT INTO article_wizard_sessions
@@ -1537,7 +1559,10 @@ def wizard_start():
         )
         session_id = cur.fetchone()["id"]
 
-    return jsonify({"session_id": session_id})
+    resp = {"session_id": session_id}
+    if keyword_warning:
+        resp["keyword_warning"] = keyword_warning
+    return jsonify(resp)
 
 
 @blog_bp.route("/api/blog/wizard/<int:session_id>", methods=["GET"])

@@ -52,6 +52,21 @@ def clamp_meta_description(text):
     return _clamp(text, MAX_META_DESCRIPTION)
 
 
+def guard_shopify_fields(fields):
+    """Clamp meta lengths and sanitize AI-authored HTML in a Shopify field
+    dict (in place). Safe on partial dicts — only touches present keys."""
+    for key in ("meta_title", "seo_title"):
+        if fields.get(key):
+            fields[key] = clamp_meta_title(fields[key])
+    for key in ("meta_description", "seo_description"):
+        if fields.get(key):
+            fields[key] = clamp_meta_description(fields[key])
+    for key in ("description_html", "body_html", "body"):
+        if fields.get(key):
+            fields[key] = sanitize_html(fields[key])
+    return fields
+
+
 def validate_injected_html(original_html, new_html, expected_hrefs=None, min_length_ratio=0.8):
     """Check that an AI-rewritten HTML body is a plausible edit of the original.
 

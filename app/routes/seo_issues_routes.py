@@ -90,16 +90,16 @@ ISSUE_DEFS = {
         "fix_fields": ["image_alt"], "item_types": ("product",),
     },
     "schema_missing": {
-        "label": "Product schema not pushed",
+        "label": "Schema enrichment not pushed",
         "severity": "med", "source": "content", "fixable": False,
         "fix_fields": [], "item_types": ("product",),
         "action_label": "Fix in Schema", "action_href": "/seo?tab=schema",
     },
     "schema_stale": {
-        "label": "Pushed schema missing image",
+        "label": "Schema missing product image",
         "severity": "med", "source": "content", "fixable": False,
         "fix_fields": [], "item_types": ("product",),
-        "action_label": "Fix in Schema", "action_href": "/seo?tab=schema",
+        "action_label": "Fix in Images", "action_href": "/images",
     },
     "meta_title_has_keyword": {
         "label": "Keyword missing from meta title",
@@ -136,11 +136,9 @@ ISSUE_DEFS = {
         "severity": "low", "source": "keyword", "fixable": True,
         "fix_fields": ["image_alt"], "item_types": ("product",),
     },
-    "url_has_keyword": {
-        "label": "Keyword missing from URL",
-        "severity": "low", "source": "keyword", "fixable": False,
-        "fix_fields": [], "item_types": ("product", "collection"),
-    },
+    # url_has_keyword is deliberately absent: changing handles needs redirects,
+    # so the check is informational-only — it stays in the item modal's Checks
+    # tab but would be pure noise in the store-wide issue list.
     "collection_image_missing": {
         "label": "No collection image",
         "severity": "low", "source": "content", "fixable": False,
@@ -156,7 +154,10 @@ def _word_count(html):
 
 
 def _live_issues_for_product(p, thresholds):
-    """Map of issue_key -> detail for one product row (content checks only)."""
+    """Map of issue_key -> detail for one product row (content checks only).
+
+    Length/word-count checks flag only below the 'acceptable' band — an
+    acceptable-but-not-ideal length is a polish opportunity, not an issue."""
     issues = {}
 
     md = p.get("meta_description") or ""
@@ -164,12 +165,12 @@ def _live_issues_for_product(p, thresholds):
         issues["meta_description_missing"] = "No meta description set"
     else:
         score, detail = score_length(len(md), thresholds["meta_description"], "meta description")
-        if score < 100:
+        if score < 60:
             issues["meta_description_length"] = detail
 
     effective_title = p.get("meta_title") or p.get("title") or ""
     score, detail = score_length(len(effective_title), thresholds["meta_title"], "meta title")
-    if score < 100:
+    if score < 60:
         issues["meta_title_length"] = detail
 
     words = _word_count(p.get("description"))
@@ -177,7 +178,7 @@ def _live_issues_for_product(p, thresholds):
         issues["description_missing"] = "No description"
     else:
         score, detail = score_description_words(words, thresholds["description_words"], "product")
-        if score < 100:
+        if score < 70:
             issues["description_thin"] = detail
 
     images = p.get("images") or []
@@ -201,12 +202,12 @@ def _live_issues_for_collection(c, thresholds):
         issues["meta_description_missing"] = "No meta description set"
     else:
         score, detail = score_length(len(md), thresholds["meta_description"], "meta description")
-        if score < 100:
+        if score < 60:
             issues["meta_description_length"] = detail
 
     effective_title = c.get("meta_title") or c.get("title") or ""
     score, detail = score_length(len(effective_title), thresholds["meta_title"], "meta title")
-    if score < 100:
+    if score < 60:
         issues["meta_title_length"] = detail
 
     words = _word_count(c.get("description"))
@@ -214,7 +215,7 @@ def _live_issues_for_collection(c, thresholds):
         issues["description_missing"] = "No description"
     else:
         score, detail = score_description_words(words, thresholds["description_words"], "collection")
-        if score < 100:
+        if score < 70:
             issues["description_thin"] = detail
 
     if not c.get("image_url"):
@@ -266,7 +267,9 @@ def _scan_store(store_id):
 
         cur.execute(
             """
-            SELECT resource_id, (schema_json::jsonb ? 'image') AS has_image
+            SELECT resource_id,
+                   (schema_json::jsonb ? 'image') AS has_image,
+                   (schema_json::jsonb ? 'schema_version') AS is_v2
             FROM schema_markup
             WHERE store_id = %s AND resource_type = 'product'
               AND schema_type = 'Product' AND pushed_to_shopify = TRUE
@@ -275,9 +278,14 @@ def _scan_store(store_id):
         )
         _schema_rows = cur.fetchall()
         schema_pushed = {str(r["resource_id"]) for r in _schema_rows}
-        # Pushed before the product had images → live merchant listings fail
-        # Google's required-image check until the schema is regenerated.
-        schema_imageless = {str(r["resource_id"]) for r in _schema_rows if not r["has_image"]}
+        # v2 (Liquid-native) schema pulls images live from the storefront — the
+        # slim enrichment payload never carries one, so only a product with no
+        # images at all fails Google's required-image check. Legacy full-JSON
+        # rows keep the stored-payload test.
+        schema_v2 = {str(r["resource_id"]) for r in _schema_rows if r["is_v2"]}
+        schema_imageless_legacy = {
+            str(r["resource_id"]) for r in _schema_rows if not r["is_v2"] and not r["has_image"]
+        }
 
     # Duplicate metas: group effective titles / non-empty descriptions across
     # both entity types in the rows already fetched (no extra queries).
@@ -341,18 +349,24 @@ def _scan_store(store_id):
         duplicate_issues(p, "product")
         sid = str(p["shopify_id"])
         if sid not in schema_pushed:
-            add("schema_missing", "product", p, "No Product schema generated and pushed to Shopify")
-        elif sid in schema_imageless:
+            add("schema_missing", "product", p, "Spec enrichment metafield not generated/pushed — base schema still renders live via the theme snippet")
+        else:
             imgs = p.get("images")
             if isinstance(imgs, str):
                 try:
                     imgs = json.loads(imgs)
                 except (ValueError, TypeError):
                     imgs = []
-            add("schema_stale", "product", p,
-                "Pushed schema has no image field — regenerate now that the product has images"
-                if imgs else
-                "Pushed schema has no image field — add a product image, then regenerate")
+            if sid in schema_v2:
+                if not imgs:
+                    add("schema_stale", "product", p,
+                        "Product has no images — the live schema fails Google's required-image "
+                        "check; add a product image")
+            elif sid in schema_imageless_legacy:
+                add("schema_stale", "product", p,
+                    "Pushed schema has no image field — regenerate now that the product has images"
+                    if imgs else
+                    "Pushed schema has no image field — add a product image, then regenerate")
         keyword_issues(p, "product")
 
     for c in collections:

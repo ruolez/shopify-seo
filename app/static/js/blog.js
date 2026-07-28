@@ -980,11 +980,12 @@ async function wizardStartResearch() {
     if (!storeId) { showToast("No store found", "error"); return; }
 
     try {
-        const { session_id } = await apiRequest("/api/blog/wizard/start", {
+        const { session_id, keyword_warning } = await apiRequest("/api/blog/wizard/start", {
             method: "POST",
             body: { store_id: storeId, topic, keywords },
         });
         currentWizardSession = session_id;
+        if (keyword_warning) showToast(keyword_warning, "warning");
 
         showWizardStep(2);
         document.getElementById("research-content").innerHTML =

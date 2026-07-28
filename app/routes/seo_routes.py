@@ -14,6 +14,7 @@ from app.routes.schema_routes import generate_and_push_product_schema
 from app.services.ai_output_guard import (
     clamp_meta_description,
     clamp_meta_title,
+    guard_shopify_fields,
     sanitize_html,
 )
 from app.services.task_runner import spawn as spawn_task
@@ -652,6 +653,7 @@ def _apply_internal_linking(data, store_id, client):
             if not ok:
                 results.append({"article_id": article_id, "status": "error", "reason": f"AI output rejected: {reason}"})
                 continue
+            new_html = sanitize_html(new_html)
             if new_html != art["body"]:
                 _push_html_to_shopify(client, "article", article_shopify_id, new_html)
                 _update_local_db("article", art["id"], new_html)
@@ -1194,6 +1196,9 @@ def apply_product_changes(product_id):
         except Exception as schema_err:
             logger.warning("Schema push failed for product %s: %s", product_id, schema_err)
 
+        from app.services.analysis_refresh import refresh_item_analysis
+        refresh_item_analysis(product["store_id"], "product", product_id)
+
         return jsonify({"ok": True, "updated_fields": updated_fields})
 
     except Exception as e:
@@ -1483,6 +1488,9 @@ def apply_collection_changes(collection_id):
             if data.get("meta_description"):
                 cur.execute("UPDATE synced_collections SET meta_description = %s WHERE id = %s", (data["meta_description"], collection_id))
             cur.execute("UPDATE synced_collections SET last_optimized_at = NOW() WHERE id = %s", (collection_id,))
+
+        from app.services.analysis_refresh import refresh_item_analysis
+        refresh_item_analysis(collection["store_id"], "collection", collection_id)
 
         return jsonify({"ok": True, "updated_fields": updated_fields})
 
@@ -2483,6 +2491,8 @@ def _auto_optimize_generated_collections(store_id, collection_ids, hierarchy=Non
                     fields["meta_title"] = ai_result["optimized_meta_title"]
                 if ai_result.get("optimized_meta_description"):
                     fields["meta_description"] = ai_result["optimized_meta_description"]
+
+                guard_shopify_fields(fields)
 
                 if fields:
                     client.update_collection(row["shopify_id"], fields)

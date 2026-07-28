@@ -7,6 +7,7 @@ from flask import Blueprint, jsonify, render_template, request
 
 from app.auth import decrypt_value
 from app.database import db
+from app.services.ai_output_guard import guard_shopify_fields
 from app.services.landing_page_seo_analyzer import analyze_synced_page, analyze_landing_page, extract_page_content
 from app.shopify_client import ShopifyClient
 
@@ -246,6 +247,7 @@ def ai_optimize_synced(page_id):
 @landing_bp.route("/api/landing-pages/synced/<int:page_id>/ai-apply", methods=["POST"])
 def ai_apply_synced(page_id):
     data = request.get_json(silent=True) or {}
+    guard_shopify_fields(data)
     with db.get_cursor() as cur:
         cur.execute("SELECT * FROM synced_pages WHERE id = %s", (page_id,))
         page = cur.fetchone()

@@ -769,23 +769,10 @@ def _execute_feed_scan(task_id, store_id):
                 (store_id,),
             )
             live_map = {r["resource_id"]: (r["live_crawl"] or {}).get("schema_types") for r in cur.fetchall()}
-        schema_map = _pushed_schema(store_id)
 
         scanned = 0
         for p in products:
-            pushed = None
-            for row in schema_map.get(str(p.get("shopify_id")), []):
-                if row.get("schema_type") in ("Product", "ProductGroup") and row.get("schema_json"):
-                    pj = row["schema_json"]
-                    if isinstance(pj, str):
-                        try:
-                            pj = json.loads(pj)
-                        except (json.JSONDecodeError, ValueError):
-                            pj = None
-                    if isinstance(pj, dict):
-                        pushed = pj
-                    break
-            result = feed_readiness_analyzer.analyze_feed_readiness(p, pushed, live_map.get(p["id"]))
+            result = feed_readiness_analyzer.analyze_feed_readiness(p, live_map.get(p["id"]))
             with db.get_cursor() as cur:
                 cur.execute(
                     """
@@ -1105,6 +1092,9 @@ def _push_and_rescore(store, resource_type, item, description_html, meta_title, 
                 "UPDATE synced_products SET description = %s, meta_title = %s, meta_description = %s, last_optimized_at = NOW() WHERE id = %s",
                 (description_html or item.get("description"), meta_title or item.get("meta_title"), meta_description or item.get("meta_description"), resource_id),
             )
+
+    from app.services.analysis_refresh import refresh_item_analysis
+    refresh_item_analysis(store_id, resource_type, resource_id)
 
     stored = _stored_score(store_id, resource_type, resource_id)
     updated_item = {

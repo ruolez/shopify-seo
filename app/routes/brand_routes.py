@@ -8,6 +8,7 @@ from flask import Blueprint, jsonify, render_template, request
 
 from app.auth import decrypt_value
 from app.database import db
+from app.services.ai_output_guard import guard_shopify_fields
 from app.services.task_runner import spawn as spawn_task
 from app.shopify_client import ShopifyClient
 
@@ -1262,18 +1263,23 @@ def apply_brand_seo(gc_id):
             fields["meta_description"] = data["meta_description"]
             updated_fields.append("meta_description")
 
+        guard_shopify_fields(fields)
+
         if fields:
             client.update_collection(row["shopify_id"], fields)
 
         collection_id = row["collection_id"]
         with db.get_cursor() as cur:
-            if data.get("description_html"):
-                cur.execute("UPDATE synced_collections SET description = %s WHERE id = %s", (data["description_html"], collection_id))
-            if data.get("meta_title"):
-                cur.execute("UPDATE synced_collections SET meta_title = %s WHERE id = %s", (data["meta_title"], collection_id))
-            if data.get("meta_description"):
-                cur.execute("UPDATE synced_collections SET meta_description = %s WHERE id = %s", (data["meta_description"], collection_id))
+            if fields.get("description_html"):
+                cur.execute("UPDATE synced_collections SET description = %s WHERE id = %s", (fields["description_html"], collection_id))
+            if fields.get("meta_title"):
+                cur.execute("UPDATE synced_collections SET meta_title = %s WHERE id = %s", (fields["meta_title"], collection_id))
+            if fields.get("meta_description"):
+                cur.execute("UPDATE synced_collections SET meta_description = %s WHERE id = %s", (fields["meta_description"], collection_id))
             cur.execute("UPDATE synced_collections SET last_optimized_at = NOW() WHERE id = %s", (collection_id,))
+
+        from app.services.analysis_refresh import refresh_item_analysis
+        refresh_item_analysis(row["store_id"], "collection", collection_id)
 
         return jsonify({"ok": True, "updated_fields": updated_fields})
 
@@ -1380,6 +1386,8 @@ def _execute_bulk_brand_optimize(bulk_task_id, store_id, gc_ids, auto_apply):
                 if result.get("optimized_meta_description"):
                     fields["meta_description"] = result["optimized_meta_description"]
 
+                guard_shopify_fields(fields)
+
                 if fields:
                     try:
                         client.update_collection(row["shopify_id"], fields)
@@ -1391,6 +1399,8 @@ def _execute_bulk_brand_optimize(bulk_task_id, store_id, gc_ids, auto_apply):
                             if fields.get("meta_description"):
                                 cur.execute("UPDATE synced_collections SET meta_description = %s WHERE id = %s", (fields["meta_description"], collection_id))
                             cur.execute("UPDATE synced_collections SET last_optimized_at = NOW() WHERE id = %s", (collection_id,))
+                        from app.services.analysis_refresh import refresh_item_analysis
+                        refresh_item_analysis(store_id, "collection", collection_id)
                     except Exception as apply_err:
                         item_error = f"Apply to Shopify failed: {apply_err}"
                         logger.exception("Failed to auto-apply brand SEO for '%s'", vendor_name)

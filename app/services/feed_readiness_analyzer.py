@@ -148,17 +148,12 @@ def _brand(vendor, fixables):
     return 0, "No vendor/brand — brand is a primary feed attribute"
 
 
-def _schema_has_rating(schema):
-    if not isinstance(schema, dict):
-        return False
-    if schema.get("aggregateRating"):
-        return True
-    return any(v.get("aggregateRating") for v in (schema.get("hasVariant") or []) if isinstance(v, dict))
-
-
-def _review_signals(pushed_schema, live_schema_types, fixables):
-    if _schema_has_rating(pushed_schema):
-        return 100, "aggregateRating present in pushed Product schema"
+def _review_signals(live_schema_types, fixables):
+    """Rating markup is rendered live by the theme snippet from rating
+    metafields (the v2 enrichment payload never carries aggregateRating), so
+    the only evidence is a live-page crawl. No crawl → unknown, not a finding."""
+    if live_schema_types is None:
+        return None, "Not verified — run a live crawl to check for rating markup"
     types = set(live_schema_types or [])
     if types & {"Review", "AggregateRating"}:
         return 100, "Review schema detected on the live page"
@@ -187,7 +182,7 @@ ELIGIBILITY_CHECKLIST = [
 ]
 
 
-def analyze_feed_readiness(product, pushed_schema=None, live_schema_types=None):
+def analyze_feed_readiness(product, live_schema_types=None):
     """Score one synced_products row's feed quality. Pure — no DB access."""
     rules = get_setting("rules.feed_readiness", DEFAULTS["rules.feed_readiness"])
     weights = rules["weights"]
@@ -208,9 +203,13 @@ def analyze_feed_readiness(product, pushed_schema=None, live_schema_types=None):
     scores["price"], details["price"] = _price(variants, thresholds, fixables)
     scores["availability"], details["availability"] = _availability(variants, product.get("status"), fixables)
     scores["brand"], details["brand"] = _brand(product.get("vendor"), fixables)
-    scores["review_signals"], details["review_signals"] = _review_signals(pushed_schema, live_schema_types, fixables)
+    scores["review_signals"], details["review_signals"] = _review_signals(live_schema_types, fixables)
 
-    overall = sum(scores[k] * weights.get(k, 0) for k in scores)
+    # Unknown components (score None, e.g. review signals without a crawl) are
+    # excluded from the weighted total instead of counting as failures.
+    known = {k: v for k, v in scores.items() if v is not None}
+    weight_total = sum(weights.get(k, 0) for k in known) or 1
+    overall = sum(known[k] * weights.get(k, 0) for k in known) / weight_total * sum(weights.get(k, 0) for k in scores)
     return {
         "score": round(overall),
         "breakdown": {k: {"score": scores[k], "detail": details[k]} for k in scores},

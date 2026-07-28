@@ -79,6 +79,27 @@ def _get_striking_keywords_for_url(store_id, url_path, base_url=""):
         return cur.fetchall()
 
 
+def compute_unified_item_score(seo, kw_score, gsc, sr, ctr_curve):
+    """Blend a content analysis with GSC/Semrush metrics into the unified
+    3-pillar score — single composition shared by the priority queue and
+    score-history snapshots."""
+    search_perf = analyze_search_performance(
+        {
+            "gsc_clicks": gsc.get("gsc_clicks"),
+            "gsc_impressions": gsc.get("gsc_impressions"),
+            "gsc_ctr": gsc.get("gsc_ctr"),
+            "gsc_position": gsc.get("gsc_position"),
+        },
+        {
+            "semrush_volume": sr.get("semrush_volume"),
+            "semrush_position": sr.get("semrush_position"),
+            "semrush_keyword_count": sr.get("semrush_keyword_count"),
+        },
+        {"ctr_curve": ctr_curve},
+    )
+    return compute_unified_score(seo, kw_score, search_perf)
+
+
 def compute_priority_score(item, gsc_data, semrush_data, striking_keywords, ctr_curve=None):
     """Compute 0-100 priority score. Higher = more urgent to optimize."""
     score = 0.0
@@ -228,22 +249,7 @@ def get_priority_ranked_items(store_id, item_type="product", limit=50, measuring
         sr = semrush_metrics.get(path, {})
 
         seo = analyze_fn(dict(item))
-
-        search_perf = analyze_search_performance(
-            {
-                "gsc_clicks": gsc.get("gsc_clicks"),
-                "gsc_impressions": gsc.get("gsc_impressions"),
-                "gsc_ctr": gsc.get("gsc_ctr"),
-                "gsc_position": gsc.get("gsc_position"),
-            },
-            {
-                "semrush_volume": sr.get("semrush_volume"),
-                "semrush_position": sr.get("semrush_position"),
-                "semrush_keyword_count": sr.get("semrush_keyword_count"),
-            },
-            {"ctr_curve": ctr_curve},
-        )
-        unified = compute_unified_score(seo, kw_scores.get(item["id"]), search_perf)
+        unified = compute_unified_item_score(seo, kw_scores.get(item["id"]), gsc, sr, ctr_curve)
         composite = {
             "composite_score": unified["seo_score"],
             "on_page_score": unified["content_score"],

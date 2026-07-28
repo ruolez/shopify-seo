@@ -1041,12 +1041,13 @@ function openFeedBreakdown(i) {
         .map((k) => {
             const c = (it.breakdown || {})[k];
             if (!c) return "";
-            const color = c.score >= 80 ? "var(--success)" : c.score >= 50 ? "var(--warning,#f9ab00)" : "var(--error)";
+            const unknown = c.score == null;
+            const color = unknown ? "var(--on-surface-secondary)" : c.score >= 80 ? "var(--success)" : c.score >= 50 ? "var(--warning,#f9ab00)" : "var(--error)";
             return `<div style="display:flex;gap:10px;align-items:flex-start;padding:8px 0;border-bottom:1px solid var(--outline);">
                 <span class="material-symbols-rounded" style="color:${color};">${FEED_COMPONENT_LABELS[k].icon}</span>
                 <div style="flex:1;"><b style="font-size:13px;">${FEED_COMPONENT_LABELS[k].label}</b>
                     <div style="font-size:12px;color:var(--on-surface-secondary);">${escapeHtml(c.detail || "")}</div></div>
-                <b style="color:${color};">${c.score}</b>
+                <b style="color:${color};">${unknown ? "—" : c.score}</b>
             </div>`;
         })
         .join("");
@@ -1556,7 +1557,7 @@ function siteSchemaCard(o) {
         icon: "schema",
         title: "Site-wide Schema — Organization + Breadcrumbs + per-item JSON-LD",
         status: statusPill(o.published_status) + (updateAvail ? ' <span class="badge badge-warning">Update available</span>' : ""),
-        desc: "A theme snippet with static <b>Organization</b> + <b>WebSite</b> JSON-LD, a <b>BreadcrumbList</b> on every page, and — critically — it renders the enriched <b>Product/CollectionPage + FAQPage</b> JSON-LD the optimizer pushes to metafields (without this, that schema is invisible to crawlers). Reversible." +
+        desc: "A theme snippet with static <b>Organization</b> + <b>WebSite</b> JSON-LD, a <b>BreadcrumbList</b> on every page, and per-item <b>Product/ProductGroup + CollectionPage</b> JSON-LD built natively from live store data (prices, availability, ratings) — only <b>FAQPage</b> and AI-verified spec facts (additionalProperty) come from metafields. Reversible." +
             (updateAvail ? " <b style=\"color:var(--warning,#f9ab00);\">Your published snippet is an older version that doesn't render per-item schema — Re-publish to fix.</b>" : "") +
             (hasBrand ? "" : " <b>Add your brand details</b> below first."),
         target: "Targets <b>structured data</b> — site-wide entity schema plus the per-item schema that pushed metafields alone can't expose.",

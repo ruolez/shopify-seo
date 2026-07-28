@@ -908,7 +908,11 @@ def _apply_link_fixes_to_source(store_id, shopify_client, config, source_ref, fi
             continue
         links_to_add.append({
             "url": target_url,
-            "anchor_text": fix.get("suggested_anchor") or target.get("title") or to_handle,
+            # Anchor equity should flow to the target's resolved primary
+            # keyword when the AI didn't propose an anchor — title is the
+            # last resort, not the default.
+            "anchor_text": (fix.get("suggested_anchor") or target.get("primary_keyword")
+                            or target.get("title") or to_handle),
             "_fix": fix,
             "_target": target,
             "_to_blog": to_blog,
@@ -1126,19 +1130,31 @@ def _get_available_targets(store_id):
     targets = []
     with db.get_cursor() as cur:
         cur.execute(
-            "SELECT handle, title FROM synced_products WHERE store_id = %s AND status = 'ACTIVE'",
+            """SELECT sp.handle, sp.title,
+                      tsa.keyword_resolution->'primary'->>'keyword' AS primary_keyword
+               FROM synced_products sp
+               LEFT JOIN technical_seo_analyses tsa
+                 ON tsa.store_id = sp.store_id AND tsa.item_type = 'product' AND tsa.item_id = sp.id
+               WHERE sp.store_id = %s AND sp.status = 'ACTIVE'""",
             (store_id,),
         )
         for row in cur.fetchall():
-            targets.append({"type": "product", "handle": row["handle"], "title": row["title"]})
+            targets.append({"type": "product", "handle": row["handle"], "title": row["title"],
+                            "primary_keyword": row["primary_keyword"]})
 
     with db.get_cursor() as cur:
         cur.execute(
-            "SELECT handle, title FROM synced_collections WHERE store_id = %s",
+            """SELECT sc.handle, sc.title,
+                      tsa.keyword_resolution->'primary'->>'keyword' AS primary_keyword
+               FROM synced_collections sc
+               LEFT JOIN technical_seo_analyses tsa
+                 ON tsa.store_id = sc.store_id AND tsa.item_type = 'collection' AND tsa.item_id = sc.id
+               WHERE sc.store_id = %s""",
             (store_id,),
         )
         for row in cur.fetchall():
-            targets.append({"type": "collection", "handle": row["handle"], "title": row["title"]})
+            targets.append({"type": "collection", "handle": row["handle"], "title": row["title"],
+                            "primary_keyword": row["primary_keyword"]})
 
     with db.get_cursor() as cur:
         cur.execute(

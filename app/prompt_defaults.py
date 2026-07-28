@@ -1673,32 +1673,6 @@ DEFAULTS = {
         "- priority_keywords: keywords to focus defensive/offensive efforts on\n\n"
         "Return JSON only."
     ),
-    "prompts.schema_breadcrumb": (
-        "Generate BreadcrumbList schema for: {item_type} \"{title}\" at path {path}\n"
-        "Store domain: {domain}\n"
-        "Parent collection: {parent_collection}\n\n"
-        "Return valid JSON-LD BreadcrumbList schema."
-    ),
-    "prompts.schema_collection": (
-        "Generate CollectionPage + ItemList schema for collection \"{title}\" with {product_count} products.\n"
-        "Store domain: {domain}\n"
-        "Description: {description}\n\n"
-        "Return valid JSON-LD with @type CollectionPage including ItemList of products."
-    ),
-    "prompts.schema_article": (
-        "Generate Article/BlogPosting schema for \"{title}\" by {author}.\n"
-        "Published: {published_at}\n"
-        "Store domain: {domain}\n"
-        "Organization: {org_name}\n\n"
-        "Return valid JSON-LD BlogPosting schema."
-    ),
-    "prompts.schema_organization": (
-        "Generate Organization schema.\n"
-        "Name: {org_name}\n"
-        "URL: {org_url}\n"
-        "Logo: {org_logo}\n\n"
-        "Return valid JSON-LD Organization schema."
-    ),
     "prompts.keyword_strategy_plan": (
         "You are an expert SEO strategist for a Shopify store. You have access to the store's "
         "master keyword list, content audit results, and current rankings. Your job is to create "

@@ -6,6 +6,7 @@ from flask import Blueprint, jsonify, redirect, request
 
 from app.auth import decrypt_value
 from app.database import db
+from app.services.ai_output_guard import sanitize_html
 from app.services.task_runner import spawn as spawn_task
 from app.services.technical_seo_analyzer import (
     analyze_collection_technical_seo,
@@ -682,6 +683,8 @@ def apply_fixes():
                     updated_fields.append("image_alt")
 
         _enforce_meta_limits(shopify_fields)
+        if shopify_fields.get("description_html"):
+            shopify_fields["description_html"] = sanitize_html(shopify_fields["description_html"])
 
         # Snapshot before-state so View Impact has history for targeted fixes
         if shopify_fields or media_updates:
@@ -740,6 +743,14 @@ def apply_fixes():
         if updated_item:
             new_analysis, new_resolution = _resolve_and_analyze(item_type, updated_item)
             _upsert_analysis(updated_item["store_id"], item_type, item_id, new_analysis, new_resolution)
+            with db.get_cursor() as cur:
+                # Applied proposals are consumed — a stale set must not be
+                # re-applicable against the now-changed content.
+                cur.execute(
+                    """UPDATE technical_seo_analyses SET ai_fixes = NULL
+                       WHERE store_id = %s AND item_type = %s AND item_id = %s""",
+                    (updated_item["store_id"], item_type, item_id),
+                )
 
             return jsonify({
                 "ok": True,
@@ -989,6 +1000,8 @@ def _execute_bulk_fix_apply(bulk_task_id, item_type, only_fields=None):
                             media_updates = value
 
                     _enforce_meta_limits(shopify_fields)
+                    if shopify_fields.get("description_html"):
+                        shopify_fields["description_html"] = sanitize_html(shopify_fields["description_html"])
 
                     # Snapshot before-state so View Impact has history
                     if shopify_fields or media_updates:
@@ -1019,6 +1032,15 @@ def _execute_bulk_fix_apply(bulk_task_id, item_type, only_fields=None):
                                     cur.execute("UPDATE synced_products SET meta_description = %s WHERE id = %s", (v, ref_id))
                                 elif f == "description_html":
                                     cur.execute("UPDATE synced_products SET description = %s WHERE id = %s", (v, ref_id))
+                            if media_updates:
+                                images = full_item.get("images") or []
+                                if isinstance(images, str):
+                                    images = json.loads(images)
+                                alt_map = {m["media_id"]: m["alt"] for m in media_updates if m.get("media_id")}
+                                for img in images:
+                                    if img.get("media_id") in alt_map:
+                                        img["alt"] = alt_map[img["media_id"]]
+                                cur.execute("UPDATE synced_products SET images = %s WHERE id = %s", (json.dumps(images), ref_id))
                             cur.execute("UPDATE synced_products SET last_optimized_at = NOW() WHERE id = %s", (ref_id,))
                         else:
                             for f, v in shopify_fields.items():
@@ -1048,6 +1070,12 @@ def _execute_bulk_fix_apply(bulk_task_id, item_type, only_fields=None):
                     if updated_item:
                         new_analysis, new_resolution = _resolve_and_analyze(item_type, updated_item)
                         _upsert_analysis(store_id, item_type, ref_id, new_analysis, new_resolution)
+                        with db.get_cursor() as cur:
+                            cur.execute(
+                                """UPDATE technical_seo_analyses SET ai_fixes = NULL
+                                   WHERE store_id = %s AND item_type = %s AND item_id = %s""",
+                                (store_id, item_type, ref_id),
+                            )
 
                 except Exception as apply_err:
                     item_error = f"Apply to Shopify failed: {apply_err}"

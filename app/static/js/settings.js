@@ -292,7 +292,6 @@ const PROMPT_GROUPS = {
     "Cannibalization Prompts": ["prompts.cannibalization_analysis", "prompts.cannibalization_fix"],
     "Content Gap Prompts": ["prompts.content_gap_analysis", "prompts.content_brief_generation", "prompts.intent_classification"],
     "Competitor Prompts": ["prompts.competitor_analysis"],
-    "Schema Prompts": ["prompts.schema_breadcrumb", "prompts.schema_collection", "prompts.schema_article", "prompts.schema_organization"],
     "News Prompts": ["prompts.news_analyze", "prompts.news_links"],
     "Other Prompts": ["prompts.interlinking", "prompts.inject_interlink", "prompts.technical_seo_fix", "prompts.keyword_phase1", "prompts.keyword_phase2", "prompts.store_audit"],
     "Image Prompts": ["prompts.blog_image", "prompts.blog_hero_image", "prompts.collection_image", "prompts.landing_hero_image", "prompts.news_inline_image"],

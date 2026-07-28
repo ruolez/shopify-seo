@@ -3252,17 +3252,11 @@ async function viewSchema(productId) {
             html += "</ul></div>";
         }
 
-        html += '<div class="form-group"><label>JSON-LD</label>';
+        html += '<div class="form-group"><label>Enrichment payload (seo.schema_enrichment metafield)</label>';
+        html += '<p style="font-size: 13px; color: var(--on-surface-secondary); margin: 4px 0 8px;">The full Product JSON-LD is rendered live by the theme snippet (ai-seo-schema.liquid) — this payload only adds AI-verified spec facts (additionalProperty).</p>';
         html += `<pre style="background: var(--surface-dim); padding: 16px; border-radius: 8px; overflow: auto; max-height: 400px; font-size: 13px;"><code id="schema-json-display">${escapeHtml(JSON.stringify(resp.schema, null, 2))}</code></pre>`;
         html += `<button class="btn btn-sm btn-secondary" style="margin-top: 8px;" onclick="copySchemaJson()">
             <span class="material-symbols-rounded">content_copy</span> Copy JSON
-        </button>`;
-        html += "</div>";
-
-        html += '<div class="form-group"><label>Script Tag</label>';
-        html += `<pre style="background: var(--surface-dim); padding: 16px; border-radius: 8px; overflow: auto; max-height: 200px; font-size: 13px;"><code>${escapeHtml(resp.script_tag)}</code></pre>`;
-        html += `<button class="btn btn-sm btn-secondary" style="margin-top: 8px;" onclick="copySchemaScriptTag()">
-            <span class="material-symbols-rounded">content_copy</span> Copy Script Tag
         </button>`;
         html += "</div>";
 
@@ -3281,7 +3275,6 @@ async function viewSchema(productId) {
 
         // Store data for copy functions
         content.dataset.schemaJson = JSON.stringify(resp.schema, null, 2);
-        content.dataset.scriptTag = resp.script_tag;
     } catch (err) {
         content.innerHTML = `<p style="color: var(--error);">Error: ${escapeHtml(err.message)}</p>`;
     }
@@ -3295,12 +3288,6 @@ function copySchemaJson() {
     const content = document.getElementById("schema-modal-content");
     const json = content.dataset.schemaJson;
     navigator.clipboard.writeText(json).then(() => showToast("JSON copied!", "success"));
-}
-
-function copySchemaScriptTag() {
-    const content = document.getElementById("schema-modal-content");
-    const tag = content.dataset.scriptTag;
-    navigator.clipboard.writeText(tag).then(() => showToast("Script tag copied!", "success"));
 }
 
 async function pushSchema(productId) {

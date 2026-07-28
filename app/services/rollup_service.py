@@ -2,8 +2,9 @@
 
 Coverage percentages, issue counts and keyword totals only exist as
 current state elsewhere; store_daily_snapshot gives them a history. The
-scheduler runs leader-only (main.py) and is idempotent via a
-row-for-today check, never in-memory state — restarts are safe.
+scheduler runs leader-only (main.py); the snapshot upsert and activity
+mirror run every tick (both idempotent), while expensive scans are gated
+by a row-for-today check, never in-memory state — restarts are safe.
 """
 
 import logging
@@ -158,8 +159,9 @@ def backfill_score_history(store_id):
 
 class NightlyScheduler:
     """Rolls up daily snapshots for every active store. Ticks every few
-    hours; the row-for-today check makes extra ticks and restarts no-ops.
-    Phase hooks (anomaly scan, gap scan) attach here later."""
+    hours; every tick refreshes the snapshot upsert and activity mirror,
+    while the row-for-today check keeps backfill, anomaly/gap scans and
+    paid runs to once per day (restart-safe)."""
 
     def __init__(self, interval_hours=6):
         self.interval = interval_hours * 3600
@@ -191,28 +193,38 @@ class NightlyScheduler:
     def _tick(self):
         today = datetime.now(timezone.utc).date()
         with db.get_cursor() as cur:
+            cur.execute("SELECT id FROM stores WHERE is_active = TRUE")
+            store_ids = [r["id"] for r in cur.fetchall()]
             cur.execute(
-                """SELECT s.id FROM stores s
-                   WHERE s.is_active = TRUE
-                     AND NOT EXISTS (
-                       SELECT 1 FROM store_daily_snapshot d
-                       WHERE d.store_id = s.id AND d.snapshot_date = %s
-                     )""",
+                "SELECT store_id FROM store_daily_snapshot WHERE snapshot_date = %s",
                 (today,),
             )
-            store_ids = [r["id"] for r in cur.fetchall()]
+            snapshotted_today = {r["store_id"] for r in cur.fetchall()}
 
+        from app.services.anomaly_service import (
+            maybe_run_weekly_visibility,
+            mirror_activity_events,
+            run_nightly_scans,
+        )
         for store_id in store_ids:
+            first_tick_today = store_id not in snapshotted_today
             try:
-                if backfill_score_history(store_id):
+                if first_tick_today and backfill_score_history(store_id):
                     logger.info("Backfilled snapshot score history for store %s", store_id)
+                # Upsert is idempotent (ON CONFLICT DO UPDATE) — refresh every
+                # tick so post-apply changes show up the same day.
                 take_store_snapshot(store_id, today)
             except Exception as e:
                 logger.error("Snapshot failed for store %s: %s", store_id, str(e))
                 continue
-            # Once per day, alongside the snapshot: anomaly + gap scans and
-            # the opt-in weekly paid runs.
-            from app.services.anomaly_service import maybe_run_weekly_visibility, run_nightly_scans
+            try:
+                mirror_activity_events(store_id)
+            except Exception as e:
+                logger.error("Activity mirror failed for store %s: %s", store_id, str(e))
+            if not first_tick_today:
+                continue
+            # Once per day, alongside the first snapshot: anomaly + gap scans
+            # and the opt-in weekly paid runs.
             try:
                 run_nightly_scans(store_id)
             except Exception as e:

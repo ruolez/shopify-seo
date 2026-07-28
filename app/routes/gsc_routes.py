@@ -430,6 +430,44 @@ def analyze_cannibalization():
         return jsonify({"error": str(e)}), 500
 
 
+def _cannibalization_keyword_guard(store_id, item_type, item_id, retarget_kw):
+    """Resolver guard for cannibalization retargeting. Returns
+    (resolved_primary, conflict_error): conflict_error is set when the
+    retarget keyword is already another page's primary — rewriting this page
+    onto it would just move the cannibalization, not fix it."""
+    resolved_primary = ""
+    try:
+        from app.services.keyword_resolver import _norm, get_or_refresh_resolution, get_owned_primary_keywords
+
+        resolution = get_or_refresh_resolution(store_id, item_type, item_id)
+        rp = (resolution or {}).get("primary")
+        if rp and rp.get("keyword"):
+            resolved_primary = rp["keyword"]
+        tk = _norm(retarget_kw or "")
+        if tk and tk != _norm(resolved_primary):
+            owner = get_owned_primary_keywords(store_id, exclude=(item_type, item_id)).get(tk)
+            if owner:
+                return resolved_primary, (
+                    f'Target keyword "{retarget_kw}" is already the primary keyword of another page '
+                    f'({owner["item_type"]} #{owner["item_id"]}'
+                    + (", manually assigned" if owner.get("manual") else "")
+                    + "). Retargeting this page onto it would create new cannibalization — pick a different keyword."
+                )
+    except Exception:
+        logger.warning("Cannibalization keyword guard failed for %s %s", item_type, item_id)
+    return resolved_primary, None
+
+
+def _resolved_primary_suffix(resolved_primary):
+    if not resolved_primary:
+        return ""
+    return (
+        f"\n\nThis page's resolved primary keyword (from the store's keyword strategy) is "
+        f"\"{resolved_primary}\". The rewrite must keep the page targeted on it — differentiate "
+        f"away from the competing query WITHOUT dropping this primary from the meta title."
+    )
+
+
 @gsc_bp.route("/api/gsc/cannibalization/generate-fix", methods=["POST"])
 def generate_cannibalization_fix():
     from app.database import db
@@ -449,15 +487,21 @@ def generate_cannibalization_fix():
 
     with db.get_cursor() as cur:
         if item_type == "product":
-            cur.execute("SELECT id, title, handle, meta_title, meta_description, images FROM synced_products WHERE id = %s", (item_id,))
+            cur.execute("SELECT id, store_id, title, handle, meta_title, meta_description, images FROM synced_products WHERE id = %s", (item_id,))
         elif item_type == "collection":
-            cur.execute("SELECT id, title, handle, meta_title, meta_description FROM synced_collections WHERE id = %s", (item_id,))
+            cur.execute("SELECT id, store_id, title, handle, meta_title, meta_description FROM synced_collections WHERE id = %s", (item_id,))
         else:
             return jsonify({"error": "item_type must be product or collection"}), 400
         item = cur.fetchone()
 
     if not item:
         return jsonify({"error": f"{item_type} not found"}), 404
+
+    resolved_primary, conflict = _cannibalization_keyword_guard(
+        item["store_id"], item_type, item_id, target_keyword or competing_query
+    )
+    if conflict:
+        return jsonify({"error": conflict}), 409
 
     images = []
     images_context = ""
@@ -488,6 +532,7 @@ def generate_cannibalization_fix():
         target_keyword=target_keyword or competing_query,
         images_context=images_context,
     )
+    prompt += _resolved_primary_suffix(resolved_primary)
 
     try:
         result = _ai_json_call(client, model, prompt, max_tokens=1200)
@@ -509,6 +554,7 @@ def generate_cannibalization_fix():
 def apply_cannibalization_fix():
     from app.auth import decrypt_value
     from app.database import db
+    from app.services.ai_output_guard import guard_shopify_fields
     from app.shopify_client import ShopifyClient
 
     data = request.get_json(silent=True) or {}
@@ -559,6 +605,11 @@ def apply_cannibalization_fix():
             fields["meta_description"] = new_meta_description
             updated_fields.append("meta_description")
 
+        guard_shopify_fields(fields)
+        new_title = fields.get("title", new_title)
+        new_meta_title = fields.get("meta_title", new_meta_title)
+        new_meta_description = fields.get("meta_description", new_meta_description)
+
         if fields:
             if item_type == "product":
                 client.update_product(item["shopify_id"], fields)
@@ -592,6 +643,10 @@ def apply_cannibalization_fix():
                 cur.execute("UPDATE synced_products SET images = %s WHERE id = %s", (json.dumps(images), item_id))
             cur.execute(f"UPDATE {table} SET last_optimized_at = NOW() WHERE id = %s", (item_id,))
 
+        from app.services.analysis_refresh import refresh_item_analysis
+        refresh_item_analysis(item.get("store_id"), item_type, item_id)
+
+        with db.get_cursor() as cur:
             if cannibal_query and cannibal_page:
                 cur.execute(
                     """INSERT INTO cannibalization_fixes
@@ -665,6 +720,7 @@ def bulk_cannibalization_fix():
     from app.database import db
     from app.settings_manager import get_setting
     from app.prompt_defaults import DEFAULTS
+    from app.services.ai_output_guard import guard_shopify_fields
     from app.shopify_client import ShopifyClient
 
     data = request.get_json(silent=True) or {}
@@ -702,6 +758,13 @@ def bulk_cannibalization_fix():
                 results.append({"item_id": item_id, "status": "error", "error": "Not found"})
                 continue
 
+            resolved_primary, conflict = _cannibalization_keyword_guard(
+                item["store_id"], item_type, item_id, target_keyword or competing_query
+            )
+            if conflict:
+                results.append({"item_id": item_id, "status": "skipped", "error": conflict})
+                continue
+
             images = []
             images_context = ""
             if item_type == "product":
@@ -726,6 +789,7 @@ def bulk_cannibalization_fix():
                 target_keyword=target_keyword or competing_query,
                 images_context=images_context,
             )
+            prompt += _resolved_primary_suffix(resolved_primary)
 
             fix = _ai_json_call(client_ai, model, prompt, max_tokens=1200)
 
@@ -746,6 +810,14 @@ def bulk_cannibalization_fix():
             if fix.get("new_meta_description"):
                 fields["meta_description"] = fix["new_meta_description"]
                 updated.append("meta_description")
+
+            guard_shopify_fields(fields)
+            if "title" in fields:
+                fix["new_title"] = fields["title"]
+            if "meta_title" in fields:
+                fix["new_meta_title"] = fields["meta_title"]
+            if "meta_description" in fields:
+                fix["new_meta_description"] = fields["meta_description"]
 
             has_alt_suggestions = bool(item_type == "product" and fix.get("image_alt_suggestions"))
             if not fields and not has_alt_suggestions:
@@ -796,6 +868,10 @@ def bulk_cannibalization_fix():
                     cur.execute("UPDATE synced_products SET images = %s WHERE id = %s", (json.dumps(db_images), item_id))
                 cur.execute(f"UPDATE {table} SET last_optimized_at = NOW() WHERE id = %s", (item_id,))
 
+            from app.services.analysis_refresh import refresh_item_analysis
+            refresh_item_analysis(item.get("store_id"), item_type, item_id)
+
+            with db.get_cursor() as cur:
                 if competing_query and page_url:
                     cur.execute(
                         """INSERT INTO cannibalization_fixes

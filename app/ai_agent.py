@@ -2038,6 +2038,27 @@ def _generate_geo_content(client, config, item, entity_type, weak_signals=None):
             "prioritise fixing them:\n" + "\n".join(f"- {s}" for s in weak_signals)
         )
     preserve = _geo_preserve_keywords(item, entity_type)
+
+    # The resolved primary (keyword strategy) anchors the rewrite — GEO must
+    # enhance the page, never retarget it away from its strategic keyword.
+    primary_block = ""
+    try:
+        from app.services.keyword_resolver import get_or_refresh_resolution
+
+        resolution = get_or_refresh_resolution(item.get("store_id"), entity_type, item.get("id"))
+        rp = (resolution or {}).get("primary")
+        if rp and rp.get("keyword"):
+            primary_block = (
+                f"\n\nPRIMARY KEYWORD (resolved by the store's keyword strategy — this page's "
+                f"target): \"{rp['keyword']}\". Keep it in the meta title (at or near the front), "
+                f"in the meta description, and in the opening of the body. Do NOT retarget the "
+                f"page to a different keyword."
+            )
+            if rp["keyword"].lower() not in {k.lower() for k in preserve}:
+                preserve.append(rp["keyword"])
+    except Exception:
+        logger.warning("GEO: resolution lookup failed for %s %s", entity_type, item.get("id"))
+
     preserve_block = ""
     if preserve:
         preserve_block = (
@@ -2097,6 +2118,7 @@ def _generate_geo_content(client, config, item, entity_type, weak_signals=None):
         f"Current meta title: {item.get('meta_title') or '(none)'}\n"
         f"Current meta description: {item.get('meta_description') or '(none)'}\n\n"
         f"Current description HTML:\n{item.get('description') or '(none)'}"
+        f"{primary_block}"
         f"{facts_block}"
         f"{members_block}"
         f"{research_block}"
@@ -2167,10 +2189,24 @@ def _generate_fact_boost(client, config, item, entity_type):
     facts = _geo_product_facts(item, entity_type)
     research = _geo_research(item)
     facts_block = "\n".join(f"- {k}: {v}" for k, v in facts.items()) or "(none)"
+    primary_note = ""
+    try:
+        from app.services.keyword_resolver import get_or_refresh_resolution
+
+        resolution = get_or_refresh_resolution(item.get("store_id"), entity_type, item.get("id"))
+        rp = (resolution or {}).get("primary")
+        if rp and rp.get("keyword"):
+            primary_note = (
+                f"Primary keyword (must remain present and prominent in the rewritten "
+                f"description): \"{rp['keyword']}\"\n"
+            )
+    except Exception:
+        pass
     user_prompt = (
         f"{entity_type.capitalize()} title: {item.get('title') or ''}\n"
         f"Brand/Vendor: {item.get('vendor') or 'n/a'}\n"
-        f"Type: {item.get('product_type') or item.get('collection_type') or 'n/a'}\n\n"
+        f"Type: {item.get('product_type') or item.get('collection_type') or 'n/a'}\n"
+        f"{primary_note}\n"
         f"Current description HTML:\n{item.get('description') or '(none)'}\n\n"
         f"VERIFIED PRODUCT FACTS (store data — safe to state):\n{facts_block}\n\n"
         f"WEB RESEARCH CONTEXT (only use a detail if clearly about THIS exact item):\n"
@@ -2896,8 +2932,20 @@ def run_task(task_type, task_input, store_id=None):
                 )
                 product_row = cur.fetchone()
             if product_row:
+                # Benchmark SERPs for the resolved primary (keyword strategy),
+                # not a title-derived query — competitor guidance must describe
+                # the keyword the optimization will actually target.
+                serp_kws = None
+                try:
+                    from app.services.keyword_resolver import get_or_refresh_resolution
+                    _res = get_or_refresh_resolution(product_row["store_id"], "product", product_id)
+                    _rp = (_res or {}).get("primary")
+                    if _rp and _rp.get("keyword"):
+                        serp_kws = [_rp["keyword"]]
+                except Exception:
+                    pass
                 serp_context, serp_benchmark = get_serp_benchmark(
-                    dict(product_row), return_raw=True
+                    dict(product_row), target_keywords=serp_kws, return_raw=True
                 )
         except Exception as e:
             logger.exception("SERP benchmark fetch failed: %s", e)
@@ -3013,8 +3061,17 @@ def run_task(task_type, task_input, store_id=None):
                 )
                 collection_row = cur.fetchone()
             if collection_row:
+                serp_kws = None
+                try:
+                    from app.services.keyword_resolver import get_or_refresh_resolution
+                    _res = get_or_refresh_resolution(collection_row["store_id"], "collection", collection_id)
+                    _rp = (_res or {}).get("primary")
+                    if _rp and _rp.get("keyword"):
+                        serp_kws = [_rp["keyword"]]
+                except Exception:
+                    pass
                 serp_context, serp_benchmark = get_serp_benchmark(
-                    dict(collection_row), return_raw=True, entity_type="collection"
+                    dict(collection_row), target_keywords=serp_kws, return_raw=True, entity_type="collection"
                 )
         except Exception as e:
             logger.exception("SERP benchmark fetch failed for collection: %s", e)
@@ -3121,8 +3178,17 @@ def run_task(task_type, task_input, store_id=None):
                 )
                 collection_row = cur.fetchone()
             if collection_row:
+                serp_kws = None
+                try:
+                    from app.services.keyword_resolver import get_or_refresh_resolution
+                    _res = get_or_refresh_resolution(collection_row["store_id"], "collection", collection_id)
+                    _rp = (_res or {}).get("primary")
+                    if _rp and _rp.get("keyword"):
+                        serp_kws = [_rp["keyword"]]
+                except Exception:
+                    pass
                 serp_context, serp_benchmark = get_serp_benchmark(
-                    dict(collection_row), return_raw=True, entity_type="collection"
+                    dict(collection_row), target_keywords=serp_kws, return_raw=True, entity_type="collection"
                 )
         except Exception as e:
             logger.exception("SERP benchmark fetch failed for brand collection: %s", e)
@@ -3354,7 +3420,7 @@ def run_task(task_type, task_input, store_id=None):
 
         with db.get_cursor() as cur:
             cur.execute(
-                "SELECT title, vendor, product_type, tags, handle, meta_title FROM synced_products WHERE id = %s",
+                "SELECT store_id, title, vendor, product_type, tags, handle, meta_title FROM synced_products WHERE id = %s",
                 (product_id,),
             )
             product = cur.fetchone()
@@ -3362,17 +3428,33 @@ def run_task(task_type, task_input, store_id=None):
         if not product:
             return {"error": f"Product {product_id} not found"}
 
-        product_context = json.dumps({
+        context_payload = {
             "current_title": product["title"],
             "vendor": product.get("vendor") or "",
             "product_type": product.get("product_type") or "",
             "tags": product.get("tags") or "",
             "handle": product.get("handle") or "",
             "meta_title": product.get("meta_title") or "",
-        }, indent=2)
+        }
+        try:
+            from app.services.keyword_resolver import get_or_refresh_resolution
+
+            resolution = get_or_refresh_resolution(product["store_id"], "product", product_id)
+            rp = (resolution or {}).get("primary")
+            if rp and rp.get("keyword"):
+                context_payload["primary_keyword"] = rp["keyword"]
+        except Exception:
+            pass
+        product_context = json.dumps(context_payload, indent=2)
 
         system_prompt = get_setting("prompts.product_title", DEFAULTS["prompts.product_title"])
         user_prompt = f"Optimize the title for this product:\n\n{product_context}"
+        if context_payload.get("primary_keyword"):
+            user_prompt += (
+                f"\n\nThe primary_keyword above was resolved by the store's keyword strategy — "
+                f"the optimized title MUST contain it (or a close natural variant). Do not "
+                f"substitute a different keyword."
+            )
 
         response = client.chat.completions.create(
             model=config["model"],
@@ -3657,7 +3739,7 @@ def run_task(task_type, task_input, store_id=None):
 
         with db.get_cursor() as cur:
             cur.execute(
-                "SELECT title, handle, meta_title, collection_type FROM synced_collections WHERE id = %s",
+                "SELECT store_id, title, handle, meta_title, collection_type FROM synced_collections WHERE id = %s",
                 (collection_id,),
             )
             collection = cur.fetchone()
@@ -3665,15 +3747,31 @@ def run_task(task_type, task_input, store_id=None):
         if not collection:
             return {"error": f"Collection {collection_id} not found"}
 
-        collection_context = json.dumps({
+        context_payload = {
             "current_title": collection["title"],
             "handle": collection.get("handle") or "",
             "meta_title": collection.get("meta_title") or "",
             "collection_type": collection.get("collection_type") or "",
-        }, indent=2)
+        }
+        try:
+            from app.services.keyword_resolver import get_or_refresh_resolution
+
+            resolution = get_or_refresh_resolution(collection["store_id"], "collection", collection_id)
+            rp = (resolution or {}).get("primary")
+            if rp and rp.get("keyword"):
+                context_payload["primary_keyword"] = rp["keyword"]
+        except Exception:
+            pass
+        collection_context = json.dumps(context_payload, indent=2)
 
         system_prompt = get_setting("prompts.collection_title", DEFAULTS["prompts.collection_title"])
         user_prompt = f"Optimize the title for this collection:\n\n{collection_context}"
+        if context_payload.get("primary_keyword"):
+            user_prompt += (
+                f"\n\nThe primary_keyword above was resolved by the store's keyword strategy — "
+                f"the optimized title MUST contain it (or a close natural variant). Do not "
+                f"substitute a different keyword."
+            )
 
         response = client.chat.completions.create(
             model=config["model"],
@@ -3966,6 +4064,25 @@ def run_task(task_type, task_input, store_id=None):
                     "title": coll.get("title"),
                     "needs_outbound": (coll.get("outgoing_count") or 0) == 0,
                 }
+                if t_type in ("product", "collection"):
+                    # Anchor equity flows to the resolved primary keyword —
+                    # give the model the strategy's target, not just the title.
+                    try:
+                        _t_table = "synced_products" if t_type == "product" else "synced_collections"
+                        with db.get_cursor() as cur:
+                            cur.execute(
+                                f"""SELECT tsa.keyword_resolution->'primary'->>'keyword' AS kw
+                                   FROM {_t_table} t
+                                   JOIN technical_seo_analyses tsa
+                                     ON tsa.store_id = t.store_id AND tsa.item_type = %s AND tsa.item_id = t.id
+                                   WHERE t.store_id = %s AND t.handle = %s""",
+                                (t_type, store_id, coll["handle"]),
+                            )
+                            _kw_row = cur.fetchone()
+                        if _kw_row and _kw_row.get("kw"):
+                            target_desc["primary_keyword"] = _kw_row["kw"]
+                    except Exception:
+                        pass
                 if t_type == "collection":
                     target_desc.update({
                         "product_count": coll.get("product_count", 0),
@@ -3986,6 +4103,9 @@ def run_task(task_type, task_input, store_id=None):
             user_prompt = (
                 "Here are the target pages and their candidate source pages:\n\n"
                 + json.dumps(batch_ctx, indent=2)
+                + "\n\nWhen a target has a primary_keyword, prefer it (or a natural phrase "
+                "containing it) as the anchor text for links pointing AT that target — "
+                "fall back to the title only when the keyword reads unnaturally in context."
                 + "\n\nReturn your link plans."
             )
             try:

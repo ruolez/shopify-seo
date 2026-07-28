@@ -423,6 +423,9 @@ def _execute_bulk_collection_task(bulk_task_id):
                             cur.execute("UPDATE synced_collections SET meta_description = %s WHERE id = %s", (collection_fields["meta_description"], collection_id))
                         cur.execute("UPDATE synced_collections SET last_optimized_at = NOW() WHERE id = %s", (collection_id,))
 
+                    from app.services.analysis_refresh import refresh_item_analysis
+                    refresh_item_analysis(item["store_id"], "collection", collection_id)
+
                     with db.get_cursor() as cur:
                         cur.execute(
                             "UPDATE bulk_task_items SET apply_result = %s WHERE id = %s",
@@ -612,6 +615,9 @@ def _execute_bulk_task(bulk_task_id):
                     except Exception as schema_err:
                         logger.warning("Schema push failed for product %s: %s", product_id, schema_err)
 
+                    from app.services.analysis_refresh import refresh_item_analysis
+                    refresh_item_analysis(item["store_id"], "product", product_id)
+
                     with db.get_cursor() as cur:
                         cur.execute(
                             "UPDATE bulk_task_items SET apply_result = %s WHERE id = %s",
@@ -751,13 +757,15 @@ def _execute_bulk_title_task(bulk_task_id):
 
                         with db.get_cursor() as cur:
                             cur.execute(
-                                "UPDATE synced_products SET title = %s WHERE id = %s",
+                                "UPDATE synced_products SET title = %s, last_optimized_at = NOW() WHERE id = %s",
                                 (new_title, product_id),
                             )
                             cur.execute(
                                 "UPDATE bulk_task_items SET apply_result = %s WHERE id = %s",
                                 (json.dumps({"applied": True}), item_id),
                             )
+                        from app.services.analysis_refresh import refresh_item_analysis
+                        refresh_item_analysis(item["store_id"], "product", product_id)
                     except Exception as apply_err:
                         item_error = f"Apply to Shopify failed: {apply_err}"
                         with db.get_cursor() as cur:
@@ -891,13 +899,15 @@ def _execute_bulk_collection_title_task(bulk_task_id):
 
                         with db.get_cursor() as cur:
                             cur.execute(
-                                "UPDATE synced_collections SET title = %s WHERE id = %s",
+                                "UPDATE synced_collections SET title = %s, last_optimized_at = NOW() WHERE id = %s",
                                 (new_title, collection_id),
                             )
                             cur.execute(
                                 "UPDATE bulk_task_items SET apply_result = %s WHERE id = %s",
                                 (json.dumps({"applied": True}), item_id),
                             )
+                        from app.services.analysis_refresh import refresh_item_analysis
+                        refresh_item_analysis(item["store_id"], "collection", collection_id)
                     except Exception as apply_err:
                         item_error = f"Apply to Shopify failed: {apply_err}"
                         with db.get_cursor() as cur:

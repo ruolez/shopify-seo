@@ -6,6 +6,7 @@ from collections import Counter
 from datetime import datetime, timedelta, timezone
 
 from app.database import db
+from app.services.ai_output_guard import guard_shopify_fields
 from app.services.content_gap_service import classify_intent
 from app.services.technical_seo_analyzer import (
     _generate_ngrams,
@@ -1064,6 +1065,12 @@ def generate_assignment_plan(store_id):
             total = len(keywords)
             assigned = 0
 
+            # Resolver ownership: a keyword that is already a page's resolved
+            # primary must be assigned to that page, never moved by the plan.
+            from app.services.keyword_resolver import _norm as _norm_kw
+            from app.services.keyword_resolver import get_owned_primary_keywords
+            ownership = get_owned_primary_keywords(store_id)
+
             with db.get_cursor() as cur:
                 cur.execute(
                     "UPDATE keyword_strategy_runs SET total_items = %s WHERE id = %s",
@@ -1122,6 +1129,17 @@ def generate_assignment_plan(store_id):
                                     "item_id": m["item_id"],
                                     "action": action,
                                 })
+
+                owner = ownership.get(_norm_kw(kw))
+                if owner and (not best_match
+                              or (owner["item_type"], owner["item_id"])
+                              != (best_match["item_type"], best_match["item_id"])):
+                    best_match = {"item_type": owner["item_type"], "item_id": owner["item_id"]}
+                    reason = "Already this page's resolved primary — the plan follows keyword-strategy ownership"
+                    cannibalization_items = [
+                        c for c in cannibalization_items
+                        if (c["item_type"], c["item_id"]) != (owner["item_type"], owner["item_id"])
+                    ]
 
                 if best_match:
                     with db.get_cursor() as cur:
@@ -1433,6 +1451,22 @@ def generate_implementation_steps(store_id, assignment_id):
         except (ValueError, TypeError):
             cannibs_raw = []
 
+    def _stored_primary(c_type, c_id):
+        if c_type not in ("product", "collection"):
+            return ""
+        try:
+            with db.get_cursor() as cur:
+                cur.execute(
+                    """SELECT keyword_resolution->'primary'->>'keyword' AS kw
+                       FROM technical_seo_analyses
+                       WHERE store_id = %s AND item_type = %s AND item_id = %s""",
+                    (store_id, c_type, c_id),
+                )
+                row = cur.fetchone()
+            return (row or {}).get("kw") or ""
+        except Exception:
+            return ""
+
     competing_pages = []
     for c in cannibs_raw:
         c_type = c.get("item_type")
@@ -1450,6 +1484,7 @@ def generate_implementation_steps(store_id, assignment_id):
                 "handle": c_content.get("handle") or "",
                 "tags": c_content.get("tags") or "",
                 "body_snippet": _strip_html(c_content.get("description") or c_content.get("body") or c_content.get("body_html") or "")[:300],
+                "resolved_primary": _stored_primary(c_type, c_id),
             })
 
     # Build AI prompt
@@ -1480,7 +1515,9 @@ def generate_implementation_steps(store_id, assignment_id):
                 f"    Meta Description: {cp['meta_description'] or '(empty)'}\n"
                 f"    Tags: {cp['tags'] or '(none)'}\n"
                 f"    Body Preview: {cp['body_snippet'] or '(empty)'}\n"
-                f"    Recommended Action: {cp['action']}\n"
+                + (f"    OWN PRIMARY KEYWORD (protected — never remove or weaken it on this page): \"{cp['resolved_primary']}\"\n"
+                   if cp.get("resolved_primary") else "")
+                + f"    Recommended Action: {cp['action']}\n"
             )
 
     system_prompt = (
@@ -1493,6 +1530,8 @@ def generate_implementation_steps(store_id, assignment_id):
         "- Include the primary keyword naturally, don't just prepend it\n"
         "- For de-optimize steps, replace the keyword with a more specific long-tail variant or remove it\n"
         "- For differentiate steps, shift focus to a related but distinct keyword\n"
+        "- A competing page's OWN PRIMARY KEYWORD is protected: de-optimize/differentiate steps must "
+        "only touch the contested keyword, never that page's own primary\n"
         "- Only propose changes to fields that actually need modification\n"
         "- Be specific with proposed values — write the actual text, not placeholders\n\n"
         "Return ONLY valid JSON in this exact format:\n"
@@ -1621,6 +1660,9 @@ def apply_single_step(store_id, assignment_id, step_index):
     new_value = step["proposed_value"]
     old_value = step.get("current_value") or ""
 
+    if s_item_type == "page" and field == "tags":
+        return {"error": "Pages have no tags field"}
+
     # Get the Shopify ID for this item
     content = _get_item_content(s_item_type, s_item_id)
     if not content:
@@ -1640,6 +1682,9 @@ def apply_single_step(store_id, assignment_id, step_index):
         update_fields["title"] = new_value
     elif field == "tags":
         update_fields["tags"] = new_value
+
+    guard_shopify_fields(update_fields)
+    new_value = update_fields.get(field, new_value)
 
     # Apply to Shopify
     access_token = decrypt_value(assignment["access_token_enc"])
@@ -1690,8 +1735,15 @@ def apply_single_step(store_id, assignment_id, step_index):
             col = "seo_title"
         elif s_item_type == "page" and field == "meta_description":
             col = "seo_description"
-        with db.get_cursor() as cur:
-            cur.execute(f"UPDATE {table} SET {col} = %s WHERE id = %s", (new_value, s_item_id))
+        known_cols = {
+            "product": {"meta_title", "meta_description", "title", "tags"},
+            "collection": {"meta_title", "meta_description", "title"},
+            "article": {"meta_title", "meta_description", "title", "tags"},
+            "page": {"seo_title", "seo_description", "title"},
+        }
+        if col in known_cols.get(s_item_type, set()):
+            with db.get_cursor() as cur:
+                cur.execute(f"UPDATE {table} SET {col} = %s WHERE id = %s", (new_value, s_item_id))
 
     # Mark step as applied in proposed_changes
     steps[step_index]["applied"] = True
@@ -1705,6 +1757,9 @@ def apply_single_step(store_id, assignment_id, step_index):
             "WHERE id = %s AND store_id = %s",
             (json.dumps(proposed), all_applied, assignment_id, store_id),
         )
+
+    from app.services.analysis_refresh import refresh_item_analysis
+    refresh_item_analysis(store_id, s_item_type, s_item_id)
 
     return {"applied": True, "field": field, "item_type": s_item_type, "all_done": all_applied}
 
@@ -1829,6 +1884,14 @@ def apply_fix(store_id, assignment_id):
         elif field == "tags":
             update_fields["tags"] = value
 
+    guard_shopify_fields(update_fields)
+    if "meta_title" in update_fields:
+        proposed["meta_title"] = update_fields["meta_title"]
+    if "meta_description" in update_fields:
+        proposed["meta_description"] = update_fields["meta_description"]
+    if "description_html" in update_fields:
+        proposed["description"] = update_fields["description_html"]
+
     if update_fields:
         if item_type == "product":
             client.update_product(shopify_id, update_fields)
@@ -1860,14 +1923,14 @@ def apply_fix(store_id, assignment_id):
     with db.get_cursor() as cur:
         if item_type == "product":
             for field, value in proposed.items():
-                if field in ("meta_title", "meta_description", "title", "tags"):
+                if field in ("meta_title", "meta_description", "title", "tags", "description"):
                     cur.execute(
                         f"UPDATE synced_products SET {field} = %s WHERE id = %s",
                         (value, item_id),
                     )
         elif item_type == "collection":
             for field, value in proposed.items():
-                if field in ("meta_title", "meta_description", "title"):
+                if field in ("meta_title", "meta_description", "title", "description"):
                     cur.execute(
                         f"UPDATE synced_collections SET {field} = %s WHERE id = %s",
                         (value, item_id),
@@ -1879,6 +1942,19 @@ def apply_fix(store_id, assignment_id):
                         f"UPDATE synced_articles SET {field} = %s WHERE id = %s",
                         (value, item_id),
                     )
+        elif item_type == "page":
+            page_col_map = {
+                "meta_title": "seo_title",
+                "meta_description": "seo_description",
+                "title": "title",
+            }
+            for field, value in proposed.items():
+                col = page_col_map.get(field)
+                if col:
+                    cur.execute(
+                        f"UPDATE synced_pages SET {col} = %s WHERE id = %s",
+                        (value, item_id),
+                    )
 
         # Mark assignment as applied
         cur.execute(
@@ -1886,6 +1962,9 @@ def apply_fix(store_id, assignment_id):
             "WHERE id = %s AND store_id = %s",
             (assignment_id, store_id),
         )
+
+    from app.services.analysis_refresh import refresh_item_analysis
+    refresh_item_analysis(store_id, item_type, item_id)
 
     return {"applied": True, "fields": list(proposed.keys())}
 
@@ -1987,6 +2066,45 @@ def revert_fix(store_id, change_id):
             if "meta_description" in page_fields:
                 page_fields["seo_description"] = page_fields.pop("meta_description")
             client.update_page(shopify_id, page_fields)
+
+        table_map = {
+            "product": "synced_products",
+            "collection": "synced_collections",
+            "article": "synced_articles",
+            "page": "synced_pages",
+        }
+        col_maps = {
+            "product": {
+                "meta_title": "meta_title",
+                "meta_description": "meta_description",
+                "title": "title",
+                "description": "description",
+            },
+            "collection": {
+                "meta_title": "meta_title",
+                "meta_description": "meta_description",
+                "title": "title",
+                "description": "description",
+            },
+            "article": {
+                "meta_title": "meta_title",
+                "meta_description": "meta_description",
+                "title": "title",
+            },
+            "page": {
+                "meta_title": "seo_title",
+                "meta_description": "seo_description",
+                "title": "title",
+            },
+        }
+        col = col_maps.get(change["item_type"], {}).get(field)
+        if col:
+            table = table_map[change["item_type"]]
+            with db.get_cursor() as cur:
+                cur.execute(
+                    f"UPDATE {table} SET {col} = %s WHERE id = %s",
+                    (old_value, change["item_id"]),
+                )
 
     with db.get_cursor() as cur:
         cur.execute(

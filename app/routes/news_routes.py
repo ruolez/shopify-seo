@@ -9,6 +9,7 @@ from flask import Blueprint, jsonify, render_template, request
 from app.database import db
 from app.routes.blog_routes import _get_store_client
 from app.services import url_utils
+from app.services.ai_output_guard import clamp_meta_description, clamp_meta_title, sanitize_html
 from app.services.news_body import insert_inline_images, render_sources_html
 from app.services.news_template import (
     NEWS_SECTION_FILE,
@@ -409,6 +410,7 @@ def _step_publish(session, store, client, is_published=True, regen_hub=True):
     sources_html = render_sources_html(session.get("source_urls") or [])
     if sources_html:
         body_html = f"{body_html}\n{sources_html}"
+    body_html = sanitize_html(body_html)
 
     tags = edited.get("tags") or []
     if "type:news" not in tags:
@@ -461,8 +463,10 @@ def _step_publish(session, store, client, is_published=True, regen_hub=True):
             )
 
     # SEO meta + news metafields (category + dateModified).
+    meta_title = clamp_meta_title(edited.get("meta_title") or "")
+    meta_description = clamp_meta_description(edited.get("meta_description") or "")
     try:
-        client.set_article_seo(shopify_id, edited.get("meta_title") or "", edited.get("meta_description") or "")
+        client.set_article_seo(shopify_id, meta_title, meta_description)
     except Exception as e:
         logger.warning("Failed to set news SEO metafields: %s", e)
     try:
@@ -500,7 +504,7 @@ def _step_publish(session, store, client, is_published=True, regen_hub=True):
                 headline, result.get("handle", ""),
                 body_html, fields["summary"],
                 ", ".join(tags),
-                edited.get("meta_title", ""), edited.get("meta_description", ""),
+                meta_title, meta_description,
                 cdn_image_url, fields.get("image_alt", ""),
                 is_published, now if is_published else None,
                 NEWS_TEMPLATE_SUFFIX, category, now,

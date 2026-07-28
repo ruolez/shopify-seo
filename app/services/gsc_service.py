@@ -1051,31 +1051,60 @@ def get_trends(store_id, date_from, date_to, device=None, country=None):
 
 
 def take_seo_score_snapshot(store_id):
+    """Record per-item score history using the same unified 3-pillar
+    composition the priority queue shows (content + keyword + search) —
+    a legacy content-only snapshot here would drift from the UI."""
+    from app.services.ctr_benchmarks import get_expected_ctr_curve
     from app.services.seo_analyzer import analyze_product_seo, analyze_collection_seo
+    from app.services.seo_priority_service import (
+        _get_gsc_metrics_for_store,
+        _get_semrush_metrics_for_store,
+        compute_unified_item_score,
+    )
+
+    gsc_metrics = _get_gsc_metrics_for_store(store_id)
+    semrush_metrics = _get_semrush_metrics_for_store(store_id)
+    ctr_curve = get_expected_ctr_curve(store_id)
 
     with db.get_cursor() as cur:
-        cur.execute("SELECT id, shopify_id, title, meta_title, meta_description, description, images FROM synced_products WHERE store_id = %s", (store_id,))
+        cur.execute(
+            "SELECT item_type, item_id, score FROM technical_seo_analyses WHERE store_id = %s",
+            (store_id,),
+        )
+        kw_scores = {(r["item_type"], r["item_id"]): r["score"] for r in cur.fetchall()}
+
+        cur.execute("SELECT id, shopify_id, handle, title, meta_title, meta_description, description, images FROM synced_products WHERE store_id = %s", (store_id,))
         products = cur.fetchall()
 
         for p in products:
             if p.get("images") and isinstance(p["images"], str):
                 p["images"] = json.loads(p["images"])
-            result = analyze_product_seo(p)
+            path = f"products/{p.get('handle') or ''}"
+            seo = analyze_product_seo(p)
+            unified = compute_unified_item_score(
+                seo, kw_scores.get(("product", p["id"])),
+                gsc_metrics.get(path, {}), semrush_metrics.get(path, {}), ctr_curve,
+            )
             cur.execute(
                 """INSERT INTO seo_score_history (store_id, item_type, item_id, shopify_id, title, score, breakdown, recorded_at)
                    VALUES (%s, 'product', %s, %s, %s, %s, %s, NOW())""",
-                (store_id, p["id"], p["shopify_id"], p["title"], result["score"], json.dumps(result["breakdown"])),
+                (store_id, p["id"], p["shopify_id"], p["title"], unified["seo_score"], json.dumps(seo["breakdown"])),
             )
 
-        cur.execute("SELECT id, shopify_id, title, meta_title, meta_description, description FROM synced_collections WHERE store_id = %s", (store_id,))
+        cur.execute("SELECT id, shopify_id, handle, title, meta_title, meta_description, description FROM synced_collections WHERE store_id = %s", (store_id,))
         collections = cur.fetchall()
 
         for c in collections:
-            result = analyze_collection_seo(c)
+            path = f"collections/{c.get('handle') or ''}"
+            seo = analyze_collection_seo(c)
+            unified = compute_unified_item_score(
+                seo, kw_scores.get(("collection", c["id"])),
+                gsc_metrics.get(path, {}), semrush_metrics.get(path, {}), ctr_curve,
+            )
             cur.execute(
                 """INSERT INTO seo_score_history (store_id, item_type, item_id, shopify_id, title, score, breakdown, recorded_at)
                    VALUES (%s, 'collection', %s, %s, %s, %s, %s, NOW())""",
-                (store_id, c["id"], c["shopify_id"], c["title"], result["score"], json.dumps(result["breakdown"])),
+                (store_id, c["id"], c["shopify_id"], c["title"], unified["seo_score"], json.dumps(seo["breakdown"])),
             )
 
     return {"products": len(products), "collections": len(collections)}
