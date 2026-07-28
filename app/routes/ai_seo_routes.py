@@ -11,7 +11,6 @@ import hashlib
 import json
 import logging
 import re
-import threading
 import time
 from datetime import datetime, timezone
 
@@ -512,7 +511,9 @@ def _section_actions(store_id, pillars):
                     )
                     comps[c] = cur.fetchone()
             review_covered = int(comps["review_signals"]["full_count"] or 0)
-            if review_covered == 0:
+            # avg is NULL when every product's review signal is unverified
+            # (no live crawls) — unknown is not a finding.
+            if review_covered == 0 and comps["review_signals"]["avg"] is not None:
                 row(high, "feed:reviews", "feed", "high", "reviews",
                     "No rating markup on any product",
                     "AI shopping ranks reviewed products higher — if a review app is installed (Stamped, Bizrate), "

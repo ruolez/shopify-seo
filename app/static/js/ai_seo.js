@@ -558,9 +558,9 @@ function renderOptimizePreview(res) {
             ${faqHtml || '<div style="color:var(--on-surface-secondary);">No FAQ generated</div>'}
             <div style="margin-top:14px;padding:8px 12px;background:var(--surface-dim);border-radius:8px;font-size:12px;color:var(--on-surface-secondary);">
                 <span class="material-symbols-rounded" style="font-size:15px;vertical-align:middle;color:var(--primary);">data_object</span>
-                On apply, structured data (JSON-LD) is also pushed: <b>FAQPage</b> + enriched
-                <b>${scanType === "collection" ? "CollectionPage" : "Product"}</b> schema
-                ${scanType === "collection" ? "" : "(brand, offers, price, availability, GTIN/MPN, condition)"} — the structured-data signal AI engines reward.
+                On apply, <b>FAQPage</b> JSON-LD and AI-verified spec facts (additionalProperty) are pushed as metafields —
+                the theme snippet renders the full <b>${scanType === "collection" ? "CollectionPage" : "Product"}</b> schema
+                (brand, offers, price, availability) live from store data.
             </div>
         </div>`;
 }
@@ -937,9 +937,9 @@ async function loadFeedOverview() {
             <div class="stat-card"><div class="stat-value">${pct("images")}%</div>
                 <div class="stat-label">Image + alt coverage</div>
                 <div class="stat-label" style="color:var(--on-surface-secondary);">products fully imaged with alt text</div></div>
-            <div class="stat-card"><div class="stat-value">${pct("review_signals")}%</div>
+            <div class="stat-card"><div class="stat-value">${(cov.review_signals || {}).avg == null ? "—" : pct("review_signals") + "%"}</div>
                 <div class="stat-label">With rating markup</div>
-                <div class="stat-label" style="color:var(--on-surface-secondary);">aggregateRating on live page</div></div>`;
+                <div class="stat-label" style="color:var(--on-surface-secondary);">${(cov.review_signals || {}).avg == null ? "not verified — run a live crawl" : "aggregateRating on live page"}</div></div>`;
         const chips = Object.keys(FEED_COMPONENT_LABELS)
             .map((c) => {
                 const avg = (cov[c] || {}).avg;
@@ -964,7 +964,9 @@ function feedChecklistCard(o) {
     const unsynced = (o.unsynced || [])
         .map((u) => `<li style="margin-bottom:4px;"><b>${escapeHtml(u.label)}</b> (${escapeHtml(u.status)}) — <span style="color:var(--on-surface-secondary);">${escapeHtml(u.why)}</span></li>`)
         .join("");
-    const noReviews = o.scanned_count && !((o.coverage || {}).review_signals || {}).full_count;
+    // avg == null means unverified (no live crawls) — unknown is not a finding.
+    const reviewCov = (o.coverage || {}).review_signals || {};
+    const noReviews = o.scanned_count && reviewCov.avg != null && !reviewCov.full_count;
     // One collapsed card carries policy + review warning + checklist; the badges
     // in the summary keep the warnings visible even while collapsed.
     return `<details class="card" id="feed-eligibility" style="padding:0;">

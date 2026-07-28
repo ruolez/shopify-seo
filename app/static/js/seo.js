@@ -4274,17 +4274,18 @@ async function loadProductSchemaPreview(productId) {
         let html = "";
 
         if (resp.is_valid) {
-            html += '<div class="success-banner" style="margin-bottom: 12px;"><span class="material-symbols-rounded">check_circle</span> Valid Schema</div>';
+            html += '<div class="success-banner" style="margin-bottom: 12px;"><span class="material-symbols-rounded">check_circle</span> Valid enrichment payload</div>';
         } else {
             html += '<div style="background: var(--error-light, #fce8e6); padding: 8px 12px; border-radius: 8px; margin-bottom: 12px; color: var(--error); font-size: 13px;">';
             html += "<strong>Validation Issues:</strong> " + (resp.validation_errors || []).join(", ");
             html += "</div>";
         }
 
+        html += '<div style="font-size:12px;color:var(--on-surface-secondary);margin-bottom:8px;">Enrichment payload (seo.schema_enrichment metafield) — the theme snippet renders the full Product JSON-LD live; this only adds AI-verified spec facts.</div>';
         html += `<pre style="background: var(--surface-dim); padding: 12px; border-radius: 8px; overflow: auto; max-height: 300px; font-size: 12px;"><code>${escapeHtml(JSON.stringify(resp.schema, null, 2))}</code></pre>`;
         html += '<div style="display: flex; gap: 8px; margin-top: 8px;">';
         html += `<button class="btn btn-sm btn-secondary" onclick="navigator.clipboard.writeText(JSON.stringify(${escapeAttr(JSON.stringify(resp.schema))}, null, 2)).then(() => showToast('Copied!', 'success'))">
-            <span class="material-symbols-rounded">content_copy</span> Copy Schema
+            <span class="material-symbols-rounded">content_copy</span> Copy JSON
         </button>`;
         html += `<button class="btn btn-sm btn-primary" onclick="pushSchema(${productId})">
             <span class="material-symbols-rounded">cloud_upload</span> Push to Shopify

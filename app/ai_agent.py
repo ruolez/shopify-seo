@@ -166,6 +166,13 @@ def _get_search_context_for_item(item_type, item_id, store_id):
         image_alt_status = _get_image_alt_status(item_type, item_id, effective_store_id)
         faq_schema_status = _get_faq_schema_status(item_type, item_id, effective_store_id)
         cannibalization_risks = _get_cannibalization_risks(item_type, handle, effective_store_id, semrush_keywords, gsc_queries, **extra_kw)
+        if resolved_primary and cannibalization_risks:
+            # The resolved primary already survived the resolver's own
+            # cannibalization/ownership checks — warning the model to
+            # "differentiate away" from its mandated keyword is a contradiction.
+            rp_norm = _norm_kw(resolved_primary.get("keyword"))
+            cannibalization_risks = [r for r in cannibalization_risks
+                                     if _norm_kw(r.get("keyword")) != rp_norm]
 
         from app.services.ctr_benchmarks import get_expected_ctr_curve
         ctr_curve = get_expected_ctr_curve(effective_store_id)
@@ -3036,6 +3043,8 @@ def run_task(task_type, task_input, store_id=None):
                 f"Choose a different, more specific keyword (e.g. a long-tail variation) to avoid "
                 f"cannibalization within the store. If the best keyword is already claimed, "
                 f"differentiate with modifiers like brand, size, flavor, or use case.\n"
+                f"EXCEPTION: if a keyword in this list matches the RESOLVED or USER-ASSIGNED "
+                f"PRIMARY KEYWORD above, the resolved primary wins — use it as the primary anyway.\n"
             )
 
         system_prompt += serp_instruction + tags_instruction + search_data_instruction + priority_instruction + claimed_instruction
@@ -3149,6 +3158,8 @@ def run_task(task_type, task_input, store_id=None):
                 f"You MUST NOT use any of these as the primary keyword for this collection. "
                 f"Choose a different, more specific keyword (e.g. a long-tail variation) to avoid "
                 f"cannibalization within the store.\n"
+                f"EXCEPTION: if a keyword in this list matches the RESOLVED or USER-ASSIGNED "
+                f"PRIMARY KEYWORD above, the resolved primary wins — use it as the primary anyway.\n"
             )
 
         system_prompt = get_setting("prompts.collection_seo", DEFAULTS["prompts.collection_seo"])
@@ -3485,6 +3496,22 @@ def run_task(task_type, task_input, store_id=None):
         if len(group_items) < 2:
             return {"error": "Need at least 2 items to dedupe"}
 
+        def _dedupe_primary(it):
+            if it.get("type") not in ("product", "collection") or not it.get("id"):
+                return ""
+            try:
+                with db.get_cursor() as cur:
+                    cur.execute(
+                        """SELECT keyword_resolution->'primary'->>'keyword' AS kw
+                           FROM technical_seo_analyses
+                           WHERE item_type = %s AND item_id = %s""",
+                        (it["type"], it["id"]),
+                    )
+                    row = cur.fetchone()
+                return (row or {}).get("kw") or ""
+            except Exception:
+                return ""
+
         payload = {
             "field": field,
             "keep_id": keep_id,
@@ -3500,6 +3527,7 @@ def run_task(task_type, task_input, store_id=None):
                     "handle": it.get("handle") or "",
                     "blog_title": it.get("blog_title") or "",
                     "summary": (it.get("summary") or "")[:200],
+                    "primary_keyword": _dedupe_primary(it),
                 }
                 for it in group_items
             ],
@@ -3511,6 +3539,9 @@ def run_task(task_type, task_input, store_id=None):
             + field
             + "'. Make each one unique:\n\n"
             + json.dumps(payload, indent=2)
+            + "\n\nWhen an item has a primary_keyword, its rewritten value MUST keep that "
+            "keyword — it was chosen by the store's keyword strategy; differentiate with "
+            "other words, never by dropping the keyword."
         )
 
         response = client.chat.completions.create(

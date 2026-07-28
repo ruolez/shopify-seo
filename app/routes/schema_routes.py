@@ -7,7 +7,6 @@ from app.auth import decrypt_value
 from app.database import db
 from app.services.schema_generator import (
     generate_product_enrichment,
-    schema_to_script_tag,
     validate_enrichment,
 )
 from app.shopify_client import ShopifyClient
@@ -175,7 +174,6 @@ def generate_schema(product_id):
         "schema": enrichment,
         "is_valid": is_valid,
         "validation_errors": errors,
-        "script_tag": schema_to_script_tag(enrichment),
         "note": "Enrichment payload only — offers, availability and ratings are rendered in-theme by ai-seo-schema.liquid.",
     })
 
@@ -212,7 +210,6 @@ def view_schema(product_id):
         "validation_errors": schema_row["validation_errors"] or [],
         "pushed_to_shopify": schema_row["pushed_to_shopify"],
         "pushed_at": schema_row["pushed_at"].isoformat() if schema_row.get("pushed_at") else None,
-        "script_tag": schema_to_script_tag(schema_json),
         "updated_at": schema_row["updated_at"].isoformat() if schema_row.get("updated_at") else None,
     })
 

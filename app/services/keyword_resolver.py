@@ -549,6 +549,17 @@ def _swap_primary_if_claimed(store_id, item_type, item_id, res):
                 (store_id, item_type, item_id),
             )
             rows = cur.fetchall()
+            # Manual assignments on any OTHER item (either type) reserve the
+            # keyword too — the resolution cache may not reflect them yet.
+            cur.execute(
+                """SELECT mk.keyword AS kw
+                   FROM keyword_assignments ka
+                   JOIN master_keywords mk ON mk.id = ka.master_keyword_id
+                   WHERE ka.store_id = %s AND ka.status IN ('accepted', 'applied')
+                     AND NOT (ka.assigned_item_type = %s AND ka.assigned_item_id = %s)""",
+                (store_id, item_type, item_id),
+            )
+            assignment_rows = cur.fetchall()
     except Exception:
         return False
 
@@ -557,6 +568,10 @@ def _swap_primary_if_claimed(store_id, item_type, item_id, res):
         prev = claimed.get(r["kw"])
         if prev is None or r["manual"] > prev["manual"] or r["score"] > prev["score"]:
             claimed[r["kw"]] = {"score": float(r["score"] or 0), "manual": bool(r["manual"])}
+    for r in assignment_rows:
+        kw_norm = _norm(r["kw"])
+        if kw_norm:
+            claimed[kw_norm] = {"score": float("inf"), "manual": True}
 
     owner = claimed.get(kw)
     my_score = float(primary.get("score") or 0)

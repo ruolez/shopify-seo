@@ -496,6 +496,8 @@ def build_action_queue(store_id, limit=15):
             continue
         severity = "high" if p["priority_score"] >= 80 else "med" if p["priority_score"] >= 60 else "low"
         action = p.get("recommended_action") or p.get("top_opportunity") or "Optimize on-page SEO"
+        if p.get("measuring"):
+            action += " · recently optimized, re-measuring"
         params = {"optimize": p["item_type"], "id": p["id"], "ak": key, "store_id": store_id}
         fix = None
         if p.get("target_keyword"):
@@ -752,7 +754,7 @@ def get_coverage(store_id):
             """SELECT COUNT(DISTINCT sp.id) AS cnt FROM synced_products sp
                JOIN schema_markup sm ON sm.store_id = sp.store_id
                     AND sm.resource_type = 'product' AND sm.resource_id = sp.shopify_id
-                    AND sm.pushed_to_shopify = TRUE
+                    AND sm.schema_type = 'Product' AND sm.pushed_to_shopify = TRUE
                WHERE sp.store_id = %s AND sp.status = 'ACTIVE'""",
             (store_id,),
         )

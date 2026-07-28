@@ -236,11 +236,12 @@ def get_priority_ranked_items(store_id, item_type="product", limit=50, measuring
         return _owner_titles[okey]
 
     results = []
+    measuring_results = []
     for item in items:
-        # Freshly optimized items sit in "Recently Optimized" (measuring) —
-        # re-flagging them off pre-change search data is queue noise.
-        if _within_measuring_window(item.get("last_optimized_at"), measuring_days):
-            continue
+        # Freshly optimized items are demoted while Google re-measures —
+        # re-flagging them off pre-change data is noise. Demoted, not hidden:
+        # a catalog-wide bulk optimize must not blank the whole queue.
+        in_measuring_window = _within_measuring_window(item.get("last_optimized_at"), measuring_days)
 
         handle = item.get("handle") or ""
         path = f"{prefix}/{handle}"
@@ -351,7 +352,11 @@ def get_priority_ranked_items(store_id, item_type="product", limit=50, measuring
                 target_keyword_position = pos
                 target_keyword_volume = vol
 
-                cannibal = _check_keyword_cannibalization(store_id, best["keyword"], path)
+                # The resolved primary already passed the resolver's own
+                # cannibalization checks — don't warn the user off it.
+                cannibal = None
+                if _norm(best["keyword"]) != resolved_kw_norm:
+                    cannibal = _check_keyword_cannibalization(store_id, best["keyword"], path)
                 if cannibal:
                     cannibalization_warning = (
                         f"Warning: \"{best['keyword']}\" already ranks on {cannibal['competing_url']} "
@@ -415,7 +420,14 @@ def get_priority_ranked_items(store_id, item_type="product", limit=50, measuring
             result_entry["keyword_aligned"] = True
         if primary_review_suggested:
             result_entry["primary_review_suggested"] = True
-        results.append(result_entry)
+        if in_measuring_window:
+            result_entry["measuring"] = True
+            measuring_results.append(result_entry)
+        else:
+            results.append(result_entry)
 
     results.sort(key=lambda x: x["priority_score"], reverse=True)
+    if len(results) < limit:
+        measuring_results.sort(key=lambda x: x["priority_score"], reverse=True)
+        results.extend(measuring_results[: limit - len(results)])
     return results[:limit]

@@ -1515,8 +1515,11 @@ def generate_implementation_steps(store_id, assignment_id):
                 f"    Meta Description: {cp['meta_description'] or '(empty)'}\n"
                 f"    Tags: {cp['tags'] or '(none)'}\n"
                 f"    Body Preview: {cp['body_snippet'] or '(empty)'}\n"
+                # When the competing page's stored primary IS the contested
+                # keyword, the ownership move is the point — don't protect it.
                 + (f"    OWN PRIMARY KEYWORD (protected — never remove or weaken it on this page): \"{cp['resolved_primary']}\"\n"
-                   if cp.get("resolved_primary") else "")
+                   if cp.get("resolved_primary")
+                   and cp["resolved_primary"].strip().lower() != (keyword or "").strip().lower() else "")
                 + f"    Recommended Action: {cp['action']}\n"
             )
 
