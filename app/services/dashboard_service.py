@@ -358,9 +358,11 @@ def _brand_tokens(store):
 def get_ctr_opportunities(store_id, limit=10, min_impressions=200):
     """Queries ranking in the top 10 whose CTR trails the expected curve for
     their position — the cheapest wins on the site (meta title rewrites)."""
+    from app.services.ctr_benchmarks import get_expected_ctr_curve
     from app.services.seo_analyzer import _expected_ctr
     from app.services.url_utils import url_path_key
 
+    ctr_curve = get_expected_ctr_curve(store_id)
     end = gsc_data_end_date()
     start = end - timedelta(days=27)
 
@@ -395,7 +397,7 @@ def get_ctr_opportunities(store_id, limit=10, min_impressions=200):
         impressions = int(r["impressions"] or 0)
         actual = int(r["clicks"] or 0) / impressions if impressions else 0
         position = float(r["position"])
-        expected = _expected_ctr(position)
+        expected = _expected_ctr(position, ctr_curve)
         if actual >= expected * 0.8:
             continue
         candidates.append(
@@ -426,11 +428,15 @@ def get_ctr_opportunities(store_id, limit=10, min_impressions=200):
         for item_type, table in (("product", "synced_products"), ("collection", "synced_collections")):
             if handles[item_type]:
                 cur.execute(
-                    f"SELECT id, handle, title FROM {table} WHERE store_id = %s AND handle = ANY(%s)",
+                    f"SELECT id, handle, title, last_optimized_at FROM {table} WHERE store_id = %s AND handle = ANY(%s)",
                     (store_id, list(handles[item_type].keys())),
                 )
                 for row in cur.fetchall():
-                    handles[item_type][row["handle"]] = {"id": row["id"], "title": row["title"]}
+                    handles[item_type][row["handle"]] = {
+                        "id": row["id"],
+                        "title": row["title"],
+                        "last_optimized_at": row["last_optimized_at"],
+                    }
 
     for c in candidates:
         parts = c["path_key"].split("/")
@@ -472,6 +478,8 @@ def dismiss_action(store_id, action_key, snooze_days=None):
 def build_action_queue(store_id, limit=15):
     """One prioritized to-do list merged from every analysis engine,
     ranked by estimated click gain."""
+    from urllib.parse import urlencode
+
     items = []
     counts = {}
     dismissed = _dismissed_action_keys(store_id)
@@ -488,47 +496,119 @@ def build_action_queue(store_id, limit=15):
             continue
         severity = "high" if p["priority_score"] >= 80 else "med" if p["priority_score"] >= 60 else "low"
         action = p.get("recommended_action") or p.get("top_opportunity") or "Optimize on-page SEO"
+        params = {"optimize": p["item_type"], "id": p["id"], "ak": key, "store_id": store_id}
+        fix = None
+        if p.get("target_keyword"):
+            fix = {
+                "kind": "striking_distance",
+                "keyword": p["target_keyword"],
+                "position": p.get("target_keyword_position"),
+                "volume": p.get("target_keyword_volume"),
+            }
+            params["fix"] = "striking_distance"
+            params["kw"] = p["target_keyword"]
+            if p.get("target_keyword_position") is not None:
+                params["pos"] = p["target_keyword_position"]
+            if p.get("target_keyword_volume") is not None:
+                params["vol"] = p["target_keyword_volume"]
+        else:
+            params["action"] = action
         items.append(
             {
                 "source": "priority",
                 "severity": severity,
                 "title": p["title"],
                 "detail": action + (" · cannibalization risk" if p.get("cannibalization_warning") else ""),
-                "href": f"/seo?optimize={p['item_type']}&id={p['id']}&action={action}",
+                "href": "/seo?" + urlencode(params),
                 "est_clicks_gain": p.get("potential_clicks_gain"),
                 "item_type": p["item_type"],
                 "item_id": p["id"],
                 "action_key": key,
+                "fix": fix,
             }
         )
     counts["priority"] = len(priorities)
 
     try:
-        ctr = get_ctr_opportunities(store_id, limit=5)
+        ctr = get_ctr_opportunities(store_id, limit=15)
     except Exception as e:
         logger.warning("Action queue: CTR scan failed: %s", e)
         ctr = []
+
+    # One meta title serves every query variant of a page — group the
+    # underperforming queries by target so one Fix clears them all.
+    from app.services.seo_priority_service import _within_measuring_window
+    from app.services.url_utils import url_path_key
+
+    ctr_groups = {}
+    ctr_order = []
     for c in ctr:
-        key = f"ctr:{c['query']}"
-        if key in dismissed:
-            continue
+        if f"ctr:{c['query']}" in dismissed:
+            continue  # legacy per-query dismissals still honored, per variant
         matched = c.get("matched_item")
-        href = f"/seo?optimize={matched['item_type']}&id={matched['id']}" if matched else "/gsc"
-        target = matched["title"] if matched else c["page"]
+        if matched and _within_measuring_window(matched.get("last_optimized_at"), 28):
+            continue  # freshly optimized — GSC hasn't re-measured yet
+        if matched:
+            gkey = f"ctr:{matched['item_type']}:{matched['id']}"
+        else:
+            gkey = f"ctr:page:{url_path_key(c['page'])}"
+        if gkey in dismissed:
+            continue
+        group = ctr_groups.get(gkey)
+        if group is None:
+            group = ctr_groups[gkey] = {"matched": matched, "page": c["page"], "variants": []}
+            ctr_order.append(gkey)
+        group["variants"].append(c)
+
+    for gkey in ctr_order:
+        group = ctr_groups[gkey]
+        variants = sorted(group["variants"], key=lambda v: v["est_clicks_gain"], reverse=True)
+        top = variants[0]
+        matched = group["matched"]
+        total_gain = sum(v["est_clicks_gain"] for v in variants)
+        queries = [v["query"] for v in variants[:5]]
+        fix = {
+            "kind": "ctr_rewrite",
+            "keyword": top["query"],
+            "queries": queries,
+            "position": top["position"],
+            "actual_ctr": top["actual_ctr"],
+            "expected_ctr": top["expected_ctr"],
+        }
+        if matched:
+            href = "/seo?" + urlencode(
+                {
+                    "fix": "ctr",
+                    "optimize": matched["item_type"],
+                    "id": matched["id"],
+                    "q": "|".join(queries),
+                    "pos": top["position"],
+                    "ctr": top["actual_ctr"],
+                    "xctr": top["expected_ctr"],
+                    "gain": total_gain,
+                    "ak": gkey,
+                    "store_id": store_id,
+                }
+            )
+        else:
+            href = "/gsc"
+        target = matched["title"] if matched else group["page"]
+        extra = f" (+{len(variants) - 1} variant{'s' if len(variants) > 2 else ''})" if len(variants) > 1 else ""
         items.append(
             {
                 "source": "ctr",
                 "severity": "med",
-                "title": f'Rewrite meta title for "{c["query"]}"',
-                "detail": f"{target} · pos {c['position']} · CTR {c['actual_ctr'] * 100:.1f}% vs {c['expected_ctr'] * 100:.1f}% expected",
+                "title": f'Rewrite meta title for "{top["query"]}"{extra}',
+                "detail": f"{target} · pos {top['position']} · CTR {top['actual_ctr'] * 100:.1f}% vs {top['expected_ctr'] * 100:.1f}% expected",
                 "href": href,
-                "est_clicks_gain": c["est_clicks_gain"],
+                "est_clicks_gain": total_gain,
                 "item_type": matched["item_type"] if matched else None,
                 "item_id": matched["id"] if matched else None,
-                "action_key": key,
+                "action_key": gkey,
+                "fix": fix,
             }
         )
-    counts["ctr"] = len(ctr)
+    counts["ctr"] = len(ctr_order)
 
     insights = get_store_insights(store_id)
 

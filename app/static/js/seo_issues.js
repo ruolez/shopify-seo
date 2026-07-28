@@ -223,6 +223,9 @@ function renderItemIssuesPanel(item, itemType) {
             <span class="material-symbols-rounded">verified</span>
             No issues found — this ${itemType} looks healthy.
         </div>`;
+        // Targeted fixes (e.g. CTR meta rewrites from the dashboard queue)
+        // still need somewhere to render even when every check passes.
+        html += '<div id="issue-fixes-container"></div>';
         html += '</div>';
         return html;
     }
@@ -254,29 +257,40 @@ function renderItemIssuesPanel(item, itemType) {
     return html;
 }
 
-async function generateItemFixes(itemType, itemId) {
+// Set when a fix flow was launched from a dashboard queue item — its
+// action_key gets auto-snoozed after a successful apply (GSC lags ~28 days).
+let _pendingFixActionKey = null;
+
+async function generateItemFixes(itemType, itemId, opts) {
     const btn = document.getElementById("gen-fixes-btn");
     const container = document.getElementById("issue-fixes-container");
     if (!container) return;
+    _pendingFixActionKey = (opts && opts.actionKey) || null;
+    const bannerHtml = opts && opts.banner
+        ? `<div style="font-size:12.5px;margin-bottom:10px;padding:8px 12px;background:var(--surface-dim);border-left:3px solid var(--primary);border-radius:6px;">${escapeHtml(opts.banner)}</div>`
+        : "";
     if (btn) {
         btn.disabled = true;
         btn.innerHTML = '<span class="material-symbols-rounded spin">sync</span> Generating fixes...';
     }
-    container.innerHTML = '<div class="loading-spinner" style="padding: 24px 0;"><div class="spinner"></div><p>AI is drafting targeted fixes for the failing checks...</p></div>';
+    container.innerHTML = bannerHtml + '<div class="loading-spinner" style="padding: 24px 0;"><div class="spinner"></div><p>AI is drafting targeted fixes for the failing checks...</p></div>';
 
     try {
+        const body = { item_type: itemType, item_id: itemId };
+        if (opts && opts.onlyFields) body.only_fields = opts.onlyFields;
+        if (opts && opts.fixContext) body.fix_context = opts.fixContext;
         const resp = await apiRequest("/api/technical-seo/fix", {
             method: "POST",
-            body: { item_type: itemType, item_id: itemId },
+            body,
         });
         const task = await pollTaskUntilDone(`/api/tasks/${resp.task_id}`);
         if (task.status === "failed" || !task.result || !task.result.fixes) {
-            container.innerHTML = `<p style="color: var(--error); font-size: 13px;">Fix generation failed: ${escapeHtml(task.error || "no fixes returned")}</p>`;
+            container.innerHTML = bannerHtml + `<p style="color: var(--error); font-size: 13px;">Fix generation failed: ${escapeHtml(task.error || "no fixes returned")}</p>`;
         } else {
-            container.innerHTML = renderFixProposals(task.result, itemType, itemId, false);
+            container.innerHTML = bannerHtml + renderFixProposals(task.result, itemType, itemId, false);
         }
     } catch (err) {
-        container.innerHTML = `<p style="color: var(--error); font-size: 13px;">Fix generation failed: ${escapeHtml(err.message)}</p>`;
+        container.innerHTML = bannerHtml + `<p style="color: var(--error); font-size: 13px;">Fix generation failed: ${escapeHtml(err.message)}</p>`;
     } finally {
         if (btn) {
             btn.disabled = false;
@@ -379,6 +393,18 @@ async function applySelectedItemFixes(itemType, itemId) {
         });
         if (resp.ok) {
             showToast(`Applied: ${(resp.updated_fields || []).join(", ")}${resp.new_score != null ? ` — new score ${resp.new_score}` : ""}`, "success");
+            if (_pendingFixActionKey) {
+                const ak = _pendingFixActionKey;
+                _pendingFixActionKey = null;
+                try {
+                    const sid = (typeof currentItemStoreId !== "undefined" && currentItemStoreId) || _getSeoStoreId();
+                    await apiRequest(`/api/dashboard/action-queue/dismiss?store_id=${sid}`, {
+                        method: "POST",
+                        body: { action_key: ak, snooze_days: 28 },
+                    });
+                    showToast("Snoozed in the queue for 28 days while Google re-measures", "success");
+                } catch {}
+            }
             if (itemType === "product") {
                 viewProduct(itemId, { tab: "checks" });
                 loadProducts();

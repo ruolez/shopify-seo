@@ -258,6 +258,14 @@ async function loadActionQueue() {
         ];
         const sevBadge = { high: "badge-error", med: "badge-warning", low: "badge-info" };
         const row = (item, verb) => {
+            const fix = item.fix || null;
+            if (fix) {
+                if (fix.kind === "ctr_rewrite") verb = item.item_id ? "Fix title" : "Review";
+                else if (fix.kind === "striking_distance") verb = "Optimize";
+            }
+            const kwChip = fix && fix.keyword
+                ? `<span class="badge" title="Target keyword" style="background:var(--surface-dim);color:var(--on-surface);font-size:10.5px;max-width:170px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(fix.keyword)}</span>`
+                : "";
             const gain = item.est_clicks_gain
                 ? `<span style="font-size:11px;color:var(--success);white-space:nowrap;">+${item.est_clicks_gain} clicks/mo</span>`
                 : "";
@@ -265,15 +273,16 @@ async function loadActionQueue() {
                 ? `<button class="icon-btn" style="width:28px;height:28px;" title="Snooze 7 days" onclick="event.stopPropagation();dismissQueueItem('${escapeAttr(item.action_key)}', 7, this)"><span class="material-symbols-rounded" style="font-size:16px;">snooze</span></button>
                    <button class="icon-btn" style="width:28px;height:28px;" title="Dismiss" onclick="event.stopPropagation();dismissQueueItem('${escapeAttr(item.action_key)}', null, this)"><span class="material-symbols-rounded" style="font-size:16px;">close</span></button>`
                 : "";
-            return `<div class="queue-row" style="display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--outline);cursor:pointer;" onclick="window.location='${item.href}'">
+            return `<div class="queue-row" style="display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--outline);cursor:pointer;" onclick="window.location='${escapeAttr(item.href)}'">
                 <span class="badge ${sevBadge[item.severity] || "badge-info"}" style="min-width:64px;text-align:center;">${QUEUE_SOURCE_LABELS[item.source] || item.source}</span>
                 <div style="flex:1;min-width:0;">
                     <div style="font-weight:600;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(item.title)}</div>
                     <div style="font-size:11px;color:var(--on-surface-secondary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(item.detail || "")}</div>
                 </div>
+                ${kwChip}
                 ${gain}
                 ${dismiss}
-                <a href="${item.href}" class="btn btn-secondary btn-sm" onclick="event.stopPropagation()">${verb}</a>
+                <a href="${escapeAttr(item.href)}" class="btn btn-secondary btn-sm" onclick="event.stopPropagation()">${verb}</a>
             </div>`;
         };
 

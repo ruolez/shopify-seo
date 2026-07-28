@@ -3,6 +3,7 @@ from datetime import datetime, timedelta, timezone
 
 from app.database import db
 from app.services.ctr_benchmarks import get_expected_ctr_curve
+from app.services.keyword_resolver import _norm, get_owned_primary_keywords
 from app.services.seo_analyzer import (
     _expected_ctr,
     analyze_collection_seo,
@@ -142,7 +143,19 @@ def _check_keyword_cannibalization(store_id, keyword, this_path):
     return None
 
 
-def get_priority_ranked_items(store_id, item_type="product", limit=50):
+def _within_measuring_window(last_optimized_at, days):
+    """True while a recent optimization is still being re-measured by Google —
+    GSC/Semrush data predating the change would just re-flag the item."""
+    if not last_optimized_at or not days:
+        return False
+    if last_optimized_at.tzinfo:
+        now = datetime.now(timezone.utc)
+    else:
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+    return (now - last_optimized_at) < timedelta(days=days)
+
+
+def get_priority_ranked_items(store_id, item_type="product", limit=50, measuring_days=28):
     gsc_metrics = _get_gsc_metrics_for_store(store_id)
     semrush_metrics = _get_semrush_metrics_for_store(store_id)
     ctr_curve = get_expected_ctr_curve(store_id)
@@ -173,13 +186,41 @@ def get_priority_ranked_items(store_id, item_type="product", limit=50):
 
     with db.get_cursor() as cur:
         cur.execute(
-            "SELECT item_id, score FROM technical_seo_analyses WHERE store_id = %s AND item_type = %s",
+            """SELECT item_id, score, keyword_resolution->'primary' AS primary
+               FROM technical_seo_analyses WHERE store_id = %s AND item_type = %s""",
             (store_id, item_type),
         )
-        kw_scores = {r["item_id"]: r["score"] for r in cur.fetchall()}
+        analysis_rows = cur.fetchall()
+    kw_scores = {r["item_id"]: r["score"] for r in analysis_rows}
+    resolved_primaries = {
+        r["item_id"]: r["primary"]
+        for r in analysis_rows
+        if r["primary"] and r["primary"].get("keyword")
+    }
+    ownership = get_owned_primary_keywords(store_id)
+
+    _owner_titles = {}
+
+    def _owner_title(owner):
+        okey = (owner["item_type"], owner["item_id"])
+        if okey not in _owner_titles:
+            table = "synced_products" if owner["item_type"] == "product" else "synced_collections"
+            try:
+                with db.get_cursor() as cur:
+                    cur.execute(f"SELECT title FROM {table} WHERE id = %s", (owner["item_id"],))
+                    row = cur.fetchone()
+                _owner_titles[okey] = (row or {}).get("title") or f"{owner['item_type']} #{owner['item_id']}"
+            except Exception:
+                _owner_titles[okey] = f"{owner['item_type']} #{owner['item_id']}"
+        return _owner_titles[okey]
 
     results = []
     for item in items:
+        # Freshly optimized items sit in "Recently Optimized" (measuring) —
+        # re-flagging them off pre-change search data is queue noise.
+        if _within_measuring_window(item.get("last_optimized_at"), measuring_days):
+            continue
+
         handle = item.get("handle") or ""
         path = f"{prefix}/{handle}"
 
@@ -228,20 +269,89 @@ def get_priority_ranked_items(store_id, item_type="product", limit=50):
         top_opp = ""
         recommended_action = ""
         cannibalization_warning = None
-        if striking:
-            best = striking[0]
-            vol = int(best.get("search_volume") or 0)
-            pos = float(best.get("position") or 0)
-            top_opp = f"{best['keyword']} (vol: {vol:,}, pos: {pos:.0f})"
-            recommended_action = f"Optimize for \"{best['keyword']}\" — striking distance at position {pos:.0f}"
+        action_kind = None
+        target_keyword = None
+        target_keyword_position = None
+        target_keyword_volume = None
+        keyword_aligned = False
+        primary_review_suggested = False
 
-            cannibal = _check_keyword_cannibalization(store_id, best["keyword"], path)
-            if cannibal:
-                cannibalization_warning = (
-                    f"Warning: \"{best['keyword']}\" already ranks on {cannibal['competing_url']} "
-                    f"at position {cannibal['position']}. Optimizing this page for the same keyword "
-                    f"may cause cannibalization. Consider a long-tail variation instead."
-                )
+        resolved = resolved_primaries.get(item["id"])
+        resolved_kw_norm = _norm(resolved["keyword"]) if resolved else None
+
+        if striking:
+            own_key = (item_type, item["id"])
+
+            def _foreign_owner(kw):
+                o = ownership.get(_norm(kw))
+                return o if o and (o["item_type"], o["item_id"]) != own_key else None
+
+            resolved_striking = next(
+                (k for k in striking if resolved_kw_norm and _norm(k["keyword"]) == resolved_kw_norm),
+                None,
+            )
+            unowned = [k for k in striking
+                       if _norm(k["keyword"]) != resolved_kw_norm and not _foreign_owner(k["keyword"])]
+
+            best = None
+            if resolved_striking:
+                best = resolved_striking
+                pos = float(best.get("position") or 0)
+                recommended_action = (f"Optimize for \"{best['keyword']}\" — resolved primary in "
+                                      f"striking distance at position {pos:.0f}")
+                keyword_aligned = True
+            elif resolved_kw_norm:
+                # Queue and optimizer must agree: recommend the resolved
+                # primary; unowned striking keywords are supporting evidence.
+                target_keyword = resolved["keyword"]
+                target_keyword_position = resolved.get("gsc_position") or resolved.get("semrush_position")
+                target_keyword_volume = resolved.get("volume")
+                action_kind = "striking_distance"
+                keyword_aligned = True
+                support = unowned[0] if unowned else None
+                if support:
+                    s_vol = int(support.get("search_volume") or 0)
+                    s_pos = float(support.get("position") or 0)
+                    top_opp = f"{support['keyword']} (vol: {s_vol:,}, pos: {s_pos:.0f})"
+                    recommended_action = (
+                        f"Optimize for \"{resolved['keyword']}\" (supporting opportunity: "
+                        f"\"{support['keyword']}\" pos {s_pos:.0f}, vol {s_vol:,})"
+                    )
+                    if s_vol > 3 * int(resolved.get("volume") or 0):
+                        primary_review_suggested = True
+                else:
+                    recommended_action = f"Optimize for \"{resolved['keyword']}\" — your resolved primary keyword"
+            elif unowned:
+                best = unowned[0]
+                pos = float(best.get("position") or 0)
+                recommended_action = f"Optimize for \"{best['keyword']}\" — striking distance at position {pos:.0f}"
+            else:
+                # Every striking keyword belongs to another page — recommending
+                # any of them would manufacture cannibalization.
+                owner = _foreign_owner(striking[0]["keyword"])
+                if owner:
+                    cannibalization_warning = (
+                        f"Warning: \"{striking[0]['keyword']}\" is the primary keyword of "
+                        f"\"{_owner_title(owner)}\". Optimizing this page for it would cause "
+                        f"cannibalization. Assign a more specific keyword instead."
+                    )
+
+            if best is not None:
+                vol = int(best.get("search_volume") or 0)
+                pos = float(best.get("position") or 0)
+                top_opp = f"{best['keyword']} (vol: {vol:,}, pos: {pos:.0f})"
+                action_kind = "striking_distance"
+                target_keyword = best["keyword"]
+                target_keyword_position = pos
+                target_keyword_volume = vol
+
+                cannibal = _check_keyword_cannibalization(store_id, best["keyword"], path)
+                if cannibal:
+                    cannibalization_warning = (
+                        f"Warning: \"{best['keyword']}\" already ranks on {cannibal['competing_url']} "
+                        f"at position {cannibal['position']}. Optimizing this page for the same keyword "
+                        f"may cause cannibalization. Consider a long-tail variation instead."
+                    )
 
         if not recommended_action and float(gsc.get("gsc_impressions") or 0) > 50:
             ctr_val = float(gsc.get("gsc_ctr") or 0)
@@ -249,9 +359,11 @@ def get_priority_ranked_items(store_id, item_type="product", limit=50):
             expected = _expected_ctr(pos_val, ctr_curve)
             if ctr_val < expected * 0.6:
                 recommended_action = f"Improve CTR — {ctr_val:.1%} vs {expected:.1%} expected at position {pos_val:.1f}"
+                action_kind = "improve_ctr"
 
         if not recommended_action and composite["on_page_score"] < 50:
             recommended_action = "Improve on-page SEO fundamentals (meta title, description, content)"
+            action_kind = "onpage_fundamentals"
 
         potential_clicks = 0
         if striking:
@@ -274,6 +386,10 @@ def get_priority_ranked_items(store_id, item_type="product", limit=50):
             "search_score": composite["search_score"],
             "top_opportunity": top_opp,
             "recommended_action": recommended_action,
+            "action_kind": action_kind,
+            "target_keyword": target_keyword,
+            "target_keyword_position": target_keyword_position,
+            "target_keyword_volume": target_keyword_volume,
             "potential_clicks_gain": potential_clicks,
             "gsc_clicks": gsc.get("gsc_clicks"),
             "gsc_impressions": gsc.get("gsc_impressions"),
@@ -284,6 +400,15 @@ def get_priority_ranked_items(store_id, item_type="product", limit=50):
         }
         if cannibalization_warning:
             result_entry["cannibalization_warning"] = cannibalization_warning
+        if resolved:
+            result_entry["resolved_primary"] = {
+                "keyword": resolved.get("keyword"),
+                "manual": bool(resolved.get("manual")),
+            }
+        if keyword_aligned:
+            result_entry["keyword_aligned"] = True
+        if primary_review_suggested:
+            result_entry["primary_review_suggested"] = True
         results.append(result_entry)
 
     results.sort(key=lambda x: x["priority_score"], reverse=True)

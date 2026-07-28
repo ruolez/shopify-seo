@@ -512,6 +512,213 @@ def resolve_item_keywords(store_id, item_type, item_id, item=None, prefetch=None
     return result
 
 
+def _pick_unclaimed_alternative(res, claimed, min_rel):
+    """Walk an item's candidate list for the best eligible keyword not in
+    `claimed`. Returns the candidate dict or None."""
+    primary_kw = res["primary"]["keyword"]
+    for c in res.get("candidates", []):
+        kw = c["keyword"]
+        if kw == primary_kw or kw in claimed:
+            continue
+        if c.get("generic") or c.get("packaging_only") or c.get("manual"):
+            continue
+        if (c.get("relevance") or 0) < min_rel:
+            continue
+        return c
+    return None
+
+
+def _swap_primary_if_claimed(store_id, item_type, item_id, res):
+    """Keep the one-keyword-one-page invariant after a single-item refresh:
+    when another item of this type owns the new primary with a stronger claim
+    (manual, or higher score), walk to the next eligible unclaimed candidate.
+    Returns True when the primary was swapped."""
+    primary = res.get("primary") or {}
+    kw = primary.get("keyword")
+    if not kw:
+        return False
+    try:
+        with db.get_cursor() as cur:
+            cur.execute(
+                """SELECT keyword_resolution->'primary'->>'keyword' AS kw,
+                          COALESCE((keyword_resolution->'primary'->>'score')::float, 0) AS score,
+                          COALESCE((keyword_resolution->'primary'->>'manual')::boolean, false) AS manual
+                   FROM technical_seo_analyses
+                   WHERE store_id = %s AND item_type = %s AND item_id != %s
+                     AND keyword_resolution->'primary'->>'keyword' IS NOT NULL""",
+                (store_id, item_type, item_id),
+            )
+            rows = cur.fetchall()
+    except Exception:
+        return False
+
+    claimed = {}
+    for r in rows:
+        prev = claimed.get(r["kw"])
+        if prev is None or r["manual"] > prev["manual"] or r["score"] > prev["score"]:
+            claimed[r["kw"]] = {"score": float(r["score"] or 0), "manual": bool(r["manual"])}
+
+    owner = claimed.get(kw)
+    my_score = float(primary.get("score") or 0)
+    if not owner or not (owner["manual"] or owner["score"] > my_score):
+        return False
+
+    min_rel = _rules().get("relevance", {}).get("min_relevance", 10) / 100.0
+    replacement = _pick_unclaimed_alternative(res, set(claimed), min_rel)
+    if replacement is None:
+        return False  # no viable alternative — sharing beats nothing
+    res["primary"] = replacement
+    res["note"] = f"'{kw}' is owned by a higher-scoring page; using next-best candidate"
+    res["candidates"] = [replacement] + [c for c in res["candidates"] if c["keyword"] != replacement["keyword"]]
+    return True
+
+
+def get_or_refresh_resolution(store_id, item_type, item_id, max_age_days=None):
+    """Persisted keyword resolution for an item, refreshed when it is missing,
+    older than rules.keyword_resolution.resolution_max_age_days, or superseded
+    by a newer manual assignment. Never raises — returns the stale resolution
+    (or None) when the refresh fails, so callers can't be blocked by it."""
+    if item_type not in ("product", "collection"):
+        return None
+    if max_age_days is None:
+        max_age_days = _rules().get("resolution_max_age_days", 7)
+
+    resolution = None
+    analyzed_at = None
+    try:
+        with db.get_cursor() as cur:
+            cur.execute(
+                """SELECT keyword_resolution, updated_at FROM technical_seo_analyses
+                   WHERE store_id = %s AND item_type = %s AND item_id = %s""",
+                (store_id, item_type, item_id),
+            )
+            row = cur.fetchone()
+        if row:
+            resolution = row["keyword_resolution"]
+            analyzed_at = row["updated_at"]
+    except Exception:
+        logger.warning("Resolution read failed for %s %s", item_type, item_id)
+
+    stale = not resolution or not resolution.get("primary")
+    if not stale and analyzed_at:
+        now = datetime.now(timezone.utc) if analyzed_at.tzinfo else datetime.now()
+        if now - analyzed_at > timedelta(days=max_age_days):
+            stale = True
+        else:
+            try:
+                with db.get_cursor() as cur:
+                    cur.execute(
+                        """SELECT MAX(updated_at) AS latest FROM keyword_assignments
+                           WHERE store_id = %s AND assigned_item_type = %s
+                             AND assigned_item_id = %s AND status IN ('accepted', 'applied')""",
+                        (store_id, item_type, item_id),
+                    )
+                    latest = (cur.fetchone() or {}).get("latest")
+                if latest and latest > analyzed_at:
+                    stale = True  # manual assignment newer than the analysis
+            except Exception:
+                pass
+
+    if not stale:
+        return resolution
+
+    try:
+        from app.routes.technical_seo_routes import (
+            _enrich_collection_data,
+            _resolve_and_analyze,
+            _upsert_analysis,
+        )
+        from app.services.technical_seo_analyzer import (
+            analyze_collection_technical_seo,
+            analyze_product_technical_seo,
+        )
+
+        with db.get_cursor() as cur:
+            cur.execute(
+                f"SELECT * FROM {_item_table(item_type)} WHERE id = %s AND store_id = %s",
+                (item_id, store_id),
+            )
+            item = cur.fetchone()
+        if not item:
+            return resolution
+
+        analysis, fresh = _resolve_and_analyze(item_type, dict(item))
+        if fresh and fresh.get("primary") and not fresh["primary"].get("manual"):
+            if _swap_primary_if_claimed(store_id, item_type, item_id, fresh):
+                item_dict = dict(item)
+                if item_type == "collection":
+                    item_dict = _enrich_collection_data(item_dict)
+                    analysis = analyze_collection_technical_seo(
+                        item_dict, primary_keyword=fresh["primary"]["keyword"])
+                else:
+                    analysis = analyze_product_technical_seo(
+                        item_dict, primary_keyword=fresh["primary"]["keyword"])
+                analysis["detected_keywords"] = fresh["candidates"]
+                analysis["keyword_resolution"] = fresh
+        _upsert_analysis(store_id, item_type, item_id, analysis, fresh)
+        return fresh or resolution
+    except Exception:
+        logger.warning("Resolution refresh failed for %s %s", item_type, item_id)
+        return resolution
+
+
+def get_owned_primary_keywords(store_id, exclude=None):
+    """Normalized keyword -> owning item for every resolved primary and
+    accepted/applied assignment in the store, across products and collections.
+    Manual claims outrank resolved ones. `exclude` is an optional
+    (item_type, item_id) whose own claims are skipped."""
+    owned = {}
+    exclude = tuple(exclude) if exclude else None
+
+    def claim(kw, owner):
+        key = _norm(kw)
+        if not key:
+            return
+        prev = owned.get(key)
+        if (prev is None or (owner["manual"] and not prev["manual"])
+                or (owner["manual"] == prev["manual"]
+                    and (owner["score"] or 0) > (prev["score"] or 0))):
+            owned[key] = owner
+
+    try:
+        with db.get_cursor() as cur:
+            cur.execute(
+                """SELECT item_type, item_id,
+                          keyword_resolution->'primary'->>'keyword' AS kw,
+                          COALESCE((keyword_resolution->'primary'->>'score')::float, 0) AS score,
+                          COALESCE((keyword_resolution->'primary'->>'manual')::boolean, false) AS manual,
+                          COALESCE((keyword_resolution->'primary'->>'volume')::float, 0) AS volume
+                   FROM technical_seo_analyses
+                   WHERE store_id = %s
+                     AND keyword_resolution->'primary'->>'keyword' IS NOT NULL""",
+                (store_id,),
+            )
+            for r in cur.fetchall():
+                if exclude and (r["item_type"], r["item_id"]) == exclude:
+                    continue
+                claim(r["kw"], {"item_type": r["item_type"], "item_id": r["item_id"],
+                                "score": float(r["score"] or 0), "manual": bool(r["manual"]),
+                                "volume": int(r["volume"] or 0)})
+
+            cur.execute(
+                """SELECT ka.assigned_item_type AS item_type, ka.assigned_item_id AS item_id,
+                          mk.keyword, mk.search_volume
+                   FROM keyword_assignments ka
+                   JOIN master_keywords mk ON mk.id = ka.master_keyword_id
+                   WHERE ka.store_id = %s AND ka.status IN ('accepted', 'applied')""",
+                (store_id,),
+            )
+            for r in cur.fetchall():
+                if exclude and (r["item_type"], r["item_id"]) == exclude:
+                    continue
+                claim(r["keyword"], {"item_type": r["item_type"], "item_id": r["item_id"],
+                                     "score": None, "manual": True,
+                                     "volume": int(r["search_volume"] or 0)})
+    except Exception:
+        logger.warning("Ownership map build failed for store %s", store_id)
+    return owned
+
+
 def dedupe_primary_ownership(store_id, item_type):
     """One keyword, one page. After a bulk resolution, redistribute auto-picked
     primaries so no two items of a type share one — the anti-cannibalization
@@ -559,17 +766,7 @@ def dedupe_primary_ownership(store_id, item_type):
         if primary_kw not in claimed:
             claimed.add(primary_kw)
             continue
-        replacement = None
-        for c in res.get("candidates", []):
-            kw = c["keyword"]
-            if kw == primary_kw or kw in claimed:
-                continue
-            if c.get("generic") or c.get("packaging_only") or c.get("manual"):
-                continue
-            if (c.get("relevance") or 0) < min_rel:
-                continue
-            replacement = c
-            break
+        replacement = _pick_unclaimed_alternative(res, claimed, min_rel)
         if replacement is None:
             continue  # no viable alternative — sharing beats nothing
         claimed.add(replacement["keyword"])

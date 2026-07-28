@@ -125,85 +125,38 @@ def _get_search_context_for_item(item_type, item_id, store_id):
             if len(semrush_keywords) >= 20:
                 break
 
-        # If no URL-matched keywords, find semantically relevant ones from the store
+        # If no URL-matched keywords, find semantically relevant ones from the
+        # store — shared heuristic with the keyword resolver so both rank alike.
         if not semrush_keywords:
+            from app.services.keyword_resolver import _semantic_semrush_matches
+
             with db.get_cursor() as cur:
                 if item_type == "article":
                     cur.execute("SELECT title, '' as product_type, '' as vendor FROM synced_articles WHERE id = %s", (item_id,))
                 else:
                     table = "synced_products" if item_type == "product" else "synced_collections"
                     cur.execute(f"SELECT title, product_type, vendor FROM {table} WHERE id = %s", (item_id,))
-                item_detail = cur.fetchone() or {}
+                item_detail = dict(cur.fetchone() or {})
+            item_detail["handle"] = item.get("handle")
+            semrush_keywords = _semantic_semrush_matches(item_detail, all_sr)
 
-            # Build identity phrases — these define what this product IS
-            identity_phrases = []
-            vendor = (item_detail.get("vendor") or "").lower().strip()
-            ptype = (item_detail.get("product_type") or "").lower().strip()
-            title = (item_detail.get("title") or "").lower()
+        # The resolved primary (demand-grounded keyword strategy) is the
+        # mandated target for products/collections; manual assignments are
+        # already folded into it. Articles have no resolution — they keep the
+        # direct manual-assignment lookup.
+        resolved_primary = None
+        resolution_note = None
+        assigned_primary = None
+        if item_type in ("product", "collection"):
+            from app.services.keyword_resolver import get_or_refresh_resolution
 
-            if vendor and len(vendor) > 2:
-                identity_phrases.append(vendor)
-            if ptype and len(ptype) > 2:
-                identity_phrases.append(ptype)
-
-            # Extract distinctive words from handle (exclude very generic ones)
-            generic_words = {"the", "and", "for", "with", "pack", "packs", "box", "can", "cans",
-                            "100", "1pk", "5pk", "10pk", "pre", "priced", "new", "best", "buy",
-                            "shop", "online", "sale", "cigar", "leaf", "tobacco", "product"}
-            handle_words = [w.lower() for w in (item.get("handle") or "").replace("-", " ").split()
-                           if len(w) > 2 and w.lower() not in generic_words]
-
-            # Build 2-word phrases from handle for better matching
-            handle_str = (item.get("handle") or "").replace("-", " ").lower()
-            handle_bigrams = []
-            hw = handle_str.split()
-            for i in range(len(hw) - 1):
-                if hw[i] not in generic_words and hw[i+1] not in generic_words:
-                    handle_bigrams.append(f"{hw[i]} {hw[i+1]}")
-
-            def _relevance_score(keyword_text):
-                kw = keyword_text.lower()
-                identity_match = False
-                score = 0
-                # Exact phrase matches on identity (vendor, product_type)
-                for phrase in identity_phrases:
-                    if phrase in kw:
-                        score += 10
-                        identity_match = True
-                # Bigram matches (2-word phrases from handle)
-                bigram_match = False
-                for bg in handle_bigrams:
-                    if bg in kw:
-                        score += 5
-                        bigram_match = True
-                # Individual distinctive word matches
-                word_matches = sum(1 for w in handle_words if w in kw)
-                score += word_matches * 2
-                # Require at least one strong signal — identity or bigram match
-                # Pure single-word matches are too noisy
-                if not identity_match and not bigram_match and word_matches < 2:
-                    return 0
-                return score
-
-            scored = []
-            seen = set()
-            for r in all_sr:
-                kw_text = r.get("keyword") or ""
-                kw_lower = kw_text.lower()
-                vol = int(r.get("search_volume") or 0)
-                if vol <= 0 or kw_lower in seen:
-                    continue
-                rel = _relevance_score(kw_text)
-                if rel >= 5:
-                    scored.append((rel, vol, r))
-                    seen.add(kw_lower)
-
-            # Sort by relevance first, then volume
-            scored.sort(key=lambda x: (x[0], x[1]), reverse=True)
-            semrush_keywords = [s[2] for s in scored[:15]]
-
-        assigned_primary = _get_assigned_primary(effective_store_id, item_type, item_id)
-        if not gsc_queries and not semrush_keywords and not assigned_primary:
+            resolution = get_or_refresh_resolution(effective_store_id, item_type, item_id)
+            if resolution and resolution.get("primary"):
+                resolved_primary = resolution["primary"]
+                resolution_note = resolution.get("note")
+        else:
+            assigned_primary = _get_assigned_primary(effective_store_id, item_type, item_id)
+        if not gsc_queries and not semrush_keywords and not assigned_primary and not resolved_primary:
             return ""
 
         extra_kw = {}
@@ -214,7 +167,10 @@ def _get_search_context_for_item(item_type, item_id, store_id):
         faq_schema_status = _get_faq_schema_status(item_type, item_id, effective_store_id)
         cannibalization_risks = _get_cannibalization_risks(item_type, handle, effective_store_id, semrush_keywords, gsc_queries, **extra_kw)
 
-        return _format_search_context(gsc_totals, gsc_queries, semrush_keywords, inbound_links, image_alt_status, faq_schema_status, cannibalization_risks, assigned_primary=assigned_primary)
+        from app.services.ctr_benchmarks import get_expected_ctr_curve
+        ctr_curve = get_expected_ctr_curve(effective_store_id)
+
+        return _format_search_context(gsc_totals, gsc_queries, semrush_keywords, inbound_links, image_alt_status, faq_schema_status, cannibalization_risks, assigned_primary=assigned_primary, resolved_primary=resolved_primary, resolution_note=resolution_note, ctr_curve=ctr_curve)
 
     except Exception as e:
         logger.warning("Search context fetch failed for %s %s: %s", item_type, item_id, e)
@@ -451,7 +407,7 @@ def _get_assigned_primary(store_id, item_type, item_id):
         return None
 
 
-def _format_search_context(gsc_totals, gsc_queries, semrush_keywords, inbound_links=None, image_alt_status=None, faq_schema_status=None, cannibalization_risks=None, assigned_primary=None):
+def _format_search_context(gsc_totals, gsc_queries, semrush_keywords, inbound_links=None, image_alt_status=None, faq_schema_status=None, cannibalization_risks=None, assigned_primary=None, resolved_primary=None, resolution_note=None, ctr_curve=None):
     """Format GSC + Semrush data as markdown for AI prompt injection."""
     lines = ["## REAL SEARCH PERFORMANCE DATA (Google Search Console + Semrush)"]
 
@@ -463,6 +419,22 @@ def _format_search_context(gsc_totals, gsc_queries, semrush_keywords, inbound_li
             + (f" — volume: {ap_vol:,}" if ap_vol else "")
             + " — assigned manually by the store owner; use it as the primary keyword "
               "regardless of the recommendations below."
+        )
+    elif resolved_primary:
+        rp_vol = int(resolved_primary.get("volume") or 0)
+        rp_pos = resolved_primary.get("gsc_position") or resolved_primary.get("semrush_position")
+        origin = ("assigned manually by the store owner"
+                  if resolved_primary.get("manual")
+                  else "selected by the store's demand-grounded keyword strategy "
+                       "(relevance × demand × specificity, cannibalization-checked)")
+        lines.append(
+            f"\n### RESOLVED PRIMARY KEYWORD (must use)\n"
+            f"\"{resolved_primary['keyword']}\""
+            + (f" — volume: {rp_vol:,}" if rp_vol else "")
+            + (f", current position: {float(rp_pos):.1f}" if rp_pos else "")
+            + f" — {origin}. Use it as the primary keyword. Do NOT substitute a "
+              "higher-volume keyword: high-volume head terms belong to other pages of this store."
+            + (f"\nNote: {resolution_note}." if resolution_note else "")
         )
 
     if gsc_totals and float(gsc_totals.get("impressions") or 0) > 0:
@@ -492,7 +464,7 @@ def _format_search_context(gsc_totals, gsc_queries, semrush_keywords, inbound_li
             qimpr = float(q["impressions"] or 0)
             qctr = float(q["ctr"] or 0)
             qpos = float(q["position"] or 0)
-            expected = _expected_ctr(qpos)
+            expected = _expected_ctr(qpos, ctr_curve)
             if qimpr >= 50 and qctr < expected * 0.6:
                 opportunities.append({
                     "query": q["query"],
@@ -558,18 +530,37 @@ def _format_search_context(gsc_totals, gsc_queries, semrush_keywords, inbound_li
         primary_kw = {"keyword": assigned_primary["keyword"],
                       "search_volume": assigned_primary.get("search_volume") or 0,
                       "position": assigned_primary.get("position") or 0}
+    elif resolved_primary:
+        # The keyword-strategy resolution owns slot 1; volume-ranked picks
+        # become secondaries.
+        if primary_kw and _norm_kw(primary_kw.get("keyword")) != _norm_kw(resolved_primary.get("keyword")):
+            secondary_kws = [primary_kw] + list(secondary_kws)
+        primary_kw = {"keyword": resolved_primary["keyword"],
+                      "search_volume": resolved_primary.get("volume") or 0,
+                      "position": (resolved_primary.get("gsc_position")
+                                   or resolved_primary.get("semrush_position") or 0)}
 
     if primary_kw:
+        secondary_kws = [k for k in secondary_kws
+                         if _norm_kw(k.get("keyword")) != _norm_kw(primary_kw.get("keyword"))]
         vol = int(primary_kw.get("search_volume") or 0)
         pos = float(primary_kw.get("position") or 0)
-        lines.append(f"\n### RECOMMENDED TARGET KEYWORDS (sorted by search volume — use #1 as primary)")
-        marker = "← USE THIS AS PRIMARY (user-assigned)" if assigned_primary else "← USE THIS AS PRIMARY"
+        if assigned_primary or resolved_primary:
+            lines.append("\n### RECOMMENDED TARGET KEYWORDS (primary chosen by the keyword strategy — use #1 as primary; do NOT swap in a higher-volume keyword)")
+        else:
+            lines.append("\n### RECOMMENDED TARGET KEYWORDS (sorted by search volume — use #1 as primary)")
+        if assigned_primary:
+            marker = "← USE THIS AS PRIMARY (user-assigned)"
+        elif resolved_primary:
+            marker = "← USE THIS AS PRIMARY (resolved by keyword strategy)"
+        else:
+            marker = "← USE THIS AS PRIMARY"
         lines.append(f"1. \"{primary_kw['keyword']}\" — volume: {vol:,}, position: {pos:.0f} {marker}")
         for i, kw in enumerate(secondary_kws):
             sv = int(kw.get("search_volume") or 0)
             sp = float(kw.get("position") or 0)
             lines.append(f"{i+2}. \"{kw['keyword']}\" — volume: {sv:,}, position: {sp:.0f}")
-        if vol == 0 and secondary_kws and not assigned_primary:
+        if vol == 0 and secondary_kws and not assigned_primary and not resolved_primary:
             best_sec = max(secondary_kws, key=lambda k: int(k.get("search_volume") or 0))
             best_vol = int(best_sec.get("search_volume") or 0)
             if best_vol > 0:
@@ -2950,18 +2941,36 @@ def run_task(task_type, task_input, store_id=None):
                 if search_ctx:
                     search_data_instruction = (
                         "\n\n## CRITICAL: Real Search Data Available\n"
-                        "The following data comes from Google Search Console and Semrush. "
-                        "Use this data to inform your keyword choices. Prioritize keywords "
-                        "that already have search volume and where this product is in striking "
-                        "distance (positions 4-20). Do NOT ignore this data in favor of generic suggestions.\n\n"
+                        "The following data comes from Google Search Console, Semrush, and the "
+                        "store's keyword strategy. If a RESOLVED or USER-ASSIGNED PRIMARY KEYWORD "
+                        "is present, it was selected by the store's demand-grounded keyword "
+                        "strategy — use it as the primary. Use the rest of the data for secondary "
+                        "keywords, CTR framing, and content ideas. Do NOT ignore this data in "
+                        "favor of generic suggestions.\n\n"
                         + search_ctx
                     )
         except Exception as e:
             logger.warning("Search context injection failed for product %s: %s", product_id, e)
 
         priority_context = task_input.get("priority_context", "")
+        target_keyword = task_input.get("target_keyword")
         priority_instruction = ""
-        if priority_context:
+        if target_keyword:
+            tk_bits = []
+            if task_input.get("target_keyword_volume"):
+                tk_bits.append(f"search volume {int(task_input['target_keyword_volume']):,}")
+            if task_input.get("target_keyword_position"):
+                tk_bits.append(f"currently position {float(task_input['target_keyword_position']):.0f}")
+            priority_instruction = (
+                f"\n\n## TARGET KEYWORD (user-selected fix)\n"
+                f"This optimization was launched to capture \"{target_keyword}\""
+                + (f" ({', '.join(tk_bits)})" if tk_bits else "")
+                + ". Treat it as the primary keyword for the meta title, meta description, and "
+                  "the opening of the description — unless a RESOLVED or USER-ASSIGNED PRIMARY "
+                  "KEYWORD in the search data below conflicts, in which case that keyword wins "
+                  "and this one becomes a secondary.\n"
+            )
+        elif priority_context:
             priority_instruction = (
                 f"\n\nPRIORITY FOCUS: This product was flagged with the following priority action: "
                 f"\"{priority_context}\". Address this specific issue first in your analysis.\n"
@@ -2972,9 +2981,9 @@ def run_task(task_type, task_input, store_id=None):
         if claimed_keywords:
             kw_list = ", ".join(f'"{kw}"' for kw in claimed_keywords)
             claimed_instruction = (
-                f"\n\n## BULK OPTIMIZATION: Keywords Already Assigned to Other Products\n"
-                f"The following primary keywords have already been assigned to other products "
-                f"in this batch: {kw_list}\n"
+                f"\n\n## BULK OPTIMIZATION: Keywords Owned by Other Pages\n"
+                f"The following primary keywords are owned by other pages of this store "
+                f"(resolved primaries, manual assignments, or earlier items in this batch): {kw_list}\n"
                 f"You MUST NOT use any of these as the primary keyword for this product. "
                 f"Choose a different, more specific keyword (e.g. a long-tail variation) to avoid "
                 f"cannibalization within the store. If the best keyword is already claimed, "
@@ -3037,18 +3046,36 @@ def run_task(task_type, task_input, store_id=None):
                 if search_ctx:
                     search_data_instruction = (
                         "\n\n## CRITICAL: Real Search Data Available\n"
-                        "The following data comes from Google Search Console and Semrush. "
-                        "Use this data to inform your keyword choices. Prioritize keywords "
-                        "that already have search volume and where this collection is in striking "
-                        "distance (positions 4-20). Do NOT ignore this data in favor of generic suggestions.\n\n"
+                        "The following data comes from Google Search Console, Semrush, and the "
+                        "store's keyword strategy. If a RESOLVED or USER-ASSIGNED PRIMARY KEYWORD "
+                        "is present, it was selected by the store's demand-grounded keyword "
+                        "strategy — use it as the primary. Use the rest of the data for secondary "
+                        "keywords, CTR framing, and content ideas. Do NOT ignore this data in "
+                        "favor of generic suggestions.\n\n"
                         + search_ctx
                     )
         except Exception as e:
             logger.warning("Search context injection failed for collection %s: %s", collection_id, e)
 
         priority_context = task_input.get("priority_context", "")
+        target_keyword = task_input.get("target_keyword")
         priority_instruction = ""
-        if priority_context:
+        if target_keyword:
+            tk_bits = []
+            if task_input.get("target_keyword_volume"):
+                tk_bits.append(f"search volume {int(task_input['target_keyword_volume']):,}")
+            if task_input.get("target_keyword_position"):
+                tk_bits.append(f"currently position {float(task_input['target_keyword_position']):.0f}")
+            priority_instruction = (
+                f"\n\n## TARGET KEYWORD (user-selected fix)\n"
+                f"This optimization was launched to capture \"{target_keyword}\""
+                + (f" ({', '.join(tk_bits)})" if tk_bits else "")
+                + ". Treat it as the primary keyword for the meta title, meta description, and "
+                  "the opening of the description — unless a RESOLVED or USER-ASSIGNED PRIMARY "
+                  "KEYWORD in the search data below conflicts, in which case that keyword wins "
+                  "and this one becomes a secondary.\n"
+            )
+        elif priority_context:
             priority_instruction = (
                 f"\n\nPRIORITY FOCUS: This collection was flagged with the following priority action: "
                 f"\"{priority_context}\". Address this specific issue first in your analysis.\n"
@@ -3059,9 +3086,9 @@ def run_task(task_type, task_input, store_id=None):
         if claimed_keywords:
             kw_list = ", ".join(f'"{kw}"' for kw in claimed_keywords)
             claimed_instruction = (
-                f"\n\n## BULK OPTIMIZATION: Keywords Already Assigned to Other Collections\n"
-                f"The following primary keywords have already been assigned to other collections "
-                f"in this batch: {kw_list}\n"
+                f"\n\n## BULK OPTIMIZATION: Keywords Owned by Other Pages\n"
+                f"The following primary keywords are owned by other pages of this store "
+                f"(resolved primaries, manual assignments, or earlier items in this batch): {kw_list}\n"
                 f"You MUST NOT use any of these as the primary keyword for this collection. "
                 f"Choose a different, more specific keyword (e.g. a long-tail variation) to avoid "
                 f"cannibalization within the store.\n"
@@ -4261,6 +4288,20 @@ def run_task(task_type, task_input, store_id=None):
                 "top_queries": demand_candidates,
                 "manual": bool(resolution["primary"].get("manual")),
             }
+        fix_context = task_input.get("fix_context") or {}
+        if fix_context.get("kind") == "ctr_rewrite":
+            analysis_payload["ctr_underperformance"] = {
+                "note": "This page already ranks well for the queries below but earns far "
+                        "fewer clicks than expected for its position. Rewrite meta_title and "
+                        "meta_description to raise SERP click-through: keep the resolved "
+                        "primary_keyword primary, and naturally work in the phrasing of these "
+                        "real Google queries. Do not keyword-stuff.",
+                "queries": fix_context.get("queries") or [],
+                "position": fix_context.get("position"),
+                "actual_ctr": fix_context.get("actual_ctr"),
+                "expected_ctr": fix_context.get("expected_ctr"),
+                "estimated_monthly_clicks_lost": fix_context.get("est_clicks_gain"),
+            }
         if sibling_context:
             analysis_payload["sibling_products"] = json.loads(sibling_context)
         if category_context:
@@ -4383,6 +4424,13 @@ def run_task(task_type, task_input, store_id=None):
             "Propose specific fixes for the failing checks:\n\n"
             + analysis_context
         )
+        if fix_context.get("kind") == "ctr_rewrite":
+            fields_list = ", ".join(only_fields) if only_fields else "meta_title, meta_description"
+            user_prompt += (
+                f"\n\nThis is a targeted CTR fix: regardless of the failing checks (even if "
+                f"none are failing), you MUST return a fix for each of these fields: "
+                f"{fields_list} — rewritten to address the ctr_underperformance data above."
+            )
 
         response = client.chat.completions.create(
             model=config["model"],
@@ -4399,6 +4447,8 @@ def run_task(task_type, task_input, store_id=None):
             end = content.rfind("}") + 1
             if start >= 0 and end > start:
                 result = json.loads(content[start:end])
+                if only_fields:
+                    result["fixes"] = [f for f in result.get("fixes", []) if f.get("field") in only_fields]
                 for fix in result.get("fixes", []):
                     if fix.get("field") == "meta_description" and isinstance(fix.get("proposed_value"), str):
                         val = fix["proposed_value"]
@@ -5976,6 +6026,8 @@ def run_task(task_type, task_input, store_id=None):
             main_result["image_alt_suggestions"] = paired
 
         main_result = _generate_description(client, config, main_result, serp_context, serp_benchmark, product_id, search_context=prefetched_search_ctx)
+        if task_input.get("target_keyword"):
+            main_result["target_keyword"] = task_input["target_keyword"]
 
     elif task_type == "collection_seo":
         main_result = _generate_collection_description(
@@ -5983,6 +6035,8 @@ def run_task(task_type, task_input, store_id=None):
             hierarchy_context=task_input.get("hierarchy_context"),
             search_context=prefetched_search_ctx,
         )
+        if task_input.get("target_keyword"):
+            main_result["target_keyword"] = task_input["target_keyword"]
 
     elif task_type == "brand_seo":
         main_result = _generate_brand_collection_description(

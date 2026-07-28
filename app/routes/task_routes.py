@@ -307,6 +307,18 @@ def create_bulk_collection_task():
     return jsonify({"ok": True, "bulk_task_id": bulk_task_id, "total": len(collection_ids)}), 201
 
 
+def _owned_claims_for(ownership, item_type, item_id, cap=150):
+    """Keywords owned by other pages (resolved primaries + manual assignments),
+    excluding this item's own claim — its primary must stay usable. Capped by
+    volume to bound prompt size."""
+    claims = [
+        (kw, o) for kw, o in ownership.items()
+        if (o["item_type"], o["item_id"]) != (item_type, item_id)
+    ]
+    claims.sort(key=lambda c: c[1].get("volume") or 0, reverse=True)
+    return [kw for kw, _ in claims[:cap]]
+
+
 def _execute_bulk_collection_task(bulk_task_id):
     with db.get_cursor() as cur:
         cur.execute(
@@ -331,6 +343,13 @@ def _execute_bulk_collection_task(bulk_task_id):
     auto_apply = bulk_task["auto_apply"]
     skip_title = bulk_task.get("skip_title", False)
     claimed_keywords = []
+    ownership = {}
+    if items:
+        try:
+            from app.services.keyword_resolver import get_owned_primary_keywords
+            ownership = get_owned_primary_keywords(items[0]["store_id"])
+        except Exception:
+            ownership = {}
 
     for item in items:
         item_id = item["item_id"]
@@ -348,8 +367,10 @@ def _execute_bulk_collection_task(bulk_task_id):
 
         try:
             task_input = {"collection_id": collection_id}
-            if claimed_keywords:
-                task_input["claimed_keywords"] = list(claimed_keywords)
+            owned_claims = _owned_claims_for(ownership, "collection", collection_id)
+            all_claims = owned_claims + [kw for kw in claimed_keywords if kw not in owned_claims]
+            if all_claims:
+                task_input["claimed_keywords"] = all_claims
             ai_result = run_task("collection_seo", task_input)
 
             item_error = None
@@ -481,6 +502,13 @@ def _execute_bulk_task(bulk_task_id):
     skip_tags = bulk_task.get("skip_tags", True)
     skip_title = bulk_task.get("skip_title", False)
     claimed_keywords = []
+    ownership = {}
+    if items:
+        try:
+            from app.services.keyword_resolver import get_owned_primary_keywords
+            ownership = get_owned_primary_keywords(items[0]["store_id"])
+        except Exception:
+            ownership = {}
 
     for item in items:
         item_id = item["item_id"]
@@ -498,8 +526,10 @@ def _execute_bulk_task(bulk_task_id):
 
         try:
             task_input = {"product_id": product_id, "skip_tags": skip_tags}
-            if claimed_keywords:
-                task_input["claimed_keywords"] = list(claimed_keywords)
+            owned_claims = _owned_claims_for(ownership, "product", product_id)
+            all_claims = owned_claims + [kw for kw in claimed_keywords if kw not in owned_claims]
+            if all_claims:
+                task_input["claimed_keywords"] = all_claims
             ai_result = run_task("product_seo", task_input)
 
             item_error = None

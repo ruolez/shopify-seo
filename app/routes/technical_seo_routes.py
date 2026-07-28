@@ -443,14 +443,31 @@ def get_analysis(item_type, item_id):
     })
 
 
+_ALLOWED_FIX_FIELDS = {"meta_title", "meta_description", "title", "tags", "description", "image_alt"}
+
+
 @technical_seo_bp.route("/api/technical-seo/fix", methods=["POST"])
 def create_fix_task():
     data = request.get_json(silent=True) or {}
     item_type = data.get("item_type", "product")
     item_id = data.get("item_id")
+    only_fields = data.get("only_fields")
+    fix_context = data.get("fix_context")
 
     if not item_id:
         return jsonify({"error": "item_id is required"}), 400
+    if only_fields:
+        only_fields = [f for f in only_fields if f in _ALLOWED_FIX_FIELDS]
+
+    with db.get_cursor() as cur:
+        table = "synced_products" if item_type == "product" else "synced_collections"
+        cur.execute(f"SELECT * FROM {table} WHERE id = %s", (item_id,))
+        item = cur.fetchone()
+
+    if not item:
+        return jsonify({"error": f"{item_type} not found"}), 404
+
+    store_id = item["store_id"]
 
     with db.get_cursor() as cur:
         cur.execute(
@@ -460,24 +477,28 @@ def create_fix_task():
         analysis = cur.fetchone()
 
     if not analysis:
+        # Seed the analysis inline (same path the bulk fix uses) so a fix can
+        # be requested straight from the dashboard queue.
+        try:
+            analysis_data, resolution = _resolve_and_analyze(item_type, dict(item))
+            analysis_pk = _upsert_analysis(store_id, item_type, item_id, analysis_data, resolution)
+            with db.get_cursor() as cur:
+                cur.execute("SELECT * FROM technical_seo_analyses WHERE id = %s", (analysis_pk,))
+                analysis = cur.fetchone()
+        except Exception:
+            logger.exception("Inline analysis failed for %s %s", item_type, item_id)
+    if not analysis:
         return jsonify({"error": "Run analysis first before requesting fixes"}), 400
 
-    with db.get_cursor() as cur:
-        if item_type == "product":
-            cur.execute("SELECT store_id FROM synced_products WHERE id = %s", (item_id,))
-        else:
-            cur.execute("SELECT store_id FROM synced_collections WHERE id = %s", (item_id,))
-        item = cur.fetchone()
-
-    if not item:
-        return jsonify({"error": f"{item_type} not found"}), 404
-
-    store_id = item["store_id"]
     task_input = {
         "item_type": item_type,
         "item_id": item_id,
         "analysis_id": analysis["id"],
     }
+    if only_fields:
+        task_input["only_fields"] = only_fields
+    if fix_context:
+        task_input["fix_context"] = fix_context
 
     with db.get_cursor() as cur:
         cur.execute(

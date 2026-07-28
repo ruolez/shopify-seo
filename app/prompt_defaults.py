@@ -35,11 +35,14 @@ DEFAULTS = {
         "and secondary keywords as an array of strings with volume. Example: the primary key holds a string like "
         "'leather crossbody bag (2400)' and secondary holds an array of similar strings.\n"
         "  CRITICAL KEYWORD SELECTION RULES:\n"
-        "  1. ALWAYS choose the primary keyword based on HIGHEST search volume first, then position.\n"
-        "  2. NEVER pick a keyword with 0 search volume as primary if higher-volume alternatives exist.\n"
-        "  3. The RECOMMENDED TARGET KEYWORDS section in the search data is pre-sorted by volume — use it.\n"
-        "  4. Product-name-based keywords are only useful as secondary if they have actual search volume.\n"
-        "  5. Your optimized meta title MUST lead with the highest-volume relevant keyword.\n"
+        "  1. If the search data contains a RESOLVED or USER-ASSIGNED PRIMARY KEYWORD, use it as the "
+        "primary — it was chosen by the store's keyword strategy. NEVER swap in a higher-volume keyword: "
+        "high-volume head terms belong to collection pages or other products in this store.\n"
+        "  2. Secondary keywords: supporting long-tail variations with real search volume from the data.\n"
+        "  3. Your optimized meta title MUST contain the primary keyword at or near the front.\n"
+        "  4. Fallback ONLY when no resolved/assigned primary is present: choose the most specific "
+        "keyword that clearly describes this exact product and has demand — specificity and relevance "
+        "beat raw volume; never pick a bare brand or category word as a product primary.\n"
         "- actionable_recommendations (array of objects): Each recommendation MUST include these fields:\n"
         "  * 'text' (string): Description of what to do\n"
         "  * 'type' (string): One of: 'internal_linking', 'image_alt_text', 'faq_schema', 'advisory'\n"
@@ -88,10 +91,14 @@ DEFAULTS = {
         "- target_keywords (object with keys 'primary' and 'secondary'): Primary keyword as a string with search volume, "
         "and secondary keywords as an array of strings with volume.\n"
         "  CRITICAL KEYWORD SELECTION RULES:\n"
-        "  1. ALWAYS choose the primary keyword based on HIGHEST search volume first, then position.\n"
-        "  2. NEVER pick a keyword with 0 search volume as primary if higher-volume alternatives exist.\n"
-        "  3. The RECOMMENDED TARGET KEYWORDS section in the search data is pre-sorted by volume — use it.\n"
-        "  4. Your optimized meta title MUST lead with the highest-volume relevant keyword.\n"
+        "  1. If the search data contains a RESOLVED or USER-ASSIGNED PRIMARY KEYWORD, use it as the "
+        "primary — it was chosen by the store's keyword strategy. NEVER swap in a different keyword "
+        "just because it has higher volume.\n"
+        "  2. Secondary keywords: supporting variations with real search volume from the data.\n"
+        "  3. Your optimized meta title MUST contain the primary keyword at or near the front.\n"
+        "  4. Fallback ONLY when no resolved/assigned primary is present: choose the most specific "
+        "keyword that clearly describes this collection and has demand — specificity and relevance "
+        "beat raw volume.\n"
         "- competitor_insights (string): Brief summary of competitor patterns and positioning\n"
         "- actionable_recommendations (array of objects): Each recommendation MUST include these fields:\n"
         "  * 'text' (string): Description of what to do\n"
@@ -1170,6 +1177,7 @@ DEFAULTS = {
         },
         "max_candidates": 15,
         "gsc_days": 30,
+        "resolution_max_age_days": 7,
     },
     "rules.technical_product": {
         "weights": {

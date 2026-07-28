@@ -431,23 +431,75 @@ function handleDeepLink() {
     const optimizeType = params.get("optimize");
     const itemId = params.get("id");
     const priorityAction = params.get("action");
+    const fixKind = params.get("fix");
+    const storeParam = params.get("store_id");
+    const actionKey = params.get("ak");
+    const targetKw = params.get("kw");
     if (!optimizeType || !itemId) return;
+
+    if (storeParam) _cachedStoreId = parseInt(storeParam) || null;
+
+    const ctrCtx = fixKind === "ctr"
+        ? {
+              queries: (params.get("q") || "").split("|").filter(Boolean),
+              position: parseFloat(params.get("pos")) || null,
+              actual_ctr: parseFloat(params.get("ctr")) || 0,
+              expected_ctr: parseFloat(params.get("xctr")) || 0,
+              est_clicks_gain: parseInt(params.get("gain")) || 0,
+              action_key: actionKey,
+          }
+        : null;
+    const targetOpts = targetKw
+        ? {
+              targetKeyword: targetKw,
+              position: parseFloat(params.get("pos")) || null,
+              volume: parseInt(params.get("vol")) || null,
+          }
+        : undefined;
 
     window.history.replaceState({}, "", "/seo");
 
     setTimeout(async () => {
         try {
-            if (optimizeType === "product") {
+            if (ctrCtx) {
+                await openCtrFixFlow(optimizeType, parseInt(itemId), ctrCtx);
+            } else if (optimizeType === "product") {
                 await viewProduct(parseInt(itemId));
-                analyzeProduct(parseInt(itemId), priorityAction);
+                analyzeProduct(parseInt(itemId), priorityAction, targetOpts);
             } else if (optimizeType === "collection") {
                 await viewCollection(parseInt(itemId));
-                analyzeCollection(parseInt(itemId), priorityAction);
+                analyzeCollection(parseInt(itemId), priorityAction, targetOpts);
             }
         } catch (err) {
             showToast(`Failed to open item: ${err.message}`, "error");
         }
     }, 500);
+}
+
+// Targeted CTR fix from the dashboard queue: open the item on the Checks tab
+// and run a scoped meta title/description rewrite with a preview diff —
+// not the full optimize pipeline.
+async function openCtrFixFlow(itemType, itemId, ctx) {
+    if (itemType === "product") await viewProduct(itemId, { tab: "checks" });
+    else await viewCollection(itemId, { tab: "checks" });
+
+    const pct = (v) => `${((v || 0) * 100).toFixed(1)}%`;
+    const variants = ctx.queries.length > 1 ? ` · covers ${ctx.queries.length} query variants` : "";
+    const banner = `Targeted fix: rewrite meta title & description for "${ctx.queries[0] || ""}" — pos ${ctx.position ?? "?"}, CTR ${pct(ctx.actual_ctr)} vs ${pct(ctx.expected_ctr)} expected${variants}`;
+
+    generateItemFixes(itemType, itemId, {
+        onlyFields: ["meta_title", "meta_description"],
+        fixContext: {
+            kind: "ctr_rewrite",
+            queries: ctx.queries,
+            position: ctx.position,
+            actual_ctr: ctx.actual_ctr,
+            expected_ctr: ctx.expected_ctr,
+            est_clicks_gain: ctx.est_clicks_gain,
+        },
+        banner,
+        actionKey: ctx.action_key || null,
+    });
 }
 
 function initTabs() {
@@ -1114,8 +1166,11 @@ async function openSessionItem(index) {
     if (!_prioritySession.length) return;
     _sessionIndex = Math.max(0, Math.min(index, _prioritySession.length - 1));
     const it = _prioritySession[_sessionIndex];
-    if (it.type === "product") analyzeProduct(it.id, it.action);
-    else analyzeCollection(it.id, it.action);
+    const opts = it.target_keyword
+        ? { targetKeyword: it.target_keyword, position: it.position, volume: it.volume }
+        : undefined;
+    if (it.type === "product") analyzeProduct(it.id, it.action, opts);
+    else analyzeCollection(it.id, it.action, opts);
     renderSessionNav();
 }
 
@@ -1151,7 +1206,12 @@ function renderPrioritiesTable(container, items) {
     let html = _priorityToolbar();
 
     // The ranked list doubles as the work-session queue.
-    _prioritySession = items.map((i) => ({ id: i.id, type: i.item_type, action: i.recommended_action || null }));
+    _prioritySession = items.map((i) => ({
+        id: i.id, type: i.item_type, action: i.recommended_action || null,
+        target_keyword: i.target_keyword || null,
+        position: i.target_keyword_position || null,
+        volume: i.target_keyword_volume || null,
+    }));
     _sessionIndex = -1;
     renderSessionNav();
 
@@ -1935,7 +1995,7 @@ function reoptimizeWithKeyword(itemId, keyword) {
     }
 }
 
-async function analyzeProduct(productId, priorityContext) {
+async function analyzeProduct(productId, priorityContext, opts) {
     const btn = typeof event !== "undefined" && event && event.target instanceof Element ? event.target.closest("button") : null;
     return guardButton(btn, async () => {
         const modal = document.getElementById("product-modal");
@@ -1948,7 +2008,14 @@ async function analyzeProduct(productId, priorityContext) {
         const resultsContainer = document.getElementById("ai-results-container");
         if (!resultsContainer) return;
 
-        const contextNote = priorityContext ? `<div style="font-size:12px;color:var(--on-surface-secondary);margin-top:8px;padding:6px 10px;background:var(--surface-dim);border-radius:6px;"><strong>Priority focus:</strong> ${escapeHtml(priorityContext)}</div>` : '';
+        const targetKw = opts && opts.targetKeyword;
+        let contextNote = '';
+        if (targetKw) {
+            const posNote = opts.position ? ` — striking distance at position ${Math.round(opts.position)}` : '';
+            contextNote = `<div style="font-size:12.5px;margin-top:8px;padding:8px 12px;background:var(--surface-dim);border-left:3px solid var(--primary);border-radius:6px;"><strong>Optimizing for "${escapeHtml(targetKw)}"</strong>${posNote}</div>`;
+        } else if (priorityContext) {
+            contextNote = `<div style="font-size:12px;color:var(--on-surface-secondary);margin-top:8px;padding:6px 10px;background:var(--surface-dim);border-radius:6px;"><strong>Priority focus:</strong> ${escapeHtml(priorityContext)}</div>`;
+        }
         resultsContainer.innerHTML = `
             <div class="ai-panel" style="margin-top: 20px;">
                 <h4><span class="material-symbols-rounded">smart_toy</span> AI Analysis</h4>
@@ -1958,7 +2025,11 @@ async function analyzeProduct(productId, priorityContext) {
         switchModalTab("ai");
 
         const taskInput = { product_id: productId };
-        if (priorityContext) taskInput.priority_context = priorityContext;
+        if (targetKw) {
+            taskInput.target_keyword = targetKw;
+            if (opts.position) taskInput.target_keyword_position = opts.position;
+            if (opts.volume) taskInput.target_keyword_volume = opts.volume;
+        } else if (priorityContext) taskInput.priority_context = priorityContext;
 
         try {
             const taskResp = await apiRequest("/api/tasks", {
@@ -2032,6 +2103,10 @@ function renderAIResults(container, result, productId) {
                 <span class="material-symbols-rounded">check_circle</span>
                 Optimization complete!
             </div>`;
+
+    if (result.target_keyword) {
+        html += `<div style="font-size:12.5px;margin-bottom:12px;padding:8px 12px;background:var(--surface-dim);border-left:3px solid var(--primary);border-radius:6px;"><strong>Optimized for "${escapeHtml(result.target_keyword)}"</strong> — the keyword this fix was launched to capture</div>`;
+    }
 
     html += `<div style="margin-bottom: 12px;"><label style="display: flex; align-items: center; gap: 8px; cursor: pointer; font-size: 14px;">
         <input type="checkbox" id="ai-keep-title-checkbox" onchange="document.getElementById('ai-h1-tag').disabled = this.checked; document.getElementById('ai-h1-tag').style.opacity = this.checked ? '0.5' : '1';">
@@ -2406,7 +2481,7 @@ async function viewCollection(id, opts = {}) {
     }
 }
 
-async function analyzeCollection(collectionId, priorityContext) {
+async function analyzeCollection(collectionId, priorityContext, opts) {
     const btn = typeof event !== "undefined" && event && event.target instanceof Element ? event.target.closest("button") : null;
     return guardButton(btn, async () => {
         const modal = document.getElementById("product-modal");
@@ -2417,7 +2492,14 @@ async function analyzeCollection(collectionId, priorityContext) {
         const resultsContainer = document.getElementById("ai-collection-results-container");
         if (!resultsContainer) return;
 
-        const contextNote = priorityContext ? `<div style="font-size:12px;color:var(--on-surface-secondary);margin-top:8px;padding:6px 10px;background:var(--surface-dim);border-radius:6px;"><strong>Priority focus:</strong> ${escapeHtml(priorityContext)}</div>` : '';
+        const targetKw = opts && opts.targetKeyword;
+        let contextNote = '';
+        if (targetKw) {
+            const posNote = opts.position ? ` — striking distance at position ${Math.round(opts.position)}` : '';
+            contextNote = `<div style="font-size:12.5px;margin-top:8px;padding:8px 12px;background:var(--surface-dim);border-left:3px solid var(--primary);border-radius:6px;"><strong>Optimizing for "${escapeHtml(targetKw)}"</strong>${posNote}</div>`;
+        } else if (priorityContext) {
+            contextNote = `<div style="font-size:12px;color:var(--on-surface-secondary);margin-top:8px;padding:6px 10px;background:var(--surface-dim);border-radius:6px;"><strong>Priority focus:</strong> ${escapeHtml(priorityContext)}</div>`;
+        }
         resultsContainer.innerHTML = `
             <div class="ai-panel" style="margin-top: 20px;">
                 <h4><span class="material-symbols-rounded">smart_toy</span> AI Analysis</h4>
@@ -2427,7 +2509,11 @@ async function analyzeCollection(collectionId, priorityContext) {
         switchModalTab("ai");
 
         const taskInput = { collection_id: collectionId };
-        if (priorityContext) taskInput.priority_context = priorityContext;
+        if (targetKw) {
+            taskInput.target_keyword = targetKw;
+            if (opts.position) taskInput.target_keyword_position = opts.position;
+            if (opts.volume) taskInput.target_keyword_volume = opts.volume;
+        } else if (priorityContext) taskInput.priority_context = priorityContext;
 
         try {
             const taskResp = await apiRequest("/api/tasks", {
