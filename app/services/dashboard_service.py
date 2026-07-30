@@ -484,9 +484,22 @@ def build_action_queue(store_id, limit=15):
     counts = {}
     dismissed = _dismissed_action_keys(store_id)
 
+    # Actionable priorities and re-measuring items are strictly separated: a
+    # page applied to Shopify leaves the actionable queue immediately and sits
+    # in the buttonless re-measuring band until GSC has fresh data for it.
+    measuring = []
     try:
         from app.services.seo_priority_service import get_priority_ranked_items
-        priorities = get_priority_ranked_items(store_id, item_type="product", limit=10)
+        priorities = []
+        for it in ("product", "collection"):
+            actionable, meas = get_priority_ranked_items(
+                store_id, item_type=it, limit=10, split_measuring=True
+            )
+            priorities.extend(actionable)
+            measuring.extend(meas)
+        priorities.sort(key=lambda p: p["priority_score"], reverse=True)
+        priorities = priorities[:10]
+        measuring.sort(key=lambda p: p["priority_score"], reverse=True)
     except Exception as e:
         logger.warning("Action queue: priorities failed: %s", e)
         priorities = []
@@ -496,8 +509,6 @@ def build_action_queue(store_id, limit=15):
             continue
         severity = "high" if p["priority_score"] >= 80 else "med" if p["priority_score"] >= 60 else "low"
         action = p.get("recommended_action") or p.get("top_opportunity") or "Optimize on-page SEO"
-        if p.get("measuring"):
-            action += " · recently optimized, re-measuring"
         params = {"optimize": p["item_type"], "id": p["id"], "ak": key, "store_id": store_id}
         fix = None
         if p.get("target_keyword"):
@@ -661,7 +672,59 @@ def build_action_queue(store_id, limit=15):
 
     severity_rank = {"high": 0, "med": 1, "low": 2}
     items.sort(key=lambda i: (-(i["est_clicks_gain"] or 0), severity_rank[i["severity"]]))
-    return {"items": items[:limit], "total_by_source": counts}
+
+    now = datetime.now(timezone.utc)
+    measuring_rows = []
+    for p in measuring[:10]:
+        applied_days = None
+        if p.get("last_optimized_at"):
+            at = datetime.fromisoformat(p["last_optimized_at"])
+            if at.tzinfo is None:
+                at = at.replace(tzinfo=timezone.utc)
+            applied_days = max(0, int((now - at).total_seconds() // 86400))
+        measuring_rows.append({
+            "title": p["title"],
+            "item_type": p["item_type"],
+            "item_id": p["id"],
+            "target_keyword": p.get("target_keyword"),
+            "est_clicks_gain": p.get("potential_clicks_gain"),
+            "applied_days_ago": applied_days,
+            "days_remaining": max(0, 28 - applied_days) if applied_days is not None else None,
+            "href": f"/seo?optimize={p['item_type']}&id={p['id']}&store_id={store_id}",
+        })
+
+    with db.get_cursor() as cur:
+        cur.execute(
+            """SELECT
+                 (SELECT COUNT(*) FROM synced_products WHERE store_id = %(sid)s) AS products_total,
+                 (SELECT COUNT(*) FROM synced_products WHERE store_id = %(sid)s
+                    AND last_optimized_at >= NOW() - INTERVAL '28 days') AS products_measuring,
+                 (SELECT COUNT(*) FROM synced_collections WHERE store_id = %(sid)s) AS collections_total,
+                 (SELECT COUNT(*) FROM synced_collections WHERE store_id = %(sid)s
+                    AND last_optimized_at >= NOW() - INTERVAL '28 days') AS collections_measuring,
+                 (SELECT MIN(last_optimized_at) FROM (
+                     SELECT last_optimized_at FROM synced_products WHERE store_id = %(sid)s
+                       AND last_optimized_at >= NOW() - INTERVAL '28 days'
+                     UNION ALL
+                     SELECT last_optimized_at FROM synced_collections WHERE store_id = %(sid)s
+                       AND last_optimized_at >= NOW() - INTERVAL '28 days') w) AS oldest_in_window""",
+            {"sid": store_id},
+        )
+        ms = dict(cur.fetchone())
+    oldest = ms.pop("oldest_in_window")
+    if oldest:
+        if oldest.tzinfo is None:
+            oldest = oldest.replace(tzinfo=timezone.utc)
+        ms["next_complete_days"] = max(0, 28 - int((now - oldest).total_seconds() // 86400))
+    else:
+        ms["next_complete_days"] = None
+
+    return {
+        "items": items[:limit],
+        "total_by_source": counts,
+        "measuring": measuring_rows,
+        "measuring_summary": ms,
+    }
 
 
 def get_setup_state(store_id):

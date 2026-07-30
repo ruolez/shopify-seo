@@ -176,7 +176,8 @@ def _within_measuring_window(last_optimized_at, days):
     return (now - last_optimized_at) < timedelta(days=days)
 
 
-def get_priority_ranked_items(store_id, item_type="product", limit=50, measuring_days=28):
+def get_priority_ranked_items(store_id, item_type="product", limit=50, measuring_days=28,
+                              split_measuring=False):
     gsc_metrics = _get_gsc_metrics_for_store(store_id)
     semrush_metrics = _get_semrush_metrics_for_store(store_id)
     ctr_curve = get_expected_ctr_curve(store_id)
@@ -427,7 +428,11 @@ def get_priority_ranked_items(store_id, item_type="product", limit=50, measuring
             results.append(result_entry)
 
     results.sort(key=lambda x: x["priority_score"], reverse=True)
+    measuring_results.sort(key=lambda x: x["priority_score"], reverse=True)
+    if split_measuring:
+        # Caller renders re-measuring items separately (no action buttons) —
+        # a page applied to Shopify is "done" until GSC re-measures it.
+        return results[:limit], measuring_results[:limit]
     if len(results) < limit:
-        measuring_results.sort(key=lambda x: x["priority_score"], reverse=True)
         results.extend(measuring_results[: limit - len(results)])
     return results[:limit]

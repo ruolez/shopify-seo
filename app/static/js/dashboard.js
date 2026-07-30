@@ -241,10 +241,21 @@ async function loadActionQueue() {
             ? `top ${data.items.length} of ${totalCount.toLocaleString()} tracked opportunities`
             : "";
 
+        const ms = data.measuring_summary || {};
+        const measuringTotal = (ms.products_measuring || 0) + (ms.collections_measuring || 0);
+        const measuringNote = measuringTotal
+            ? `<div style="padding:10px 12px;margin:6px 0 2px;border:1px solid var(--outline);border-radius:8px;background:var(--surface-dim);font-size:12.5px;color:var(--on-surface-secondary);">
+                <span class="material-symbols-rounded" style="font-size:16px;vertical-align:middle;color:var(--primary);">schedule</span>
+                ${ms.products_measuring || 0} of ${ms.products_total || 0} products and ${ms.collections_measuring || 0} of ${ms.collections_total || 0} collections were applied to Shopify in the last 28 days — Google is re-measuring them.
+                ${ms.next_complete_days !== null && ms.next_complete_days !== undefined ? `Oldest re-measure completes in ${ms.next_complete_days} day${ms.next_complete_days === 1 ? "" : "s"}.` : ""}
+               </div>`
+            : "";
+
         if (!data.items.length) {
             container.innerHTML = `<div style="padding:16px 0;color:var(--on-surface-secondary);font-size:13px;">
                 <span class="material-symbols-rounded" style="vertical-align:middle;color:var(--success);">check_circle</span>
-                All clear — no outstanding actions.</div>`;
+                Nothing actionable right now — everything applied is being re-measured.</div>`
+                + measuringNote + renderMeasuringBand(data.measuring || []);
             card.style.display = "";
             return;
         }
@@ -302,11 +313,34 @@ async function loadActionQueue() {
         }
         const rest = data.items.filter((i) => !placed.has(i));
         if (rest.length) html += rest.map((i) => row(i, "Open")).join("");
+        html += measuringNote + renderMeasuringBand(data.measuring || []);
         container.innerHTML = html;
         card.style.display = "";
     } catch {
         // Queue unavailable — card stays hidden
     }
+}
+
+// Applied-to-Shopify pages waiting on fresh GSC data: informational only —
+// no action buttons, so the queue never nags about work already done.
+function renderMeasuringBand(rows) {
+    if (!rows.length) return "";
+    const typeB = { product: "badge-success", collection: "badge-warning" };
+    return `<details style="margin:4px 0;">
+        <summary style="cursor:pointer;list-style:none;display:flex;align-items:center;gap:8px;padding:8px 0;font-weight:600;font-size:12.5px;color:var(--on-surface-secondary);">
+            <span class="material-symbols-rounded" style="font-size:16px;">expand_more</span>Re-measuring after optimization
+            <span class="badge" style="background:var(--surface-dim);color:var(--on-surface);">${rows.length}</span>
+        </summary>
+        ${rows.map((m) => `<div class="queue-row" style="display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--outline);opacity:0.75;">
+            <span class="badge ${typeB[m.item_type] || "badge-info"}" style="min-width:64px;text-align:center;">${m.item_type}</span>
+            <div style="flex:1;min-width:0;">
+                <div style="font-weight:600;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(m.title)}</div>
+                <div style="font-size:11px;color:var(--on-surface-secondary);">
+                    applied ${m.applied_days_ago ?? "?"}d ago · re-measure completes in ${m.days_remaining ?? "?"}d${m.target_keyword ? ` · target: ${escapeHtml(m.target_keyword)}` : ""}</div>
+            </div>
+            <a href="${escapeAttr(m.href)}" class="btn btn-ghost btn-sm" onclick="event.stopPropagation()">View</a>
+        </div>`).join("")}
+    </details>`;
 }
 
 async function dismissQueueItem(actionKey, snoozeDays, btn) {
