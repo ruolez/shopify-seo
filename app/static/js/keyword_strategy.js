@@ -10,13 +10,21 @@ let ksAuditPage = 1;
 const KS_AUDIT_PAGE_SIZE = 50;
 let ksFamilyCache = {};
 let ksKwDrawer = null;
+let ksExpandedCid = null;
 
 // ── Init ─────────────────────────────────────────────────────────────────
 document.addEventListener("DOMContentLoaded", () => {
     loadKsStores();
     initStepNav();
     initKsEvents();
-    const tab = new URLSearchParams(location.search).get("tab");
+    initOptimizeModalObserver();
+    let tab = new URLSearchParams(location.search).get("tab");
+    if (tab === "coverage") {
+        // Legacy deep link: the Coverage Gaps tab merged into the Explorer
+        tab = "explorer";
+        const gapsOnly = document.getElementById("ks-gaps-only");
+        if (gapsOnly) gapsOnly.checked = true;
+    }
     if (tab && document.getElementById("panel-" + tab)) switchToStep(tab);
 });
 
@@ -43,9 +51,10 @@ document.getElementById("ks-store-select").addEventListener("change", e => { if 
 function onKsStore(id) {
     ksStoreId = id;
     ksFamilyCache = {};
+    ksExpandedCid = null;
     loadKwOverview();
     updateExplorerView();
-    loadCoverageMatrix();
+    loadFreshness();
     resumeClassifyRun();
     loadAuditStatus();
     loadPlanData();
@@ -95,6 +104,8 @@ function initKsEvents() {
     // Explorer actions
     document.getElementById("ks-consolidate-btn").addEventListener("click", runConsolidate);
     document.getElementById("ks-classify-btn").addEventListener("click", runAiClassify);
+    document.getElementById("ks-fresh-audit-btn").addEventListener("click", () => runAudit());
+    document.getElementById("ks-reanalyze-btn").addEventListener("click", ksReanalyzeAll);
     document.getElementById("ks-add-kw-btn").addEventListener("click", () => document.getElementById("ks-add-modal").classList.add("active"));
     document.getElementById("ks-save-kw-btn").addEventListener("click", saveManualKeyword);
 
@@ -105,10 +116,8 @@ function initKsEvents() {
     ["ks-intent-filter", "ks-source-filter", "ks-cluster-filter"].forEach(id =>
         document.getElementById(id).addEventListener("change", () => { ksKwPage = 1; updateExplorerView(); }));
     document.getElementById("ks-fam-sort").addEventListener("change", () => loadFamilies());
-
-    // Coverage matrix filters
-    document.getElementById("ks-cov-gaps-only").addEventListener("change", loadCoverageMatrix);
-    document.getElementById("ks-cov-min").addEventListener("change", loadCoverageMatrix);
+    document.getElementById("ks-gaps-only").addEventListener("change", () => loadFamilies());
+    document.getElementById("ks-min-volume").addEventListener("change", () => loadFamilies());
     document.addEventListener("click", () => closeKsPopover());
 
     // Sort
@@ -152,6 +161,76 @@ function initKsEvents() {
         document.getElementById(id).addEventListener("change", () => { ksPlanPage = 0; loadPlanData(); }));
 }
 
+// ── Data freshness strip ─────────────────────────────────────────────────
+function ksAge(hours) {
+    if (hours === null || hours === undefined) return "never";
+    if (hours < 1) return "just now";
+    if (hours < 48) return Math.round(hours) + "h ago";
+    return Math.round(hours / 24) + "d ago";
+}
+
+async function loadFreshness() {
+    if (!ksStoreId) return;
+    try {
+        const d = await apiRequest(`/api/keyword-strategy/freshness?store_id=${ksStoreId}`);
+        const set = (id, e) => {
+            const el = document.getElementById(id);
+            if (!el || !e) return;
+            el.textContent = ksAge(e.age_hours);
+            el.className = "ks-fresh-age " + (e.level || "none");
+            el.title = e.at ? new Date(e.at).toLocaleString() : "Never run";
+        };
+        set("ks-fresh-gsc", d.gsc);
+        set("ks-fresh-consolidate", d.consolidate);
+        set("ks-fresh-classify", d.ai_classify);
+        set("ks-fresh-audit", d.audit);
+        const a = document.getElementById("ks-fresh-analyses");
+        if (a && d.analyses) {
+            a.className = "ks-fresh-age " + (d.analyses.level || "none");
+            a.textContent = d.analyses.stale_count
+                ? `${d.analyses.stale_count} of ${d.analyses.total} stale`
+                : d.analyses.total ? "all fresh" : "never";
+            a.title = d.analyses.at
+                ? `Newest analysis: ${new Date(d.analyses.at).toLocaleString()} — pages not re-analyzed in 7 days count as stale`
+                : "No pages analyzed yet";
+        }
+    } catch (e) {}
+}
+
+async function ksReanalyzeAll() {
+    if (!ksStoreId) return;
+    const btn = document.getElementById("ks-reanalyze-btn");
+    if (btn.disabled) return;
+    btn.disabled = true;
+    const orig = btn.innerHTML;
+    btn.innerHTML = '<span class="spinner" style="width:12px;height:12px;border-width:2px;"></span> Running...';
+    try {
+        for (const t of ["product", "collection"]) {
+            const resp = await apiRequest("/api/technical-seo/bulk-analyze", {
+                method: "POST", headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ item_type: t, all: true, store_id: ksStoreId }),
+            });
+            await pollTaskUntilDone(`/api/tasks/bulk/${resp.bulk_task_id}`, {
+                timeoutMs: 60 * 60 * 1000,
+                onProgress: task => showProgress(
+                    `Re-analyzing ${t}s... ${task.completed || 0} / ${task.total || 0}`
+                    + (task.current_product_title ? ` — ${task.current_product_title}` : ""),
+                    task.total ? Math.round(((task.completed || 0) / task.total) * 100) : 0),
+            });
+        }
+        hideProgress();
+        showToast("All pages re-analyzed", "success");
+        ksFamilyCache = {};
+        loadKwOverview(); updateExplorerView(); loadFreshness();
+    } catch (e) {
+        hideProgress();
+        showToast("Re-analyze failed: " + e.message, "error");
+    } finally {
+        btn.disabled = false;
+        btn.innerHTML = orig;
+    }
+}
+
 // ── Progress bar ─────────────────────────────────────────────────────────
 function showProgress(text, percent) {
     const wrap = document.getElementById("ks-progress-wrap");
@@ -180,20 +259,21 @@ async function runConsolidate() {
             await apiRequest(`/api/keyword-strategy/consolidate?store_id=${ksStoreId}`, { method: "POST" });
             pollRun("consolidate", (run) => {
                 hideProgress();
+                ksFamilyCache = {};
                 loadKwOverview();
-                loadKeywords();
-                markStepCompleted("keywords");
+                updateExplorerView();
+                loadFreshness();
                 showToast("Keywords consolidated", "success");
             }, (run) => {
                 const pct = run.total_items > 0 ? Math.round((run.completed_items / run.total_items) * 100) : 30;
                 showProgress(`Consolidating... ${(run.completed_items || 0).toLocaleString()} keywords`, pct);
             });
         } catch (e) { showToast("Consolidation failed: " + e.message, "error"); hideProgress(); }
-        finally { btn.innerHTML = '<span class="material-symbols-rounded" style="font-size:16px;vertical-align:middle;">sync</span> Consolidate Keywords'; }
+        finally { btn.innerHTML = 'Consolidate'; }
     });
 }
 
-const KS_CLASSIFY_BTN_HTML = '<span class="material-symbols-rounded" style="font-size:16px;vertical-align:middle;">psychology</span> AI Classify &amp; Cluster';
+const KS_CLASSIFY_BTN_HTML = 'Classify';
 
 async function runAiClassify() {
     if (!ksStoreId) return;
@@ -224,7 +304,7 @@ function pollClassifyRun() {
         const s = typeof run.summary === "string" ? JSON.parse(run.summary) : (run.summary || {});
         showToast(`Classified keywords into ${s.families || 0} families`, "success");
         ksFamilyCache = {};
-        loadKwOverview(); updateExplorerView(); loadCoverageMatrix();
+        loadKwOverview(); updateExplorerView(); loadFreshness();
     }, (run) => {
         const pct = run.total_items > 0 ? Math.round((run.completed_items / run.total_items) * 100) : 3;
         showProgress(`AI classifying keywords... ${(run.completed_items || 0).toLocaleString()} / ${(run.total_items || 0).toLocaleString()}`, pct);
@@ -393,7 +473,10 @@ function updateExplorerView() {
     const flat = _explorerFiltersActive();
     document.getElementById("ks-fam-view").style.display = flat ? "none" : "";
     document.getElementById("ks-flat-view").style.display = flat ? "" : "none";
-    document.getElementById("ks-fam-sort").style.display = flat ? "none" : "";
+    ["ks-fam-sort", "ks-gaps-only-wrap", "ks-min-volume", "ks-fam-legend"].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.style.display = flat ? "none" : "";
+    });
     if (flat) loadKeywords();
     else loadFamilies();
 }
@@ -401,14 +484,15 @@ function updateExplorerView() {
 async function loadFamilies() {
     if (!ksStoreId) return;
     const tbody = document.getElementById("ks-fam-tbody");
-    tbody.innerHTML = '<tr><td colspan="9" style="text-align:center"><div class="spinner" style="margin:20px auto"></div></td></tr>';
+    tbody.innerHTML = '<tr><td colspan="10" style="text-align:center"><div class="spinner" style="margin:20px auto"></div></td></tr>';
     const sortBy = document.getElementById("ks-fam-sort").value;
+    const minVol = parseInt(document.getElementById("ks-min-volume").value) || 0;
+    const gapsOnly = document.getElementById("ks-gaps-only").checked ? 1 : 0;
     try {
-        const d = await apiRequest(`/api/keyword-strategy/coverage/matrix?store_id=${ksStoreId}&sort_by=${sortBy}&limit=200`);
+        const d = await apiRequest(`/api/keyword-strategy/coverage/matrix?store_id=${ksStoreId}&sort_by=${sortBy}&min_volume=${minVol}&only_gaps=${gapsOnly}&limit=200`);
         const fams = d.families || [];
         document.getElementById("ks-kw-count").textContent = `${d.total || 0} families`;
         document.getElementById("ks-gap-volume").textContent = (d.gap_volume || 0).toLocaleString();
-        document.getElementById("ks-step-coverage-desc").textContent = `${(d.gap_volume || 0).toLocaleString()} weighted gap volume`;
         if (!fams.length) {
             tbody.innerHTML = "";
             document.getElementById("ks-fam-empty").style.display = "";
@@ -422,24 +506,15 @@ async function loadFamilies() {
                 <td style="font-weight:600;">${escapeHtml(f.name)}${f.unclustered ? ' <span class="badge" style="font-size:10px;">needs classification</span>' : ''}</td>
                 <td>${f.keyword_count}</td>
                 <td>${(f.total_volume || 0).toLocaleString()}</td>
-                ${["transactional", "commercial", "informational", "navigational"].map(i => `<td>${renderIntentCell(f.intents[i])}</td>`).join("")}
+                <td>${f.pages_count ?? '—'}</td>
+                ${["transactional", "commercial", "informational", "navigational"].map(i => `<td>${renderMatrixCell(f.intents[i], cid, i)}</td>`).join("")}
                 <td>${f.gap_score ? f.gap_score.toLocaleString() : '—'}</td>
             </tr>
-            <tr class="ks-fam-expand" id="ks-fam-expand-${cid}" style="display:none;"><td colspan="9"><div class="ks-fam-kws" id="ks-fam-kws-${cid}"></div></td></tr>`;
+            <tr class="ks-fam-expand" id="ks-fam-expand-${cid}" style="display:none;"><td colspan="10"><div class="ks-fam-kws" id="ks-fam-kws-${cid}"></div></td></tr>`;
         }).join("");
     } catch (e) {
-        tbody.innerHTML = `<tr><td colspan="9" style="text-align:center;color:var(--error);">Error loading families</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="10" style="text-align:center;color:var(--error);">Error loading families</td></tr>`;
     }
-}
-
-function renderIntentCell(cell) {
-    if (!cell || (!cell.count && !cell.volume)) return '<span class="ks-intent-cell na">—</span>';
-    if (cell.na) return `<span class="ks-intent-cell na" title="${cell.count} keyword(s), volume too low to matter">—</span>`;
-    if (!cell.covered) return `<span class="ks-intent-cell gap" title="${(cell.volume || 0).toLocaleString()} vol uncovered"><span class="material-symbols-rounded" style="font-size:16px;">close</span></span>`;
-    const partial = cell.covered_volume < cell.volume;
-    const cls = partial ? "partial" : "covered";
-    const title = `${(cell.covered_volume || 0).toLocaleString()} of ${(cell.volume || 0).toLocaleString()} vol covered`;
-    return `<span class="ks-intent-cell ${cls}" title="${title}"><span class="material-symbols-rounded" style="font-size:16px;">${partial ? 'remove' : 'check'}</span></span>`;
 }
 
 async function toggleFamily(cid, rowEl) {
@@ -447,9 +522,11 @@ async function toggleFamily(cid, rowEl) {
     const isOpen = expand.style.display !== "none";
     document.querySelectorAll(".ks-fam-expand").forEach(r => r.style.display = "none");
     document.querySelectorAll(".ks-fam-row").forEach(r => r.classList.remove("expanded"));
+    ksExpandedCid = null;
     if (isOpen) return;
     expand.style.display = "";
     rowEl.classList.add("expanded");
+    ksExpandedCid = cid;
     const box = document.getElementById(`ks-fam-kws-${cid}`);
     if (!ksFamilyCache[cid]) {
         box.innerHTML = '<div class="spinner" style="margin:14px auto"></div>';
@@ -460,34 +537,226 @@ async function toggleFamily(cid, rowEl) {
             return;
         }
     }
-    box.innerHTML = renderFamilyKeywords(ksFamilyCache[cid]);
+    box.innerHTML = renderFamilyDetail(ksFamilyCache[cid], cid);
 }
 
-function renderFamilyKeywords(fam) {
+const KS_STALENESS = {
+    fresh: { label: "fresh", badge: "success" },
+    stale: { label: "stale", badge: "warning" },
+    never_optimized: { label: "never optimized", badge: "error" },
+    low_score: { label: "low score", badge: "error" },
+};
+
+function renderFamilyDetail(fam, cid) {
+    const pages = fam.pages || [];
+    const unowned = fam.unowned || [];
     let html = "";
-    ["transactional", "commercial", "informational", "navigational"].forEach(intent => {
-        const kws = (fam.keywords_by_intent || {})[intent] || [];
-        if (!kws.length) return;
-        const cell = (fam.coverage || {})[intent] || {};
-        html += `<div style="margin-top:10px;">
-            <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">
-                <span class="badge badge-${intentBadge(intent)}" style="text-transform:capitalize;">${intent}</span>
-                <span style="font-size:12px;color:var(--on-surface-secondary);">${(cell.volume || 0).toLocaleString()} vol</span>
-                ${renderIntentCell(cell)}
-            </div>`;
-        kws.slice(0, 12).forEach(k => {
-            html += `<div class="ks-fam-kw-row" onclick="openKeywordDrawer(${k.id})">
-                <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(k.keyword)}</span>
-                <span style="color:var(--on-surface-secondary);font-size:12px;white-space:nowrap;">${(k.search_volume || 0).toLocaleString()}</span>
-                ${k.owner
-                    ? `<span class="ks-owner-chip"><span class="badge badge-${typeBadge(k.owner.item_type)}" style="font-size:9.5px;">${k.owner.item_type}</span><span style="overflow:hidden;text-overflow:ellipsis;max-width:200px;">${escapeHtml(k.owner.title || '')}</span></span>`
-                    : '<span style="font-size:11.5px;color:var(--on-surface-secondary);font-style:italic;">unowned</span>'}
-            </div>`;
+
+    // ── Pages covering this family ──
+    html += `<div class="ks-pages-label">Pages covering this family (${pages.length})</div>`;
+    if (!pages.length) {
+        html += '<div style="font-size:13px;color:var(--on-surface-secondary);padding:2px 0 6px;">No pages own keywords in this family yet.</div>';
+    }
+    pages.forEach(p => {
+        const st = KS_STALENESS[p.staleness] || KS_STALENESS.fresh;
+        const tip = [p.stale_reason, p.last_optimized_at ? `Last optimized ${p.last_optimized_at.slice(0, 10)}` : null]
+            .filter(Boolean).join(" — ");
+        const canOptimize = (p.item_type === "product" || p.item_type === "collection");
+        const pk = p.primary_keyword;
+        const kwArgs = pk ? `${JSON.stringify(pk.keyword)}, ${pk.search_volume || 0}` : "null, 0";
+
+        let kwLine = "";
+        if (pk) {
+            kwLine += `<span>primary:</span><span class="ks-kw-chip" title="${pk.role === 'assigned' || pk.manual ? 'manually assigned' : 'resolver primary'}">
+                ${escapeHtml(pk.keyword)} <span style="color:var(--on-surface-secondary);">(${(pk.search_volume || 0).toLocaleString()})</span>
+                ${pk.manual ? '<span class="material-symbols-rounded" style="font-size:12px;" title="manual">push_pin</span>' : ''}</span>`;
+            if (!pk.in_family) kwLine += '<span style="font-style:italic;">outside this family</span>';
+        } else {
+            kwLine += '<span style="font-style:italic;">no primary keyword</span>';
+        }
+        (p.owned_keywords || []).forEach(k => {
+            kwLine += `<span class="ks-kw-chip" onclick="event.stopPropagation();openKeywordDrawer(${k.id})">${escapeHtml(k.keyword)} <span style="color:var(--on-surface-secondary);">(${(k.search_volume || 0).toLocaleString()})</span></span>`;
         });
-        if (kws.length > 12) html += `<div style="font-size:11.5px;color:var(--on-surface-secondary);padding:2px 8px;">+ ${kws.length - 12} more</div>`;
-        html += '</div>';
+
+        html += `<div class="ks-page-row">
+            <div class="ks-page-info">
+                <div class="ks-page-head">
+                    <span class="badge badge-${typeBadge(p.item_type)}" style="font-size:10px;">${p.item_type}</span>
+                    <span class="ks-page-title" ${canOptimize ? `onclick="ksOpenPage('${p.item_type}', ${p.item_id})"` : ""}>${escapeHtml(p.title || '#' + p.item_id)}</span>
+                    ${p.seo_score !== null && p.seo_score !== undefined ? `<span class="ks-page-score" style="color:${p.seo_score >= 80 ? 'var(--success)' : p.seo_score >= 60 ? 'var(--warning)' : 'var(--error)'};">${p.seo_score}</span>` : ''}
+                    <span class="badge badge-${st.badge}" style="font-size:10px;" ${tip ? `title="${escapeAttr(tip)}"` : ''}>${st.label}</span>
+                    ${p.conflict_key ? '<span class="badge badge-error" style="font-size:10px;" title="Another page targets a variant of the same keyword — see Keyword conflicts below">keyword conflict</span>' : ''}
+                </div>
+                <div class="ks-page-kws">${kwLine}</div>
+            </div>
+            <div class="ks-page-actions">
+                ${canOptimize && p.staleness !== "fresh"
+                    ? `<button class="btn btn-sm btn-primary" style="font-size:11.5px;white-space:nowrap;" onclick='ksOptimizePage("${p.item_type}", ${p.item_id}, ${kwArgs})'>
+                        <span class="material-symbols-rounded" style="font-size:14px;vertical-align:middle;">auto_fix_high</span> Optimize</button>`
+                    : ''}
+                ${canOptimize
+                    ? `<button class="icon-btn" title="Open item" onclick="ksOpenPage('${p.item_type}', ${p.item_id})"><span class="material-symbols-rounded" style="font-size:18px;">open_in_full</span></button>`
+                    : ''}
+            </div>
+        </div>`;
     });
-    return html || '<div style="font-size:13px;color:var(--on-surface-secondary);padding:10px;">No keywords in this family.</div>';
+
+    // ── Keyword conflicts (cannibalization) ──
+    const conflicts = fam.conflicts || [];
+    if (conflicts.length) {
+        html += `<div class="ks-pages-label">Keyword conflicts (${conflicts.length})</div>`;
+        conflicts.forEach(c => {
+            const top = c.keywords[0] || {};
+            const owners = c.contenders.filter(x => x.is_owner).length;
+            html += `<div class="ks-conflict-box">
+                <div class="ks-conflict-head">
+                    <span class="material-symbols-rounded">swords</span>
+                    <span>"${escapeHtml(top.keyword || c.key)}" (${(top.search_volume || 0).toLocaleString()} vol) —
+                        ${owners} pages hold variants of this keyword and compete for one SERP</span>
+                </div>`;
+            c.contenders.forEach(x => {
+                const pos = x.gsc_position !== null && x.gsc_position !== undefined
+                    ? `pos ${x.gsc_position}` : 'not ranking';
+                const name = x.title || x.url || `${x.item_type} #${x.item_id}`;
+                const canAct = x.item_id && (x.item_type === "product" || x.item_type === "collection");
+                html += `<div class="ks-contender-row">
+                    <span class="ks-contender-pos" style="color:${x.gsc_position != null ? (x.gsc_position <= 20 ? 'var(--success)' : 'var(--warning)') : 'var(--on-surface-secondary)'};">${pos}</span>
+                    ${x.item_type ? `<span class="badge badge-${typeBadge(x.item_type)}" style="font-size:9.5px;">${x.item_type}</span>` : ''}
+                    <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;" ${canAct ? `class="ks-page-title" onclick="ksOpenPage('${x.item_type}', ${x.item_id})"` : ''}>${escapeHtml(name)}</span>
+                    ${x.is_owner
+                        ? `<span style="font-size:11px;color:var(--on-surface-secondary);white-space:nowrap;">primary: ${escapeHtml(x.primary_keyword || '')}${x.manual ? ' 📌' : ''}</span>`
+                        : '<span style="font-size:11px;color:var(--warning);white-space:nowrap;">ranks but doesn\'t own it</span>'}
+                    ${x.gsc_impressions ? `<span style="font-size:11px;color:var(--on-surface-secondary);white-space:nowrap;">${x.gsc_clicks} clicks · ${x.gsc_impressions.toLocaleString()} impr</span>` : ''}
+                    ${canAct
+                        ? `<button class="btn btn-sm btn-outline" style="font-size:11px;white-space:nowrap;" onclick='ksResolveConflict(${cid}, ${JSON.stringify(c.key)}, "${x.item_type}", ${x.item_id})'>${x.is_owner ? 'Keep primary here' : 'Make owner'}</button>`
+                        : ''}
+                </div>`;
+            });
+            html += '</div>';
+        });
+    }
+
+    // ── Unowned demand ──
+    const unownedVol = unowned.reduce((s, u) => s + (u.search_volume || 0), 0);
+    html += `<div class="ks-pages-label">Unowned demand (${unowned.length} keyword${unowned.length !== 1 ? 's' : ''} · ${unownedVol.toLocaleString()} vol)</div>`;
+    if (!unowned.length) {
+        html += '<div style="font-size:13px;color:var(--on-surface-secondary);padding:2px 0 6px;">Every keyword with demand has an owning page.</div>';
+    }
+    unowned.forEach(u => {
+        html += `<div class="ks-unowned-row" onclick="openKeywordDrawer(${u.id})">
+            <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(u.keyword)}</span>
+            <span style="color:var(--on-surface-secondary);font-size:12px;white-space:nowrap;">${(u.search_volume || 0).toLocaleString()}</span>
+            <span class="badge badge-${intentBadge(u.intent)}" style="font-size:10px;">${u.intent}</span>
+            <span class="ks-req-type">&rarr; needs ${(u.required_types || []).join(" / ") || "content"}</span>
+            <span onclick="event.stopPropagation();" style="display:flex;gap:4px;">
+                <button class="btn btn-sm btn-outline" style="font-size:11px;white-space:nowrap;" onclick="ksActionAssign(${u.id})">Assign</button>
+                ${u.action === "research_topic"
+                    ? `<button class="btn btn-sm btn-outline" style="font-size:11px;white-space:nowrap;" onclick='ksActionResearch(${cid}, ${JSON.stringify(u.intent)})'>Research</button>`
+                    : ''}
+            </span>
+        </div>`;
+    });
+    return html;
+}
+
+async function ksResolveConflict(cid, key, itemType, itemId) {
+    // Consolidate a variant-cannibalization group onto one winner: pin the
+    // highest-volume variant as the winner's manual primary, then re-resolve
+    // the losing owners so they walk to their next-best unclaimed keyword.
+    const fam = ksFamilyCache[cid];
+    const conflict = (fam && (fam.conflicts || []).find(c => c.key === key));
+    if (!conflict) return;
+    const kw = (conflict.keywords[0] || {}).keyword;
+    const winner = conflict.contenders.find(x => x.item_type === itemType && x.item_id === itemId);
+    const losers = conflict.contenders.filter(x =>
+        x.is_owner && !(x.item_type === itemType && x.item_id === itemId)
+        && (x.item_type === "product" || x.item_type === "collection"));
+    if (!kw || !winner) return;
+    if (!confirm(`Pin "${kw}" as the manual primary of "${winner.title || winner.item_type + ' #' + itemId}"`
+        + (losers.length ? ` and re-resolve ${losers.length} competing page(s) to their next-best keywords?` : '?'))) return;
+
+    try {
+        showToast("Consolidating keyword ownership...", "info");
+        await apiRequest(`/api/seo/items/${itemType}/${itemId}/primary-keyword?store_id=${ksStoreId}`, {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ keyword: kw }),
+        });
+        for (const loser of losers) {
+            try {
+                await apiRequest("/api/technical-seo/analyze", {
+                    method: "POST", headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ item_type: loser.item_type, item_id: loser.item_id, store_id: ksStoreId }),
+                });
+            } catch (e) {
+                showToast(`Re-resolve failed for ${loser.title || loser.item_id}: ${e.message}`, "error");
+            }
+        }
+        showToast(`"${kw}" consolidated onto ${winner.title || 'the selected page'}`, "success");
+        refreshExpandedFamily(cid);
+    } catch (e) {
+        showToast("Failed: " + e.message, "error");
+    }
+}
+
+// ── In-place optimize (reuses the /seo item modal loaded on this page) ─────
+function ksOpenPage(itemType, itemId) {
+    if (typeof _cachedStoreId !== "undefined") _cachedStoreId = ksStoreId;
+    if (itemType === "product") viewProduct(itemId);
+    else if (itemType === "collection") viewCollection(itemId);
+}
+
+async function ksOptimizePage(itemType, itemId, keyword, volume) {
+    if (itemType !== "product" && itemType !== "collection") return;
+    if (typeof _cachedStoreId !== "undefined") _cachedStoreId = ksStoreId;
+    const opts = keyword ? { targetKeyword: keyword, volume: volume || null } : undefined;
+    try {
+        if (itemType === "product") {
+            await viewProduct(itemId);
+            analyzeProduct(itemId, null, opts);
+        } else {
+            await viewCollection(itemId);
+            analyzeCollection(itemId, null, opts);
+        }
+    } catch (e) {
+        showToast("Failed to open item: " + e.message, "error");
+    }
+}
+
+function initOptimizeModalObserver() {
+    const modal = document.getElementById("product-modal");
+    if (!modal) return;
+    let wasActive = modal.classList.contains("active");
+    new MutationObserver(() => {
+        const active = modal.classList.contains("active");
+        if (wasActive && !active && ksExpandedCid !== null) refreshExpandedFamily(ksExpandedCid);
+        wasActive = active;
+    }).observe(modal, { attributes: true, attributeFilter: ["class"] });
+}
+
+async function refreshExpandedFamily(cid) {
+    // Re-fetch just this family so ownership/staleness reflect the optimize,
+    // keeping the accordion open and the scroll position untouched.
+    delete ksFamilyCache[cid];
+    const expand = document.getElementById(`ks-fam-expand-${cid}`);
+    const box = document.getElementById(`ks-fam-kws-${cid}`);
+    if (!expand || !box || expand.style.display === "none") return;
+    try {
+        const fam = await apiRequest(`/api/keyword-strategy/families/${cid}?store_id=${ksStoreId}`);
+        ksFamilyCache[cid] = fam;
+        box.innerHTML = renderFamilyDetail(fam, cid);
+        const row = document.querySelector(`.ks-fam-row[data-cid="${cid}"]`);
+        if (row) {
+            const tds = row.querySelectorAll("td");
+            if (tds.length >= 10) {
+                tds[4].textContent = (fam.pages || []).length;
+                ["transactional", "commercial", "informational", "navigational"].forEach((i, idx) => {
+                    tds[5 + idx].innerHTML = renderMatrixCell((fam.coverage || {})[i], cid, i);
+                });
+                tds[9].textContent = fam.gap_score ? fam.gap_score.toLocaleString() : "—";
+            }
+        }
+        loadKwOverview();
+    } catch (e) {}
 }
 
 // ── Keyword detail drawer ────────────────────────────────────────────────
@@ -552,7 +821,12 @@ function renderKeywordDrawer(d) {
         const fam = d.family;
         html += `<div class="ks-drawer-section">
             <div class="ks-drawer-label">Family — ${escapeHtml(fam.cluster.name)} (${fam.keyword_count} keywords, ${(fam.total_volume || 0).toLocaleString()} vol)</div>
-            ${renderFamilyKeywords(fam)}
+            ${renderFamilyKwMini(fam)}
+            <button class="btn btn-sm btn-outline" style="margin-top:8px;font-size:11.5px;"
+                    onclick="ksKwDrawer.close();ksViewFamily(${fam.cluster.id === null ? 0 : fam.cluster.id})">
+                <span class="material-symbols-rounded" style="font-size:14px;vertical-align:middle;">travel_explore</span>
+                Open family in Explorer
+            </button>
         </div>`;
         const gaps = fam.gaps || [];
         if (gaps.length) {
@@ -573,6 +847,28 @@ function renderKeywordDrawer(d) {
         </div>`;
     }
     ksKwDrawer.setBody(html);
+}
+
+function renderFamilyKwMini(fam) {
+    // Compact top-8 keyword list for the drawer — the full page-grouped
+    // picture lives in the Explorer expansion.
+    const all = [];
+    ["transactional", "commercial", "informational", "navigational"].forEach(intent => {
+        ((fam.keywords_by_intent || {})[intent] || []).forEach(k => all.push(k));
+    });
+    all.sort((a, b) => (b.search_volume || 0) - (a.search_volume || 0));
+    const rows = all.slice(0, 8).map(k => `<div class="ks-fam-kw-row" onclick="openKeywordDrawer(${k.id})">
+        <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(k.keyword)}</span>
+        <span style="color:var(--on-surface-secondary);font-size:12px;white-space:nowrap;">${(k.search_volume || 0).toLocaleString()}</span>
+        <span class="badge badge-${intentBadge(k.intent)}" style="font-size:9.5px;">${k.intent || '-'}</span>
+        ${k.owner
+            ? `<span class="ks-owner-chip"><span class="badge badge-${typeBadge(k.owner.item_type)}" style="font-size:9.5px;">${k.owner.item_type}</span><span style="overflow:hidden;text-overflow:ellipsis;max-width:160px;">${escapeHtml(k.owner.title || '')}</span></span>`
+            : '<span style="font-size:11.5px;color:var(--on-surface-secondary);font-style:italic;">unowned</span>'}
+    </div>`).join("");
+    const more = all.length > 8
+        ? `<div style="font-size:11.5px;color:var(--on-surface-secondary);padding:2px 8px;">+ ${all.length - 8} more in the Explorer</div>`
+        : "";
+    return (rows || '<div style="font-size:13px;color:var(--on-surface-secondary);">No keywords in this family.</div>') + more;
 }
 
 function renderGapAction(gap, clusterId) {
@@ -606,42 +902,12 @@ async function setKeywordIntent(keywordId, intent) {
         });
         showToast(`Intent set to ${intent}`, "success");
         ksFamilyCache = {};
-        loadFamilies(); loadCoverageMatrix();
+        loadFamilies();
         openKeywordDrawer(keywordId);
     } catch (e) { showToast("Failed: " + e.message, "error"); }
 }
 
-// ── Coverage matrix ──────────────────────────────────────────────────────
-async function loadCoverageMatrix() {
-    if (!ksStoreId) return;
-    const tbody = document.getElementById("ks-cov-tbody");
-    tbody.innerHTML = '<tr><td colspan="7" style="text-align:center"><div class="spinner" style="margin:20px auto"></div></td></tr>';
-    const minVol = parseInt(document.getElementById("ks-cov-min").value) || 0;
-    const gapsOnly = document.getElementById("ks-cov-gaps-only").checked ? 1 : 0;
-    try {
-        const d = await apiRequest(`/api/keyword-strategy/coverage/matrix?store_id=${ksStoreId}&min_volume=${minVol}&only_gaps=${gapsOnly}&limit=200`);
-        const fams = d.families || [];
-        if (!fams.length) {
-            tbody.innerHTML = "";
-            document.getElementById("ks-cov-empty").style.display = "";
-            return;
-        }
-        document.getElementById("ks-cov-empty").style.display = "none";
-        tbody.innerHTML = fams.map(f => {
-            const cid = f.cluster_id === null ? 0 : f.cluster_id;
-            return `<tr>
-                <td style="font-weight:600;">${escapeHtml(f.name)}</td>
-                <td>${f.keyword_count}</td>
-                ${["transactional", "commercial", "informational", "navigational"].map(i =>
-                    `<td>${renderMatrixCell(f.intents[i], cid, i)}</td>`).join("")}
-                <td>${f.gap_score ? f.gap_score.toLocaleString() : '—'}</td>
-            </tr>`;
-        }).join("");
-    } catch (e) {
-        tbody.innerHTML = `<tr><td colspan="7" style="text-align:center;color:var(--error);">Error loading matrix</td></tr>`;
-    }
-}
-
+// ── Intent coverage cells (family table) ─────────────────────────────────
 function renderMatrixCell(cell, cid, intent) {
     if (!cell || (!cell.count && !cell.volume)) return '<div class="ks-matrix-cell na">—</div>';
     if (cell.na) return `<div class="ks-matrix-cell na" title="Volume below threshold">${(cell.volume || 0).toLocaleString()}</div>`;
@@ -669,7 +935,7 @@ function openGapPopover(ev, cid, intent) {
         ? `<button onclick='closeKsPopover();ksActionResearch(${cid}, ${JSON.stringify(intent)})'><span class="material-symbols-rounded">edit_note</span> Research blog topic</button>` : "";
     el.innerHTML = `${research}
         <button onclick="closeKsPopover();ksActionAssignTop(${cid}, '${intent}')"><span class="material-symbols-rounded">link</span> Assign top keyword to page</button>
-        <button onclick="closeKsPopover();ksViewFamily(${cid})"><span class="material-symbols-rounded">travel_explore</span> View keywords</button>`;
+        <button onclick="closeKsPopover();ksViewFamily(${cid})"><span class="material-symbols-rounded">travel_explore</span> Open family</button>`;
     document.body.appendChild(el);
     const x = Math.min(ev.clientX, window.innerWidth - 240);
     const y = Math.min(ev.clientY + 8, window.innerHeight - 140);
@@ -795,7 +1061,7 @@ async function ksActionAssign(keywordId) {
             modal.close();
             showToast(`"${kw.keyword}" assigned as primary`, "success");
             ksFamilyCache = {};
-            loadFamilies(); loadCoverageMatrix();
+            loadFamilies();
             if (ksKwDrawer && ksKwDrawer.isOpen()) openKeywordDrawer(keywordId);
         } catch (e) {
             showToast("Assign failed: " + e.message, "error");
@@ -875,6 +1141,8 @@ async function loadAuditStatus() {
 }
 
 function onAuditComplete(summary) {
+    loadFreshness();
+    ksFamilyCache = {};
     if (!summary || summary.error) return;
     // Show overview
     document.getElementById("ks-audit-overview").style.display = "";

@@ -530,7 +530,8 @@ function initTabs() {
 
     const tabBtn = document.querySelector(`.tab[data-tab="${savedTab}"]`) ||
         document.querySelector('.tab[data-tab="priorities"]');
-    tabBtn.click();
+    // Absent when seo.js is loaded on a non-/seo page for its item modal
+    if (tabBtn) tabBtn.click();
 }
 
 async function loadStatusCounts() {
@@ -560,6 +561,7 @@ function clearAllProductFilters() {
 
 async function loadProducts() {
     const container = document.getElementById("products-container");
+    if (!container) return;
     try {
         let url = `/api/seo/products?sort_by=${currentSort.by}&sort_dir=${currentSort.dir}`;
         if (currentStatusFilter) url += `&status=${currentStatusFilter}`;
@@ -905,6 +907,7 @@ async function pollBulkTask(bulkTaskId, total, subtitleText = "Optimizing produc
 
 async function loadCollections() {
     const container = document.getElementById("collections-container");
+    if (!container) return;
     try {
         let url = `/api/seo/collections?sort_by=${collectionSort.by}&sort_dir=${collectionSort.dir}`;
         if (collectionFilters.type) url += `&collection_type=${collectionFilters.type}`;
@@ -1249,7 +1252,7 @@ function renderPrioritiesTable(container, items) {
 
     for (let i = 0; i < items.length; i++) {
         const item = items[i];
-        const optimizedLabel = item.last_optimized_at ? `<div style="font-size:10px;color:var(--on-surface-secondary);margin-top:2px;">Optimized ${new Date(item.last_optimized_at).toLocaleDateString('en-US', {month:'short',day:'numeric'})}</div>` : '';
+        const optimizedLabel = item.last_optimized_at ? `<div style="font-size:10px;color:var(--on-surface-secondary);margin-top:2px;">Optimized ${new Date(item.last_optimized_at).toLocaleDateString('en-US', {month:'short',day:'numeric'})}${item.measuring ? ' <span class="badge badge-warning" style="font-size:9px;" title="Applied to Shopify within the last 28 days — Google has not re-measured it yet. Optimizing again now would overwrite work whose results are still unknown.">re-measuring</span>' : ''}</div>` : '';
         const recommendedAction = item.recommended_action ? escapeAttr(item.recommended_action) : 'Optimize';
         html += `<tr>
             <td class="row-num-col">${i + 1}</td>

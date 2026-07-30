@@ -74,6 +74,13 @@ def _resolve_and_analyze(item_type, item_dict, prefetch=None):
         resolution = resolve_item_keywords(
             store_id, item_type, item_dict["id"], item=item_dict, prefetch=prefetch
         )
+        # One keyword, one page: if another page already owns this primary
+        # (or a plural/word-order variant of it) with a stronger claim, walk
+        # to the next-best unclaimed candidate right away instead of waiting
+        # for the post-bulk dedup pass.
+        if resolution and resolution.get("primary"):
+            from app.services.keyword_resolver import _swap_primary_if_claimed
+            _swap_primary_if_claimed(store_id, item_type, item_dict["id"], resolution)
     except Exception:
         logger.warning("Keyword resolution failed for %s %s", item_type, item_dict.get("id"))
 
@@ -298,17 +305,24 @@ def bulk_analyze():
     data = request.get_json(silent=True) or {}
     item_type = data.get("item_type", "product")
     item_ids = data.get("item_ids", [])
+    analyze_all = bool(data.get("all"))
+    store_id = data.get("store_id")
 
     if item_type not in ("product", "collection"):
         return jsonify({"error": f"Invalid item_type: {item_type}"}), 400
-    if not item_ids:
+    if analyze_all and not store_id:
+        return jsonify({"error": "store_id is required with all=true"}), 400
+    if not analyze_all and not item_ids:
         return jsonify({"error": "item_ids is required"}), 400
 
     table = "synced_products" if item_type == "product" else "synced_collections"
     item_col = "product_id" if item_type == "product" else "collection_id"
 
     with db.get_cursor() as cur:
-        cur.execute(f"SELECT id FROM {table} WHERE id = ANY(%s)", ([int(i) for i in item_ids],))
+        if analyze_all:
+            cur.execute(f"SELECT id FROM {table} WHERE store_id = %s", (int(store_id),))
+        else:
+            cur.execute(f"SELECT id FROM {table} WHERE id = ANY(%s)", ([int(i) for i in item_ids],))
         valid_ids = [r["id"] for r in cur.fetchall()]
         if not valid_ids:
             return jsonify({"error": "No matching items found"}), 400

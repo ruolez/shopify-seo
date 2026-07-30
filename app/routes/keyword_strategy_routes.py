@@ -26,6 +26,88 @@ def keyword_strategy_page():
     return render_template("keyword_strategy.html")
 
 
+@keyword_strategy_bp.route("/api/keyword-strategy/freshness")
+def keyword_freshness():
+    """Last-run time and staleness level for every data layer feeding the
+    Explorer, so the UI can show what is current and what needs a re-run.
+    GSC refreshes automatically (6h scheduler); the rest are user-triggered."""
+    store_id = _get_store_id()
+    if not store_id:
+        return jsonify({"error": "store_id required"}), 400
+
+    from datetime import datetime, timezone
+
+    from app.database import db
+
+    # hours: (fresh under, stale under) — beyond is "old"
+    thresholds = {
+        "gsc": (24, 72),
+        "consolidate": (7 * 24, 30 * 24),
+        "ai_classify": (14 * 24, 60 * 24),
+        "audit": (7 * 24, 30 * 24),
+    }
+    now = datetime.now(timezone.utc)
+
+    def entry(source, at):
+        if not at:
+            return {"at": None, "age_hours": None, "level": "none"}
+        if at.tzinfo is None:
+            at = at.replace(tzinfo=timezone.utc)
+        age = (now - at).total_seconds() / 3600
+        ok, stale = thresholds[source]
+        level = "ok" if age < ok else "stale" if age < stale else "old"
+        return {"at": at.isoformat(), "age_hours": round(age, 1), "level": level}
+
+    with db.get_cursor() as cur:
+        cur.execute(
+            "SELECT MAX(completed_at) AS at FROM gsc_data_pulls "
+            "WHERE store_id = %s AND status = 'completed'",
+            (store_id,),
+        )
+        gsc_at = cur.fetchone()["at"]
+        cur.execute(
+            """SELECT run_type, MAX(completed_at) AS at FROM keyword_strategy_runs
+               WHERE store_id = %s AND status = 'completed' GROUP BY run_type""",
+            (store_id,),
+        )
+        runs = {r["run_type"]: r["at"] for r in cur.fetchall()}
+        cur.execute(
+            """SELECT COUNT(*) AS total,
+                      COUNT(*) FILTER (WHERE updated_at < NOW() - INTERVAL '7 days') AS stale_count,
+                      MAX(updated_at) AS newest
+               FROM technical_seo_analyses WHERE store_id = %s""",
+            (store_id,),
+        )
+        arow = cur.fetchone()
+
+    total, stale_count = arow["total"], arow["stale_count"]
+    if not total:
+        analyses_level = "none"
+    elif stale_count / total <= 0.05:
+        analyses_level = "ok"
+    elif stale_count / total <= 0.25:
+        analyses_level = "stale"
+    else:
+        analyses_level = "old"
+    newest = arow["newest"]
+    if newest and newest.tzinfo is None:
+        newest = newest.replace(tzinfo=timezone.utc)
+
+    return jsonify({
+        "gsc": entry("gsc", gsc_at),
+        "consolidate": entry("consolidate", runs.get("consolidate")),
+        "ai_classify": entry("ai_classify", runs.get("ai_classify")),
+        "audit": entry("audit", runs.get("audit")),
+        "analyses": {
+            "at": newest.isoformat() if newest else None,
+            "age_hours": round((now - newest).total_seconds() / 3600, 1) if newest else None,
+            "level": analyses_level,
+            "total": total,
+            "stale_count": stale_count,
+        },
+    })
+
+
 # ---------------------------------------------------------------------------
 # Master Keyword List
 # ---------------------------------------------------------------------------

@@ -54,27 +54,7 @@
                     </div>
                 </div>
 
-                <!-- Product Detail Modal -->
-                <div class="modal-overlay" id="product-modal">
-                    <div class="modal modal-fullscreen">
-                        <div class="modal-header">
-                            <h3 id="product-modal-title">Product SEO</h3>
-                            <button class="icon-btn" onclick="closeProductModal()"><span class="material-symbols-rounded">close</span></button>
-                        </div>
-                        <div class="modal-body" id="product-detail-content"></div>
-                    </div>
-                </div>
-
-                <!-- Action Preview / Impact Modal (z-index above product modal) -->
-                <div class="modal-overlay" id="impact-modal" style="z-index: 250;">
-                    <div class="modal" style="max-width: 620px; max-height: 80vh; overflow-y: auto;">
-                        <div class="modal-header">
-                            <h3 id="impact-modal-title">Action Preview</h3>
-                            <button class="icon-btn" onclick="closeImpactModal()"><span class="material-symbols-rounded">close</span></button>
-                        </div>
-                        <div class="modal-body" id="impact-modal-content"></div>
-                    </div>
-                </div>
+                {% include "_seo_item_modal.html" %}
 
                 <!-- Bulk Progress Overlay -->
                 <div class="progress-overlay" id="bulk-progress-overlay">
@@ -127,18 +107,6 @@
                     </div>
                 </div>
 
-                <!-- Confirm Dialog -->
-                <div class="confirm-overlay" id="confirm-dialog-overlay">
-                    <div class="confirm-dialog">
-                        <h3 id="confirm-dialog-title">Confirm</h3>
-                        <p id="confirm-dialog-message">Are you sure?</p>
-                        <div class="confirm-actions">
-                            <button class="btn btn-secondary" onclick="closeConfirmDialog()">Cancel</button>
-                            <button class="btn btn-primary" id="confirm-dialog-ok">Continue</button>
-                        </div>
-                    </div>
-                </div>
-            
 {% endblock %}
 
 {% block scripts %}

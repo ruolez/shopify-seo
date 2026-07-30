@@ -34,28 +34,6 @@
             background: var(--primary-light);
             border-bottom: 3px solid var(--primary);
         }
-        .ks-step.completed .ks-step-num {
-            background: var(--success);
-            color: #fff;
-        }
-        .ks-step-num {
-            width: 28px;
-            height: 28px;
-            border-radius: 50%;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-weight: 700;
-            font-size: 13px;
-            background: var(--surface-dim);
-            color: var(--on-surface-secondary);
-            flex-shrink: 0;
-            transition: all 0.2s ease;
-        }
-        .ks-step.active .ks-step-num {
-            background: var(--primary);
-            color: #fff;
-        }
         .ks-step-info { display: flex; flex-direction: column; min-width: 0; }
         .ks-step-title {
             font-size: 13px;
@@ -170,14 +148,86 @@
             padding: 5px 8px; border-radius: 6px; font-size: 13px; cursor: pointer;
         }
         .ks-fam-kw-row:hover { background: var(--surface); }
-        .ks-intent-cell {
-            display: inline-flex; align-items: center; justify-content: center;
-            width: 26px; height: 26px; border-radius: 6px; font-size: 15px;
+
+        /* Family expansion: page-grouped view */
+        .ks-pages-label {
+            font-size: 11px; font-weight: 700; letter-spacing: 0.06em;
+            text-transform: uppercase; color: var(--on-surface-secondary);
+            margin: 14px 0 8px;
         }
-        .ks-intent-cell.covered { background: color-mix(in srgb, var(--success) 14%, transparent); color: var(--success); }
-        .ks-intent-cell.gap { background: color-mix(in srgb, var(--error) 12%, transparent); color: var(--error); }
-        .ks-intent-cell.partial { background: color-mix(in srgb, var(--warning) 16%, transparent); color: var(--warning); }
-        .ks-intent-cell.na { color: var(--on-surface-secondary); opacity: 0.45; }
+        .ks-pages-label:first-child { margin-top: 6px; }
+        .ks-page-row {
+            display: flex; align-items: center; gap: 12px;
+            border: 1px solid var(--outline); border-radius: 8px;
+            background: var(--surface); padding: 9px 12px; margin-bottom: 6px;
+        }
+        .ks-page-info { flex: 1; min-width: 0; }
+        .ks-page-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
+        .ks-page-title {
+            font-size: 13px; font-weight: 600; cursor: pointer;
+            overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+        }
+        .ks-page-title:hover { color: var(--primary); }
+        .ks-page-kws {
+            font-size: 12px; color: var(--on-surface-secondary); margin-top: 3px;
+            display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+        }
+        .ks-page-kws .ks-kw-chip {
+            display: inline-flex; align-items: center; gap: 4px;
+            background: var(--surface-dim); border-radius: 999px;
+            padding: 1px 8px; font-size: 11.5px; cursor: pointer;
+        }
+        .ks-page-kws .ks-kw-chip:hover { background: var(--primary-light); }
+        .ks-page-score { font-size: 12px; font-weight: 600; white-space: nowrap; }
+        .ks-page-actions { display: flex; gap: 4px; flex-shrink: 0; }
+        .ks-unowned-row {
+            display: flex; align-items: center; gap: 10px;
+            padding: 5px 8px; border-radius: 6px; font-size: 13px;
+        }
+        .ks-unowned-row:hover { background: var(--surface); }
+        .ks-req-type { font-size: 11.5px; color: var(--on-surface-secondary); white-space: nowrap; }
+
+        /* Data freshness strip */
+        .ks-fresh-strip {
+            display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 16px;
+        }
+        .ks-fresh-item {
+            display: flex; align-items: center; gap: 8px;
+            padding: 6px 8px 6px 12px; border: 1px solid var(--outline);
+            border-radius: 8px; background: var(--surface); font-size: 12px;
+        }
+        .ks-fresh-item > .material-symbols-rounded {
+            font-size: 16px; color: var(--on-surface-secondary);
+        }
+        .ks-fresh-label { font-weight: 600; white-space: nowrap; }
+        .ks-fresh-age {
+            padding: 1px 8px; border-radius: 999px; font-size: 11px;
+            font-weight: 600; white-space: nowrap;
+            background: var(--surface-dim); color: var(--on-surface-secondary);
+        }
+        .ks-fresh-age.ok { background: color-mix(in srgb, var(--success) 14%, transparent); color: var(--success); }
+        .ks-fresh-age.stale { background: color-mix(in srgb, var(--warning) 18%, transparent); color: var(--warning); }
+        .ks-fresh-age.old, .ks-fresh-age.none { background: color-mix(in srgb, var(--error) 12%, transparent); color: var(--error); }
+        .ks-fresh-auto { font-size: 10.5px; color: var(--on-surface-secondary); white-space: nowrap; }
+        .ks-fresh-item .btn { padding: 3px 10px; font-size: 11.5px; }
+
+        /* Keyword conflicts (cannibalization) */
+        .ks-conflict-box {
+            border: 1px solid color-mix(in srgb, var(--error) 45%, transparent);
+            background: color-mix(in srgb, var(--error) 6%, transparent);
+            border-radius: 8px; padding: 10px 12px; margin-bottom: 8px;
+        }
+        .ks-conflict-head {
+            display: flex; align-items: center; gap: 8px; font-size: 13px;
+            font-weight: 600; margin-bottom: 8px;
+        }
+        .ks-conflict-head .material-symbols-rounded { font-size: 18px; color: var(--error); }
+        .ks-contender-row {
+            display: flex; align-items: center; gap: 10px; font-size: 12.5px;
+            padding: 5px 8px; border-radius: 6px; background: var(--surface);
+            margin-bottom: 4px;
+        }
+        .ks-contender-pos { font-weight: 700; min-width: 64px; white-space: nowrap; }
 
         /* Coverage matrix */
         .ks-matrix-cell {
@@ -251,13 +301,6 @@
                             <div class="ks-step-desc" id="ks-step-kw-desc">Keywords by topic family</div>
                         </div>
                     </div>
-                    <div class="ks-step" data-step="coverage">
-                        <span class="material-symbols-rounded ks-step-icon">grid_view</span>
-                        <div class="ks-step-info">
-                            <div class="ks-step-title">Coverage Gaps</div>
-                            <div class="ks-step-desc" id="ks-step-coverage-desc">Intent &times; content matrix</div>
-                        </div>
-                    </div>
                     <div class="ks-step" data-step="audit">
                         <span class="material-symbols-rounded ks-step-icon">fact_check</span>
                         <div class="ks-step-info">
@@ -292,15 +335,43 @@
                     <div class="ks-section-header">
                         <h3>Keyword Explorer</h3>
                         <div style="display:flex;gap:8px;flex-wrap:wrap;">
-                            <button id="ks-classify-btn" class="btn btn-primary">
-                                <span class="material-symbols-rounded" style="font-size:16px;vertical-align:middle;">psychology</span> AI Classify &amp; Cluster
-                            </button>
-                            <button id="ks-consolidate-btn" class="btn btn-outline">
-                                <span class="material-symbols-rounded" style="font-size:16px;vertical-align:middle;">sync</span> Consolidate
-                            </button>
                             <button id="ks-add-kw-btn" class="btn btn-outline">
                                 <span class="material-symbols-rounded" style="font-size:16px;vertical-align:middle;">add</span> Add Keyword
                             </button>
+                        </div>
+                    </div>
+
+                    <!-- Data freshness: when each layer last ran + re-run triggers -->
+                    <div class="ks-fresh-strip" id="ks-fresh-strip">
+                        <div class="ks-fresh-item" title="Clicks, impressions and positions from Google Search Console">
+                            <span class="material-symbols-rounded">query_stats</span>
+                            <span class="ks-fresh-label">GSC data</span>
+                            <span class="ks-fresh-age" id="ks-fresh-gsc">&mdash;</span>
+                            <span class="ks-fresh-auto">auto &middot; every 6h</span>
+                        </div>
+                        <div class="ks-fresh-item" title="Rebuild the master keyword list (volumes, positions, new keywords) from Semrush imports & GSC queries">
+                            <span class="material-symbols-rounded">sync</span>
+                            <span class="ks-fresh-label">Keywords</span>
+                            <span class="ks-fresh-age" id="ks-fresh-consolidate">&mdash;</span>
+                            <button id="ks-consolidate-btn" class="btn btn-outline">Consolidate</button>
+                        </div>
+                        <div class="ks-fresh-item" title="AI intent classification and topic-family clustering">
+                            <span class="material-symbols-rounded">psychology</span>
+                            <span class="ks-fresh-label">Intent &amp; families</span>
+                            <span class="ks-fresh-age" id="ks-fresh-classify">&mdash;</span>
+                            <button id="ks-classify-btn" class="btn btn-outline">Classify</button>
+                        </div>
+                        <div class="ks-fresh-item" title="Scan all content for keyword mentions (feeds mentions & fallback ownership)">
+                            <span class="material-symbols-rounded">fact_check</span>
+                            <span class="ks-fresh-label">Content audit</span>
+                            <span class="ks-fresh-age" id="ks-fresh-audit">&mdash;</span>
+                            <button id="ks-fresh-audit-btn" class="btn btn-outline">Run audit</button>
+                        </div>
+                        <div class="ks-fresh-item" title="Re-resolve keywords and re-score every product & collection (ownership, scores, staleness)">
+                            <span class="material-symbols-rounded">refresh</span>
+                            <span class="ks-fresh-label">Page analyses</span>
+                            <span class="ks-fresh-age" id="ks-fresh-analyses">&mdash;</span>
+                            <button id="ks-reanalyze-btn" class="btn btn-outline">Re-analyze</button>
                         </div>
                     </div>
 
@@ -333,7 +404,16 @@
                                     <option value="keyword_count">Sort: Keywords</option>
                                     <option value="name">Sort: Name</option>
                                 </select>
+                                <label id="ks-gaps-only-wrap" style="font-size:13px;display:flex;align-items:center;gap:6px;">
+                                    <input type="checkbox" id="ks-gaps-only"> Only gaps
+                                </label>
+                                <input type="number" id="ks-min-volume" class="form-control" value="0" min="0" title="Min family volume" placeholder="Min vol" style="width:90px;font-size:13px;">
                                 <span id="ks-kw-count" style="font-size:12px;color:var(--on-surface-secondary);margin-left:auto;"></span>
+                            </div>
+                            <div id="ks-fam-legend" style="font-size:12px;color:var(--on-surface-secondary);margin-bottom:10px;">
+                                Cells show search volume covered by the right content type vs. the family total per intent
+                                (transactional &rarr; product/collection, commercial &rarr; collection/article, informational &rarr; article).
+                                Click a red or amber cell to act; expand a family to see its pages.
                             </div>
 
                             <!-- Family view (default) -->
@@ -344,6 +424,7 @@
                                         <th>Family</th>
                                         <th>Keywords</th>
                                         <th>Volume</th>
+                                        <th>Pages</th>
                                         <th title="Transactional">T</th>
                                         <th title="Commercial">C</th>
                                         <th title="Informational">I</th>
@@ -387,47 +468,6 @@
                                 </div>
                                 <div id="ks-kw-pagination" style="display:flex;justify-content:center;gap:8px;margin-top:12px;"></div>
                             </div>
-                        </div>
-                    </div>
-                </div>
-
-                <!-- ==================== COVERAGE GAPS ==================== -->
-                <div id="panel-coverage" class="tab-panel">
-                    <div class="ks-section-header">
-                        <h3>Coverage Gaps</h3>
-                        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
-                            <label style="font-size:13px;display:flex;align-items:center;gap:6px;">
-                                <input type="checkbox" id="ks-cov-gaps-only" checked> Only gaps
-                            </label>
-                            <label style="font-size:13px;">Min volume:</label>
-                            <input type="number" id="ks-cov-min" class="form-control" value="0" style="width:80px;font-size:13px;">
-                        </div>
-                    </div>
-                    <div style="font-size:12.5px;color:var(--on-surface-secondary);margin-bottom:12px;">
-                        Each cell shows the search volume already covered by the right content type vs. the family's total for that intent.
-                        <span style="white-space:nowrap;">Transactional &rarr; product/collection,</span>
-                        <span style="white-space:nowrap;">Commercial &rarr; collection/article,</span>
-                        <span style="white-space:nowrap;">Informational &rarr; article.</span>
-                        Click a red or amber cell to act on it.
-                    </div>
-                    <div class="card">
-                        <div style="overflow-x:auto;">
-                            <table class="data-table">
-                                <thead><tr>
-                                    <th>Family</th>
-                                    <th>Kws</th>
-                                    <th>Transactional</th>
-                                    <th>Commercial</th>
-                                    <th>Informational</th>
-                                    <th>Navigational</th>
-                                    <th>Gap Score</th>
-                                </tr></thead>
-                                <tbody id="ks-cov-tbody"></tbody>
-                            </table>
-                        </div>
-                        <div id="ks-cov-empty" class="ks-empty" style="display:none;">
-                            <span class="material-symbols-rounded">check_circle</span>
-                            <p>No coverage gaps at this volume threshold.</p>
                         </div>
                     </div>
                 </div>
@@ -665,9 +705,13 @@
                         </div>
                     </div>
                 </div>
-            
+
+                {% include "_seo_item_modal.html" %}
+
 {% endblock %}
 
 {% block scripts %}
+    <script src="/static/js/seo.js"></script>
+    <script src="/static/js/seo_issues.js"></script>
     <script src="/static/js/keyword_strategy.js"></script>
 {% endblock %}

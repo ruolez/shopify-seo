@@ -7,12 +7,24 @@ product/collection beats an accepted assignment, which beats an audit-elected
 primary mapping; mere content_keyword_map presence is only a "mention" and
 never makes a page an owner of record (the audit DELETEs and rebuilds that
 table, so it cannot carry durable decisions).
+
+Family detail also pivots ownership by page ("pages" / "unowned" keys) with a
+staleness verdict per owning page: never_optimized -> stale -> low_score ->
+fresh, first match wins. "stale" means the content demonstrably predates the
+current primary: either an accepted assignment is newer than the last AI
+optimize, or (products/collections) the resolved primary appears in neither
+the title nor the meta title. keyword_resolution->>'resolved_at' is NOT used —
+the 7-day background refresh re-stamps it, which would mark everything stale.
+Limitations: synced_pages has no optimize timestamp, so pages can only be
+never_optimized/low_score/fresh; the title/meta check is conservative (a page
+optimized for its keyword only in the body reads stale).
 """
 
 import logging
 
 from app.database import db
 from app.prompt_defaults import DEFAULTS
+from app.services.blog_seo_analyzer import analyze_article_seo
 from app.settings_manager import get_setting
 
 logger = logging.getLogger(__name__)
@@ -164,6 +176,368 @@ def _intent_coverage(keywords, ownership, rules):
     return cells, round(gap_score)
 
 
+def _staleness(item_type, score, last_optimized_at, assigned_at,
+               primary_kw, title_kw_score, meta_kw_score, threshold):
+    """(status, reason) for one owning page. First matching rule wins."""
+    if item_type == "page":
+        if not score:
+            return "never_optimized", "Page has never been scored"
+    elif last_optimized_at is None:
+        return "never_optimized", "Never AI-optimized"
+
+    if assigned_at and last_optimized_at and assigned_at > last_optimized_at:
+        return "stale", (
+            f"Keyword assigned {assigned_at:%Y-%m-%d}, after last optimize "
+            f"{last_optimized_at:%Y-%m-%d}"
+        )
+    if (
+        item_type in ("product", "collection")
+        and primary_kw
+        and title_kw_score == 0
+        and meta_kw_score == 0
+    ):
+        return "stale", "Title and meta title do not contain the current primary keyword"
+
+    if score is not None and score < threshold:
+        return "low_score", f"SEO score {round(score)} is below {threshold}"
+
+    return "fresh", None
+
+
+def _fetch_owner_records(store_id, item_type, item_ids):
+    """{item_id: record} with title/handle/score/optimize-freshness inputs."""
+    records = {}
+    with db.get_cursor() as cur:
+        if item_type in ("product", "collection"):
+            table = _TITLE_TABLES[item_type]
+            cur.execute(
+                f"""SELECT i.id, i.title, i.handle, i.last_optimized_at,
+                           tsa.score,
+                           tsa.keyword_resolution->'primary'->>'keyword' AS primary_kw,
+                           COALESCE((tsa.keyword_resolution->'primary'->>'volume')::float, 0)
+                               AS primary_volume,
+                           COALESCE((tsa.keyword_resolution->'primary'->>'manual')::boolean, false)
+                               AS primary_manual,
+                           COALESCE((tsa.checks->'title_has_keyword'->>'score')::int, 100)
+                               AS title_kw_score,
+                           COALESCE((tsa.checks->'meta_title_has_keyword'->>'score')::int, 100)
+                               AS meta_kw_score
+                    FROM {table} i
+                    LEFT JOIN technical_seo_analyses tsa
+                      ON tsa.store_id = %s AND tsa.item_type = %s AND tsa.item_id = i.id
+                    WHERE i.store_id = %s AND i.id = ANY(%s)""",
+                (store_id, item_type, store_id, list(item_ids)),
+            )
+            records = {r["id"]: dict(r) for r in cur.fetchall()}
+        elif item_type == "article":
+            cur.execute(
+                """SELECT id, title, handle, meta_title, meta_description, body,
+                          summary, image_url, image_alt, last_optimized_at
+                   FROM synced_articles WHERE store_id = %s AND id = ANY(%s)""",
+                (store_id, list(item_ids)),
+            )
+            for r in cur.fetchall():
+                rec = dict(r)
+                try:
+                    rec["score"] = analyze_article_seo(rec)["score"]
+                except Exception:
+                    rec["score"] = None
+                records[r["id"]] = rec
+        elif item_type == "page":
+            cur.execute(
+                "SELECT id, title, handle, seo_score AS score FROM synced_pages "
+                "WHERE store_id = %s AND id = ANY(%s)",
+                (store_id, list(item_ids)),
+            )
+            for r in cur.fetchall():
+                records[r["id"]] = {**dict(r), "last_optimized_at": None}
+    return records
+
+
+def _gsc_contenders(store_id, queries, limit=6):
+    """Pages Google actually shows for these queries (30d), best position
+    first, position impression-weighted. Includes pages that own nothing —
+    often the real ranking page is not among the primary holders."""
+    import re as _re
+    with db.get_cursor() as cur:
+        cur.execute(
+            """SELECT page,
+                      SUM(position * impressions) / NULLIF(SUM(impressions), 0) AS pos,
+                      SUM(clicks)::int AS clicks, SUM(impressions)::int AS impressions
+               FROM gsc_daily_metrics
+               WHERE store_id = %s AND date >= CURRENT_DATE - 30 AND query = ANY(%s)
+               GROUP BY page HAVING SUM(impressions) > 0
+               ORDER BY pos ASC LIMIT %s""",
+            (store_id, list(queries), limit),
+        )
+        rows = cur.fetchall()
+
+    handles = {"product": {}, "collection": {}}
+    parsed = []
+    for r in rows:
+        m = _re.search(r"/(products|collections)/([^/?#]+)", r["page"] or "")
+        item_type = handle = None
+        if m:
+            item_type = "product" if m.group(1) == "products" else "collection"
+            handle = m.group(2)
+            handles[item_type][handle] = None
+        parsed.append({**dict(r), "item_type": item_type, "handle": handle})
+
+    with db.get_cursor() as cur:
+        for item_type, hmap in handles.items():
+            if not hmap:
+                continue
+            cur.execute(
+                f"SELECT id, title, handle FROM {_TITLE_TABLES[item_type]} "
+                f"WHERE store_id = %s AND handle = ANY(%s)",
+                (store_id, list(hmap)),
+            )
+            for r in cur.fetchall():
+                hmap[r["handle"]] = {"item_id": r["id"], "title": r["title"]}
+
+    contenders = []
+    for p in parsed:
+        rec = handles.get(p["item_type"], {}).get(p["handle"]) if p["handle"] else None
+        contenders.append({
+            "url": p["page"],
+            "item_type": p["item_type"] if rec else None,
+            "item_id": rec["item_id"] if rec else None,
+            "title": rec["title"] if rec else None,
+            "handle": p["handle"] if rec else None,
+            "gsc_position": round(float(p["pos"]), 1) if p["pos"] is not None else None,
+            "gsc_clicks": p["clicks"],
+            "gsc_impressions": p["impressions"],
+        })
+    return contenders
+
+
+def _detect_conflicts(store_id, pages, keywords):
+    """Groups of pages whose primaries are variants of one keyword
+    (exact duplicate, plural, or word-order — same SERP). Scans ALL store
+    primaries, not just this family's owner-of-record pages, because the
+    ownership map keeps one best owner per keyword — the second holder of an
+    exact-duplicate primary would otherwise be invisible. Tags family pages
+    with conflict_key and attaches the GSC contenders for the shared query,
+    so the UI shows which page Google actually prefers."""
+    from app.services.keyword_resolver import variant_key
+
+    fam_keys = {}
+    for k in keywords:
+        fam_keys.setdefault(variant_key(k["keyword"]), []).append(k)
+
+    with db.get_cursor() as cur:
+        cur.execute(
+            """SELECT item_type, item_id,
+                      keyword_resolution->'primary'->>'keyword' AS kw,
+                      COALESCE((keyword_resolution->'primary'->>'manual')::boolean, false) AS manual
+               FROM technical_seo_analyses
+               WHERE store_id = %s AND keyword_resolution->'primary'->>'keyword' IS NOT NULL
+               UNION ALL
+               SELECT ka.assigned_item_type, ka.assigned_item_id, mk.keyword, true
+               FROM keyword_assignments ka
+               JOIN master_keywords mk ON mk.id = ka.master_keyword_id
+               WHERE ka.store_id = %s AND ka.status IN ('accepted', 'applied')
+                 AND ka.assigned_item_type IS NOT NULL""",
+            (store_id, store_id),
+        )
+        holder_rows = cur.fetchall()
+
+    groups = {}
+    for r in holder_rows:
+        key = variant_key(r["kw"])
+        if key in fam_keys:
+            holders = groups.setdefault(key, {})
+            holders.setdefault((r["item_type"], r["item_id"]),
+                               {"keyword": r["kw"], "manual": bool(r["manual"])})
+
+    conflict_groups = {k: v for k, v in groups.items() if len(v) > 1}
+    if not conflict_groups:
+        return []
+
+    all_holder_ids = [ids for v in conflict_groups.values() for ids in v]
+    titles = _resolve_titles(
+        store_id, [{"item_type": t, "item_id": i} for t, i in all_holder_ids]
+    )
+    page_by_id = {(p["item_type"], p["item_id"]): p for p in pages}
+    vol_by_kw = {k["keyword"]: k["search_volume"] for k in keywords}
+
+    conflicts = []
+    for key, holders in conflict_groups.items():
+        variants = {h["keyword"] for h in holders.values()}
+        variants |= {k["keyword"] for k in fam_keys[key]}
+        gsc = _gsc_contenders(store_id, variants)
+        gsc_by_item = {(c["item_type"], c["item_id"]): c for c in gsc if c["item_id"]}
+
+        contenders = []
+        for (item_type, item_id), h in holders.items():
+            fam_page = page_by_id.get((item_type, item_id))
+            if fam_page is not None:
+                fam_page["conflict_key"] = key
+            hit = gsc_by_item.get((item_type, item_id), {})
+            meta = titles.get((item_type, item_id), {})
+            contenders.append({
+                "item_type": item_type,
+                "item_id": item_id,
+                "title": (fam_page or {}).get("title") or meta.get("title"),
+                "handle": (fam_page or {}).get("handle") or meta.get("handle"),
+                "primary_keyword": h["keyword"],
+                "manual": h["manual"],
+                "is_owner": True,
+                "gsc_position": hit.get("gsc_position"),
+                "gsc_clicks": hit.get("gsc_clicks", 0),
+                "gsc_impressions": hit.get("gsc_impressions", 0),
+            })
+        for c in gsc:
+            if (c["item_type"], c["item_id"]) not in holders:
+                contenders.append({**c, "is_owner": False, "primary_keyword": None,
+                                   "manual": False})
+
+        contenders.sort(key=lambda c: (c["gsc_position"] is None, c["gsc_position"] or 0))
+        conflicts.append({
+            "key": key,
+            "keywords": sorted(
+                ({"keyword": v, "search_volume": vol_by_kw.get(v, 0)} for v in variants),
+                key=lambda x: -x["search_volume"],
+            ),
+            "contenders": contenders,
+        })
+    conflicts.sort(key=lambda c: -max(k["search_volume"] for k in c["keywords"]))
+    return conflicts
+
+
+def _family_pages(store_id, keywords, ownership, rules):
+    """Pivot one family's ownership by page -> (pages, unowned).
+
+    pages: every item that best-owns >=1 family keyword, with its primary
+    keyword, other owned family keywords, score and staleness verdict.
+    unowned: family keywords with demand but no owner of record, annotated
+    with the content types that should own them. Uncapped, volume desc.
+    """
+    threshold = rules.get("stale_score_threshold", 70)
+    required = rules["required_types"]
+    family_kw_texts = {k["keyword"] for k in keywords}
+
+    buckets = {}
+    unowned = []
+    for k in keywords:
+        owner = ownership.get(k["id"], {}).get("owner")
+        if owner:
+            buckets.setdefault((owner["item_type"], owner["item_id"]), []).append(
+                (k, owner["role"])
+            )
+        elif k["search_volume"] > 0:
+            intent = k["intent"] or "commercial"
+            unowned.append({
+                "id": k["id"],
+                "keyword": k["keyword"],
+                "search_volume": k["search_volume"],
+                "intent": intent,
+                "cpc": float(k["cpc"]) if k.get("cpc") is not None else None,
+                "best_position": k.get("best_position"),
+                "source": k.get("source"),
+                "required_types": required.get(intent, []),
+                "action": "research_topic"
+                if intent in ("informational", "commercial")
+                else "assign",
+            })
+
+    ids_by_type = {}
+    for item_type, item_id in buckets:
+        ids_by_type.setdefault(item_type, set()).add(item_id)
+    records = {}
+    for item_type, ids in ids_by_type.items():
+        for item_id, rec in _fetch_owner_records(store_id, item_type, ids).items():
+            records[(item_type, item_id)] = rec
+
+    assignments = {}
+    if buckets:
+        with db.get_cursor() as cur:
+            cur.execute(
+                """SELECT ka.assigned_item_type, ka.assigned_item_id, ka.updated_at,
+                          mk.keyword, COALESCE(mk.search_volume, 0) AS search_volume
+                   FROM keyword_assignments ka
+                   JOIN master_keywords mk ON mk.id = ka.master_keyword_id
+                   WHERE ka.store_id = %s AND ka.status IN ('accepted', 'applied')
+                     AND (ka.assigned_item_type, ka.assigned_item_id) IN %s
+                   ORDER BY ka.updated_at DESC""",
+                (store_id, tuple(buckets.keys())),
+            )
+            for r in cur.fetchall():
+                # rows arrive newest-first; keep only the newest per item
+                assignments.setdefault(
+                    (r["assigned_item_type"], r["assigned_item_id"]), dict(r)
+                )
+
+    pages = []
+    for (item_type, item_id), owned in buckets.items():
+        rec = records.get((item_type, item_id))
+        if not rec:
+            continue
+        assignment = assignments.get((item_type, item_id))
+
+        if item_type in ("product", "collection") and rec.get("primary_kw"):
+            primary = {
+                "keyword": rec["primary_kw"],
+                "search_volume": round(rec["primary_volume"] or 0),
+                "role": "resolved_primary",
+                "manual": rec["primary_manual"],
+                "in_family": rec["primary_kw"] in family_kw_texts,
+            }
+        elif assignment:
+            primary = {
+                "keyword": assignment["keyword"],
+                "search_volume": assignment["search_volume"],
+                "role": "assigned",
+                "manual": True,
+                "in_family": assignment["keyword"] in family_kw_texts,
+            }
+        else:
+            primary = None
+
+        primary_text = primary["keyword"] if primary else None
+        owned_keywords = [
+            {
+                "id": k["id"],
+                "keyword": k["keyword"],
+                "search_volume": k["search_volume"],
+                "intent": k["intent"] or "commercial",
+                "role": role,
+            }
+            for k, role in owned
+            if k["keyword"] != primary_text
+        ]
+
+        status, reason = _staleness(
+            item_type,
+            rec.get("score"),
+            rec.get("last_optimized_at"),
+            assignment["updated_at"] if assignment else None,
+            rec.get("primary_kw"),
+            rec.get("title_kw_score", 100),
+            rec.get("meta_kw_score", 100),
+            threshold,
+        )
+        last_opt = rec.get("last_optimized_at")
+        pages.append({
+            "item_type": item_type,
+            "item_id": item_id,
+            "title": rec.get("title"),
+            "handle": rec.get("handle"),
+            "primary_keyword": primary,
+            "owned_keywords": owned_keywords,
+            "owned_volume": sum(k["search_volume"] for k, _ in owned),
+            "seo_score": round(rec["score"]) if rec.get("score") is not None else None,
+            "last_optimized_at": last_opt.isoformat() if last_opt else None,
+            "staleness": status,
+            "stale_reason": reason,
+        })
+
+    pages.sort(key=lambda p: p["owned_volume"], reverse=True)
+    unowned.sort(key=lambda u: u["search_volume"], reverse=True)
+    conflicts = _detect_conflicts(store_id, pages, keywords)
+    return pages, unowned, conflicts
+
+
 def get_coverage_matrix(store_id, min_volume=0, search=None, only_gaps=False,
                         sort_by="gap_score", limit=50, offset=0):
     rules = _rules()
@@ -193,6 +567,11 @@ def get_coverage_matrix(store_id, min_volume=0, search=None, only_gaps=False,
         cells, gap_score = _intent_coverage(kws, ownership, rules)
         if only_gaps and gap_score == 0:
             continue
+        owner_pages = set()
+        for k in kws:
+            owner = ownership.get(k["id"], {}).get("owner")
+            if owner:
+                owner_pages.add((owner["item_type"], owner["item_id"]))
         families.append({
             "cluster_id": cluster_id,
             "name": name,
@@ -201,6 +580,7 @@ def get_coverage_matrix(store_id, min_volume=0, search=None, only_gaps=False,
             "total_volume": total_volume,
             "intents": cells,
             "gap_score": gap_score,
+            "pages_count": len(owner_pages),
             "unclustered": cluster_id is None,
         })
 
@@ -221,7 +601,7 @@ def get_coverage_matrix(store_id, min_volume=0, search=None, only_gaps=False,
     return {"families": page, "total": total, "gap_volume": gap_volume}
 
 
-def get_family_coverage(store_id, cluster_id):
+def get_family_coverage(store_id, cluster_id, include_pages=True):
     """Full picture for one family (cluster_id 0/None = unclustered bucket)."""
     rules = _rules()
     cluster = None
@@ -281,7 +661,7 @@ def get_family_coverage(store_id, cluster_id):
                     "message": f"\"{top['keyword']}\" has no owning page",
                 })
 
-    return {
+    result = {
         "cluster": cluster or {"id": None, "name": "unclustered", "description": None},
         "keyword_count": len(keywords),
         "total_volume": sum(k["search_volume"] for k in keywords),
@@ -290,6 +670,11 @@ def get_family_coverage(store_id, cluster_id):
         "gap_score": gap_score,
         "gaps": gaps,
     }
+    if include_pages:
+        result["pages"], result["unowned"], result["conflicts"] = _family_pages(
+            store_id, keywords, ownership, rules
+        )
+    return result
 
 
 def get_keyword_detail(store_id, keyword_id):
@@ -312,7 +697,11 @@ def get_keyword_detail(store_id, keyword_id):
         mentions_count = cur.fetchone()["n"]
 
     ownership = get_ownership_map(store_id, [keyword_id]).get(keyword_id, {})
-    family = get_family_coverage(store_id, kw["cluster_id"]) if kw["cluster_id"] else None
+    family = (
+        get_family_coverage(store_id, kw["cluster_id"], include_pages=False)
+        if kw["cluster_id"]
+        else None
+    )
 
     return {
         "keyword": kw,

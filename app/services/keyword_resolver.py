@@ -33,6 +33,17 @@ def _norm(kw):
     return re.sub(r"\s+", " ", cleaned).strip()
 
 
+def variant_key(kw):
+    """Cluster key for ownership claims: plural-folded, order-insensitive
+    tokens, so 'dutch masters', 'dutch master' and 'masters dutch' all claim
+    one slot. Singular/plural and word-order variants share a SERP, and two
+    pages holding them as primaries cannibalize each other exactly like an
+    exact-string duplicate would."""
+    def _fold(t):
+        return t[:-1] if t.endswith("s") and len(t) > 3 else t
+    return " ".join(sorted(_fold(t) for t in _norm(kw).split()))
+
+
 def _rules():
     return get_setting("rules.keyword_resolution", DEFAULTS["rules.keyword_resolution"])
 
@@ -514,11 +525,12 @@ def resolve_item_keywords(store_id, item_type, item_id, item=None, prefetch=None
 
 def _pick_unclaimed_alternative(res, claimed, min_rel):
     """Walk an item's candidate list for the best eligible keyword not in
-    `claimed`. Returns the candidate dict or None."""
-    primary_kw = res["primary"]["keyword"]
+    `claimed` (a set of variant_key strings). Returns the candidate dict
+    or None."""
+    primary_key = variant_key(res["primary"]["keyword"])
     for c in res.get("candidates", []):
         kw = c["keyword"]
-        if kw == primary_kw or kw in claimed:
+        if variant_key(kw) == primary_key or variant_key(kw) in claimed:
             continue
         if c.get("generic") or c.get("packaging_only") or c.get("manual"):
             continue
@@ -535,16 +547,17 @@ def _swap_primary_if_claimed(store_id, item_type, item_id, res):
     Returns True when the primary was swapped."""
     primary = res.get("primary") or {}
     kw = primary.get("keyword")
-    if not kw:
-        return False
+    if not kw or primary.get("manual"):
+        return False  # manual wins — never displaced by another page's claim
     try:
         with db.get_cursor() as cur:
+            # Both item types: one keyword, one page — store-wide.
             cur.execute(
                 """SELECT keyword_resolution->'primary'->>'keyword' AS kw,
                           COALESCE((keyword_resolution->'primary'->>'score')::float, 0) AS score,
                           COALESCE((keyword_resolution->'primary'->>'manual')::boolean, false) AS manual
                    FROM technical_seo_analyses
-                   WHERE store_id = %s AND item_type = %s AND item_id != %s
+                   WHERE store_id = %s AND NOT (item_type = %s AND item_id = %s)
                      AND keyword_resolution->'primary'->>'keyword' IS NOT NULL""",
                 (store_id, item_type, item_id),
             )
@@ -565,17 +578,20 @@ def _swap_primary_if_claimed(store_id, item_type, item_id, res):
 
     claimed = {}
     for r in rows:
-        prev = claimed.get(r["kw"])
+        key = variant_key(r["kw"])
+        prev = claimed.get(key)
         if prev is None or r["manual"] > prev["manual"] or r["score"] > prev["score"]:
-            claimed[r["kw"]] = {"score": float(r["score"] or 0), "manual": bool(r["manual"])}
+            claimed[key] = {"score": float(r["score"] or 0), "manual": bool(r["manual"])}
     for r in assignment_rows:
-        kw_norm = _norm(r["kw"])
-        if kw_norm:
-            claimed[kw_norm] = {"score": float("inf"), "manual": True}
+        key = variant_key(r["kw"])
+        if key:
+            claimed[key] = {"score": float("inf"), "manual": True}
 
-    owner = claimed.get(kw)
+    owner = claimed.get(variant_key(kw))
     my_score = float(primary.get("score") or 0)
-    if not owner or not (owner["manual"] or owner["score"] > my_score):
+    # Ties count as claimed too (>=): twin pages resolve identical scores, and
+    # the incumbent keeps the keyword — matching the bulk dedup semantics.
+    if not owner or not (owner["manual"] or owner["score"] >= my_score):
         return False
 
     min_rel = _rules().get("relevance", {}).get("min_relevance", 10) / 100.0
@@ -759,32 +775,53 @@ def dedupe_primary_ownership(store_id, item_type):
             (store_id, item_type),
         )
         rows = cur.fetchall()
+        # Primaries of the OTHER item type and accepted assignments are not
+        # redistributed by this pass, but they still reserve their slot —
+        # ownership is store-wide, not per type.
+        cur.execute(
+            """SELECT keyword_resolution->'primary'->>'keyword' AS kw
+               FROM technical_seo_analyses
+               WHERE store_id = %s AND item_type != %s
+                 AND keyword_resolution->'primary'->>'keyword' IS NOT NULL""",
+            (store_id, item_type),
+        )
+        reserved_rows = cur.fetchall()
+        cur.execute(
+            """SELECT mk.keyword AS kw
+               FROM keyword_assignments ka
+               JOIN master_keywords mk ON mk.id = ka.master_keyword_id
+               WHERE ka.store_id = %s AND ka.status IN ('accepted', 'applied')""",
+            (store_id,),
+        )
+        reserved_rows += cur.fetchall()
 
     entries = []
-    claimed = set()
+    claimed = {variant_key(r["kw"]) for r in reserved_rows if r["kw"]}
     for r in rows:
         res = r["keyword_resolution"]
         if not res or not res.get("primary"):
             continue
         if res["primary"].get("manual"):
-            claimed.add(res["primary"]["keyword"])
+            claimed.add(variant_key(res["primary"]["keyword"]))
             continue
         entries.append({"item_id": r["item_id"], "res": res})
 
     # Strongest claim wins each keyword; process in descending score order.
+    # Claims are keyed by variant_key, so singular/plural and word-order
+    # variants ('dutch master' vs 'dutch masters') contest ONE slot.
     entries.sort(key=lambda e: e["res"]["primary"].get("score") or 0, reverse=True)
 
     demoted = []
     for e in entries:
         res = e["res"]
-        primary_kw = res["primary"]["keyword"]
-        if primary_kw not in claimed:
-            claimed.add(primary_kw)
+        primary_key = variant_key(res["primary"]["keyword"])
+        if primary_key not in claimed:
+            claimed.add(primary_key)
             continue
         replacement = _pick_unclaimed_alternative(res, claimed, min_rel)
         if replacement is None:
             continue  # no viable alternative — sharing beats nothing
-        claimed.add(replacement["keyword"])
+        claimed.add(variant_key(replacement["keyword"]))
         old_kw = res["primary"]["keyword"]
         res["primary"] = replacement
         res["note"] = f"'{old_kw}' is owned by a higher-scoring page; using next-best candidate"

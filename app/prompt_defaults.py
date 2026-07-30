@@ -962,6 +962,8 @@ DEFAULTS = {
         },
         # Intent cells whose total volume is below this are "n/a", not gaps.
         "min_intent_volume": 10,
+        # Owner pages scoring below this are flagged "low_score" in family views.
+        "stale_score_threshold": 70,
     },
     "rules.product_seo": {
         "weights": {
