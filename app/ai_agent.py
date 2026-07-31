@@ -131,11 +131,12 @@ def _get_search_context_for_item(item_type, item_id, store_id):
             from app.services.keyword_resolver import _semantic_semrush_matches
 
             with db.get_cursor() as cur:
-                if item_type == "article":
-                    cur.execute("SELECT title, '' as product_type, '' as vendor FROM synced_articles WHERE id = %s", (item_id,))
+                if item_type == "product":
+                    cur.execute("SELECT title, product_type, vendor FROM synced_products WHERE id = %s", (item_id,))
                 else:
-                    table = "synced_products" if item_type == "product" else "synced_collections"
-                    cur.execute(f"SELECT title, product_type, vendor FROM {table} WHERE id = %s", (item_id,))
+                    # Collections/articles have no product_type/vendor columns
+                    table = "synced_collections" if item_type == "collection" else "synced_articles"
+                    cur.execute(f"SELECT title, '' as product_type, '' as vendor FROM {table} WHERE id = %s", (item_id,))
                 item_detail = dict(cur.fetchone() or {})
             item_detail["handle"] = item.get("handle")
             semrush_keywords = _semantic_semrush_matches(item_detail, all_sr)
@@ -1619,6 +1620,10 @@ def _sanitize_description(html: str) -> str:
         "",
         html,
     )
+    # The theme renders the title as the page H1 — a second h1 in the body
+    # would be a duplicate; demote rather than strip so no content is lost.
+    from app.services.ai_output_guard import demote_h1
+    html = demote_h1(html)
     return html.strip()
 
 
@@ -2910,6 +2915,39 @@ def _validate_home_page_generate(result):
         result["meta_description"] = meta_desc[:160]
 
     return result
+
+
+def _validate_main_result(main_result, task_type, task_input, product_id, collection_id, client, config):
+    """Quality-gate a product_seo/collection_seo main result: resolve the
+    primary keyword (task input > persisted resolution > the model's own
+    pick), then validate lengths / title keyword position / alt balance with
+    one rephrase retry. Fails open."""
+    try:
+        from app.services.ai_content_validator import clean_keyword, validate_seo_result
+
+        primary_kw = clean_keyword(task_input.get("target_keyword"))
+        if not primary_kw:
+            item_type = "product" if task_type == "product_seo" else "collection"
+            item_id = product_id if task_type == "product_seo" else collection_id
+            try:
+                with db.get_cursor() as cur:
+                    cur.execute(
+                        """SELECT keyword_resolution->'primary'->>'keyword' AS kw
+                           FROM technical_seo_analyses
+                           WHERE item_type = %s AND item_id = %s""",
+                        (item_type, item_id),
+                    )
+                    row = cur.fetchone()
+                primary_kw = clean_keyword(row["kw"]) if row else None
+            except Exception:
+                primary_kw = None
+        if not primary_kw:
+            tk = main_result.get("target_keywords")
+            if isinstance(tk, dict):
+                primary_kw = clean_keyword(tk.get("primary"))
+        validate_seo_result(main_result, primary_kw, client, config)
+    except Exception:
+        logger.exception("Main-result validation failed — passing through")
 
 
 def run_task(task_type, task_input, store_id=None):
@@ -4561,6 +4599,7 @@ def run_task(task_type, task_input, store_id=None):
                 + stuffing_instruction
                 + "- If word count is low, expand with relevant product information (features, usage, benefits)\n"
                 "- If headings are missing, add H2/H3 subheadings to structure the content\n"
+                "- NEVER use <h1> tags in the description — the page already has an H1 (the title); use h2/h3 only\n"
                 "- Output valid HTML (p, h2, h3, ul, li tags)\n"
                 + links_instruction
             )
@@ -4600,15 +4639,13 @@ def run_task(task_type, task_input, store_id=None):
                 result = json.loads(content[start:end])
                 if only_fields:
                     result["fixes"] = [f for f in result.get("fixes", []) if f.get("field") in only_fields]
-                for fix in result.get("fixes", []):
-                    if fix.get("field") == "meta_description" and isinstance(fix.get("proposed_value"), str):
-                        val = fix["proposed_value"]
-                        if len(val) > 160:
-                            truncated = val[:157].rsplit(" ", 1)[0] + "..."
-                            if len(truncated) <= 160:
-                                fix["proposed_value"] = truncated
-                            else:
-                                fix["proposed_value"] = val[:160]
+                from app.services.ai_content_validator import clean_keyword, validate_technical_fixes
+                _res_primary = (resolution or {}).get("primary") if isinstance(resolution, dict) else None
+                fix_kw = clean_keyword(
+                    (_res_primary or {}).get("keyword")
+                    or (detected_kws[0].get("keyword") if detected_kws else None)
+                )
+                validate_technical_fixes(result, fix_kw, client, config)
                 return result
         except (json.JSONDecodeError, ValueError):
             pass
@@ -6164,23 +6201,49 @@ def run_task(task_type, task_input, store_id=None):
             if isinstance(images, str):
                 images = json.loads(images)
 
-            paired = []
-            for i, img in enumerate(images):
-                mid = img.get("media_id", "")
-                if not mid:
-                    continue
-                if i < len(alt_suggestions):
-                    alt = alt_suggestions[i]
-                    if isinstance(alt, dict):
-                        alt = alt.get("suggested_alt") or alt.get("alt") or ""
-                    paired.append({"media_id": mid, "suggested_alt": str(alt)})
-            main_result["image_alt_suggestions"] = paired
+            def _alt_text(a):
+                if isinstance(a, dict):
+                    return str(a.get("suggested_alt") or a.get("alt") or "")
+                return str(a)
 
+            # Pair suggestions to media ids. The model answers positionally
+            # against the full images array, so images without a media_id must
+            # still consume their slot — but when counts only match the
+            # media-bearing subset, pair against that instead of misaligning.
+            media_imgs = [img for img in images if img.get("media_id")]
+            by_media = {}
+            explicit = [a for a in alt_suggestions if isinstance(a, dict) and a.get("media_id")]
+            if explicit and len(explicit) == len(alt_suggestions):
+                valid_mids = {img["media_id"] for img in media_imgs}
+                by_media = {a["media_id"]: _alt_text(a) for a in explicit
+                            if a["media_id"] in valid_mids}
+            elif len(alt_suggestions) == len(images):
+                by_media = {img["media_id"]: _alt_text(alt_suggestions[i])
+                            for i, img in enumerate(images) if img.get("media_id")}
+            elif len(alt_suggestions) == len(media_imgs):
+                by_media = {img["media_id"]: _alt_text(alt_suggestions[i])
+                            for i, img in enumerate(media_imgs)}
+            else:
+                logger.warning(
+                    "Alt suggestion count %d matches neither %d images nor %d media images — pairing to min",
+                    len(alt_suggestions), len(images), len(media_imgs),
+                )
+                by_media = {img["media_id"]: _alt_text(alt_suggestions[i])
+                            for i, img in enumerate(media_imgs[: len(alt_suggestions)])}
+            main_result["image_alt_suggestions"] = [
+                {"media_id": mid, "suggested_alt": alt} for mid, alt in by_media.items() if alt
+            ]
+
+        _validate_main_result(main_result, task_type, task_input,
+                              product_id if task_type == "product_seo" else None,
+                              None, client, config)
         main_result = _generate_description(client, config, main_result, serp_context, serp_benchmark, product_id, search_context=prefetched_search_ctx)
         if task_input.get("target_keyword"):
             main_result["target_keyword"] = task_input["target_keyword"]
 
     elif task_type == "collection_seo":
+        _validate_main_result(main_result, task_type, task_input,
+                              None, collection_id, client, config)
         main_result = _generate_collection_description(
             client, config, main_result, serp_context, serp_benchmark, collection_id,
             hierarchy_context=task_input.get("hierarchy_context"),

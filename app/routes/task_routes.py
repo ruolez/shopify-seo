@@ -12,6 +12,7 @@ from app.routes.schema_routes import generate_and_push_product_schema
 from app.services.ai_output_guard import (
     clamp_meta_description,
     clamp_meta_title,
+    clamp_title,
     sanitize_html,
 )
 from app.services.task_runner import is_failed_result, spawn as spawn_task, sweep_stale_jobs
@@ -401,7 +402,7 @@ def _execute_bulk_collection_task(bulk_task_id):
 
                     collection_fields = {}
                     if not skip_title and ai_result.get("h1_tag"):
-                        collection_fields["title"] = ai_result["h1_tag"]
+                        collection_fields["title"] = clamp_title(ai_result["h1_tag"])
                     if ai_result.get("optimized_description"):
                         collection_fields["description_html"] = sanitize_html(ai_result["optimized_description"])
                     if ai_result.get("optimized_meta_title"):
@@ -563,7 +564,7 @@ def _execute_bulk_task(bulk_task_id):
 
                     product_fields = {}
                     if not skip_title and ai_result.get("h1_tag"):
-                        product_fields["title"] = ai_result["h1_tag"]
+                        product_fields["title"] = clamp_title(ai_result["h1_tag"])
                     if ai_result.get("optimized_description"):
                         product_fields["description_html"] = sanitize_html(ai_result["optimized_description"])
                     if ai_result.get("optimized_meta_title"):
@@ -584,6 +585,29 @@ def _execute_bulk_task(bulk_task_id):
                             if isinstance(s, dict)
                         ]
                         if media_updates:
+                            try:
+                                from app.services.ai_content_validator import (
+                                    clean_keyword,
+                                    ensure_applied_alt_balance,
+                                )
+                                with db.get_cursor() as cur:
+                                    cur.execute("SELECT images FROM synced_products WHERE id = %s", (product_id,))
+                                    _img_row = cur.fetchone()
+                                    cur.execute(
+                                        """SELECT keyword_resolution->'primary'->>'keyword' AS kw
+                                           FROM technical_seo_analyses
+                                           WHERE item_type = 'product' AND item_id = %s""",
+                                        (product_id,),
+                                    )
+                                    _kw_row = cur.fetchone()
+                                _imgs = (_img_row or {}).get("images") or []
+                                if isinstance(_imgs, str):
+                                    _imgs = json.loads(_imgs)
+                                media_updates = ensure_applied_alt_balance(
+                                    _imgs, media_updates, clean_keyword((_kw_row or {}).get("kw"))
+                                )
+                            except Exception:
+                                logger.exception("Alt balance backstop failed (bulk)")
                             logger.info("Applying alt text for %d images on product %s (bulk)", len(media_updates), product_id)
                             media_result = client.update_product_media(item["shopify_id"], media_updates)
                             logger.info("Alt text bulk apply result: %s", media_result)

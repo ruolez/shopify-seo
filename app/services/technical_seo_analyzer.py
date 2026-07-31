@@ -511,6 +511,19 @@ def analyze_product_technical_seo(product, primary_keyword=None):
         "fix_type": "description",
     }
 
+    # 11b. No <h1> inside the description — the theme renders the title as the
+    # page H1, so a body h1 duplicates it. Weightless (not in `weights`): it
+    # surfaces as a fixable issue without churning historical scores.
+    h1_count = len(re.findall(r"<h1[\s>]", body_html or "", re.IGNORECASE))
+    checks["description_no_h1"] = {
+        "score": 0 if h1_count else 100,
+        "detail": (f"{h1_count} <h1> tag(s) in description — duplicates the page H1"
+                   if h1_count else "No <h1> in description"),
+        "issue": ("Replace <h1> tags in the description with <h2> — the page title is already the H1"
+                  if h1_count else None),
+        "fix_type": "description",
+    }
+
     # 12. Image alt text coverage
     img_alt_score, img_alt_detail, _, _ = score_image_alt(images)
     checks["image_alt_coverage"] = {
@@ -735,6 +748,17 @@ def analyze_collection_technical_seo(collection, primary_keyword=None):
         "score": h_score,
         "detail": h_detail,
         "issue": None if h_score == 100 else "Add H2/H3 subheadings to structure your description",
+        "fix_type": "description",
+    }
+
+    # 11b. No <h1> inside the description (weightless — see product variant)
+    h1_count = len(re.findall(r"<h1[\s>]", body_html or "", re.IGNORECASE))
+    checks["description_no_h1"] = {
+        "score": 0 if h1_count else 100,
+        "detail": (f"{h1_count} <h1> tag(s) in description — duplicates the page H1"
+                   if h1_count else "No <h1> in description"),
+        "issue": ("Replace <h1> tags in the description with <h2> — the page title is already the H1"
+                  if h1_count else None),
         "fix_type": "description",
     }
 

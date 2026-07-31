@@ -10,10 +10,15 @@ import re
 
 logger = logging.getLogger(__name__)
 
-# Hard caps — safety net above the SEO-ideal lengths (title ~60, description ~160),
-# so intentionally longer AI output still fits what Shopify/search engines tolerate.
-MAX_META_TITLE = 70
-MAX_META_DESCRIPTION = 200
+# Hard caps aligned with the scorer's "good" bands (title [50,60], description
+# [120,160]) — generation now aims ~50/~150 and rephrases overshoots, so anything
+# still longer at apply time is clamped rather than shipped in the "ok" band.
+MAX_META_TITLE = 60
+MAX_META_DESCRIPTION = 160
+# Shopify's platform limit for the product/collection title field. Titles are
+# never SEO-truncated (that would mangle merchandising) — this is corruption
+# protection only.
+MAX_TITLE = 255
 
 _SCRIPT_STYLE_RE = re.compile(
     r"<\s*(script|style)\b[^>]*>.*?<\s*/\s*\1\s*>", re.IGNORECASE | re.DOTALL
@@ -24,17 +29,34 @@ _EVENT_ATTR_RE = re.compile(
 _JS_URL_RE = re.compile(
     r"\s+(href|src)\s*=\s*([\"']?)\s*javascript:[^\"'\s>]*\2", re.IGNORECASE
 )
+# The theme renders the product/collection title as the page's H1 — an <h1> in
+# a description would be a duplicate H1, so demote (not strip: no content loss).
+_H1_OPEN_RE = re.compile(r"<\s*h1(\s[^>]*)?>", re.IGNORECASE)
+_H1_CLOSE_RE = re.compile(r"<\s*/\s*h1\s*>", re.IGNORECASE)
+
+
+def demote_h1(html):
+    """Rewrite <h1> tags to <h2> in description HTML."""
+    if not html:
+        return html
+    return _H1_CLOSE_RE.sub("</h2>", _H1_OPEN_RE.sub(lambda m: f"<h2{m.group(1) or ''}>", html))
 
 
 def sanitize_html(html):
     """Strip active content (script/style blocks, inline event handlers,
-    javascript: URLs) from AI-generated HTML. Returns "" for falsy input."""
+    javascript: URLs) from AI-generated HTML and demote any <h1> to <h2>.
+    Returns "" for falsy input."""
     if not html:
         return ""
     cleaned = _SCRIPT_STYLE_RE.sub("", html)
     cleaned = _EVENT_ATTR_RE.sub("", cleaned)
     cleaned = _JS_URL_RE.sub("", cleaned)
+    cleaned = demote_h1(cleaned)
     return cleaned.strip()
+
+
+def clamp_title(text):
+    return _clamp(text, MAX_TITLE)
 
 
 def _clamp(text, limit):
@@ -55,6 +77,8 @@ def clamp_meta_description(text):
 def guard_shopify_fields(fields):
     """Clamp meta lengths and sanitize AI-authored HTML in a Shopify field
     dict (in place). Safe on partial dicts — only touches present keys."""
+    if fields.get("title"):
+        fields["title"] = clamp_title(fields["title"])
     for key in ("meta_title", "seo_title"):
         if fields.get(key):
             fields[key] = clamp_meta_title(fields[key])

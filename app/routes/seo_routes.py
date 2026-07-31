@@ -14,6 +14,7 @@ from app.routes.schema_routes import generate_and_push_product_schema
 from app.services.ai_output_guard import (
     clamp_meta_description,
     clamp_meta_title,
+    clamp_title,
     guard_shopify_fields,
     sanitize_html,
 )
@@ -103,6 +104,8 @@ def _attach_unified_scores(item, seo, search_perf, kw):
 
 def _guard_ai_content_fields(data):
     """Clamp/sanitize AI-generated fields in an apply payload in place."""
+    if data.get("title"):
+        data["title"] = clamp_title(data["title"])
     if data.get("description_html"):
         data["description_html"] = sanitize_html(data["description_html"])
     if data.get("meta_title"):
@@ -691,6 +694,9 @@ def _preview_image_alt_text(data, store_id):
     from openai import OpenAI
     from app.settings_manager import get_setting as _gs
     from app.prompt_defaults import DEFAULTS as _defs
+    from app.services.ai_content_validator import clean_keyword as clean_alt_keyword
+    from app.services.ai_content_validator import strip_keyword_phrase
+    from app.services.technical_seo_analyzer import _keyword_in_text as _kw_in_text
 
     item_id = data.get("item_id")
     scope = data.get("scope", "single")
@@ -741,6 +747,16 @@ def _preview_image_alt_text(data, store_id):
             else f"- Image {a['position']}: (no alt text)"
             for a in existing_alts
         )
+        kw_analysis = _fetch_keyword_analysis(store_id, "product", product["id"])
+        primary_kw = clean_alt_keyword(
+            (((kw_analysis or {}).get("keyword_resolution") or {}).get("primary") or {}).get("keyword")
+        )
+        kw_line = (
+            f"Primary keyword: \"{primary_kw}\". Include it naturally in ONLY the first (hero) "
+            f"image alt. Every other alt must NOT contain it — keyword in every alt reads as "
+            f"spam to search engines. "
+            if primary_kw else ""
+        )
         prompt = (
             f"Generate optimized SEO alt text for ALL images of this product.\n"
             f"Product: {product['title']}\n"
@@ -748,9 +764,9 @@ def _preview_image_alt_text(data, store_id):
             f"Current alt text:\n{existing_context}\n\n"
             f"Recommendation context: {recommendation_text}\n\n"
             f"Return JSON with key 'alts' — an array of strings, one per image in order. "
-            f"Improve existing alt text to better incorporate SEO keywords. "
-            f"For images with no alt text, write new descriptions. "
-            f"Keep each under 125 characters. Naturally include the product name and relevant keywords. "
+            f"{kw_line}"
+            f"For images with no alt text, write new descriptions; describe what each image "
+            f"shows (angle, detail, packaging, lifestyle). Keep each under 125 characters. "
             f"Vary descriptions (front view, side view, detail shot, lifestyle, etc.)."
         )
 
@@ -761,6 +777,11 @@ def _preview_image_alt_text(data, store_id):
             alts = []
             if s >= 0 and e > s:
                 alts = json.loads(content[s:e]).get("alts", [])
+            # Deterministic balance backstop: keyword stays in the hero alt only.
+            if primary_kw and len(alts) >= 2 and all(
+                a and _kw_in_text(primary_kw, a) for a in alts
+            ):
+                alts = [alts[0]] + [strip_keyword_phrase(a, primary_kw) for a in alts[1:]]
 
             suggestions = []
             for i, img in enumerate(actionable_images):
@@ -1153,6 +1174,19 @@ def apply_product_changes(product_id):
             client.update_product(product["shopify_id"], product_fields)
 
         if data.get("image_alts") and isinstance(data["image_alts"], list):
+            try:
+                from app.services.ai_content_validator import (
+                    clean_keyword as _ck,
+                    ensure_applied_alt_balance,
+                )
+                _kw_analysis = _fetch_keyword_analysis(product["store_id"], "product", product_id)
+                _pk = _ck((((_kw_analysis or {}).get("keyword_resolution") or {}).get("primary") or {}).get("keyword"))
+                _imgs = product.get("images") or []
+                if isinstance(_imgs, str):
+                    _imgs = json.loads(_imgs)
+                data["image_alts"] = ensure_applied_alt_balance(_imgs, data["image_alts"], _pk)
+            except Exception:
+                logger.exception("Alt balance backstop failed (apply)")
             logger.info("Applying alt text for %d images on product %s", len(data["image_alts"]), product_id)
             result = client.update_product_media(product["shopify_id"], data["image_alts"])
             logger.info("Alt text apply result: %s", result)
