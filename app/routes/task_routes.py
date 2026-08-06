@@ -650,8 +650,8 @@ def _execute_bulk_task(bulk_task_id):
                                     cur.execute(
                                         """SELECT keyword_resolution->'primary'->>'keyword' AS kw
                                            FROM technical_seo_analyses
-                                           WHERE item_type = 'product' AND item_id = %s""",
-                                        (product_id,),
+                                           WHERE store_id = %s AND item_type = 'product' AND item_id = %s""",
+                                        (item["store_id"], product_id),
                                     )
                                     _kw_row = cur.fetchone()
                                 _imgs = (_img_row or {}).get("images") or []

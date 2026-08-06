@@ -575,7 +575,7 @@ trustworthy again.
 
 ## Keyword-resolver bypasses
 
-- [ ] **5.1 Collection image-alt generation ignores the resolver** *(impact corrected)*
+- [x] **5.1 Collection image-alt generation ignores the resolver** *(impact corrected)*
   **Problem:** `_generate_image_for_collection` (`routes/seo_routes.py:2592`) derives keywords
   from raw n-grams, never the resolver. Verified correction: there is **no scoring mismatch**
   (the collection analyzer has no `image_alt_has_keyword` check) — the issue is consistency:
@@ -584,7 +584,7 @@ trustworthy again.
   **Benefit:** Collection image alt text reinforces the keyword the page is actually
   targeting.
 
-- [ ] **5.2 Priority queue hands out unresolved keywords**
+- [x] **5.2 Priority queue hands out unresolved keywords**
   **Problem:** `services/seo_priority_service.py:332-335` — with no stored resolved primary,
   the fallback hands out the top unowned Semrush keyword as `target_keyword` without
   triggering resolution (mitigations exist: foreign-owner filter + GSC cannibalization check).
@@ -593,7 +593,7 @@ trustworthy again.
   **Benefit:** The home queue's suggested keywords go through the same vetting as everywhere
   else.
 
-- [ ] **5.3 SERP scraper discards the resolver keyword for collections** *(worse than audited)*
+- [x] **5.3 SERP scraper discards the resolver keyword for collections** *(worse than audited)*
   **Problem:** Verified beyond the original claim: for `entity_type == "collection"`,
   `determine_search_queries` (`services/serp_scraper.py:203-204`) **unconditionally** uses the
   meta-title/title heuristic and ignores `target_keywords` — the resolver keyword carefully
@@ -604,7 +604,7 @@ trustworthy again.
   **Benefit:** Collection SEO benchmarks against the keyword you're actually targeting, not a
   guess from the title.
 
-- [ ] **5.4 Resolver failure silently overwrites good stored resolutions** *(aggravation found)*
+- [x] **5.4 Resolver failure silently overwrites good stored resolutions** *(aggravation found)*
   **Problem:** `routes/technical_seo_routes.py:84-85` swallows resolver exceptions, the
   analysis proceeds n-gram-scored, and — verified aggravation — the upsert's ON CONFLICT
   clause **overwrites a previously good `keyword_resolution` with NULL**.
@@ -613,7 +613,7 @@ trustworthy again.
   the column) and surface a warning in the analysis result.
   **Benefit:** One transient error can no longer erase an item's keyword targeting.
 
-- [ ] **5.5 Quality gate can enforce the AI's own keyword choice**
+- [x] **5.5 Quality gate can enforce the AI's own keyword choice**
   **Problem:** `ai_agent.py:2946-2948` — with no target keyword and no stored resolution, the
   validator enforces keyword-first rules against the AI's self-picked
   `target_keywords.primary`. (Deliberate per docstring, but circular.)
@@ -621,7 +621,7 @@ trustworthy again.
   (keep length/structure checks) or trigger resolution first.
   **Benefit:** The quality gate can't lock in a keyword nobody chose.
 
-- [ ] **5.6 Stored-primary lookups don't filter by store (latent)**
+- [x] **5.6 Stored-primary lookups don't filter by store (latent)**
   **Problem:** `ai_agent.py:2935-2941, 3543-3548` and `routes/task_routes.py:627-631` query
   `technical_seo_analyses` by item_type/item_id only. Safe today (item ids are global
   serials); breaks silently if ids are ever reused per store.

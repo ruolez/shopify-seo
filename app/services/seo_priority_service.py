@@ -283,6 +283,7 @@ def get_priority_ranked_items(store_id, item_type="product", limit=50, measuring
         target_keyword_volume = None
         keyword_aligned = False
         primary_review_suggested = False
+        keyword_unresolved = False
 
         resolved = resolved_primaries.get(item["id"])
         resolved_kw_norm = _norm(resolved["keyword"]) if resolved else None
@@ -330,9 +331,15 @@ def get_priority_ranked_items(store_id, item_type="product", limit=50, measuring
                 else:
                     recommended_action = f"Optimize for \"{resolved['keyword']}\" — your resolved primary keyword"
             elif unowned:
+                # No stored resolution — this is a raw Semrush suggestion that
+                # never went through the resolver's vetting. Say so.
                 best = unowned[0]
                 pos = float(best.get("position") or 0)
-                recommended_action = f"Optimize for \"{best['keyword']}\" — striking distance at position {pos:.0f}"
+                recommended_action = (
+                    f"Optimize for \"{best['keyword']}\" (suggestion — not yet vetted by keyword "
+                    f"analysis) — striking distance at position {pos:.0f}"
+                )
+                keyword_unresolved = True
             else:
                 # Every striking keyword belongs to another page — recommending
                 # any of them would manufacture cannibalization.
@@ -413,6 +420,8 @@ def get_priority_ranked_items(store_id, item_type="product", limit=50, measuring
             "striking_keywords_count": len(striking),
             "last_optimized_at": item.get("last_optimized_at").isoformat() if item.get("last_optimized_at") else None,
         }
+        if keyword_unresolved:
+            result_entry["keyword_unresolved"] = True
         if cannibalization_warning:
             result_entry["cannibalization_warning"] = cannibalization_warning
         if resolved:

@@ -201,7 +201,15 @@ def determine_search_queries(product, target_keywords=None, entity_type="product
     store_domain = (product.get("store_domain") or "").strip()
 
     if entity_type == "collection":
-        keyword = _determine_collection_keyword(product)
+        # Honor the resolver keyword exactly as the product path does — the
+        # collection/brand flows pass it deliberately; benchmarking a
+        # title-derived guess instead defeats the resolution.
+        if target_keywords and target_keywords[0].strip():
+            keyword = target_keywords[0].strip()
+        else:
+            keyword = _determine_collection_keyword(product)
+            logger.info("SERP benchmark falling back to title heuristic for collection '%s'",
+                        (product.get("title") or "")[:60])
     else:
         specific_keyword = _build_specific_keyword(product)
         if target_keywords and target_keywords[0].strip():

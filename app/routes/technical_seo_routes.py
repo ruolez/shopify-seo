@@ -111,7 +111,10 @@ def _upsert_analysis(store_id, item_type, item_id, analysis, resolution):
                 checks = EXCLUDED.checks,
                 issues_count = EXCLUDED.issues_count,
                 fixable_count = EXCLUDED.fixable_count,
-                keyword_resolution = EXCLUDED.keyword_resolution,
+                -- NULL here means "resolver failed / no new info", never
+                -- "deliberately cleared" — a transient error must not erase
+                -- a previously good resolution.
+                keyword_resolution = COALESCE(EXCLUDED.keyword_resolution, technical_seo_analyses.keyword_resolution),
                 updated_at = NOW()
             RETURNING id""",
             (

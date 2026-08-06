@@ -2920,34 +2920,41 @@ def _validate_home_page_generate(result):
     return result
 
 
-def _validate_main_result(main_result, task_type, task_input, product_id, collection_id, client, config):
+def _validate_main_result(main_result, task_type, task_input, product_id, collection_id, client, config, store_id=None):
     """Quality-gate a product_seo/collection_seo main result: resolve the
-    primary keyword (task input > persisted resolution > the model's own
-    pick), then validate lengths / title keyword position / alt balance with
-    one rephrase retry. Fails open."""
+    primary keyword (task input > persisted resolution), then validate
+    lengths / title keyword position / alt balance with one rephrase retry.
+    With no vetted keyword, keyword-first enforcement is skipped (length and
+    structure checks still run) — enforcing the model's own pick would lock
+    in a keyword nobody chose. Fails open."""
     try:
         from app.services.ai_content_validator import clean_keyword, validate_seo_result
 
+        store_id = store_id or task_input.get("store_id")
         primary_kw = clean_keyword(task_input.get("target_keyword"))
         if not primary_kw:
             item_type = "product" if task_type == "product_seo" else "collection"
             item_id = product_id if task_type == "product_seo" else collection_id
             try:
                 with db.get_cursor() as cur:
-                    cur.execute(
-                        """SELECT keyword_resolution->'primary'->>'keyword' AS kw
-                           FROM technical_seo_analyses
-                           WHERE item_type = %s AND item_id = %s""",
-                        (item_type, item_id),
-                    )
+                    if store_id:
+                        cur.execute(
+                            """SELECT keyword_resolution->'primary'->>'keyword' AS kw
+                               FROM technical_seo_analyses
+                               WHERE store_id = %s AND item_type = %s AND item_id = %s""",
+                            (store_id, item_type, item_id),
+                        )
+                    else:
+                        cur.execute(
+                            """SELECT keyword_resolution->'primary'->>'keyword' AS kw
+                               FROM technical_seo_analyses
+                               WHERE item_type = %s AND item_id = %s""",
+                            (item_type, item_id),
+                        )
                     row = cur.fetchone()
                 primary_kw = clean_keyword(row["kw"]) if row else None
             except Exception:
                 primary_kw = None
-        if not primary_kw:
-            tk = main_result.get("target_keywords")
-            if isinstance(tk, dict):
-                primary_kw = clean_keyword(tk.get("primary"))
         validate_seo_result(main_result, primary_kw, client, config)
     except Exception:
         logger.exception("Main-result validation failed — passing through")
@@ -3542,12 +3549,20 @@ def run_task(task_type, task_input, store_id=None):
                 return ""
             try:
                 with db.get_cursor() as cur:
-                    cur.execute(
-                        """SELECT keyword_resolution->'primary'->>'keyword' AS kw
-                           FROM technical_seo_analyses
-                           WHERE item_type = %s AND item_id = %s""",
-                        (it["type"], it["id"]),
-                    )
+                    if store_id:
+                        cur.execute(
+                            """SELECT keyword_resolution->'primary'->>'keyword' AS kw
+                               FROM technical_seo_analyses
+                               WHERE store_id = %s AND item_type = %s AND item_id = %s""",
+                            (store_id, it["type"], it["id"]),
+                        )
+                    else:
+                        cur.execute(
+                            """SELECT keyword_resolution->'primary'->>'keyword' AS kw
+                               FROM technical_seo_analyses
+                               WHERE item_type = %s AND item_id = %s""",
+                            (it["type"], it["id"]),
+                        )
                     row = cur.fetchone()
                 return (row or {}).get("kw") or ""
             except Exception:
@@ -6253,14 +6268,14 @@ def run_task(task_type, task_input, store_id=None):
 
         _validate_main_result(main_result, task_type, task_input,
                               product_id if task_type == "product_seo" else None,
-                              None, client, config)
+                              None, client, config, store_id=store_id)
         main_result = _generate_description(client, config, main_result, serp_context, serp_benchmark, product_id, search_context=prefetched_search_ctx)
         if task_input.get("target_keyword"):
             main_result["target_keyword"] = task_input["target_keyword"]
 
     elif task_type == "collection_seo":
         _validate_main_result(main_result, task_type, task_input,
-                              None, collection_id, client, config)
+                              None, collection_id, client, config, store_id=store_id)
         main_result = _generate_collection_description(
             client, config, main_result, serp_context, serp_benchmark, collection_id,
             hierarchy_context=task_input.get("hierarchy_context"),

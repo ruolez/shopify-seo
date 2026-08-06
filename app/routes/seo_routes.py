@@ -2593,7 +2593,17 @@ def _build_client(row):
 
 
 def _generate_image_for_collection(client, collection):
-    keywords = _extract_keywords(collection)
+    # Resolver-first: the alt text should reinforce the keyword the page is
+    # actually targeting; raw n-grams are only the no-resolution fallback.
+    keywords = []
+    try:
+        ka = _fetch_keyword_analysis(collection["store_id"], "collection", collection["id"])
+        resolved = ((((ka or {}).get("keyword_resolution") or {}).get("primary")) or {}).get("keyword")
+        if resolved:
+            keywords = [resolved]
+    except Exception:
+        logger.warning("Resolved-primary lookup failed for collection %s", collection.get("id"))
+    keywords += [k for k in _extract_keywords(collection) if k not in keywords]
     products = client.get_collection_products_with_images(collection["shopify_id"], limit=4)
     product_image_bytes = []
     product_titles = []
