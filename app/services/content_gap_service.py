@@ -814,6 +814,20 @@ def publish_content(store_id, gap_id, content_data):
         shopify_id = shopify_result["shopify_id"]
         handle = shopify_result["handle"]
 
+        # create_article carries no SEO fields — without this the metadata
+        # exists only in our DB and never reaches the live store. Non-fatal:
+        # a metafield hiccup must not roll back a successfully created article.
+        if meta_title or meta_description:
+            from app.services.ai_output_guard import clamp_meta_title, clamp_meta_description
+            try:
+                client.set_article_seo(
+                    shopify_id,
+                    clamp_meta_title(meta_title or ""),
+                    clamp_meta_description(meta_description or ""),
+                )
+            except Exception as e:
+                logger.warning("Failed to set article SEO metafields for gap %s: %s", gap_id, e)
+
         with db.get_cursor() as cur:
             cur.execute(
                 """INSERT INTO synced_articles (store_id, blog_id, shopify_id, shopify_blog_id, title, handle, body, tags, meta_title, meta_description, is_published, synced_at)

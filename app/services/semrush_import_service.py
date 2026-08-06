@@ -279,6 +279,13 @@ def _safe_int(val):
         return None
 
 
+def _safe_position(val):
+    """Semrush exports use 0 for "not ranking" — store NULL, never 0, or the
+    overview counts phantom top-3 wins and 0s poison AVG(position)."""
+    pos = _safe_int(val)
+    return pos if pos and pos > 0 else None
+
+
 def _safe_float(val):
     if val is None:
         return None
@@ -371,7 +378,7 @@ def _import_keywords(store_id, import_id, source_type, rows, col_map):
             continue
         batch.append((
             store_id, import_id, source_type, keyword,
-            _safe_int(_get_col(row, col_map, "position")),
+            _safe_position(_get_col(row, col_map, "position")),
             _safe_int(_get_col(row, col_map, "search volume") or _get_col(row, col_map, "volume")),
             _safe_float(_get_col(row, col_map, "cpc")),
             _safe_float(_get_col(row, col_map, "competition")),
@@ -440,8 +447,8 @@ def _import_position_overview(store_id, import_id, rows, col_map):
         if not keyword:
             continue
 
-        position = _safe_int(row[pos_idx]) if pos_idx is not None and pos_idx < len(row) else None
-        prev_position = _safe_int(row[prev_pos_idx]) if prev_pos_idx is not None and prev_pos_idx < len(row) else None
+        position = _safe_position(row[pos_idx]) if pos_idx is not None and pos_idx < len(row) else None
+        prev_position = _safe_position(row[prev_pos_idx]) if prev_pos_idx is not None and prev_pos_idx < len(row) else None
         url = row[landing_idx].strip() if landing_idx is not None and landing_idx < len(row) else ""
         volume = _safe_int(row[vol_idx]) if vol_idx is not None and vol_idx < len(row) else None
         cpc = _safe_float(row[cpc_idx]) if cpc_idx is not None and cpc_idx < len(row) else None
@@ -533,12 +540,13 @@ def _import_keyword_gap(store_id, import_id, rows, col_map, headers):
                 if val and val > 0:
                     comp_positions[name] = val
 
-        # Our position: from dedicated column, or fallback to col_map
+        # Our position: from dedicated column, or fallback to col_map — same
+        # 0-means-not-ranking guard the competitor columns above get.
         our_pos = None
         if our_domain_col is not None and our_domain_col < len(row) and row[our_domain_col].strip():
-            our_pos = _safe_int(row[our_domain_col])
+            our_pos = _safe_position(row[our_domain_col])
         if our_pos is None:
-            our_pos = _safe_int(_get_col(row, col_map, "position") or _get_col(row, col_map, "your position"))
+            our_pos = _safe_position(_get_col(row, col_map, "position") or _get_col(row, col_map, "your position"))
 
         # Our URL from (pages) column
         our_url = ""

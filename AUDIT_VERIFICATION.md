@@ -149,7 +149,7 @@ trustworthy again.
   **Benefit:** Rare, but when it happens you'll see an honest failure instead of a green
   checkmark on a job that did nothing.
 
-- [ ] **2.9 AI-visibility runs where every model query failed still show "completed"**
+- [x] **2.9 AI-visibility runs where every model query failed still show "completed"**
   **Problem:** Every model-query exception is swallowed with a warning
   (`services/ai_visibility_tracker.py:816-820`) and the run always ends `completed` — a run
   with zero answers looks like a clean run, and the summary (asked == planned) actively masks
@@ -183,7 +183,7 @@ trustworthy again.
   **Fix:** Return `len(valid_ids)` in the creation response.
   **Benefit:** Consistent numbers between "job started" and "job progress".
 
-- [ ] **2.13 Semrush: keywords you don't rank for counted as top-3 wins**
+- [x] **2.13 Semrush: keywords you don't rank for counted as top-3 wins**
   **Problem:** In the gap import (`services/semrush_import_service.py:537-541`), your own
   position is stored unguarded — Semrush uses `0` = "not ranking" (proven by
   `NULLIF(position, 0)` at :926) — while competitor positions two lines above ARE guarded.
@@ -212,7 +212,7 @@ trustworthy again.
   **Fix:** Add `'completed_with_errors'` to the ai_tasks branch status list.
   **Benefit:** Jobs that partially failed stay visible so you can review what went wrong.
 
-- [ ] **2.16 Content-gap blog publish records SEO fields never sent to Shopify**
+- [x] **2.16 Content-gap blog publish records SEO fields never sent to Shopify**
   **Problem:** The blog branch (`services/content_gap_service.py:813-822`) writes
   `meta_title`/`meta_description` into `synced_articles` but `create_article` accepts no SEO
   fields and no follow-up call is made — local data claims metadata Shopify never received.

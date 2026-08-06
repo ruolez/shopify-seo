@@ -800,6 +800,8 @@ def run_tracking(run_id):
             (runs_per_prompt if (p.get("intent") or "buyer") == "buyer" else 1) for p in prompts
         ) * len(models)
         attempted = 0
+        query_failures = 0
+        last_query_error = None
         for pr in prompts:
             if capped:
                 break
@@ -818,6 +820,8 @@ def run_tracking(run_id):
                         text, tokens, citations = _query_model(client, model, pr["prompt"])
                     except Exception as e:
                         logger.warning("Tracking query failed (%s): %s", model, e)
+                        query_failures += 1
+                        last_query_error = f"{model}: {e}"
                         continue
                     grounded = _is_grounded_model(model, cfg)
                     cost += tokens * (GROUNDED_COST_PER_TOKEN if grounded else COST_PER_TOKEN)
@@ -865,10 +869,25 @@ def run_tracking(run_id):
                             ),
                         )
 
+        # A run where every model query threw is a broken check, not a report
+        # of zero visibility — mark it failed instead of writing zeroed metrics.
+        if attempted > 0 and query_failures >= attempted:
+            with db.get_cursor() as cur:
+                cur.execute(
+                    "UPDATE ai_tracking_runs SET status = 'failed', error = %s, completed_at = NOW() WHERE id = %s",
+                    (f"All {attempted} model queries failed — last error: {last_query_error}", run_id),
+                )
+            return
+
         agg = compute_share_of_voice(run_id)
         summary = _run_summary(agg)
         summary["queries_planned"] = planned
         summary["queries_asked"] = attempted
+        if query_failures:
+            summary["query_failures"] = {
+                "count": query_failures,
+                "last_error": (last_query_error or "")[:500],
+            }
         if capped:
             summary["truncated"] = (
                 f"Daily budget ${budget:.2f} reached — {planned - attempted} of {planned} "
@@ -994,7 +1013,7 @@ def reanalyze_run(run_id):
                 prior_summary = json.loads(prior_summary)
             except (json.JSONDecodeError, ValueError):
                 prior_summary = {}
-        for k in ("queries_planned", "queries_asked", "truncated"):
+        for k in ("queries_planned", "queries_asked", "truncated", "query_failures"):
             if k in prior_summary:
                 summary[k] = prior_summary[k]
         with db.get_cursor() as cur:

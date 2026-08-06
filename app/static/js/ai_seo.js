@@ -1889,7 +1889,13 @@ function renderHeadline(latest, summary, metrics) {
             <div style="font-size:12.5px;line-height:1.45;">${escapeHtml(s.truncated)}</div>
            </div>`
         : "";
-    summary.innerHTML = `<p style="font-size:13px;color:var(--on-surface-secondary);margin:12px 0 0;">${summaryLine}</p>${zeroCallout}${truncCallout}`;
+    const failCallout = s.query_failures && s.query_failures.count
+        ? `<div style="display:flex;gap:10px;align-items:flex-start;background:var(--warning-light);border:1px solid var(--outline);border-radius:var(--radius-sm);padding:10px 12px;margin-top:10px;">
+            <span class="material-symbols-rounded" style="color:var(--warning);font-size:20px;">error_outline</span>
+            <div style="font-size:12.5px;line-height:1.45;">${s.query_failures.count} of ${s.queries_asked || "?"} model queries failed — the numbers below are based on partial data.${s.query_failures.last_error ? ` Last error: ${escapeHtml(s.query_failures.last_error)}` : ""}</div>
+           </div>`
+        : "";
+    summary.innerHTML = `<p style="font-size:13px;color:var(--on-surface-secondary);margin:12px 0 0;">${summaryLine}</p>${zeroCallout}${truncCallout}${failCallout}`;
 
     const brandKnown = s.brand_known_rate;
     const retr = s.retrieval;
