@@ -532,7 +532,7 @@ function renderOpportunitiesTable() {
             <td>${positionBadge(r.position)}</td>
             <td style="color: var(--success); font-weight: 600;">+${Math.round(r.potential_clicks)}</td>
             <td style="font-size: 12px;">${r.matched_item
-                ? `<a class="btn btn-secondary btn-sm" href="/seo?optimize=${r.matched_item.item_type}&id=${r.matched_item.id}&action=${encodeURIComponent(r.action)}" style="white-space:nowrap;">Rewrite title/meta</a>`
+                ? `<a class="btn btn-secondary btn-sm" href="/seo?optimize=${r.matched_item.item_type}&id=${r.matched_item.id}&action=${encodeURIComponent(r.action)}&store_id=${currentStoreId || ""}" style="white-space:nowrap;">Rewrite title/meta</a>`
                 : `<span style="color: var(--on-surface-secondary);">${escapeHtml(r.action)}</span>`}</td>
         </tr>
     `).join("");

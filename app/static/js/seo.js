@@ -1288,7 +1288,7 @@ async function viewImpact(itemId, itemType) {
     content.innerHTML = '<div class="loading-spinner"><div class="spinner"></div><p>Loading impact data...</p></div>';
     modal.classList.add("active");
 
-    const storeId = _getSeoStoreId();
+    const storeId = currentItemStoreId || _getSeoStoreId();
     try {
         const data = await apiRequest(`/api/seo/impact?store_id=${storeId}&item_id=${itemId}&item_type=${itemType}`);
 

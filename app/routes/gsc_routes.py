@@ -516,7 +516,7 @@ def generate_cannibalization_fix():
         if isinstance(raw_images, str):
             import json as _json
             raw_images = _json.loads(raw_images)
-        images = [{"media_id": img.get("media_id", ""), "alt": img.get("alt", ""), "src": img.get("src", "")} for img in raw_images if img.get("media_id")]
+        images = [{"media_id": img.get("media_id", ""), "alt": img.get("alt", ""), "src": img.get("url", "")} for img in raw_images if img.get("media_id")]
         if images:
             alt_lines = "\n".join([f"  - Image {i+1}: alt=\"{img['alt']}\"" for i, img in enumerate(images)])
             images_context = f"\n\nCURRENT IMAGE ALT TEXTS ({len(images)} images):\n{alt_lines}"

@@ -386,7 +386,7 @@ async function loadCtrOpportunities() {
         let html = "";
         for (const c of data.items) {
             const target = c.matched_item
-                ? `<a href="/seo?optimize=${c.matched_item.item_type}&id=${c.matched_item.id}" style="color:var(--primary);">${escapeHtml(c.matched_item.title)}</a>`
+                ? `<a href="/seo?optimize=${c.matched_item.item_type}&id=${c.matched_item.id}&store_id=${dashStoreId || ""}" style="color:var(--primary);">${escapeHtml(c.matched_item.title)}</a>`
                 : `<span style="color:var(--on-surface-secondary);">${escapeHtml(c.page.replace(/^https?:\/\/[^/]+/, ""))}</span>`;
             html += `<tr style="border-top:1px solid var(--outline);">
                 <td style="padding:6px 8px;font-weight:500;">${escapeHtml(c.query)}</td>

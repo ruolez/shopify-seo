@@ -441,7 +441,7 @@ def _step_publish(session, store, client, is_published=True, regen_hub=True):
         result = {
             "shopify_id": existing_shopify_id,
             "handle": updated.get("handle") or session.get("article_handle") or "",
-            "image_url": "",
+            "image_url": fields.get("image_url", ""),
         }
         shopify_id = existing_shopify_id
     else:
@@ -478,6 +478,10 @@ def _step_publish(session, store, client, is_published=True, regen_hub=True):
         logger.warning("Failed to set news category/date metafields: %s", e)
 
     cdn_image_url = result.get("image_url", "")
+    # Update path returns no image URL — fall back to what was pushed so a
+    # republish can't blank the stored CDN url (mirrors the blog twin's guard).
+    if not cdn_image_url:
+        cdn_image_url = fields.get("image_url", "")
     if "shopify-staged-uploads" in (cdn_image_url or ""):
         cdn_image_url = ""
 
@@ -512,8 +516,8 @@ def _step_publish(session, store, client, is_published=True, regen_hub=True):
         )
         article_row = cur.fetchone()
         cur.execute(
-            "UPDATE news_sessions SET status = 'published', shopify_article_id = %s, article_handle = %s, updated_at = NOW() WHERE id = %s",
-            (shopify_id, result.get("handle", ""), session["id"]),
+            "UPDATE news_sessions SET status = %s, shopify_article_id = %s, article_handle = %s, updated_at = NOW() WHERE id = %s",
+            ("published" if is_published else "draft", shopify_id, result.get("handle", ""), session["id"]),
         )
 
     if is_published and regen_hub:
@@ -662,6 +666,54 @@ def check_duplicate_titles():
             continue
         accepted.append(title)
     return jsonify({"duplicates": duplicates})
+
+
+@news_bp.route("/api/news/articles/<int:article_id>/publish", methods=["POST"])
+def publish_news_article(article_id):
+    """Publish a saved draft article — without this, a draft could only be
+    published by redoing the whole wizard."""
+    with db.get_cursor() as cur:
+        cur.execute(
+            "SELECT * FROM synced_articles WHERE id = %s AND article_type = 'news'",
+            (article_id,),
+        )
+        article = cur.fetchone()
+    if not article:
+        return jsonify({"error": "News article not found"}), 404
+    if article["is_published"]:
+        return jsonify({"ok": True, "message": "Article is already published"})
+
+    store, client = _get_store_client(article["store_id"])
+    if not client:
+        return jsonify({"error": "Store not found"}), 404
+
+    try:
+        client.update_article(article["shopify_id"], {"is_published": True})
+    except Exception as e:
+        logger.exception("Shopify publish failed for news article %s: %s", article_id, e)
+        return jsonify({"error": f"Shopify publish failed: {e}"}), 502
+
+    with db.get_cursor() as cur:
+        cur.execute(
+            "UPDATE synced_articles SET is_published = TRUE, published_at = NOW(), synced_at = NOW() WHERE id = %s",
+            (article_id,),
+        )
+
+    # Same post-publish side effects as the wizard path — non-fatal.
+    _regen_news_hub_async(article["store_id"], client, store)
+    _regen_blog_landings_async(article["store_id"], client, store)
+    if article.get("handle"):
+        try:
+            from app.services.indexnow_service import ping_async
+            ping_async(
+                article["store_id"],
+                [f"{_store_base_url(store)}/blogs/news/{article['handle']}"],
+                "news_publish",
+            )
+        except Exception:
+            logger.warning("IndexNow ping failed for news article %s", article_id, exc_info=True)
+
+    return jsonify({"ok": True, "success": True})
 
 
 @news_bp.route("/api/news/articles/<int:article_id>", methods=["DELETE"])

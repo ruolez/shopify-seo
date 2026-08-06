@@ -518,6 +518,9 @@ def _fetch_gsc_by_dimension(store_id, date_from, date_to, dimension, key_name, d
 def get_top_pages(store_id, date_from, date_to, limit=500, offset=0, sort_by="clicks", device=None, country=None):
     live = _fetch_gsc_by_dimension(store_id, date_from, date_to, "page", "page", device, country, limit + offset)
     if live is not None:
+        # GSC returns click-sorted rows — honor sort_by like the DB path does,
+        # and sort before slicing so pagination stays consistent.
+        live.sort(key=lambda r: r["clicks"] if sort_by == "clicks" else r["impressions"], reverse=True)
         return live[offset:offset + limit]
 
     order = "total_clicks DESC" if sort_by == "clicks" else "total_impressions DESC"
@@ -554,6 +557,7 @@ def get_top_pages(store_id, date_from, date_to, limit=500, offset=0, sort_by="cl
 def get_top_queries(store_id, date_from, date_to, limit=500, offset=0, sort_by="clicks", device=None, country=None):
     live = _fetch_gsc_by_dimension(store_id, date_from, date_to, "query", "query", device, country, limit + offset)
     if live is not None:
+        live.sort(key=lambda r: r["clicks"] if sort_by == "clicks" else r["impressions"], reverse=True)
         return live[offset:offset + limit]
 
     order = "total_clicks DESC" if sort_by == "clicks" else "total_impressions DESC"

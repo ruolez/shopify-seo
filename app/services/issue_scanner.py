@@ -23,6 +23,7 @@ import time
 
 from app.database import db
 from app.prompt_defaults import DEFAULTS
+from app.services.duplicate_detector import normalize as dup_normalize
 from app.services.seo_rules import score_length, score_description_words, score_image_alt
 from app.settings_manager import get_setting
 
@@ -308,13 +309,16 @@ def scan_store_issues(store_id):
 
     # Duplicate metas: group effective titles / non-empty descriptions across
     # both entity types in the rows already fetched (no extra queries).
+    # Same normalization as /duplicates (duplicate_detector.normalize) so the
+    # two surfaces agree on what's a duplicate. Coverage still differs by
+    # design: /duplicates also scans articles and pages.
     title_groups = {}
     desc_groups = {}
     for row in list(products) + list(collections):
-        t = ((row.get("meta_title") or row.get("title") or "").strip().lower())
+        t = dup_normalize(row.get("meta_title") or row.get("title") or "")
         if t:
             title_groups.setdefault(t, []).append(row)
-        d = (row.get("meta_description") or "").strip().lower()
+        d = dup_normalize(row.get("meta_description") or "")
         if d:
             desc_groups.setdefault(d, []).append(row)
     dup_titles = {k: len(v) for k, v in title_groups.items() if len(v) >= 2}
@@ -341,11 +345,11 @@ def scan_store_issues(store_id):
         })
 
     def duplicate_issues(row, item_type):
-        t = ((row.get("meta_title") or row.get("title") or "").strip().lower())
+        t = dup_normalize(row.get("meta_title") or row.get("title") or "")
         if t in dup_titles:
             add("meta_title_duplicate", item_type, row,
                 f"Shared with {dup_titles[t] - 1} other item(s): “{t[:60]}”")
-        d = (row.get("meta_description") or "").strip().lower()
+        d = dup_normalize(row.get("meta_description") or "")
         if d in dup_descs:
             add("meta_description_duplicate", item_type, row,
                 f"Shared with {dup_descs[d] - 1} other item(s): “{d[:60]}”")

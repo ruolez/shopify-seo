@@ -1023,6 +1023,7 @@ async function loadNewsArticles() {
                 <td>${status}</td>
                 <td>${a.published_at ? formatDate(a.published_at) : "—"}</td>
                 <td style="white-space:nowrap;">
+                    ${a.is_published ? "" : `<button class="btn btn-primary btn-sm" style="margin-right:6px;" title="Publish this draft to the live store" onclick="publishNewsArticle(${i}, this)"><span class="material-symbols-rounded">publish</span> Publish</button>`}
                     <button class="btn btn-secondary btn-sm" onclick="openManage(${i})"><span class="material-symbols-rounded">image</span> Images</button>
                     <button class="btn btn-secondary btn-sm" style="margin-left:6px;color:var(--error);" title="Delete article" onclick="deleteNewsArticle(${i}, this)"><span class="material-symbols-rounded">delete</span></button>
                     <a class="news-link" href="${escapeAttr(url)}" target="_blank" rel="noopener" style="margin-left:10px;">View ↗</a>
@@ -1034,6 +1035,21 @@ async function loadNewsArticles() {
             <tbody>${rows}</tbody></table></div>`;
     } catch (e) {
         container.innerHTML = `<p style="color:var(--error);">${escapeHtml(e.message)}</p>`;
+    }
+}
+
+async function publishNewsArticle(index, btn) {
+    const a = publishedArticles[index];
+    if (!a) return;
+    if (!confirm(`Publish “${a.title || "Untitled"}” to your live store?`)) return;
+    if (btn) btn.disabled = true;
+    try {
+        await apiRequest(`/api/news/articles/${a.id}/publish`, { method: "POST" });
+        showToast("Article published", "success");
+        loadNewsArticles();
+    } catch (e) {
+        showToast(`Publish failed: ${e.message}`, "error");
+        if (btn) btn.disabled = false;
     }
 }
 

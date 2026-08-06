@@ -15,7 +15,7 @@ import re
 import requests
 
 from app.database import db
-from app.services.serp_scraper import brave_search
+from app.services.serp_scraper import brave_search, _get_brave_api_key
 from app.services.ai_visibility_tracker import _brand_terms, _competitor_terms
 
 logger = logging.getLogger(__name__)
@@ -303,13 +303,19 @@ def run_offsite_audit(run_id, store_id):
         categories = _top_categories(store_id)
         queries = build_query_set(store, categories, query_name)
 
+        # A missing key is a configuration problem; a None result mid-loop is a
+        # transient search failure. Conflating them blamed configuration for
+        # rate limits and let mostly-failed audits complete silently.
+        if not _get_brave_api_key():
+            raise ValueError("Brave Search is not configured — add your Brave API key in Settings.")
+
         rows = []
         ran = 0
+        failed = 0
         for query, kind in queries:
             results = brave_search(query, count=8)
             if results is None:
-                if ran == 0:
-                    raise ValueError("Brave Search is not configured — add your Brave API key in Settings.")
+                failed += 1
                 continue
             ran += 1
             for r in results:
@@ -352,7 +358,16 @@ def run_offsite_audit(run_id, store_id):
                     ),
                 )
 
+        if ran == 0:
+            raise ValueError(
+                f"All {len(queries)} searches failed — Brave Search may be rate-limited "
+                "or temporarily unavailable. Try again in a few minutes."
+            )
+
         scorecard = compute_scorecard(rows, mentions, brand_terms)
+        if failed:
+            scorecard["queries_failed"] = failed
+            scorecard["queries_planned"] = len(queries)
         actions = build_actions(scorecard, categories)
         with db.get_cursor() as cur:
             cur.execute(

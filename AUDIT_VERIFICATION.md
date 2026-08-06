@@ -270,7 +270,7 @@ trustworthy again.
   **Benefit:** AI-SEO scores stop being artificially inflated — you see which pages genuinely
   lack authoritative outbound references.
 
-- [ ] **3.6 Republishing a news article wipes its stored hero-image URL**
+- [x] **3.6 Republishing a news article wipes its stored hero-image URL**
   **Problem:** The update path in `routes/news_routes.py` hand-builds the result with hardcoded
   `"image_url": ""` (:444), so the upsert (:497) overwrites the stored CDN URL with an empty
   string on every republish. (This blanks the *local record*; the blog twin guards it at
@@ -295,7 +295,7 @@ trustworthy again.
   **Fix:** Use `f"{topic} {' '.join(keywords)}"`.
   **Benefit:** Blog-article product linking picks from better-matched products more often.
 
-- [ ] **3.9 "View Impact" fails after deep links from Home/GSC**
+- [x] **3.9 "View Impact" fails after deep links from Home/GSC**
   **Problem:** `static/js/seo.js:1291-1293` uses only `_getSeoStoreId()` (can return `""` after
   a deep link that omits `store_id` — dashboard.js:389 and gsc.js:535 both omit it), producing
   a 400. Verified correction: the panel shows the server's "store_id and item_id required"
@@ -304,7 +304,7 @@ trustworthy again.
   include `store_id` in the dashboard/gsc deep links.
   **Benefit:** "View Impact" works no matter how you navigated to the item.
 
-- [ ] **3.10 Draft news article gets mislabeled "published" internally**
+- [x] **3.10 Draft news article gets mislabeled "published" internally**
   **Problem (impact corrected):** `_step_publish` (`routes/news_routes.py:515`) sets the wizard
   session `status='published'` even when saving a draft (`is_published=False`). Verified: there
   is no resume feature this breaks, but the status is a lie, and separately there is **no UI at
@@ -314,7 +314,7 @@ trustworthy again.
   **Benefit:** Drafts are labeled as drafts, and you can actually publish them later without
   redoing the wizard.
 
-- [ ] **3.11 GSC top-pages/top-queries sorting silently ignored**
+- [x] **3.11 GSC top-pages/top-queries sorting silently ignored**
   **Problem:** `sort_by` is applied only in the DB fallback; when the live GSC fetch succeeds
   (`services/gsc_service.py:518-559`) results return in GSC's default order. Latent today (the
   UI doesn't send `sort_by`) but the API contract is broken.
@@ -367,7 +367,7 @@ trustworthy again.
   **Benefit:** Pages that genuinely lack internal links get the linking recommendations they
   should.
 
-- [ ] **3.17 Offsite audit: wrong error on failure, silent success on near-total failure**
+- [x] **3.17 Offsite audit: wrong error on failure, silent success on near-total failure**
   **Problem:** `services/offsite_visibility_service.py:309-313` — if query #1 fails (any
   transient Brave error returns None), the whole audit fails with the misleading "Brave Search
   is not configured" message; conversely 1 success + 14 failures completes silently with a
@@ -378,14 +378,14 @@ trustworthy again.
   **Benefit:** Offsite audit errors tell you what actually went wrong, and a mostly-failed
   audit can't masquerade as a clean one.
 
-- [ ] **3.18 Dead `src` field in cannibalization-fix payloads (cleanup)**
+- [x] **3.18 Dead `src` field in cannibalization-fix payloads (cleanup)**
   **Problem (scope corrected):** `routes/gsc_routes.py:516` reads `img.get("src")` but sync
   stores the URL under `"url"` — so `src` is always empty. Verified: nothing renders it (the
   preview uses only `alt`/`media_id`), so this is dead weight, not a broken image preview.
   **Fix:** Either read `img.get("url")` or drop the field.
   **Benefit:** Cleanliness only; prevents someone later "using" a field that is always empty.
 
-- [ ] **3.19 Duplicates page and Issues tab disagree on what's a duplicate**
+- [x] **3.19 Duplicates page and Issues tab disagree on what's a duplicate**
   **Problem:** `routes/seo_issues_routes.py:294-302` groups with `.strip().lower()` while
   `duplicate_detector.normalize` casefolds and collapses whitespace — a pair differing by a
   double space is a duplicate on /duplicates but not in the Issues tab. The Issues-tab
