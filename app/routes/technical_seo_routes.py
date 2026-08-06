@@ -531,6 +531,10 @@ def create_fix_task():
         return jsonify({"error": "item_id is required"}), 400
     if only_fields:
         only_fields = [f for f in only_fields if f in _ALLOWED_FIX_FIELDS]
+        # An emptied filter must not silently widen a scoped fix into a
+        # full-item rewrite (downstream treats falsy as "no restriction").
+        if not only_fields:
+            return jsonify({"error": "No valid fields in only_fields"}), 400
 
     with db.get_cursor() as cur:
         table = "synced_products" if item_type == "product" else "synced_collections"
@@ -728,7 +732,9 @@ def apply_fixes():
         for fix in fixes:
             field = fix.get("field")
             value = fix.get("value")
-            if not field or not value:
+            # Absent means skip; explicit ""/[] means "clear this field" and
+            # must go through — removing bad content is a legitimate fix.
+            if not field or value is None:
                 continue
 
             if field == "meta_title":
@@ -744,7 +750,7 @@ def apply_fixes():
                 if isinstance(value, list):
                     shopify_fields["tags"] = value
                 elif isinstance(value, str):
-                    shopify_fields["tags"] = [t.strip() for t in value.split(",")]
+                    shopify_fields["tags"] = [t.strip() for t in value.split(",") if t.strip()]
                 updated_fields.append("tags")
             elif field == "description":
                 shopify_fields["description_html"] = value
@@ -778,15 +784,17 @@ def apply_fixes():
 
         with db.get_cursor() as cur:
             if item_type == "product":
-                if shopify_fields.get("title"):
+                # Presence checks, not truthiness — a blanked field pushed to
+                # Shopify must also blank the local mirror.
+                if "title" in shopify_fields:
                     cur.execute("UPDATE synced_products SET title = %s WHERE id = %s", (shopify_fields["title"], item_id))
-                if shopify_fields.get("meta_title"):
+                if "meta_title" in shopify_fields:
                     cur.execute("UPDATE synced_products SET meta_title = %s WHERE id = %s", (shopify_fields["meta_title"], item_id))
-                if shopify_fields.get("meta_description"):
+                if "meta_description" in shopify_fields:
                     cur.execute("UPDATE synced_products SET meta_description = %s WHERE id = %s", (shopify_fields["meta_description"], item_id))
-                if shopify_fields.get("description_html"):
+                if "description_html" in shopify_fields:
                     cur.execute("UPDATE synced_products SET description = %s WHERE id = %s", (shopify_fields["description_html"], item_id))
-                if shopify_fields.get("tags"):
+                if "tags" in shopify_fields:
                     cur.execute("UPDATE synced_products SET tags = %s WHERE id = %s", (", ".join(shopify_fields["tags"]), item_id))
                 if media_updates:
                     images = item.get("images") or []
@@ -799,13 +807,13 @@ def apply_fixes():
                     cur.execute("UPDATE synced_products SET images = %s WHERE id = %s", (json.dumps(images), item_id))
                 cur.execute("UPDATE synced_products SET last_optimized_at = NOW() WHERE id = %s", (item_id,))
             else:
-                if shopify_fields.get("title"):
+                if "title" in shopify_fields:
                     cur.execute("UPDATE synced_collections SET title = %s WHERE id = %s", (shopify_fields["title"], item_id))
-                if shopify_fields.get("meta_title"):
+                if "meta_title" in shopify_fields:
                     cur.execute("UPDATE synced_collections SET meta_title = %s WHERE id = %s", (shopify_fields["meta_title"], item_id))
-                if shopify_fields.get("meta_description"):
+                if "meta_description" in shopify_fields:
                     cur.execute("UPDATE synced_collections SET meta_description = %s WHERE id = %s", (shopify_fields["meta_description"], item_id))
-                if shopify_fields.get("description_html"):
+                if "description_html" in shopify_fields:
                     cur.execute("UPDATE synced_collections SET description = %s WHERE id = %s", (shopify_fields["description_html"], item_id))
                 cur.execute("UPDATE synced_collections SET last_optimized_at = NOW() WHERE id = %s", (item_id,))
 
@@ -1065,7 +1073,8 @@ def _execute_bulk_fix_apply(bulk_task_id, item_type, only_fields=None):
                     for fix in ai_fixes:
                         field = fix.get("field")
                         value = fix.get("proposed_value")
-                        if not field or not value:
+                        # Absent means skip; explicit "" means "clear this field".
+                        if not field or value is None:
                             continue
                         if field in ("meta_title", "meta_description", "title"):
                             shopify_fields[field] = value

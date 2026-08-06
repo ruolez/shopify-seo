@@ -328,10 +328,15 @@ def _keyword_density(keyword, body_html):
         if count == 0:
             kw_set = set(kw_tokens)
             window = kw_len + 2
-            for i in range(total_words - kw_len + 1):
-                chunk = set(tokens[i:i + window])
-                if kw_set.issubset(chunk):
+            # Advance past each match — sliding one token at a time counted a
+            # single loose occurrence up to 3x, tripping phantom stuffing alarms.
+            i = 0
+            while i <= total_words - kw_len:
+                if kw_set.issubset(set(tokens[i:i + window])):
                     count += 1
+                    i += kw_len
+                else:
+                    i += 1
     return (count / total_words) * 100
 
 

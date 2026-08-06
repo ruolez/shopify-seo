@@ -260,7 +260,7 @@ trustworthy again.
   **Benefit:** Optimizing an existing page from a content gap works even when no brief was
   generated.
 
-- [ ] **3.5 AI-SEO "entity authority" score inflated for every item**
+- [x] **3.5 AI-SEO "entity authority" score inflated for every item**
   **Problem:** Five call sites in `routes/ai_seo_routes.py` (:317, :981, :1141, :1363, :1412)
   pass the full `https://…` URL as `store_domain`; the analyzer's self-link filter
   (`services/ai_seo_analyzer.py:227`) substring-checks bare hostnames, so
@@ -279,7 +279,7 @@ trustworthy again.
   result has no image URL (copy the blog guard).
   **Benefit:** News articles keep their hero image association in the app after updates.
 
-- [ ] **3.7 Scoped AI fix can silently become a full fix (latent API bug)**
+- [x] **3.7 Scoped AI fix can silently become a full fix (latent API bug)**
   **Problem:** `routes/technical_seo_routes.py:527-533, 571` — if every entry in `only_fields`
   is filtered out by the whitelist, the empty list is treated as "no restriction" and the AI
   fixes everything. Verified: unreachable from the current UI (the only caller sends valid
@@ -287,7 +287,7 @@ trustworthy again.
   **Fix:** If the filtered list is empty but the original wasn't, return 400 "no valid fields".
   **Benefit:** A request to fix one field can never quietly rewrite the whole item.
 
-- [ ] **3.8 Article product discovery degraded by stringified keyword list**
+- [x] **3.8 Article product discovery degraded by stringified keyword list**
   **Problem:** `ai_agent.py:5276` does `re.split(r"[,\s]+", f"{topic} {keywords}")` where
   `keywords` is a **list** — its `repr` contaminates edge tokens with `['`, quotes, commas,
   wasting slots in the 8-term cap. Verified correction: it's *degraded*, not dead — topic words
@@ -321,7 +321,7 @@ trustworthy again.
   **Fix:** Sort the live results by `sort_by` before returning (or remove the parameter).
   **Benefit:** Sorting behaves the same whether data came live from Google or from cache.
 
-- [ ] **3.12 Clearing a field is impossible in technical apply**
+- [x] **3.12 Clearing a field is impossible in technical apply**
   **Problem:** `routes/technical_seo_routes.py:730-731` — `if not field or not value: continue`
   skips empty strings and empty lists, so no fix can ever blank a field (e.g. remove a bad meta
   or clear tags).
@@ -329,7 +329,7 @@ trustworthy again.
   let explicit `""`/`[]` through.
   **Benefit:** Fixes that *remove* bad content (not just replace it) become possible.
 
-- [ ] **3.13 False "keyword stuffing" alarms on short descriptions**
+- [x] **3.13 False "keyword stuffing" alarms on short descriptions**
   **Problem:** The fuzzy fallback in `_keyword_density`
   (`services/technical_seo_analyzer.py:316-335`) counts one loose occurrence once per
   overlapping token window — 2-3× inflation. Short descriptions falsely trip
@@ -357,7 +357,7 @@ trustworthy again.
   **Benefit:** New collections published from gaps start with their matched product in them,
   as designed.
 
-- [ ] **3.16 Internal-link counting overcounts, suppressing link recommendations**
+- [x] **3.16 Internal-link counting overcounts, suppressing link recommendations**
   **Problem:** `_get_inbound_links` (`ai_agent.py:196`) puts bare `base_path` first in
   `target_patterns`, so the loop always matches it and the `?/#/"` delimiter variants are dead
   code — `/products/foo` matches `/products/foo-bar` too. The inflated count feeds the prompt

@@ -193,7 +193,10 @@ def _get_inbound_links(item_type, handle, store_id, blog_handle=None):
     else:
         prefix = "products" if item_type == "product" else "collections"
         base_path = f"/{prefix}/{handle}"
-    target_patterns = [base_path, f"{base_path}?", f"{base_path}#", f'{base_path}"', f"{base_path}'"]
+    # Delimiter-terminated only — a bare base_path prefix-matched longer
+    # handles (/products/foo counted links to /products/foo-bar), inflating
+    # the count that gates internal-linking recommendations.
+    target_patterns = [f"{base_path}?", f"{base_path}#", f'{base_path}"', f"{base_path}'"]
 
     inbound = []
     try:
@@ -5273,7 +5276,8 @@ def run_task(task_type, task_input, store_id=None):
                 # Pre-filter the catalog by topic/keyword relevance and cap the
                 # list — serializing every product (with tags) into one prompt
                 # blows the context window / cost on large stores.
-                terms = [t.strip() for t in re.split(r"[,\s]+", f"{topic} {keywords}") if len(t.strip()) >= 4][:8]
+                kw_text = " ".join(keywords) if isinstance(keywords, list) else str(keywords or "")
+                terms = [t.strip() for t in re.split(r"[,\s]+", f"{topic} {kw_text}") if len(t.strip()) >= 4][:8]
                 with db.get_cursor() as cur:
                     if terms:
                         like_clauses = " OR ".join(

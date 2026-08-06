@@ -314,7 +314,7 @@ def _execute_scan(task_id, store_id, resource_type):
         total = 0
         for rtype in types:
             items = _load_items(store_id, rtype)
-            _score_items(store_id, rtype, items, base_url, crawlability, base_url)
+            _score_items(store_id, rtype, items, base_url, crawlability, url_utils.store_host(store))
             total += len(items)
 
         with db.get_cursor() as cur:
@@ -978,7 +978,7 @@ def optimize_preview():
     if not item:
         return jsonify({"error": "Item not found"}), 404
     item = dict(item)
-    store_domain = _store_base_url(dict(store)) if store else None
+    store_domain = url_utils.store_host(dict(store)) if store else None
 
     stored = _stored_score(int(store_id), resource_type, resource_id)
     before_breakdown = stored["breakdown"] if stored else None
@@ -1137,7 +1137,7 @@ def _push_and_rescore(store, resource_type, item, description_html, meta_title, 
         updated_item,
         (stored or {}).get("live_crawl"),
         _crawlability_from_breakdown((stored or {}).get("breakdown")),
-        _store_base_url(store),
+        url_utils.store_host(store),
     )
 
 
@@ -1360,7 +1360,7 @@ def facts_preview():
     if not item:
         return jsonify({"error": "Item not found"}), 404
     item = dict(item)
-    store_domain = _store_base_url(dict(store)) if store else None
+    store_domain = url_utils.store_host(dict(store)) if store else None
 
     task_type = "ai_seo_facts_collection" if resource_type == "collection" else "ai_seo_facts_product"
     id_key = "collection_id" if resource_type == "collection" else "product_id"
@@ -1409,7 +1409,7 @@ def facts_apply():
 
     # Same rule as the batch path: only apply an enrichment that actually raises
     # fact density — otherwise it's churn (and a fake freshness bump) for nothing.
-    store_domain = _store_base_url(store)
+    store_domain = url_utils.store_host(store)
     before_fd = _fact_density_score(store_id, resource_type, resource_id, item, store_domain)
     after_fd = _fact_density_score(
         store_id, resource_type, resource_id, {**item, "description": description_html}, store_domain
