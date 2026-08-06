@@ -9,7 +9,7 @@ from flask import Blueprint, jsonify, render_template, request
 from app.auth import decrypt_value
 from app.database import db
 from app.services.ai_output_guard import guard_shopify_fields
-from app.services.task_runner import spawn as spawn_task
+from app.services.task_runner import is_failed_result, spawn as spawn_task
 from app.shopify_client import ShopifyClient
 
 logger = logging.getLogger(__name__)
@@ -1378,8 +1378,9 @@ def _execute_bulk_brand_optimize(bulk_task_id, store_id, gc_ids, auto_apply):
             result = run_task("brand_seo", task_input, store_id)
 
             item_error = None
-            if not result or result.get("error") or ("raw_response" in result and len(result) == 1):
-                item_error = (result or {}).get("error") or "AI returned unparsable output"
+            if is_failed_result(result):
+                item_error = ((result.get("error") if isinstance(result, dict) else None)
+                              or "AI returned unparsable output")
 
             if auto_apply and not item_error:
                 fields = {}

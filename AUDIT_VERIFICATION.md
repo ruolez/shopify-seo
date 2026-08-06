@@ -97,7 +97,7 @@ trustworthy again.
   there are none.
   **Benefit:** Blog freshness data stays honest; no pointless empty API calls to Shopify.
 
-- [ ] **2.4 GSC cannibalization returns garbage as success**
+- [x] **2.4 GSC cannibalization returns garbage as success**
   **Problem:** `_ai_json_call` (`routes/gsc_routes.py:379-391`) returns `{"raw_response": ...}`
   when the AI reply contains no JSON. Both the analyze endpoint (:426-427) and generate-fix
   (:541-550) return that as HTTP 200 "success" with no analysis or fix in it.
@@ -106,7 +106,7 @@ trustworthy again.
   **Benefit:** When the AI stumbles, you see a clear retry message instead of an empty result
   that looks like "no problems found".
 
-- [ ] **2.5 Unify the "AI failed" definition**
+- [x] **2.5 Unify the "AI failed" definition**
   **Problem:** Three coexisting definitions of "the AI call failed": `task_runner.
   is_failed_result` (unused in the files below), a key-presence check at
   `routes/technical_seo_routes.py:609` (and :1031), and a bespoke check at

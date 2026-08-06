@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 from flask import Blueprint, jsonify, redirect, render_template, request, session, url_for
 
 from app.services import gsc_service
+from app.services.task_runner import is_failed_result
 
 logger = logging.getLogger(__name__)
 
@@ -424,6 +425,8 @@ def analyze_cannibalization():
 
     try:
         result = _ai_json_call(client, model, prompt)
+        if is_failed_result(result):
+            return jsonify({"error": "AI returned an unusable response — try again"}), 502
         return jsonify(result)
     except Exception as e:
         logger.error("Cannibalization AI analysis failed: %s", str(e))
@@ -539,6 +542,10 @@ def generate_cannibalization_fix():
 
     try:
         result = _ai_json_call(client, model, prompt, max_tokens=1200)
+        # Must run before the enrichment below — added keys would defeat
+        # is_failed_result's bare-raw_response test.
+        if is_failed_result(result):
+            return jsonify({"error": "AI returned an unusable response — try again"}), 502
         result["current"] = {
             "title": item.get("title") or "",
             "meta_title": item.get("meta_title") or "",
@@ -800,6 +807,9 @@ def bulk_cannibalization_fix():
             prompt += _resolved_primary_suffix(resolved_primary)
 
             fix = _ai_json_call(client_ai, model, prompt, max_tokens=1200)
+            if is_failed_result(fix):
+                results.append({"item_id": item_id, "status": "error", "error": "AI returned an unusable response"})
+                continue
 
             shopify_client = ShopifyClient(
                 item["domain"],

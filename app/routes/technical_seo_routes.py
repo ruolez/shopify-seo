@@ -7,7 +7,7 @@ from flask import Blueprint, jsonify, redirect, request
 from app.auth import decrypt_value
 from app.database import db
 from app.services.ai_output_guard import sanitize_html
-from app.services.task_runner import spawn as spawn_task
+from app.services.task_runner import is_failed_result, spawn as spawn_task
 from app.services.technical_seo_analyzer import (
     analyze_collection_technical_seo,
     analyze_product_technical_seo,
@@ -606,16 +606,16 @@ def _execute_fix_task(task_id, analysis_id):
     try:
         result = run_task(task["task_type"], task["input"], task.get("store_id"))
 
-        _failed = "error" in result or "raw_response" in result
+        _failed = is_failed_result(result)
         with db.get_cursor() as cur:
             cur.execute(
                 "UPDATE ai_tasks SET status = %s, error = %s, result = %s, completed_at = NOW() WHERE id = %s",
                 ("failed" if _failed else "completed",
-                 (result.get("error") or "AI returned unparsable output") if _failed else None,
+                 ((result.get("error") if isinstance(result, dict) else None) or "AI returned unparsable output") if _failed else None,
                  json.dumps(result), task_id),
             )
 
-        if "error" not in result and "raw_response" not in result:
+        if not _failed:
             with db.get_cursor() as cur:
                 cur.execute(
                     "UPDATE technical_seo_analyses SET ai_fixes = %s, updated_at = NOW() WHERE id = %s",
@@ -1032,11 +1032,11 @@ def _execute_bulk_fix_apply(bulk_task_id, item_type, only_fields=None):
                     (json.dumps(ai_result), bti_id),
                 )
 
-            if "error" in ai_result or "raw_response" in ai_result:
+            if is_failed_result(ai_result):
                 with db.get_cursor() as cur:
                     cur.execute(
                         "UPDATE bulk_task_items SET status = 'failed', error = %s, completed_at = NOW() WHERE id = %s",
-                        (ai_result.get("error") or "AI returned unparsable output", bti_id),
+                        (((ai_result.get("error") if isinstance(ai_result, dict) else None) or "AI returned unparsable output"), bti_id),
                     )
                     cur.execute("UPDATE bulk_tasks SET failed = failed + 1 WHERE id = %s", (bulk_task_id,))
                 continue
