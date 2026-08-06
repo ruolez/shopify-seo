@@ -516,7 +516,7 @@ trustworthy again.
   **Benefit:** Uploads are declared consistently end-to-end; immune to Shopify tightening
   validation later.
 
-- [ ] **4.14 Bulk endpoints mix stores**
+- [x] **4.14 Bulk endpoints mix stores**
   **Problem:** `routes/technical_seo_routes.py:360-372, 411-423` accept mixed-store selections
   but take `run_store_id` from the first item — other stores' items get the wrong store's
   demand data in prefetch, and the ownership-dedup pass runs only for store #1.
@@ -527,7 +527,7 @@ trustworthy again.
   selections in technical bulk or group items per store and prefetch/dedup per group.
   **Benefit:** With multiple stores connected, bulk jobs can never cross wires between them.
 
-- [ ] **4.15 Multi-store metric collision on the SEO list pages**
+- [x] **4.15 Multi-store metric collision on the SEO list pages**
   **Problem:** `routes/seo_routes.py:295-302, 1365-1372` merge per-store GSC/Semrush metric
   dicts keyed only by `prefix/handle`. Verified: this is the **routine** path — the shipped
   frontend never sends `store_id` to these list endpoints — so with two stores sharing a

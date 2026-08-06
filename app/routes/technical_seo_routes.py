@@ -356,18 +356,22 @@ def _execute_bulk_analyze(bulk_task_id, item_type):
         )
         items = cur.fetchall()
 
-    # Batch the store-level demand-data queries once for the whole run
-    prefetch = None
-    run_store_id = None
+    # Batch the store-level demand-data queries per store — a mixed-store
+    # selection must never analyze store B's items with store A's demand data.
+    prefetches = {}
+    store_of_ref = {}
     if items:
         try:
             from app.services.keyword_resolver import build_prefetch
+            ref_ids = [r["ref_id"] for r in items]
             with db.get_cursor() as cur:
-                cur.execute(f"SELECT store_id FROM {table} WHERE id = %s", (items[0]["ref_id"],))
-                first = cur.fetchone()
-            if first:
-                run_store_id = first["store_id"]
-                prefetch = build_prefetch(run_store_id, item_type, [r["ref_id"] for r in items])
+                cur.execute(f"SELECT id, store_id FROM {table} WHERE id = ANY(%s)", (ref_ids,))
+                store_of_ref = {r["id"]: r["store_id"] for r in cur.fetchall()}
+            by_store = {}
+            for rid, sid in store_of_ref.items():
+                by_store.setdefault(sid, []).append(rid)
+            for sid, ids in by_store.items():
+                prefetches[sid] = build_prefetch(sid, item_type, ids)
         except Exception:
             logger.warning("Keyword prefetch failed for bulk task %s", bulk_task_id)
 
@@ -388,7 +392,9 @@ def _execute_bulk_analyze(bulk_task_id, item_type):
                     (item.get("title") or "", bulk_task_id),
                 )
 
-            analysis, resolution = _resolve_and_analyze(item_type, item, prefetch=prefetch)
+            analysis, resolution = _resolve_and_analyze(
+                item_type, item, prefetch=prefetches.get(item["store_id"])
+            )
             _upsert_analysis(item["store_id"], item_type, ref_id, analysis, resolution)
 
             with db.get_cursor() as cur:
@@ -407,8 +413,9 @@ def _execute_bulk_analyze(bulk_task_id, item_type):
                 cur.execute("UPDATE bulk_tasks SET failed = failed + 1 WHERE id = %s", (bulk_task_id,))
 
     # Ownership pass: one keyword, one page — redistribute duplicate
-    # auto-primaries now that every item's candidates are fresh.
-    if run_store_id:
+    # auto-primaries now that every item's candidates are fresh. Once per
+    # store in the batch, not just the first item's store.
+    for dedup_store_id in sorted(set(store_of_ref.values())):
         try:
             from app.services.keyword_resolver import dedupe_primary_ownership
             with db.get_cursor() as cur:
@@ -416,7 +423,7 @@ def _execute_bulk_analyze(bulk_task_id, item_type):
                     "UPDATE bulk_tasks SET current_product_title = 'Deduplicating keyword ownership...' WHERE id = %s",
                     (bulk_task_id,),
                 )
-            reassigned = dedupe_primary_ownership(run_store_id, item_type)
+            reassigned = dedupe_primary_ownership(dedup_store_id, item_type)
             if reassigned:
                 logger.info("Keyword ownership pass reassigned %s %ss", reassigned, item_type)
         except Exception:

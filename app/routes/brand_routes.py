@@ -941,8 +941,9 @@ def _execute_bulk_brand_logos(bulk_task_id, store_id, gc_ids):
                     sc.title, sc.handle
                 FROM generated_collections gc
                 LEFT JOIN synced_collections sc ON gc.collection_id = sc.id
-                WHERE gc.id = %s AND gc.generation_mode = 'brands'""",
-                (gc_id,),
+                WHERE gc.id = %s AND gc.generation_mode = 'brands'
+                  AND gc.store_id = %s""",
+                (gc_id, store_id),
             )
             row = cur.fetchone()
 
@@ -1339,8 +1340,9 @@ def _execute_bulk_brand_optimize(bulk_task_id, store_id, gc_ids, auto_apply):
                 """SELECT gc.collection_id, gc.tag, sc.title, sc.handle, sc.shopify_id
                 FROM generated_collections gc
                 JOIN synced_collections sc ON gc.collection_id = sc.id
-                WHERE gc.id = %s AND gc.generation_mode = 'brands'""",
-                (gc_id,),
+                WHERE gc.id = %s AND gc.generation_mode = 'brands'
+                  AND gc.store_id = %s""",
+                (gc_id, store_id),
             )
             row = cur.fetchone()
 

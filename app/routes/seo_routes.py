@@ -143,11 +143,15 @@ def _get_gsc_metrics_for_store(store_id):
 
 
 def _attach_gsc_to_item(item, gsc_metrics, item_type):
-    """Attach GSC data to a product/collection dict by handle matching."""
+    """Attach GSC data to a product/collection dict by handle matching.
+
+    Accepts dicts keyed (store_id, path) — required for multi-store lists,
+    where two stores sharing a handle must not swap metrics — or plain path
+    for single-store callers."""
     handle = item.get("handle") or ""
     prefix = "products" if item_type == "product" else "collections"
     path = f"{prefix}/{handle}"
-    gsc = gsc_metrics.get(path, {})
+    gsc = gsc_metrics.get((item.get("store_id"), path)) or gsc_metrics.get(path, {})
     item["gsc_clicks"] = gsc.get("gsc_clicks")
     item["gsc_impressions"] = gsc.get("gsc_impressions")
     item["gsc_ctr"] = gsc.get("gsc_ctr")
@@ -162,11 +166,12 @@ def _get_semrush_metrics_for_store(store_id):
 
 
 def _attach_semrush_to_item(item, semrush_metrics, item_type):
-    """Attach Semrush data to a product/collection dict by handle matching."""
+    """Attach Semrush data to a product/collection dict by handle matching.
+    Same (store_id, path)-first key scheme as _attach_gsc_to_item."""
     handle = item.get("handle") or ""
     prefix = "products" if item_type == "product" else "collections"
     path = f"{prefix}/{handle}"
-    sr = semrush_metrics.get(path, {})
+    sr = semrush_metrics.get((item.get("store_id"), path)) or semrush_metrics.get(path, {})
     item["semrush_volume"] = sr.get("semrush_volume")
     item["semrush_position"] = sr.get("semrush_position")
     item["semrush_keyword_count"] = sr.get("semrush_keyword_count")
@@ -285,8 +290,12 @@ def list_products_seo():
     semrush_metrics = {}
     store_baselines = {}
     for sid in store_ids:
-        gsc_metrics.update(_get_gsc_metrics_for_store(sid))
-        semrush_metrics.update(_get_semrush_metrics_for_store(sid))
+        # Key by (store_id, path) — a plain-path merge let the last store win
+        # whenever two stores share a handle.
+        for _path, _m in _get_gsc_metrics_for_store(sid).items():
+            gsc_metrics[(sid, _path)] = _m
+        for _path, _m in _get_semrush_metrics_for_store(sid).items():
+            semrush_metrics[(sid, _path)] = _m
         store_baselines[sid] = _get_store_baselines(sid)
 
     result = []
@@ -1365,8 +1374,12 @@ def list_collections_seo():
     semrush_metrics = {}
     store_baselines = {}
     for sid in store_ids:
-        gsc_metrics.update(_get_gsc_metrics_for_store(sid))
-        semrush_metrics.update(_get_semrush_metrics_for_store(sid))
+        # Key by (store_id, path) — a plain-path merge let the last store win
+        # whenever two stores share a handle.
+        for _path, _m in _get_gsc_metrics_for_store(sid).items():
+            gsc_metrics[(sid, _path)] = _m
+        for _path, _m in _get_semrush_metrics_for_store(sid).items():
+            semrush_metrics[(sid, _path)] = _m
         store_baselines[sid] = _get_store_baselines(sid)
 
     result = []
