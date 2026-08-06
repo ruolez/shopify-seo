@@ -392,6 +392,10 @@ def apply_article(article_id):
         if key in data:
             fields[key] = data[key]
 
+    # An empty apply must not fire a no-op Shopify mutation or bump freshness.
+    if not fields:
+        return jsonify({"error": "No recognized fields to apply"}), 400
+
     guard_shopify_fields(fields)
     client.update_article(article["shopify_id"], fields)
 

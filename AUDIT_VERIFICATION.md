@@ -71,7 +71,7 @@ These all share one theme: a change event is recorded or `last_optimized_at` is 
 real Shopify write. Fixing them makes every downstream number (freshness, impact, queues)
 trustworthy again.
 
-- [ ] **2.1 Phantom product optimizations**
+- [x] **2.1 Phantom product optimizations**
   **Problem:** The product apply endpoint (`routes/seo_routes.py`) inserts a `seo_change_events`
   row (:1202-1210) and bumps `last_optimized_at` unconditionally (:1232) even when the payload
   contained no recognized fields and no Shopify call was made. The code comment claims events
@@ -82,13 +82,13 @@ trustworthy again.
   **Benefit:** "Optimized" means optimized. Items stop disappearing from your work queue when
   nothing actually changed on the store.
 
-- [ ] **2.2 Phantom collection optimizations**
+- [x] **2.2 Phantom collection optimizations**
   **Problem:** Identical structure in the collection apply (`seo_routes.py:1475-1520`, bump at
   :1531).
   **Fix:** Same guard as 2.1.
   **Benefit:** Same as 2.1, for collections.
 
-- [ ] **2.3 Phantom blog-article optimizations**
+- [x] **2.3 Phantom blog-article optimizations**
   **Problem:** In `routes/blog_routes.py`, `"last_optimized_at = NOW()"` is appended (:419)
   *before* the `if update_parts:` check (:422), making it always true; an apply with no
   recognized fields still calls `update_article({})` (an empty Shopify mutation) and bumps the

@@ -1113,6 +1113,16 @@ def apply_product_changes(product_id):
     if not product:
         return jsonify({"error": "Product not found"}), 404
 
+    # Mirrors the push conditions below — an apply that would reach Shopify
+    # with nothing must not record an event or bump last_optimized_at.
+    will_push = (
+        any(data.get(f) for f in ("title", "description_html", "meta_title", "meta_description"))
+        or ("tags" in data and isinstance(data["tags"], list))
+        or bool(data.get("image_alts") and isinstance(data["image_alts"], list))
+    )
+    if not will_push:
+        return jsonify({"error": "No recognized fields to apply"}), 400
+
     try:
         try:
             seo_before = analyze_product_seo(dict(product))
@@ -1445,6 +1455,11 @@ def apply_collection_changes(collection_id):
 
     if not collection:
         return jsonify({"error": "Collection not found"}), 404
+
+    # Mirrors the push conditions below — an apply that would reach Shopify
+    # with nothing must not record an event or bump last_optimized_at.
+    if not any(data.get(f) for f in ("title", "description_html", "meta_title", "meta_description")):
+        return jsonify({"error": "No recognized fields to apply"}), 400
 
     try:
         try:
