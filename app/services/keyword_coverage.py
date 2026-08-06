@@ -55,7 +55,12 @@ def get_ownership_map(store_id, keyword_ids):
                    FROM master_keywords mk
                    JOIN technical_seo_analyses tsa
                      ON tsa.store_id = mk.store_id
-                    AND (tsa.keyword_resolution->'primary'->>'keyword') = mk.keyword
+                    -- Resolver primaries are stored _norm-ed (punctuation
+                    -- stripped, whitespace collapsed); mk.keyword is only
+                    -- lowercased — mirror _norm on the mk side or punctuated
+                    -- keywords show "unowned" although a page owns them.
+                    AND (tsa.keyword_resolution->'primary'->>'keyword')
+                        = btrim(regexp_replace(regexp_replace(lower(mk.keyword), '[^\\w\\s''&-]', ' ', 'g'), '\\s+', ' ', 'g'))
                   WHERE mk.store_id = %(sid)s AND mk.id = ANY(%(ids)s)
                  UNION ALL
                  SELECT ka.master_keyword_id, 2, 'assigned',

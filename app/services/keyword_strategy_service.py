@@ -1067,8 +1067,8 @@ def generate_assignment_plan(store_id):
 
             # Resolver ownership: a keyword that is already a page's resolved
             # primary must be assigned to that page, never moved by the plan.
-            from app.services.keyword_resolver import _norm as _norm_kw
             from app.services.keyword_resolver import get_owned_primary_keywords
+            from app.services.keyword_resolver import variant_key as _variant_key
             ownership = get_owned_primary_keywords(store_id)
 
             with db.get_cursor() as cur:
@@ -1130,7 +1130,7 @@ def generate_assignment_plan(store_id):
                                     "action": action,
                                 })
 
-                owner = ownership.get(_norm_kw(kw))
+                owner = ownership.get(_variant_key(kw))
                 if owner and (not best_match
                               or (owner["item_type"], owner["item_id"])
                               != (best_match["item_type"], best_match["item_id"])):

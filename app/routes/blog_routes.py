@@ -1561,9 +1561,9 @@ def wizard_start():
     # product/collection's resolved primary would cannibalize it.
     keyword_warning = None
     try:
-        from app.services.keyword_resolver import _norm, get_owned_primary_keywords
+        from app.services.keyword_resolver import get_owned_primary_keywords, variant_key
 
-        primary = _norm(keywords[0]) if keywords else ""
+        primary = variant_key(keywords[0]) if keywords else ""
         if primary:
             owner = get_owned_primary_keywords(store_id).get(primary)
             if owner:

@@ -694,17 +694,21 @@ def get_or_refresh_resolution(store_id, item_type, item_id, max_age_days=None):
 
 
 def get_owned_primary_keywords(store_id, exclude=None):
-    """Normalized keyword -> owning item for every resolved primary and
+    """variant_key -> owning item for every resolved primary and
     accepted/applied assignment in the store, across products and collections.
-    Manual claims outrank resolved ones. `exclude` is an optional
-    (item_type, item_id) whose own claims are skipped."""
+    Keyed by variant_key (plural-folded, token-sorted) — the same identity
+    dedup/claiming uses — so guards can't miss what claiming blocks. Each
+    owner dict carries the display-form "keyword". Manual claims outrank
+    resolved ones. `exclude` is an optional (item_type, item_id) whose own
+    claims are skipped."""
     owned = {}
     exclude = tuple(exclude) if exclude else None
 
     def claim(kw, owner):
-        key = _norm(kw)
+        key = variant_key(kw)
         if not key:
             return
+        owner["keyword"] = kw
         prev = owned.get(key)
         if (prev is None or (owner["manual"] and not prev["manual"])
                 or (owner["manual"] == prev["manual"]
@@ -763,8 +767,10 @@ def keyword_ownership_guard(store_id, item_type, item_id, retarget_kw, ownership
     rp = (resolution or {}).get("primary")
     if rp and rp.get("keyword"):
         resolved_primary = rp["keyword"]
-    tk = _norm(retarget_kw or "")
-    if tk and tk != _norm(resolved_primary):
+    # variant_key, not _norm: claiming folds plurals/word order, so the guard
+    # must too — else "dutch master" slips past the "dutch masters" claim.
+    tk = variant_key(retarget_kw or "")
+    if tk and tk != variant_key(resolved_primary):
         if ownership is None:
             ownership = get_owned_primary_keywords(store_id, exclude=(item_type, item_id))
         owner = ownership.get(tk)

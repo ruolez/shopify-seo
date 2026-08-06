@@ -1002,14 +1002,14 @@ def optimize_existing_page(store_id, gap_id, override_keyword=None, override_vol
     # and never let the gap keyword displace this page's resolved primary.
     resolved_primary = ""
     try:
-        from app.services.keyword_resolver import _norm, get_or_refresh_resolution, get_owned_primary_keywords
+        from app.services.keyword_resolver import get_or_refresh_resolution, get_owned_primary_keywords, variant_key
 
         resolution = get_or_refresh_resolution(store_id, item_type, item_id)
         rp = (resolution or {}).get("primary")
         if rp and rp.get("keyword"):
             resolved_primary = rp["keyword"]
-        gap_kw = _norm(gap["keyword"])
-        if gap_kw and gap_kw != _norm(resolved_primary):
+        gap_kw = variant_key(gap["keyword"])
+        if gap_kw and gap_kw != variant_key(resolved_primary):
             owner = get_owned_primary_keywords(store_id, exclude=(item_type, item_id)).get(gap_kw)
             if owner:
                 raise ValueError(

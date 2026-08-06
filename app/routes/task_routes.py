@@ -351,7 +351,9 @@ def _owned_claims_for(ownership, item_type, item_id, cap=150):
         if (o["item_type"], o["item_id"]) != (item_type, item_id)
     ]
     claims.sort(key=lambda c: c[1].get("volume") or 0, reverse=True)
-    return [kw for kw, _ in claims[:cap]]
+    # Display form, not the map key — variant_keys are plural-folded and
+    # token-sorted, which would feed mangled phrases into the prompt.
+    return [o.get("keyword") or kw for kw, o in claims[:cap]]
 
 
 def _record_bulk_change_event(store_id, item_type, item_id, change_type, fields):

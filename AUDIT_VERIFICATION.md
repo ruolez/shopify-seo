@@ -630,7 +630,7 @@ trustworthy again.
 
 ## One key for "same keyword"
 
-- [ ] **5.7 Coverage map joins keywords by exact string — misses owned keywords**
+- [x] **5.7 Coverage map joins keywords by exact string — misses owned keywords**
   **Problem:** `services/keyword_coverage.py:58` joins resolver primaries (stored `_norm`-ed:
   punctuation stripped, whitespace collapsed) against `master_keywords` (only lowercased) by
   exact string — keywords with punctuation or double spaces show "unowned" although a page
@@ -641,7 +641,7 @@ trustworthy again.
   **Benefit:** The gap matrix stops telling you to create content for keywords you already
   rank pages for.
 
-- [ ] **5.8 Three granularities of keyword identity — guards miss what claiming blocks**
+- [x] **5.8 Three granularities of keyword identity — guards miss what claiming blocks**
   **Problem (verified with the exact scenario):** `variant_key` (plural-folded, order-sorted)
   drives dedup/claiming; `_norm` drives the priority queue and the blog-wizard/gsc/content-gap
   guards; exact string drives the coverage map. A product owning "dutch masters" **blocks**
@@ -652,7 +652,7 @@ trustworthy again.
   **Benefit:** If the app considers two keywords "the same" for claiming, every guard and
   every view agrees — no more contradictory warnings.
 
-- [ ] **5.9 Cannibalization self-test uses substring matching — misses real conflicts**
+- [x] **5.9 Cannibalization self-test uses substring matching — misses real conflicts**
   **Problem:** `services/seo_priority_service.py:157` — `this_path not in page_path` treats
   `products/x-large` as "self" when checking `products/x`, silently excluding a genuinely
   competing page (false negatives only). The resolver's own check compares exact URLs.

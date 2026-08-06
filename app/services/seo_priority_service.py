@@ -3,7 +3,7 @@ from datetime import datetime, timedelta, timezone
 
 from app.database import db
 from app.services.ctr_benchmarks import get_expected_ctr_curve, is_ctr_underperformer
-from app.services.keyword_resolver import _norm, get_owned_primary_keywords
+from app.services.keyword_resolver import _norm, get_owned_primary_keywords, variant_key
 from app.services.seo_analyzer import (
     _expected_ctr,
     analyze_collection_seo,
@@ -155,7 +155,9 @@ def _check_keyword_cannibalization(store_id, keyword, this_path):
 
         for p in pages:
             page_path = (p["page"] or "").rstrip("/")
-            if this_path and this_path not in page_path:
+            # Exact-URL compare — substring matching treated products/x-large
+            # as "self" when checking products/x, hiding real cannibalization.
+            if this_path and page_path != this_path.rstrip("/"):
                 pos = round(float(p["position"] or 0), 1)
                 if pos <= 10:
                     return {"competing_url": p["page"], "position": pos, "impressions": int(float(p["impressions"] or 0))}
@@ -292,7 +294,7 @@ def get_priority_ranked_items(store_id, item_type="product", limit=50, measuring
             own_key = (item_type, item["id"])
 
             def _foreign_owner(kw):
-                o = ownership.get(_norm(kw))
+                o = ownership.get(variant_key(kw))
                 return o if o and (o["item_type"], o["item_id"]) != own_key else None
 
             resolved_striking = next(
@@ -364,7 +366,9 @@ def get_priority_ranked_items(store_id, item_type="product", limit=50, measuring
                 # cannibalization checks — don't warn the user off it.
                 cannibal = None
                 if _norm(best["keyword"]) != resolved_kw_norm:
-                    cannibal = _check_keyword_cannibalization(store_id, best["keyword"], path)
+                    # Full URL — GSC pages are absolute; the exact compare in
+                    # the checker needs matching shapes.
+                    cannibal = _check_keyword_cannibalization(store_id, best["keyword"], f"{base_url}/{path}" if base_url else path)
                 if cannibal:
                     cannibalization_warning = (
                         f"Warning: \"{best['keyword']}\" already ranks on {cannibal['competing_url']} "
