@@ -495,10 +495,12 @@ def _normalize_media_updates(item, value):
     updates = []
     positional = []
     claimed = set()
+    from app.services.ai_content_validator import alt_text_of
+
     for entry in value:
         if isinstance(entry, dict):
             mid = entry.get("media_id")
-            alt = (entry.get("alt") or entry.get("suggested_alt") or "").strip()
+            alt = alt_text_of(entry).strip()
             if mid in valid_ids and alt:
                 updates.append({"media_id": mid, "alt": alt})
                 claimed.add(mid)

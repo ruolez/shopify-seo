@@ -1308,6 +1308,38 @@ def _handle_article_tool_call(name, args):
     return {"error": f"Unknown article tool: {name}"}
 
 
+def _tool_score_result(content_result, item_type, store_id, item_id):
+    """Tool results must not call the content pillar 'the SEO score' — the UI
+    shows the unified blend. Relabel, attach the stored keyword pillar, and
+    include a unified score over the pillars available here (search omitted;
+    weights renormalize)."""
+    from app.services.seo_analyzer import compute_unified_score
+
+    out = dict(content_result)
+    out["content_score"] = out.pop("score", None)
+    kw_score = None
+    try:
+        with db.get_cursor() as cur:
+            cur.execute(
+                """SELECT score FROM technical_seo_analyses
+                   WHERE store_id = %s AND item_type = %s AND item_id = %s""",
+                (store_id, item_type, item_id),
+            )
+            row = cur.fetchone()
+            kw_score = row["score"] if row else None
+    except Exception:
+        pass
+    out["keyword_score"] = kw_score
+    try:
+        unified = compute_unified_score({"score": out["content_score"], "breakdown": out.get("breakdown", {})}, kw_score, None)
+        out["unified_score"] = unified["seo_score"]
+    except Exception:
+        out["unified_score"] = out["content_score"]
+    out["note"] = ("unified_score blends content + keyword pillars (search pillar not available "
+                   "in this tool); the UI's score adds search performance")
+    return out
+
+
 def _handle_tool_call(name, args):
     if name == "get_product_data":
         product_id = args["product_id"]
@@ -1338,7 +1370,7 @@ def _handle_tool_call(name, args):
             product = cur.fetchone()
         if not product:
             return {"error": f"Product {product_id} not found"}
-        return analyze_product_seo(dict(product))
+        return _tool_score_result(analyze_product_seo(dict(product)), "product", product["store_id"], product_id)
 
     if name == "get_store_summary":
         store_id = args["store_id"]
@@ -1362,8 +1394,9 @@ def _handle_tool_call(name, args):
             "store_id": store_id,
             "total_products": total,
             "analyzed_count": len(scores),
-            "average_seo_score": avg_score,
+            "average_content_score": avg_score,
             "products_below_50": low_score_count,
+            "note": "content pillar only — the UI's unified score also blends keyword and search pillars",
         }
 
     if name == "get_collection_data":
@@ -1391,7 +1424,7 @@ def _handle_tool_call(name, args):
             collection = cur.fetchone()
         if not collection:
             return {"error": f"Collection {collection_id} not found"}
-        return analyze_collection_seo(dict(collection))
+        return _tool_score_result(analyze_collection_seo(dict(collection)), "collection", collection["store_id"], collection_id)
 
     if name == "get_search_performance":
         item_id = args["item_id"]
@@ -2057,12 +2090,14 @@ def _generate_geo_content(client, config, item, entity_type, weak_signals=None):
     # The resolved primary (keyword strategy) anchors the rewrite — GEO must
     # enhance the page, never retarget it away from its strategic keyword.
     primary_block = ""
+    resolved_kw = ""
     try:
         from app.services.keyword_resolver import get_or_refresh_resolution
 
         resolution = get_or_refresh_resolution(item.get("store_id"), entity_type, item.get("id"))
         rp = (resolution or {}).get("primary")
         if rp and rp.get("keyword"):
+            resolved_kw = rp["keyword"]
             primary_block = (
                 f"\n\nPRIMARY KEYWORD (resolved by the store's keyword strategy — this page's "
                 f"target): \"{rp['keyword']}\". Keep it in the meta title (at or near the front), "
@@ -2181,7 +2216,7 @@ def _generate_geo_content(client, config, item, entity_type, weak_signals=None):
     preserved_keywords = [k for k in preserve if k.lower() in new_text]
     dropped_keywords = [k for k in preserve if k.lower() not in new_text]
 
-    return {
+    result = {
         "optimized_description_html": description,
         "faq": faq,
         "faqpage_jsonld": _build_faqpage_jsonld(faq),
@@ -2194,6 +2229,15 @@ def _generate_geo_content(client, config, item, entity_type, weak_signals=None):
         "expert_verdict": (data.get("expert_verdict") or "").strip(),
         "product_facts": facts,
     }
+    # Same rephrase-first meta polish product content gets — the apply path
+    # only clamps, and clamping truncates instead of rewording.
+    from app.services.ai_content_validator import validate_named_fields
+    validate_named_fields(
+        result,
+        {"meta_title": "meta_title", "meta_description": "meta_description"},
+        resolved_kw, client, config,
+    )
+    return result
 
 
 def _generate_fact_boost(client, config, item, entity_type):
@@ -6230,10 +6274,7 @@ def run_task(task_type, task_input, store_id=None):
             if isinstance(images, str):
                 images = json.loads(images)
 
-            def _alt_text(a):
-                if isinstance(a, dict):
-                    return str(a.get("suggested_alt") or a.get("alt") or "")
-                return str(a)
+            from app.services.ai_content_validator import alt_text_of as _alt_text
 
             # Pair suggestions to media ids. The model answers positionally
             # against the full images array, so images without a media_id must
@@ -6287,6 +6328,15 @@ def run_task(task_type, task_input, store_id=None):
             collection_id, task_input.get("interlink_collections", []),
             task_input.get("keywords", []),
             search_context=prefetched_search_ctx,
+        )
+        # Brand metas get the same rephrase-first polish as product content —
+        # the apply path only clamps (truncation, not rewording).
+        from app.services.ai_content_validator import clean_keyword, validate_named_fields
+        brand_kws = task_input.get("keywords") or []
+        validate_named_fields(
+            main_result,
+            {"meta_title": "optimized_meta_title", "meta_description": "optimized_meta_description"},
+            clean_keyword(brand_kws[0]) if brand_kws else "", client, config,
         )
 
     return main_result

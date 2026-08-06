@@ -684,7 +684,7 @@ trustworthy again.
   **Fix:** Delete the dead keys from the defaults.
   **Benefit:** Every setting you can edit actually does something.
 
-- [ ] **5.13 AI tools report a different "SEO score" than the UI shows**
+- [x] **5.13 AI tools report a different "SEO score" than the UI shows**
   **Problem:** `analyze_seo_score` / `analyze_collection_seo_score` / store-audit average
   (`ai_agent.py:1331-1391, 1354`) return only the content pillar under the name "seo score";
   the UI shows the unified 3-pillar blend — the AI reasons about a number you never see.
@@ -710,7 +710,7 @@ trustworthy again.
   **Benefit:** Freshly generated news articles arrive already scoring green instead of
   needing an immediate "fix".
 
-- [ ] **5.16 Quality gate skips brand SEO (and rephrase-checks skip GEO)** *(corrected)*
+- [x] **5.16 Quality gate skips brand SEO (and rephrase-checks skip GEO)** *(corrected)*
   **Problem:** The rephrase-quality gate covers only `product_seo`/`collection_seo` and
   `technical_seo_fix`. Verified correction: GEO applies **are** clamped via
   `_push_and_rescore`, and brand/content-gap applies via `guard_shopify_fields` — so nothing
@@ -730,7 +730,7 @@ trustworthy again.
   **Benefit:** Home and landing pages never go live with overlong or mid-word-truncated
   titles.
 
-- [ ] **5.18 Prompt length-guidance inconsistency (low priority)** *(conflict downgraded)*
+- [x] **5.18 Prompt length-guidance inconsistency (low priority)** *(conflict downgraded)*
   **Problem:** Several prompts steer to top-of-band (50–60 / 140–160): the SERP block,
   `dedupe_group`, `cannibalization_fix`, `keyword_strategy_fix`, the content-brief prompt.
   Verified correction: there is **no functional conflict** — the validator only enforces hard
@@ -746,7 +746,7 @@ trustworthy again.
   **Fix:** Delete the local copy; import the shared clamps.
   **Benefit:** One truncation rule everywhere.
 
-- [ ] **5.20 Two alt-pairing heuristics (consistency, low priority)** *(impact corrected)*
+- [x] **5.20 Two alt-pairing heuristics (consistency, low priority)** *(impact corrected)*
   **Problem:** Generation-time pairing (`ai_agent.py:6222-6247`) and apply-time
   `_normalize_media_updates` (`technical_seo_routes.py:464-519`) have different fallback
   semantics. Verified correction: they live in disjoint pipelines and never process the same

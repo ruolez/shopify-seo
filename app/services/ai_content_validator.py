@@ -39,6 +39,14 @@ def _title_first_n():
         return 5
 
 
+def alt_text_of(entry):
+    """Alt text of a suggestion entry — dicts may carry it under either key
+    (generation uses suggested_alt, apply uses alt), strings are themselves."""
+    if isinstance(entry, dict):
+        return str(entry.get("suggested_alt") or entry.get("alt") or "")
+    return str(entry)
+
+
 def clean_keyword(kw):
     """Strip a trailing volume suffix — 'leather bag (2,400)' -> 'leather bag'."""
     if not kw or not isinstance(kw, str):
@@ -253,6 +261,30 @@ def validate_seo_result(result, primary_keyword, client, config):
                         primary_keyword or "no keyword", qa)
     except Exception:
         logger.exception("validate_seo_result failed — result passed through")
+    return result
+
+
+def validate_named_fields(result, field_map, primary_keyword, client, config):
+    """Quality-gate arbitrary meta fields in place.
+
+    `field_map` maps validator field names ("meta_title"/"meta_description"/
+    "title") to the result's own key names — brand results use
+    optimized_meta_*, GEO uses meta_* — so every generator gets the same
+    rephrase-first, clamp-last treatment without renaming its output."""
+    try:
+        if not isinstance(result, dict) or result.get("error") or result.get("raw_response"):
+            return result
+        fields = {std: result.get(key) for std, key in field_map.items()}
+        qa = {}
+        _validate_fields(fields, primary_keyword, client, (config or {}).get("model"), qa)
+        for std, key in field_map.items():
+            if fields.get(std):
+                result[key] = fields[std]
+        if qa:
+            result["_qa"] = qa
+            logger.info("AI content QA (%s): %s", primary_keyword or "no keyword", qa)
+    except Exception:
+        logger.exception("validate_named_fields failed — result passed through")
     return result
 
 
