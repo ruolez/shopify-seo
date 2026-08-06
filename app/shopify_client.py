@@ -9,6 +9,17 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_API_VERSION = "2026-01"
 
+_GONE_ERROR_MARKERS = ("does not exist", "not found", "invalid id", "no longer exists")
+
+
+def is_gone_error(e):
+    """True when a Shopify error means the resource is already gone.
+
+    The rule callers encode with this: gone -> safe to proceed locally
+    (delete the row / recreate the resource); anything else is transient and
+    must surface, or a live resource silently becomes invisible in the app."""
+    return any(t in str(e).lower() for t in _GONE_ERROR_MARKERS)
+
 METAFIELDS_SET_MUTATION = """
 mutation ($metafields: [MetafieldsSetInput!]!) {
   metafieldsSet(metafields: $metafields) {

@@ -99,8 +99,12 @@ async function saveStore() {
                 showToast("Access token is required for new stores", "error");
                 return;
             }
-            await apiRequest("/api/stores", { method: "POST", body: data });
-            showToast("Store added", "success");
+            const resp = await apiRequest("/api/stores", { method: "POST", body: data });
+            if (resp && resp.warning) {
+                showToast(resp.warning, "error");
+            } else {
+                showToast("Store added", "success");
+            }
         }
         closeModal();
         loadStores();

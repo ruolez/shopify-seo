@@ -439,7 +439,7 @@ trustworthy again.
   **Benefit:** One consistent path for keyword assignment; no back door that leaves items
   owning stale keywords.
 
-- [ ] **4.5 Deleting one article can orphan it live on the storefront**
+- [x] **4.5 Deleting one article can orphan it live on the storefront**
   **Problem:** `routes/blog_routes.py:485-493` logs-and-ignores a failed Shopify delete, then
   deletes the local row — the article stays live on your store but becomes invisible in the
   app. Verified worse: if no client is available, the local row is deleted **without even
@@ -448,14 +448,14 @@ trustworthy again.
   or confirms the article is already gone; otherwise return 502 and keep the row.
   **Benefit:** Nothing can be live on your store yet invisible in the app.
 
-- [ ] **4.6 Same swallow on empty-blog landing delete**
+- [x] **4.6 Same swallow on empty-blog landing delete**
   **Problem:** `routes/blog_routes.py:75-82` — `except Exception: pass` around the Shopify
   delete, then the tracking row is removed regardless. A transient failure leaves a live,
   untracked landing article.
   **Fix:** Same gone-vs-transient discrimination as 4.5.
   **Benefit:** Same as 4.5.
 
-- [ ] **4.7 Landing regen can duplicate the live landing article**
+- [x] **4.7 Landing regen can duplicate the live landing article**
   **Problem:** `routes/blog_routes.py:108-121` and :995-1008 — an `update_article` failure is
   swallowed, then the unconfirmed id triggers a fresh create; the old article stays live and
   untracked. `news_routes.py:112-125` already fixed this pattern ("a transient error must not
@@ -499,7 +499,7 @@ trustworthy again.
   `refresh_token` presence for defense in depth.
   **Benefit:** OAuth failures land you on a proper error message instead of a garbled URL.
 
-- [ ] **4.12 Adding a store with bad credentials silently "succeeds"**
+- [x] **4.12 Adding a store with bad credentials silently "succeeds"**
   **Problem:** `routes/store_routes.py:88-94` swallows the connection-test failure and creates
   the store with NULL shop name/domain; you first learn at sync time.
   **Fix:** Return the test failure to the user (block creation, or create with a clear
@@ -560,7 +560,7 @@ trustworthy again.
   **Fix:** `if vendor_name and vendor_name.lower() in coll_title_lower:`.
   **Benefit:** Interlink suggestions never include nonsense blank-brand entries.
 
-- [ ] **4.19 Blog scheduling accepts past dates and publishes immediately**
+- [x] **4.19 Blog scheduling accepts past dates and publishes immediately**
   **Problem:** `routes/blog_routes.py:2079-2171` accepts any `scheduled_at` (schedule and
   reschedule); the scheduler publishes anything past-due on its next 60-second tick. The news
   twins reject past dates with the comment "a mistyped date must not silently publish

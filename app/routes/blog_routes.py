@@ -11,7 +11,7 @@ from app.auth import decrypt_value
 from app.database import db
 from app.services.ai_output_guard import guard_shopify_fields
 from app.services.blog_seo_analyzer import analyze_article_seo
-from app.shopify_client import ShopifyClient
+from app.shopify_client import ShopifyClient, is_gone_error
 
 logger = logging.getLogger(__name__)
 
@@ -75,8 +75,12 @@ def _regen_landing_async(store_id, blog_id, client, store):
                 if existing and existing.get("shopify_page_id"):
                     try:
                         client.delete_article(existing["shopify_page_id"])
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        if not is_gone_error(e):
+                            # Keep the tracking row — dropping it would orphan a
+                            # still-live landing article with no local record.
+                            logger.warning("Landing delete failed for blog %s, keeping tracking row: %s", blog_id, e)
+                            return
                     with db.get_cursor() as cur:
                         cur.execute("DELETE FROM blog_landing_pages WHERE store_id = %s AND blog_id = %s", (store_id, blog_id))
                 return
@@ -110,8 +114,13 @@ def _regen_landing_async(store_id, blog_id, client, store):
                 try:
                     client.update_article(existing["shopify_page_id"], landing_fields)
                     shopify_article_id = existing["shopify_page_id"]
-                except Exception:
-                    pass
+                except Exception as e:
+                    # Only recreate when the old article is confirmed gone — a
+                    # transient error must not mint a duplicate landing.
+                    if is_gone_error(e):
+                        logger.info("Landing article %s gone on Shopify — recreating", existing["shopify_page_id"])
+                    else:
+                        raise
 
             if not shopify_article_id:
                 landing_fields.pop("clear_image", None)
@@ -487,17 +496,24 @@ def delete_article(article_id):
         return jsonify({"error": "Article not found"}), 404
 
     store, client = _get_store_client(article["store_id"])
-    if client:
-        try:
-            client.delete_article(article["shopify_id"])
-        except Exception as e:
-            logger.warning("Failed to delete article from Shopify: %s", e)
+    if not client:
+        # Deleting only the local row would leave the article live on the
+        # store but invisible in the app.
+        return jsonify({"error": "Store connection unavailable — cannot delete from Shopify"}), 502
+
+    try:
+        client.delete_article(article["shopify_id"])
+    except Exception as e:
+        # Already gone on Shopify is fine to clean up locally; real failures
+        # keep the local row so the article doesn't vanish while still live.
+        if not is_gone_error(e):
+            logger.exception("Shopify delete failed for article %s: %s", article_id, e)
+            return jsonify({"error": f"Shopify delete failed: {e}"}), 502
 
     with db.get_cursor() as cur:
         cur.execute("DELETE FROM synced_articles WHERE id = %s", (article_id,))
 
-    if client:
-        _regen_landing_async(article["store_id"], article["blog_id"], client, store)
+    _regen_landing_async(article["store_id"], article["blog_id"], client, store)
 
     return jsonify({"ok": True, "success": True})
 
@@ -535,7 +551,7 @@ def bulk_delete_articles():
         except Exception as e:
             # Already-gone articles are safe to remove locally; real failures
             # keep the local row so the article doesn't become invisible while live.
-            if any(t in str(e).lower() for t in ("does not exist", "not found", "invalid id", "no longer exists")):
+            if is_gone_error(e):
                 deletable_ids.append(article["id"])
             else:
                 logger.warning("Failed to delete article %s from Shopify: %s", article["id"], e)
@@ -1002,7 +1018,12 @@ def generate_landing_page():
                     shopify_article_id = existing["shopify_page_id"]
                     logger.info("Updated existing landing page article %s", shopify_article_id)
                 except Exception as e:
-                    logger.warning("Failed to update landing page article, creating new: %s", e)
+                    # Only recreate when the old article is confirmed gone — a
+                    # transient error must not mint a duplicate landing.
+                    if is_gone_error(e):
+                        logger.info("Landing article %s gone on Shopify — recreating", existing["shopify_page_id"])
+                    else:
+                        raise
 
             if not shopify_article_id:
                 landing_fields.pop("clear_image", None)
@@ -2108,6 +2129,9 @@ def schedule_from_suggestion():
             scheduled_for = _parse_scheduled_at(data["scheduled_at"])
         except (ValueError, TypeError):
             return jsonify({"error": "Invalid scheduled_at"}), 400
+        # A mistyped past date must not silently publish on the next tick.
+        if scheduled_for < datetime.utcnow():
+            return jsonify({"error": "The publish time is in the past — pick a future date/time"}), 400
     else:
         scheduled_for = _next_open_slot(store_id)
 
@@ -2163,6 +2187,8 @@ def reschedule_blog_post(session_id):
         scheduled_for = _parse_scheduled_at(data.get("scheduled_at"))
     except (ValueError, TypeError):
         return jsonify({"error": "A valid scheduled_at is required"}), 400
+    if scheduled_for < datetime.utcnow():
+        return jsonify({"error": "The new publish time is in the past — pick a future date/time"}), 400
     with db.get_cursor() as cur:
         cur.execute(
             """UPDATE article_wizard_sessions SET scheduled_for = %s, updated_at = NOW()

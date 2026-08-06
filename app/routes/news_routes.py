@@ -9,6 +9,7 @@ from flask import Blueprint, jsonify, render_template, request
 from app.database import db
 from app.routes.blog_routes import _get_store_client
 from app.services import url_utils
+from app.shopify_client import is_gone_error
 from app.services.ai_output_guard import clamp_meta_description, clamp_meta_title, sanitize_html
 from app.services.news_body import insert_inline_images, render_sources_html
 from app.services.news_template import (
@@ -118,7 +119,7 @@ def _regenerate_news_hub(store_id, client, store):
         except Exception as e:
             # Only fall back to creating a new page when the old one is
             # confirmed gone — a transient error must not mint news-1.
-            if any(t in str(e).lower() for t in ("does not exist", "not found", "invalid id", "no longer exists")):
+            if is_gone_error(e):
                 logger.info("News hub page %s gone on Shopify — recreating", page_id)
                 page_id = None
             else:
@@ -736,7 +737,7 @@ def delete_news_article(article_id):
         client.delete_article(article["shopify_id"])
     except Exception as e:
         # Already gone on Shopify is fine to clean up locally; real failures surface.
-        if not any(t in str(e).lower() for t in ("does not exist", "not found", "invalid id", "no longer exists")):
+        if not is_gone_error(e):
             logger.exception("Shopify delete failed for news article %s: %s", article_id, e)
             return jsonify({"error": f"Shopify delete failed: {e}"}), 502
 

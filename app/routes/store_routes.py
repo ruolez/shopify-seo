@@ -85,13 +85,16 @@ def create_store():
 
     shop_name = None
     primary_domain = None
+    connection_warning = None
     try:
         client = ShopifyClient(domain, access_token, api_version)
         shop_info = client.test_connection()
         shop_name = shop_info.get("name")
         primary_domain = shop_info.get("primary_domain")
-    except Exception:
-        pass
+    except Exception as e:
+        # Create anyway (the user may be offline or fixing DNS), but say so —
+        # a silent success here surfaces as a confusing sync failure later.
+        connection_warning = f"Store saved, but the connection test failed — check the domain and access token: {e}"
 
     with db.get_cursor() as cur:
         cur.execute(
@@ -103,7 +106,10 @@ def create_store():
         )
         store_id = cur.fetchone()["id"]
 
-    return jsonify({"ok": True, "id": store_id}), 201
+    resp = {"ok": True, "id": store_id}
+    if connection_warning:
+        resp["warning"] = connection_warning
+    return jsonify(resp), 201
 
 
 @store_bp.route("/api/stores/<int:store_id>", methods=["PUT"])
