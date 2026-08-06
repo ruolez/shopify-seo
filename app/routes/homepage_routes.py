@@ -96,14 +96,19 @@ def save_home_page():
     _get_or_create_home_page(store_id)
     slides = _normalize_slides(data.get("slides"))
 
+    # Clamp at the door — publish pushes these to Shopify verbatim.
+    from app.services.ai_output_guard import guard_shopify_fields
+    seo_fields = {"meta_title": data.get("meta_title"), "meta_description": data.get("meta_description")}
+    guard_shopify_fields(seo_fields)
+
     with db.get_cursor() as cur:
         cur.execute(
             """UPDATE home_pages
             SET meta_title = %s, meta_description = %s, slides = %s, updated_at = NOW()
             WHERE store_id = %s""",
             (
-                data.get("meta_title"),
-                data.get("meta_description"),
+                seo_fields.get("meta_title"),
+                seo_fields.get("meta_description"),
                 json.dumps(slides),
                 store_id,
             ),
@@ -354,10 +359,12 @@ def publish_home_page():
         client.upsert_theme_asset(theme_id, INDEX_TEMPLATE, new_index)
 
         # Home-page SEO metafields (shop-level title_tag / description_tag).
+        # Clamp here too — rows saved before clamping existed may be overlong.
         if home.get("meta_title") or home.get("meta_description"):
+            from app.services.ai_output_guard import clamp_meta_description, clamp_meta_title
             client.update_homepage_seo(
-                seo_title=home.get("meta_title") or None,
-                seo_description=home.get("meta_description") or None,
+                seo_title=clamp_meta_title(home.get("meta_title") or "") or None,
+                seo_description=clamp_meta_description(home.get("meta_description") or "") or None,
             )
 
         with db.get_cursor() as cur:

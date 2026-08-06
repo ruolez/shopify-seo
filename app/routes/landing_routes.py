@@ -7,7 +7,7 @@ from flask import Blueprint, jsonify, render_template, request
 
 from app.auth import decrypt_value
 from app.database import db
-from app.services.ai_output_guard import guard_shopify_fields
+from app.services.ai_output_guard import clamp_meta_description, clamp_meta_title, guard_shopify_fields
 from app.services.landing_page_seo_analyzer import analyze_synced_page, analyze_landing_page, extract_page_content
 from app.shopify_client import ShopifyClient
 
@@ -610,13 +610,17 @@ def publish_page(page_id):
         shopify_page_id = page.get("shopify_page_id") or ""
         is_valid_page_gid = shopify_page_id.startswith("gid://shopify/Page/")
 
+        # Clamp before the live push — nothing upstream guarantees these.
+        seo_title = clamp_meta_title(page.get("meta_title") or "")
+        seo_description = clamp_meta_description(page.get("meta_description") or "")
+
         if is_valid_page_gid:
             client.update_page(shopify_page_id, {
                 "title": page["title"],
                 "body": full_html,
                 "is_published": True,
-                "seo_title": page.get("meta_title") or "",
-                "seo_description": page.get("meta_description") or "",
+                "seo_title": seo_title,
+                "seo_description": seo_description,
             })
         else:
             result = client.create_page(
@@ -624,8 +628,8 @@ def publish_page(page_id):
                 body_html=full_html,
                 handle=page.get("handle"),
                 is_published=True,
-                seo_title=page.get("meta_title") or "",
-                seo_description=page.get("meta_description") or "",
+                seo_title=seo_title,
+                seo_description=seo_description,
             )
             with db.get_cursor() as cur:
                 cur.execute(

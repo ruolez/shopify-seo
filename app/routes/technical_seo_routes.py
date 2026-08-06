@@ -20,14 +20,16 @@ technical_seo_bp = Blueprint("technical_seo", __name__)
 
 
 def _enforce_meta_limits(shopify_fields):
+    """One truncation rule everywhere — delegates to the shared clamps
+    (a hand-rolled copy here had already drifted from them)."""
+    from app.services.ai_output_guard import clamp_meta_description, clamp_meta_title
+
     meta_desc = shopify_fields.get("meta_description")
-    if meta_desc and isinstance(meta_desc, str) and len(meta_desc) > 160:
-        truncated = meta_desc[:157].rsplit(" ", 1)[0] + "..."
-        shopify_fields["meta_description"] = truncated if len(truncated) <= 160 else meta_desc[:160]
+    if meta_desc and isinstance(meta_desc, str):
+        shopify_fields["meta_description"] = clamp_meta_description(meta_desc)
     meta_title = shopify_fields.get("meta_title")
-    if meta_title and isinstance(meta_title, str) and len(meta_title) > 60:
-        truncated = meta_title[:57].rsplit(" ", 1)[0] + "..."
-        shopify_fields["meta_title"] = truncated if len(truncated) <= 60 else meta_title[:60]
+    if meta_title and isinstance(meta_title, str):
+        shopify_fields["meta_title"] = clamp_meta_title(meta_title)
     return shopify_fields
 
 

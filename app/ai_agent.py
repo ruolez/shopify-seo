@@ -2876,13 +2876,11 @@ def _validate_landing_page_generate(result):
 
     result["sections"] = validated
 
-    meta_title = result.get("meta_title", "")
-    if meta_title and len(meta_title) > 70:
-        # Too-short titles can't be fixed by truncation — leave them for review.
-        result["meta_title"] = meta_title[:60]
-    meta_desc = result.get("meta_description", "")
-    if meta_desc and len(meta_desc) > 200:
-        result["meta_description"] = meta_desc[:160]
+    from app.services.ai_output_guard import clamp_meta_description, clamp_meta_title
+    if result.get("meta_title"):
+        result["meta_title"] = clamp_meta_title(result["meta_title"])
+    if result.get("meta_description"):
+        result["meta_description"] = clamp_meta_description(result["meta_description"])
 
     return result
 
@@ -2910,12 +2908,11 @@ def _validate_home_page_generate(result):
         })
     result["slides"] = [s for s in cleaned if s["headline"]]
 
-    meta_title = result.get("meta_title", "")
-    if meta_title and len(meta_title) > 70:
-        result["meta_title"] = meta_title[:60]
-    meta_desc = result.get("meta_description", "")
-    if meta_desc and len(meta_desc) > 200:
-        result["meta_description"] = meta_desc[:160]
+    from app.services.ai_output_guard import clamp_meta_description, clamp_meta_title
+    if result.get("meta_title"):
+        result["meta_title"] = clamp_meta_title(result["meta_title"])
+    if result.get("meta_description"):
+        result["meta_description"] = clamp_meta_description(result["meta_description"])
 
     return result
 

@@ -583,7 +583,7 @@ function renderFamilyDetail(fam, cid) {
                 <div class="ks-page-head">
                     <span class="badge badge-${typeBadge(p.item_type)}" style="font-size:10px;">${p.item_type}</span>
                     <span class="ks-page-title" ${canOptimize ? `onclick="ksOpenPage('${p.item_type}', ${p.item_id})"` : ""}>${escapeHtml(p.title || '#' + p.item_id)}</span>
-                    ${p.seo_score !== null && p.seo_score !== undefined ? `<span class="ks-page-score" style="color:${p.seo_score >= 80 ? 'var(--success)' : p.seo_score >= 60 ? 'var(--warning)' : 'var(--error)'};">${p.seo_score}</span>` : ''}
+                    ${p.seo_score !== null && p.seo_score !== undefined ? `<span class="ks-page-score" style="color:${scoreColor(p.seo_score)};">${p.seo_score}</span>` : ''}
                     <span class="badge badge-${st.badge}" style="font-size:10px;" ${tip ? `title="${escapeAttr(tip)}"` : ''}>${st.label}</span>
                     ${p.conflict_key ? '<span class="badge badge-error" style="font-size:10px;" title="Another page targets a variant of the same keyword — see Keyword conflicts below">keyword conflict</span>' : ''}
                 </div>

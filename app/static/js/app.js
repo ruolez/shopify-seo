@@ -169,6 +169,14 @@ function getScoreBadge(score) {
     return `<span class="badge ${cls}">${score}</span>`;
 }
 
+/* The one SEO-score color scale (80/50) — every surface must show the same
+ * score in the same color. */
+function scoreColor(score) {
+    if (score >= 80) return "var(--success)";
+    if (score >= 50) return "var(--warning)";
+    return "var(--error)";
+}
+
 function formatRelativeTime(isoStr) {
     if (!isoStr) return "—";
     const d = parseServerDate(isoStr);

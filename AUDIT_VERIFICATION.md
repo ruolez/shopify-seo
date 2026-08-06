@@ -662,21 +662,21 @@ trustworthy again.
 
 ## One set of scoring bands & length rules
 
-- [ ] **5.10 Keyword Strategy page uses different score colors than everywhere else**
+- [x] **5.10 Keyword Strategy page uses different score colors than everywhere else**
   **Problem:** `static/js/keyword_strategy.js:586` colors green≥80/amber≥60/red<60; every
   other SEO-score surface uses 80/50 (verified across app.js, seo.js, seo_issues.js,
   ai_seo.js, brands.js).
   **Fix:** Change to the 80/50 bands (ideally via a shared `scoreClass()` helper in app.js).
   **Benefit:** The same score shows the same color on every page.
 
-- [ ] **5.11 Dashboard "coverage" uses a title band that matches nothing**
+- [x] **5.11 Dashboard "coverage" uses a title band that matches nothing**
   **Problem:** `services/dashboard_service.py:800-801` hard-codes
   `meta_title BETWEEN 20 AND 75` (nothing else in the app uses 20–75; live ok-band is 30–70)
   and ignores settings. (Verified: the 100–200 desc band happens to match.)
   **Fix:** Read the same `rules.product_seo` thresholds the analyzer uses.
   **Benefit:** The dashboard coverage tile agrees with the item-level scoring.
 
-- [ ] **5.12 Dead settings keys mislead in Settings**
+- [x] **5.12 Dead settings keys mislead in Settings**
   **Problem:** `rules.technical_*` → `meta_title_length`/`meta_desc_length`
   (`prompt_defaults.py:1214-1215, 1237-1238`) are read by nothing (the analyzer reads
   `rules.product_seo`/`collection_seo`) and disagree with the live bands — editing them does
@@ -692,7 +692,7 @@ trustworthy again.
   unified score alongside).
   **Benefit:** When the AI says "score is 62", it matches the 62 you see on screen.
 
-- [ ] **5.14 blog_seo_analyzer re-implements the scoring ladder with a divergent default**
+- [x] **5.14 blog_seo_analyzer re-implements the scoring ladder with a divergent default**
   **Problem:** `services/blog_seo_analyzer.py:15-38` re-implements `score_length` inline with
   an in-code default `[140,160]` vs the settings default `[120,160]` (settings win today, so
   the divergent value is dormant — until someone edits settings incompletely).
@@ -700,7 +700,7 @@ trustworthy again.
   default.
   **Benefit:** One length-scoring implementation to maintain.
 
-- [ ] **5.15 News prompt targets titles the article scorer calls "poor"**
+- [x] **5.15 News prompt targets titles the article scorer calls "poor"**
   **Problem (scope corrected):** `prompts.news_analyze` asks for 40–60-char meta titles while
   `rules.article_seo` scores good 35–46 / ok ≤55 — a 56–60-char title scores "poor" on
   arrival. Verified corrections: `blog_seo_suggestions` targets the blog *landing* meta which
@@ -720,7 +720,7 @@ trustworthy again.
   **Benefit:** Brand and AI-SEO content gets the same quality polish as product content —
   fewer truncated-mid-word titles.
 
-- [ ] **5.17 Homepage/landing meta pushed to Shopify with lenient clamps**
+- [x] **5.17 Homepage/landing meta pushed to Shopify with lenient clamps**
   **Problem:** `ai_agent.py:2876-2882, 2910-2915` clamp title only when >70 (so 61–70 passes a
   60 cap) and truncate mid-word. Verified end-to-end: the homepage save/publish
   (`homepage_routes.py:102-105, 357-361`) and builder-page publish (`landing_routes.py:614-628`)
@@ -739,7 +739,7 @@ trustworthy again.
   **Fix:** When touching these prompts anyway, align on the ~50/~150 mid-band aims.
   **Benefit:** Generated titles sit safely mid-band instead of flirting with the cap.
 
-- [ ] **5.19 `_enforce_meta_limits` duplicates the clamp helper (already diverging)**
+- [x] **5.19 `_enforce_meta_limits` duplicates the clamp helper (already diverging)**
   **Problem:** `routes/technical_seo_routes.py:22-31` hand-rolls `ai_output_guard._clamp`.
   Verified: not quite identical even today — `_clamp` strips trailing punctuation before the
   ellipsis; the copy doesn't. Any band change desynchronizes them further.

@@ -793,14 +793,23 @@ def get_nav_badges(store_id):
 
 def get_coverage(store_id):
     """Completeness percentages over ACTIVE products. Shared by the ops
-    widget and the daily snapshot rollup so the two can never drift."""
+    widget and the daily snapshot rollup so the two can never drift.
+    Bands come from the same rules.product_seo thresholds the item analyzer
+    scores with — a hard-coded band here made the tile disagree with items."""
+    from app.prompt_defaults import DEFAULTS
+    from app.settings_manager import get_setting
+
+    thresholds = get_setting("rules.product_seo", DEFAULTS["rules.product_seo"])["thresholds"]
+    mt_ok = thresholds.get("meta_title", {}).get("ok", [30, 70])
+    md_ok = thresholds.get("meta_description", {}).get("ok", [100, 200])
+
     with db.get_cursor() as cur:
         cur.execute(
             """SELECT COUNT(*) AS total,
-                      COUNT(*) FILTER (WHERE char_length(COALESCE(meta_title, '')) BETWEEN 20 AND 75) AS meta_title_ok,
-                      COUNT(*) FILTER (WHERE char_length(COALESCE(meta_description, '')) BETWEEN 100 AND 200) AS meta_desc_ok
+                      COUNT(*) FILTER (WHERE char_length(COALESCE(meta_title, '')) BETWEEN %s AND %s) AS meta_title_ok,
+                      COUNT(*) FILTER (WHERE char_length(COALESCE(meta_description, '')) BETWEEN %s AND %s) AS meta_desc_ok
                FROM synced_products WHERE store_id = %s AND status = 'ACTIVE'""",
-            (store_id,),
+            (mt_ok[0], mt_ok[1], md_ok[0], md_ok[1], store_id),
         )
         p = cur.fetchone()
         total = int(p["total"] or 0)

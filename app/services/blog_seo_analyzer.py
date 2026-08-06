@@ -2,58 +2,29 @@ import re
 
 from app.settings_manager import get_setting
 from app.prompt_defaults import DEFAULTS
+from app.services.seo_rules import score_length
 
 
 def analyze_article_seo(article):
     rules = get_setting("rules.article_seo", DEFAULTS["rules.article_seo"])
     thresholds = rules.get("thresholds", {})
+    defaults = DEFAULTS["rules.article_seo"]["thresholds"]
 
     scores = {}
     details = {}
 
-    # Meta Title
-    mt = thresholds.get("meta_title", {})
-    mt_good = mt.get("good", [35, 46])
-    mt_ok = mt.get("ok", [25, 55])
-    mt_poor_min = mt.get("poor_min", 1)
-
+    # Meta Title — shared scoring ladder; the settings defaults are the
+    # single fallback (an inline copy here once drifted to [140,160]).
     title = article.get("meta_title") or article.get("title") or ""
-    title_len = len(title)
-    ideal = f"{mt_good[0]}-{mt_good[1]}"
-    if mt_good[0] <= title_len <= mt_good[1]:
-        scores["meta_title"] = 100
-        details["meta_title"] = f"Good length ({title_len} chars)"
-    elif mt_ok[0] <= title_len < mt_good[0] or mt_good[1] < title_len <= mt_ok[1]:
-        scores["meta_title"] = 60
-        details["meta_title"] = f"Acceptable length ({title_len} chars), ideal is {ideal}"
-    elif title_len >= mt_poor_min:
-        scores["meta_title"] = 30
-        details["meta_title"] = f"Poor length ({title_len} chars), ideal is {ideal}"
-    else:
-        scores["meta_title"] = 0
-        details["meta_title"] = "Missing meta title"
+    scores["meta_title"], details["meta_title"] = score_length(
+        len(title), thresholds.get("meta_title") or defaults["meta_title"], "meta title"
+    )
 
     # Meta Description
-    md = thresholds.get("meta_description", {})
-    md_good = md.get("good", [140, 160])
-    md_ok = md.get("ok", [100, 200])
-    md_poor_min = md.get("poor_min", 1)
-
     desc = article.get("meta_description") or ""
-    desc_len = len(desc)
-    ideal_md = f"{md_good[0]}-{md_good[1]}"
-    if md_good[0] <= desc_len <= md_good[1]:
-        scores["meta_description"] = 100
-        details["meta_description"] = f"Good length ({desc_len} chars)"
-    elif md_ok[0] <= desc_len < md_good[0] or md_good[1] < desc_len <= md_ok[1]:
-        scores["meta_description"] = 60
-        details["meta_description"] = f"Acceptable length ({desc_len} chars), ideal is {ideal_md}"
-    elif desc_len >= md_poor_min:
-        scores["meta_description"] = 30
-        details["meta_description"] = f"Poor length ({desc_len} chars), ideal is {ideal_md}"
-    else:
-        scores["meta_description"] = 0
-        details["meta_description"] = "Missing meta description"
+    scores["meta_description"], details["meta_description"] = score_length(
+        len(desc), thresholds.get("meta_description") or defaults["meta_description"], "meta description"
+    )
 
     # Body Word Count
     wc = thresholds.get("word_count", {})

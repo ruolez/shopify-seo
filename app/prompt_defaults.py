@@ -905,7 +905,7 @@ DEFAULTS = {
         "- kicker: short overline (2-4 words)\n"
         "- category: one value from the allowed category list\n"
         "- summary: 50-160 char dek/excerpt\n"
-        "- meta_title: 40-60 chars\n"
+        "- meta_title: 40-46 chars (the store theme appends a suffix like ' | Store Name')\n"
         "- meta_description: 140-160 chars\n"
         "- tags: array of strings; MUST include 'type:news' plus 3-6 topical tags\n"
         "- body_html: the formatted HTML with [[INLINE_IMAGE_n]] tokens, no <h1>, no byline\n"
@@ -1211,8 +1211,6 @@ DEFAULTS = {
             "image_alt_has_keyword": 0.10,
         },
         "thresholds": {
-            "meta_title_length": {"good": [50, 60], "ok": [40, 70], "poor_min": 1},
-            "meta_desc_length": {"good": [120, 160], "ok": [100, 200], "poor_min": 1},
             "keyword_stuffing_max": 4.0,
             "description_words": {"good": 300, "ok": 150, "short": 50, "very_short": 1},
             "keyword_at_title_start": 5,
@@ -1234,8 +1232,6 @@ DEFAULTS = {
             "image_alt_coverage": 0.08,
         },
         "thresholds": {
-            "meta_title_length": {"good": [50, 60], "ok": [40, 70], "poor_min": 1},
-            "meta_desc_length": {"good": [120, 160], "ok": [100, 200], "poor_min": 1},
             "keyword_stuffing_max": 4.0,
             "description_words": {"good": 150, "ok": 75, "short": 25, "very_short": 1},
             "keyword_at_title_start": 5,
