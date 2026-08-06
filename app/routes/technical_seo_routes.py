@@ -461,6 +461,64 @@ def get_analysis(item_type, item_id):
 _ALLOWED_FIX_FIELDS = {"meta_title", "meta_description", "title", "tags", "description", "image_alt"}
 
 
+def _normalize_media_updates(item, value):
+    """Coerce an image_alt fix value into [{media_id, alt}] for fileUpdate.
+
+    The model is asked for objects carrying the media_id, but bare strings
+    still occur — pair those positionally with the item's images that lack
+    alt text (the same order images_without_alt was presented in). Entries
+    that can't be resolved to a media_id are dropped with a log line rather
+    than crashing the apply.
+    """
+    if not isinstance(value, list):
+        return []
+    images = item.get("images") or []
+    if isinstance(images, str):
+        images = json.loads(images)
+    missing_alt_ids = [img.get("media_id") for img in images
+                       if not img.get("alt") and img.get("media_id")]
+    valid_ids = {img.get("media_id") for img in images if img.get("media_id")}
+
+    # Pass 1: entries that already carry a valid media_id claim it directly.
+    updates = []
+    positional = []
+    claimed = set()
+    for entry in value:
+        if isinstance(entry, dict):
+            mid = entry.get("media_id")
+            alt = (entry.get("alt") or entry.get("suggested_alt") or "").strip()
+            if mid in valid_ids and alt:
+                updates.append({"media_id": mid, "alt": alt})
+                claimed.add(mid)
+                continue
+            entry = alt  # unresolvable dict — pair its text positionally
+        if isinstance(entry, str) and entry.strip():
+            positional.append(entry.strip())
+
+    # Pass 2: pair leftover texts positionally. Default target is the images
+    # missing alt text (coverage fixes); when the text count instead matches
+    # the full unclaimed image set, it's a whole-set rewrite (keyword-balance
+    # fixes rewrite EXISTING alts) — pair against all images in order.
+    all_ids = [img.get("media_id") for img in images if img.get("media_id")]
+    available = [mid for mid in missing_alt_ids if mid not in claimed]
+    all_unclaimed = [mid for mid in all_ids if mid not in claimed]
+    if positional and len(positional) != len(available):
+        if len(positional) == len(all_unclaimed):
+            available = all_unclaimed
+        elif not available and len(all_unclaimed) >= 2 and len(positional) == len(all_unclaimed) - 1:
+            # Balance rewrite of just the non-hero alts ("remove the keyword
+            # from the others") — the hero keeps its keyword-bearing alt.
+            available = all_unclaimed[1:]
+    for alt, mid in zip(positional, available):
+        updates.append({"media_id": mid, "alt": alt})
+    if len(positional) > len(available):
+        logger.warning(
+            "image_alt fix: %d proposed alt(s) had no image to attach to — dropped",
+            len(positional) - len(available),
+        )
+    return updates
+
+
 @technical_seo_bp.route("/api/technical-seo/fix", methods=["POST"])
 def create_fix_task():
     data = request.get_json(silent=True) or {}
@@ -693,16 +751,21 @@ def apply_fixes():
                 updated_fields.append("description")
             elif field == "image_alt":
                 if isinstance(value, list):
-                    media_updates = value
-                    updated_fields.append("image_alt")
+                    media_updates = _normalize_media_updates(item, value)
+                    if media_updates:
+                        updated_fields.append("image_alt")
+
+        # Nothing resolvable means no Shopify write — succeeding here would
+        # falsely bump last_optimized_at and clear the item from queues.
+        if not shopify_fields and not media_updates:
+            return jsonify({"error": "No applicable fixes — nothing was resolvable to a Shopify update"}), 400
 
         _enforce_meta_limits(shopify_fields)
         if shopify_fields.get("description_html"):
             shopify_fields["description_html"] = sanitize_html(shopify_fields["description_html"])
 
         # Snapshot before-state so View Impact has history for targeted fixes
-        if shopify_fields or media_updates:
-            _record_change_event(item_type, item, fixes, "technical_fix")
+        _record_change_event(item_type, item, fixes, "technical_fix")
 
         if shopify_fields:
             if item_type == "product":
@@ -1011,85 +1074,94 @@ def _execute_bulk_fix_apply(bulk_task_id, item_type, only_fields=None):
                         elif field == "tags" and isinstance(value, list):
                             shopify_fields["tags"] = value
                         elif field == "image_alt" and isinstance(value, list):
-                            media_updates = value
+                            media_updates = _normalize_media_updates(full_item, value)
 
-                    _enforce_meta_limits(shopify_fields)
-                    if shopify_fields.get("description_html"):
-                        shopify_fields["description_html"] = sanitize_html(shopify_fields["description_html"])
+                    # Every fix entry dropped means no Shopify write — recording
+                    # success would fake an optimization and bump freshness.
+                    if not shopify_fields and not media_updates:
+                        item_error = "No applicable fixes — nothing was resolvable to a Shopify update"
+                        with db.get_cursor() as cur:
+                            cur.execute(
+                                "UPDATE bulk_task_items SET apply_result = %s WHERE id = %s",
+                                (json.dumps({"applied": False, "error": item_error}), bti_id),
+                            )
+                    else:
+                        _enforce_meta_limits(shopify_fields)
+                        if shopify_fields.get("description_html"):
+                            shopify_fields["description_html"] = sanitize_html(shopify_fields["description_html"])
 
-                    # Snapshot before-state so View Impact has history
-                    if shopify_fields or media_updates:
+                        # Snapshot before-state so View Impact has history
                         _record_change_event(
                             item_type, full_item, ai_fixes,
                             "issue_fix" if only_fields else "technical_fix",
                         )
 
-                    if shopify_fields:
-                        if item_type == "product":
-                            client.update_product(item["shopify_id"], shopify_fields)
-                        else:
-                            client.update_collection(item["shopify_id"], shopify_fields)
+                        if shopify_fields:
+                            if item_type == "product":
+                                client.update_product(item["shopify_id"], shopify_fields)
+                            else:
+                                client.update_collection(item["shopify_id"], shopify_fields)
 
-                    if media_updates and item_type == "product":
-                        client.update_product_media(item["shopify_id"], media_updates)
+                        if media_updates and item_type == "product":
+                            client.update_product_media(item["shopify_id"], media_updates)
 
-                    with db.get_cursor() as cur:
-                        if item_type == "product":
-                            for f, v in shopify_fields.items():
-                                if f == "tags" and isinstance(v, list):
-                                    cur.execute("UPDATE synced_products SET tags = %s WHERE id = %s", (", ".join(v), ref_id))
-                                elif f == "title":
-                                    cur.execute("UPDATE synced_products SET title = %s WHERE id = %s", (v, ref_id))
-                                elif f == "meta_title":
-                                    cur.execute("UPDATE synced_products SET meta_title = %s WHERE id = %s", (v, ref_id))
-                                elif f == "meta_description":
-                                    cur.execute("UPDATE synced_products SET meta_description = %s WHERE id = %s", (v, ref_id))
-                                elif f == "description_html":
-                                    cur.execute("UPDATE synced_products SET description = %s WHERE id = %s", (v, ref_id))
-                            if media_updates:
-                                images = full_item.get("images") or []
-                                if isinstance(images, str):
-                                    images = json.loads(images)
-                                alt_map = {m["media_id"]: m["alt"] for m in media_updates if m.get("media_id")}
-                                for img in images:
-                                    if img.get("media_id") in alt_map:
-                                        img["alt"] = alt_map[img["media_id"]]
-                                cur.execute("UPDATE synced_products SET images = %s WHERE id = %s", (json.dumps(images), ref_id))
-                            cur.execute("UPDATE synced_products SET last_optimized_at = NOW() WHERE id = %s", (ref_id,))
-                        else:
-                            for f, v in shopify_fields.items():
-                                if f == "title":
-                                    cur.execute("UPDATE synced_collections SET title = %s WHERE id = %s", (v, ref_id))
-                                elif f == "meta_title":
-                                    cur.execute("UPDATE synced_collections SET meta_title = %s WHERE id = %s", (v, ref_id))
-                                elif f == "meta_description":
-                                    cur.execute("UPDATE synced_collections SET meta_description = %s WHERE id = %s", (v, ref_id))
-                                elif f == "description_html":
-                                    cur.execute("UPDATE synced_collections SET description = %s WHERE id = %s", (v, ref_id))
-                            cur.execute("UPDATE synced_collections SET last_optimized_at = NOW() WHERE id = %s", (ref_id,))
+                        with db.get_cursor() as cur:
+                            if item_type == "product":
+                                for f, v in shopify_fields.items():
+                                    if f == "tags" and isinstance(v, list):
+                                        cur.execute("UPDATE synced_products SET tags = %s WHERE id = %s", (", ".join(v), ref_id))
+                                    elif f == "title":
+                                        cur.execute("UPDATE synced_products SET title = %s WHERE id = %s", (v, ref_id))
+                                    elif f == "meta_title":
+                                        cur.execute("UPDATE synced_products SET meta_title = %s WHERE id = %s", (v, ref_id))
+                                    elif f == "meta_description":
+                                        cur.execute("UPDATE synced_products SET meta_description = %s WHERE id = %s", (v, ref_id))
+                                    elif f == "description_html":
+                                        cur.execute("UPDATE synced_products SET description = %s WHERE id = %s", (v, ref_id))
+                                if media_updates:
+                                    images = full_item.get("images") or []
+                                    if isinstance(images, str):
+                                        images = json.loads(images)
+                                    alt_map = {m["media_id"]: m["alt"] for m in media_updates if m.get("media_id")}
+                                    for img in images:
+                                        if img.get("media_id") in alt_map:
+                                            img["alt"] = alt_map[img["media_id"]]
+                                    cur.execute("UPDATE synced_products SET images = %s WHERE id = %s", (json.dumps(images), ref_id))
+                                cur.execute("UPDATE synced_products SET last_optimized_at = NOW() WHERE id = %s", (ref_id,))
+                            else:
+                                for f, v in shopify_fields.items():
+                                    if f == "title":
+                                        cur.execute("UPDATE synced_collections SET title = %s WHERE id = %s", (v, ref_id))
+                                    elif f == "meta_title":
+                                        cur.execute("UPDATE synced_collections SET meta_title = %s WHERE id = %s", (v, ref_id))
+                                    elif f == "meta_description":
+                                        cur.execute("UPDATE synced_collections SET meta_description = %s WHERE id = %s", (v, ref_id))
+                                    elif f == "description_html":
+                                        cur.execute("UPDATE synced_collections SET description = %s WHERE id = %s", (v, ref_id))
+                                cur.execute("UPDATE synced_collections SET last_optimized_at = NOW() WHERE id = %s", (ref_id,))
 
-                    with db.get_cursor() as cur:
-                        cur.execute(
-                            "UPDATE bulk_task_items SET apply_result = %s WHERE id = %s",
-                            (json.dumps({"applied": True}), bti_id),
-                        )
-
-                    with db.get_cursor() as cur:
-                        if item_type == "product":
-                            cur.execute("SELECT * FROM synced_products WHERE id = %s", (ref_id,))
-                        else:
-                            cur.execute("SELECT * FROM synced_collections WHERE id = %s", (ref_id,))
-                        updated_item = cur.fetchone()
-
-                    if updated_item:
-                        new_analysis, new_resolution = _resolve_and_analyze(item_type, updated_item)
-                        _upsert_analysis(store_id, item_type, ref_id, new_analysis, new_resolution)
                         with db.get_cursor() as cur:
                             cur.execute(
-                                """UPDATE technical_seo_analyses SET ai_fixes = NULL
-                                   WHERE store_id = %s AND item_type = %s AND item_id = %s""",
-                                (store_id, item_type, ref_id),
+                                "UPDATE bulk_task_items SET apply_result = %s WHERE id = %s",
+                                (json.dumps({"applied": True}), bti_id),
                             )
+
+                        with db.get_cursor() as cur:
+                            if item_type == "product":
+                                cur.execute("SELECT * FROM synced_products WHERE id = %s", (ref_id,))
+                            else:
+                                cur.execute("SELECT * FROM synced_collections WHERE id = %s", (ref_id,))
+                            updated_item = cur.fetchone()
+
+                        if updated_item:
+                            new_analysis, new_resolution = _resolve_and_analyze(item_type, updated_item)
+                            _upsert_analysis(store_id, item_type, ref_id, new_analysis, new_resolution)
+                            with db.get_cursor() as cur:
+                                cur.execute(
+                                    """UPDATE technical_seo_analyses SET ai_fixes = NULL
+                                       WHERE store_id = %s AND item_type = %s AND item_id = %s""",
+                                    (store_id, item_type, ref_id),
+                                )
 
                 except Exception as apply_err:
                     item_error = f"Apply to Shopify failed: {apply_err}"

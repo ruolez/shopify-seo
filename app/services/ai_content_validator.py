@@ -281,9 +281,14 @@ def validate_technical_fixes(result, primary_keyword, client, config):
             if by_field.get(key) and fields.get(key):
                 by_field[key]["proposed_value"] = fields[key]
         if alt_fix and alts is not None and fields.get("alts"):
-            for orig, new_alt in zip(alt_fix["proposed_value"], fields["alts"]):
-                if isinstance(orig, dict):
-                    orig["alt"] = new_alt
+            proposed = alt_fix["proposed_value"]
+            for i, new_alt in enumerate(fields["alts"]):
+                if i >= len(proposed):
+                    break
+                if isinstance(proposed[i], dict):
+                    proposed[i]["alt"] = new_alt
+                else:
+                    proposed[i] = new_alt
         if qa:
             result["_qa"] = qa
             logger.info("Technical fix QA (%s): %s",

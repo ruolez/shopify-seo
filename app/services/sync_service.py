@@ -60,6 +60,24 @@ def _enqueue_schema_drift_repush(store_id):
             )
 
 
+def _prune_orphan_analyses(store_id, item_type, live_table):
+    """Drop technical_seo_analyses rows whose product/collection no longer exists.
+
+    item_id has no FK (it points into different tables by item_type), so pruning
+    synced rows leaves analyses behind — which then read as permanently stale."""
+    with db.get_cursor() as cur:
+        cur.execute(
+            f"""DELETE FROM technical_seo_analyses tsa
+                WHERE tsa.store_id = %s AND tsa.item_type = %s
+                  AND NOT EXISTS (SELECT 1 FROM {live_table} t
+                                  WHERE t.id = tsa.item_id AND t.store_id = tsa.store_id)""",
+            (store_id, item_type),
+        )
+        removed = cur.rowcount
+    if removed:
+        logger.info("Removed %d orphaned %s analyses for store %s", removed, item_type, store_id)
+
+
 def _upsert_product_batch(store_id, batch):
     # De-dupe by shopify_id (keep the newest occurrence) — ON CONFLICT raises
     # "cannot affect row a second time" if a product appears twice in one batch.
@@ -347,6 +365,7 @@ def _sync_store_inner(store_id):
             stale_count = cur.rowcount
         if stale_count:
             logger.info("Removed %d stale products for store %s", stale_count, store_id)
+        _prune_orphan_analyses(store_id, "product", "synced_products")
 
         with db.get_cursor() as cur:
             cur.execute(
@@ -506,6 +525,7 @@ def _sync_store_inner(store_id):
             stale_count = cur.rowcount
         if stale_count:
             logger.info("Removed %d stale collections for store %s", stale_count, store_id)
+        _prune_orphan_analyses(store_id, "collection", "synced_collections")
 
         # Clear stale interlinking analysis and re-run
         with db.get_cursor() as cur:

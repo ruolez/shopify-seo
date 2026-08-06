@@ -1890,13 +1890,23 @@ def manage_prompts():
         prompt = (data.get("prompt") or "").strip()
         if not prompt:
             return jsonify({"error": "prompt is required"}), 400
+        intent = data.get("intent") or "buyer"
+        if intent not in ("buyer", "brand"):
+            return jsonify({"error": "intent must be 'buyer' or 'brand'"}), 400
         with db.get_cursor() as cur:
             cur.execute(
-                "INSERT INTO ai_prompts (store_id, prompt, intent) VALUES (%s, %s, 'buyer') RETURNING id",
+                "SELECT 1 FROM ai_prompts WHERE store_id = %s AND LOWER(prompt) = LOWER(%s)",
                 (int(store_id), prompt),
             )
-            pid = cur.fetchone()["id"]
-        return jsonify({"ok": True, "id": pid})
+            if cur.fetchone():
+                return jsonify({"error": "This prompt already exists"}), 400
+            cur.execute(
+                "INSERT INTO ai_prompts (store_id, prompt, intent) VALUES (%s, %s, %s) "
+                "RETURNING id, prompt, intent, is_active",
+                (int(store_id), prompt, intent),
+            )
+            row = dict(cur.fetchone())
+        return jsonify({"ok": True, **row})
 
     if action == "delete":
         with db.get_cursor() as cur:
@@ -1998,6 +2008,8 @@ def tracking_detail(run_id):
             "brand_hits": agg["brand_hits"],
             "competitors": agg["competitors"],
             "product_brands": agg["product_brands"],
+            "sources": agg.get("sources") or [],
+            "grounded_answers_with_citations": agg.get("grounded_answers_with_citations") or 0,
             "gap_analysis": run["gap_analysis"],
             "results": results,
         }

@@ -1693,7 +1693,7 @@ async function loadPrompts() {
         const prompts = await apiRequest(`/api/ai-seo/prompts?store_id=${storeId}`);
         if (!prompts.length) {
             container.innerHTML = `<div class="empty-state"><span class="material-symbols-rounded">forum</span>
-                <p>No prompts yet. Click <b>Auto-generate</b> to seed a buyer-intent prompt set.</p></div>`;
+                <p>No prompts yet. Type your own question above, or click <b>Auto-generate</b> to seed a buyer-intent prompt set.</p></div>`;
             return;
         }
         container.innerHTML = prompts
@@ -1701,12 +1701,31 @@ async function loadPrompts() {
                 (p) => `<div style="display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid var(--outline);">
                 <span class="material-symbols-rounded" style="color:var(--on-surface-secondary);font-size:18px;">forum</span>
                 <div style="flex:1;font-size:13px;">${escapeHtml(p.prompt)}</div>
+                <span class="badge ${p.intent === "brand" ? "badge-info" : ""}" ${p.intent === "brand" ? "" : 'style="background:var(--surface-dim);color:var(--on-surface-secondary);"'}>${escapeHtml(p.intent || "buyer")}</span>
                 <button class="icon-btn" onclick="deletePrompt(${p.id})"><span class="material-symbols-rounded" style="font-size:18px;">delete</span></button>
             </div>`
             )
             .join("");
     } catch (err) {
         showToast(`Failed to load prompts: ${err.message}`, "error");
+    }
+}
+
+async function addPrompt() {
+    const storeId = getStoreId();
+    const input = document.getElementById("prompt-add-input");
+    const prompt = input.value.trim();
+    if (!prompt) {
+        showToast("Type a prompt first", "error");
+        return;
+    }
+    const intent = document.getElementById("prompt-add-intent").value;
+    try {
+        await apiRequest("/api/ai-seo/prompts", { method: "POST", body: { action: "add", store_id: parseInt(storeId), prompt, intent } });
+        input.value = "";
+        loadPrompts();
+    } catch (err) {
+        showToast(`Add failed: ${err.message}`, "error");
     }
 }
 
@@ -1823,7 +1842,7 @@ async function loadRuns() {
         document.getElementById("vis-pills").style.display = latest ? "" : "none";
 
         latestRunId = latest ? latest.id : null;
-        ["models-panel", "competitors-panel", "brands-panel", "gap-panel", "breakdown-panel"].forEach(
+        ["models-panel", "competitors-panel", "brands-panel", "gap-panel", "breakdown-panel", "sources-panel"].forEach(
             (id) => (document.getElementById(id).innerHTML = "")
         );
         if (latestRunId) loadRunDetail(latestRunId);
@@ -2008,6 +2027,7 @@ async function loadRunDetail(runId) {
         visState.detail = d;
         renderModels(d);
         renderLeaderboard(d);
+        renderSources(d);
         renderProductBrands(d.product_brands || []);
         renderGap(d.gap_analysis);
         renderBreakdown(d.results || []);
@@ -2060,11 +2080,19 @@ function renderLeaderboard(d) {
             const trackBtn = c.tracked
                 ? `<button class="btn btn-secondary btn-sm" style="color:var(--success);" title="Tracking as a competitor — click to stop" onclick="toggleTracked(${i}, this)"><span class="material-symbols-rounded">check</span> Tracking</button>`
                 : `<button class="btn btn-secondary btn-sm" title="Track this retailer as a competitor" onclick="toggleTracked(${i}, this)"><span class="material-symbols-rounded">add</span> Track</button>`;
+            const srcs = c.sources || [];
+            const viaLine = srcs.length
+                ? `<div style="font-size:11px;color:var(--on-surface-secondary);margin-top:1px;" title="Cited pages backing this recommendation in web-grounded answers">via ${srcs
+                      .slice(0, 4)
+                      .map((s) => `${escapeHtml(s.domain)}${s.count > 1 ? ` (${s.count}×)` : ""}`)
+                      .join(", ")}${srcs.length > 4 ? ` +${srcs.length - 4} more` : ""}</div>`
+                : "";
             return `<div class="sov-row">
                 <span class="sov-rank">${i + 1}</span>
                 <div style="flex:1;min-width:0;">
                     <div style="font-size:13px;font-weight:600;line-height:1.3;">${escapeHtml(name)}</div>
                     <div style="margin-top:1px;">${site}</div>
+                    ${viaLine}
                 </div>
                 ${bar(c.count, false)}
                 <span class="sov-count" title="AI answers that recommended this retailer">${c.count}×</span>
@@ -2106,6 +2134,61 @@ function renderLeaderboard(d) {
         window._domainResolveRun = latestRunId;
         resolveCompetitorDomains();
     }
+}
+
+const SOURCE_CLASS_LABELS = {
+    own_site: { label: "your site", cls: "badge-success" },
+    review_platform: { label: "reviews", cls: "badge-info" },
+    forum: { label: "forum", cls: "badge-info" },
+    marketplace: { label: "marketplace", cls: "badge-info" },
+    social: { label: "social", cls: "badge-info" },
+    competitor: { label: "competitor site", cls: "badge-warning" },
+    listicle: { label: "roundup", cls: "badge-warning" },
+    news: { label: "news/blog", cls: "badge-info" },
+    other: { label: "other", cls: "" },
+};
+
+function renderSources(d) {
+    const panel = document.getElementById("sources-panel");
+    const sources = d.sources || [];
+    if (!sources.length) {
+        panel.innerHTML = "";
+        return;
+    }
+    const names = {};
+    (d.competitors || []).forEach((c) => (names[c.key] = c.name));
+    const rows = sources
+        .map((s) => {
+            const cl = SOURCE_CLASS_LABELS[s.classification] || SOURCE_CLASS_LABELS.other;
+            const comps = (s.competitors || []).map((k) => names[k] || k);
+            const compLine = comps.length
+                ? `<div style="font-size:11px;color:var(--on-surface-secondary);margin-top:1px;">recommends ${comps.map(escapeHtml).join(", ")}</div>`
+                : "";
+            return `<div class="sov-row">
+                <div style="flex:1;min-width:0;">
+                    <div style="font-size:13px;font-weight:600;line-height:1.3;">
+                        <a href="${escapeHtml(s.url)}" target="_blank" rel="noopener" class="comp-site" style="font-size:13px;font-weight:600;">${escapeHtml(s.domain)}<span style="opacity:.55;">&nbsp;↗</span></a>
+                        <span class="badge ${cl.cls}" style="margin-left:6px;">${cl.label}</span>
+                        ${s.cites_you ? '<span class="badge badge-success" style="margin-left:4px;" title="This source appears in answers as a citation for your store">cites you</span>' : ""}
+                    </div>
+                    ${compLine}
+                </div>
+                <span class="sov-count" title="Web-grounded AI answers citing this page">${s.count}×</span>
+            </div>`;
+        })
+        .join("");
+    const covered = d.grounded_answers_with_citations || 0;
+    panel.innerHTML = `<details class="card" style="padding:0;" open>
+        <summary style="padding:14px 16px;cursor:pointer;list-style:none;display:flex;align-items:center;gap:8px;">
+            <span class="material-symbols-rounded" style="color:var(--on-surface-secondary);">travel_explore</span>
+            <b style="flex:1;">Sources behind AI recommendations</b>
+            <span style="font-size:12px;color:var(--on-surface-secondary);">${sources.length} cited page${sources.length === 1 ? "" : "s"}</span>
+        </summary>
+        <div style="padding:0 16px 16px;">
+            <p style="font-size:12px;color:var(--on-surface-secondary);margin:0 0 10px;">The web pages live-search AIs actually cited when answering your buyer questions — based on ${covered} web-grounded answer${covered === 1 ? "" : "s"}. Get listed on the pages recommending competitors but not you.</p>
+            ${rows}
+        </div>
+    </details>`;
 }
 
 async function resolveCompetitorDomains() {

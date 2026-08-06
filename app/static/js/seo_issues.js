@@ -323,9 +323,13 @@ function renderFixProposals(aiFixes, itemType, itemId, fromCache) {
         if (field === "image_alt" && Array.isArray(fix.proposed_value)) {
             html += '<div class="fix-proposal-body">';
             fix.proposed_value.forEach((alt, j) => {
+                // Older generations returned bare strings (no media_id) — the
+                // backend pairs those positionally with the images missing alt.
+                const altText = typeof alt === "string" ? alt : (alt.alt || alt.proposed_alt || "");
+                const mediaId = typeof alt === "string" ? "" : (alt.media_id || "");
                 html += `<div style="display: flex; align-items: center; gap: 8px; margin-bottom: 6px;">
                     <input type="text" class="ai-field-editable fix-value-alt" data-fix-idx="${i}" data-alt-idx="${j}"
-                        data-media-id="${escapeAttr(alt.media_id || "")}" value="${escapeAttr(alt.alt || alt.proposed_alt || "")}" style="flex: 1;">
+                        data-media-id="${escapeAttr(mediaId)}" value="${escapeAttr(altText)}" style="flex: 1;">
                     <span style="font-size: 11px; color: var(--on-surface-secondary); white-space: nowrap;">Image ${j + 1}</span>
                 </div>`;
             });
@@ -365,8 +369,8 @@ async function applySelectedItemFixes(itemType, itemId) {
         const altInputs = proposal.querySelectorAll(`.fix-value-alt[data-fix-idx="${idx}"]`);
         if (altInputs.length) {
             const alts = [...altInputs]
-                .filter(inp => inp.dataset.mediaId && inp.value.trim())
-                .map(inp => ({ media_id: inp.dataset.mediaId, alt: inp.value.trim() }));
+                .filter(inp => inp.value.trim())
+                .map(inp => ({ media_id: inp.dataset.mediaId || "", alt: inp.value.trim() }));
             if (alts.length) fixes.push({ field: "image_alt", value: alts });
             return;
         }
@@ -837,7 +841,11 @@ async function fixIssueType(key) {
                     body: { store_id: parseInt(storeId), item_type: itemType, limit: 500 },
                 });
                 const task = await pollIssuesBulk(resp.bulk_task_id, resp.total, `Fixing ${issue.label.toLowerCase()} (${itemType}s)...`);
-                showToast(`${issue.label} — ${itemType}s: ${task.completed} fixed${task.failed ? `, ${task.failed} failed` : ""}`, task.failed ? "warning" : "success");
+                const skipped = task.skipped || 0;
+                const fixed = Math.max(0, task.completed - skipped);
+                showToast(`${issue.label} — ${itemType}s: ${fixed} fixed`
+                    + (skipped ? `, ${skipped} already clean on re-analysis` : "")
+                    + (task.failed ? `, ${task.failed} failed` : ""), task.failed ? "warning" : "success");
             } catch (err) {
                 failedRuns++;
                 showToast(`Fix failed for ${itemType}s: ${err.message}`, "error");

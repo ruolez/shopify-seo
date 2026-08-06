@@ -251,6 +251,15 @@ def get_bulk_task(bulk_task_id):
         )
         items = cur.fetchall()
 
+    def _is_skipped(it):
+        r = it.get("ai_result")
+        if isinstance(r, str):
+            try:
+                r = json.loads(r)
+            except (ValueError, TypeError):
+                return False
+        return isinstance(r, dict) and bool(r.get("skipped"))
+
     return jsonify(
         {
             "id": bulk_task["id"],
@@ -258,6 +267,7 @@ def get_bulk_task(bulk_task_id):
             "total": bulk_task["total"],
             "completed": bulk_task["completed"],
             "failed": bulk_task["failed"],
+            "skipped": sum(1 for it in items if _is_skipped(it)),
             "current_product_title": bulk_task["current_product_title"],
             "current_item_title": bulk_task["current_product_title"],
             "auto_apply": bulk_task["auto_apply"],
@@ -318,6 +328,24 @@ def _owned_claims_for(ownership, item_type, item_id, cap=150):
     ]
     claims.sort(key=lambda c: c[1].get("volume") or 0, reverse=True)
     return [kw for kw, _ in claims[:cap]]
+
+
+def _record_bulk_change_event(store_id, item_type, item_id, change_type, fields):
+    """Minimal seo_change_events row for a bulk apply. View Impact keys its
+    GSC before/after windows off the event's created_at — without a row,
+    bulk-optimized items report 'no optimization history'."""
+    try:
+        changes = {k: {"new": str(v)[:200]} for k, v in (fields or {}).items() if v}
+        with db.get_cursor() as cur:
+            cur.execute(
+                """INSERT INTO seo_change_events
+                   (store_id, item_type, item_id, change_type, changes_applied)
+                   VALUES (%s, %s, %s, %s, %s)""",
+                (store_id, item_type, item_id, change_type,
+                 json.dumps(changes) if changes else None),
+            )
+    except Exception:
+        logger.exception("Bulk change event insert failed for %s %s", item_type, item_id)
 
 
 def _execute_bulk_collection_task(bulk_task_id):
@@ -423,6 +451,8 @@ def _execute_bulk_collection_task(bulk_task_id):
                         if collection_fields.get("meta_description"):
                             cur.execute("UPDATE synced_collections SET meta_description = %s WHERE id = %s", (collection_fields["meta_description"], collection_id))
                         cur.execute("UPDATE synced_collections SET last_optimized_at = NOW() WHERE id = %s", (collection_id,))
+                    _record_bulk_change_event(item["store_id"], "collection", collection_id,
+                                              "bulk_optimize", collection_fields)
 
                     from app.services.analysis_refresh import refresh_item_analysis
                     refresh_item_analysis(item["store_id"], "collection", collection_id)
@@ -625,7 +655,12 @@ def _execute_bulk_task(bulk_task_id):
                             cur.execute("UPDATE synced_products SET tags = %s WHERE id = %s", (", ".join(product_fields["tags"]), product_id))
                         if media_updates:
                             alt_map = {m["media_id"]: m["alt"] for m in media_updates if m.get("media_id")}
-                            images = item["images"] or []
+                            # Merge into the CURRENT row, not the snapshot read at
+                            # task start — hours may have passed, and overwriting
+                            # with stale images reverts every change made since.
+                            cur.execute("SELECT images FROM synced_products WHERE id = %s", (product_id,))
+                            _fresh = cur.fetchone()
+                            images = (_fresh or {}).get("images") or []
                             if isinstance(images, str):
                                 images = json.loads(images)
                             for img in images:
@@ -633,6 +668,11 @@ def _execute_bulk_task(bulk_task_id):
                                     img["alt"] = alt_map[img["media_id"]]
                             cur.execute("UPDATE synced_products SET images = %s WHERE id = %s", (json.dumps(images), product_id))
                         cur.execute("UPDATE synced_products SET last_optimized_at = NOW() WHERE id = %s", (product_id,))
+                    _event_fields = dict(product_fields)
+                    if media_updates:
+                        _event_fields["image_alt"] = f"{len(media_updates)} image(s) updated"
+                    _record_bulk_change_event(item["store_id"], "product", product_id,
+                                              "bulk_optimize", _event_fields)
 
                     try:
                         generate_and_push_product_schema(product_id, client)
@@ -788,6 +828,8 @@ def _execute_bulk_title_task(bulk_task_id):
                                 "UPDATE bulk_task_items SET apply_result = %s WHERE id = %s",
                                 (json.dumps({"applied": True}), item_id),
                             )
+                        _record_bulk_change_event(item["store_id"], "product", product_id,
+                                                  "bulk_title", {"title": new_title})
                         from app.services.analysis_refresh import refresh_item_analysis
                         refresh_item_analysis(item["store_id"], "product", product_id)
                     except Exception as apply_err:
@@ -930,6 +972,8 @@ def _execute_bulk_collection_title_task(bulk_task_id):
                                 "UPDATE bulk_task_items SET apply_result = %s WHERE id = %s",
                                 (json.dumps({"applied": True}), item_id),
                             )
+                        _record_bulk_change_event(item["store_id"], "collection", collection_id,
+                                                  "bulk_title", {"title": new_title})
                         from app.services.analysis_refresh import refresh_item_analysis
                         refresh_item_analysis(item["store_id"], "collection", collection_id)
                     except Exception as apply_err:

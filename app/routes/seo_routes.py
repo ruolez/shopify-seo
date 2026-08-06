@@ -684,6 +684,8 @@ def _apply_internal_linking(data, store_id, client):
                     [{"field": "internal_links", "value": f"{applied} inbound link(s) added"}],
                     "internal_linking",
                 )
+                from app.services.analysis_refresh import refresh_item_analysis
+                refresh_item_analysis(store_id, t_type, target["id"])
 
     return jsonify({"ok": True, "links_added": applied, "results": results, "message": f"Added links in {applied} article(s)"})
 
@@ -841,6 +843,9 @@ def _apply_image_alt_text(data, store_id, client):
                         img["alt"] = alt_map[img["media_id"]]
                 with db.get_cursor() as cur:
                     cur.execute("UPDATE synced_products SET images = %s WHERE id = %s", (json.dumps(images), product_id))
+                # Re-analyze so Issues/Checks stop flagging the alts just fixed
+                from app.services.analysis_refresh import refresh_item_analysis
+                refresh_item_analysis(store_id, "product", product_id)
 
             results.append({"product_id": product_id, "status": "applied", "count": len(updates)})
         except Exception as e:
@@ -938,6 +943,8 @@ def _apply_faq_schema(data, store_id, client):
                 [{"field": "faq_schema", "value": f"{len(faqs)} FAQ(s) pushed"}],
                 "faq_schema",
             )
+            from app.services.analysis_refresh import refresh_item_analysis
+            refresh_item_analysis(store_id, item_type, item_id)
 
     return jsonify({"ok": True, "faqs_count": len(faqs), "message": f"Pushed {len(faqs)} FAQ(s) as schema markup"})
 
@@ -1694,6 +1701,10 @@ def _execute_bulk_collection_action(bulk_task_id, action):
                     )
                     cur.execute("UPDATE bulk_tasks SET completed = completed + 1 WHERE id = %s", (bulk_task_id,))
                     cur.execute("DELETE FROM generated_collections WHERE collection_id = %s", (c["cid"],))
+                    cur.execute(
+                        "DELETE FROM technical_seo_analyses WHERE item_type = 'collection' AND item_id = %s",
+                        (c["cid"],),
+                    )
                     cur.execute("DELETE FROM synced_collections WHERE id = %s", (c["cid"],))
 
             logger.info("Bulk %s: collection '%s' (shopify_id=%s)", action, c["title"], c["shopify_id"])

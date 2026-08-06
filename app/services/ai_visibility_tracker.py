@@ -14,6 +14,7 @@ import json
 import logging
 import re
 import threading
+from urllib.parse import urlparse
 
 from openai import OpenAI
 
@@ -42,6 +43,45 @@ _DOMAIN_STOPLIST = {
 def _stoplisted_domain(dom):
     """True for reference/social sites, including subdomains (en.wikipedia.org)."""
     return any(dom == s or dom.endswith("." + s) for s in _DOMAIN_STOPLIST)
+
+
+def _cite_domain(url):
+    """Bare hostname of a citation URL ('https://www.reddit.com/r/x' -> 'reddit.com')."""
+    try:
+        host = urlparse(url if "://" in (url or "") else "https://" + (url or "")).hostname or ""
+    except ValueError:
+        return ""
+    host = host.lower()
+    return host[4:] if host.startswith("www.") else host
+
+
+def _classify_source(domain, url_path, store_host, competitor_keys):
+    """Bucket a cited domain the way the off-site audit buckets SERP results.
+
+    Citations carry no page title, so the listicle check runs against the URL
+    path slug instead. Lazy import — offsite_visibility_service imports from
+    this module at top level."""
+    from app.services.offsite_visibility_service import (
+        CLASSIFY_DOMAINS, _domain_in, _LISTICLE_TITLE_RE, _NEWSISH_RE,
+    )
+
+    if store_host and (domain == store_host or domain.endswith("." + store_host)):
+        return "own_site"
+    if _domain_in(domain, CLASSIFY_DOMAINS["review_platform"]):
+        return "review_platform"
+    if _domain_in(domain, CLASSIFY_DOMAINS["forum"]):
+        return "forum"
+    if _domain_in(domain, CLASSIFY_DOMAINS["marketplace"]):
+        return "marketplace"
+    if _domain_in(domain, CLASSIFY_DOMAINS["social"]):
+        return "social"
+    if _key_in(_canonical_brand_key(domain), competitor_keys):
+        return "competitor"
+    if _LISTICLE_TITLE_RE.search((url_path or "").replace("-", " ").replace("/", " ")):
+        return "listicle"
+    if _NEWSISH_RE.search(domain):
+        return "news"
+    return "other"
 
 
 # Generic place descriptors models use instead of naming a store — not competitors.
@@ -164,7 +204,8 @@ def _is_grounded_model(model, cfg=None):
 
 
 def _host(value):
-    return (value or "").replace("https://", "").replace("http://", "").strip("/").lower()
+    host = (value or "").replace("https://", "").replace("http://", "").strip("/").lower()
+    return host[4:] if host.startswith("www.") else host
 
 
 def _brand_terms(store):
@@ -275,24 +316,41 @@ def _query_model(client, model, prompt, temperature=0.3):
     return content, total, _extract_citations(msg)
 
 
-def _extract_entities_llm(client, model, question, answer, store_name, brand_ck):
+def _extract_entities_llm(client, model, question, answer, store_name, brand_ck, citations=None):
     """One cheap structured call per answer: which retailers does it send buyers to,
     and which product brands does it mention? Far more reliable than the regex
-    fallback at telling 'JR Cigars' from a 'Flavor profile:' heading. Returns
+    fallback at telling 'JR Cigars' from a 'Flavor profile:' heading. When the
+    answer is web-grounded, `citations` (its cited URLs) is passed so the same
+    call also attributes which sources back each retailer. Returns
     (entities, tokens); entities is None when the response can't be parsed."""
+    sources_block, sources_instr = "", ""
+    shape = '{"retailers": [{"name": string, "domain": string|null}], "product_brands": [string]}'
+    if citations:
+        sources_block = (
+            "\nSOURCES the answer cited (numbered):\n"
+            + "\n".join(f"[{i}] {u}" for i, u in enumerate(citations, 1)) + "\n"
+        )
+        sources_instr = (
+            " For each retailer, also list which SOURCE numbers from the numbered list "
+            "support or mention it — the cited pages the answer draws on when "
+            "recommending it. Use [] when unclear."
+        )
+        shape = (
+            '{"retailers": [{"name": string, "domain": string|null, "sources": [int]}], '
+            '"product_brands": [string]}'
+        )
     prompt = (
         "A shopper asked an AI assistant a question; the answer is below. Identify the "
         "entities the answer mentions.\n\n"
-        f"QUESTION: {question}\n\nANSWER:\n{answer}\n\n"
+        f"QUESTION: {question}\n\nANSWER:\n{answer}\n{sources_block}\n"
         "Extract:\n"
         "1. retailers — actual stores, websites, or marketplaces the answer points to as "
-        "PLACES TO BUY. Include a domain only if it literally appears in the answer.\n"
+        f"PLACES TO BUY. Include a domain only if it literally appears in the answer.{sources_instr}\n"
         "2. product_brands — product brands / manufacturers mentioned (things you buy, "
         "not places to buy).\n"
         "Do NOT include section headings, advice phrases, product categories, or generic "
         f'terms — only real, named businesses and brands. Do not include "{store_name}".\n'
-        'Return ONLY JSON: {"retailers": [{"name": string, "domain": string|null}], '
-        '"product_brands": [string]}'
+        f"Return ONLY JSON: {shape}"
     )
     text, tokens, _cites = _query_model(client, model, prompt, temperature=0)
     s, e = text.find("{"), text.rfind("}") + 1
@@ -312,7 +370,8 @@ def _extract_entities_llm(client, model, question, answer, store_name, brand_ck)
         name = (r.get("name") or "").strip()
         if name and _norm_brand(name) in _GENERIC_RETAILERS:
             continue
-        domain = _host(r.get("domain") or "") or None
+        # The extractor sometimes returns a full URL as the domain — keep the host only.
+        domain = _host(r.get("domain") or "").split("/")[0].removeprefix("www.") or None
         if domain and (_stoplisted_domain(domain) or "." not in domain):
             domain = None
         # Domain-derived keys are stable across runs; name variants aren't.
@@ -322,7 +381,14 @@ def _extract_entities_llm(client, model, question, answer, store_name, brand_ck)
         if any(b in key or key in b for b in brand_ck):
             continue
         seen.add(key)
-        retailers.append({"key": key, "name": name or domain, "domain": domain})
+        entry = {"key": key, "name": name or domain, "domain": domain}
+        if citations:
+            urls = []
+            for idx in r.get("sources") or []:
+                if isinstance(idx, int) and 1 <= idx <= len(citations) and citations[idx - 1] not in urls:
+                    urls.append(citations[idx - 1])
+            entry["urls"] = urls[:5]
+        retailers.append(entry)
 
     brands, bseen = [], set()
     for b in data.get("product_brands") or []:
@@ -437,12 +503,17 @@ def compute_share_of_voice(run_id):
         cur.execute("SELECT store_id FROM ai_tracking_runs WHERE id = %s", (run_id,))
         run = cur.fetchone()
         domain_cache = {}
+        store_host = ""
         if run:
             cur.execute(
                 "SELECT brand_key, domain FROM brand_domains WHERE store_id = %s AND domain <> ''",
                 (run["store_id"],),
             )
             domain_cache = {r["brand_key"]: r["domain"] for r in cur.fetchall()}
+            cur.execute("SELECT * FROM stores WHERE id = %s", (run["store_id"],))
+            store = cur.fetchone()
+            if store:
+                store_host = _host(store.get("primary_domain") or store.get("domain"))
         cur.execute(
             """SELECT m.*, p.intent FROM ai_mention_results m
                LEFT JOIN ai_prompts p ON p.id = m.prompt_id WHERE m.run_id = %s""",
@@ -453,7 +524,8 @@ def compute_share_of_voice(run_id):
     if not rows:
         return {"brand_mention_rate": 0, "citation_rate": 0, "share_of_voice": 0,
                 "avg_rank": None, "brand_known_rate": None, "competitors": [],
-                "product_brands": [], "total_answers": 0, "brand_hits": 0}
+                "product_brands": [], "total_answers": 0, "brand_hits": 0,
+                "sources": [], "grounded_answers_with_citations": 0}
 
     buyer = [r for r in rows if (r.get("intent") or "buyer") != "brand"]
     brand_rows = [r for r in rows if r.get("intent") == "brand"]
@@ -488,6 +560,68 @@ def compute_share_of_voice(run_id):
           "count": v, "tracked": _key_in(k, tracked)} for k, v in counts.items()),
         key=lambda c: -c["count"],
     )[:25]
+
+    # Which web pages grounded answers actually cited, and which competitors each
+    # page backs. Attribution per answer: the extractor's per-retailer source URLs
+    # when present, plus a deterministic hostname match (competitor's own domain
+    # appearing among the citations) that also covers runs recorded before
+    # attribution existed.
+    comp_domain_keys = {}
+    for k in counts:
+        d = _host(domains.get(k) or domain_cache.get(k) or "")
+        if d:
+            comp_domain_keys[d] = k
+    src, comp_sources, grounded_cited = {}, {}, 0
+    for r in buyer:
+        if not r.get("grounded"):
+            continue
+        cited = {}  # domain -> first url in this answer
+        for u in (r.get("citations") or []):
+            d = _cite_domain(u)
+            if d and d not in cited:
+                cited[d] = u
+        if not cited:
+            continue
+        grounded_cited += 1
+        for d, u in cited.items():
+            e = src.setdefault(d, {"count": 0, "cites_you": False, "comp_keys": set(), "url": u})
+            e["count"] += 1
+            if store_host and (d == store_host or d.endswith("." + store_host)):
+                e["cites_you"] = True
+        for b in (r["recommended_brands"] or []):
+            key = b.get("key")
+            if not key or key not in counts:
+                continue
+            attributed = {d for d in (_cite_domain(u) for u in (b.get("urls") or [])) if d in cited}
+            bdom = _host(b.get("domain") or "")
+            for d in cited:
+                if d == bdom or comp_domain_keys.get(d) == key or _canonical_brand_key(d) == key:
+                    attributed.add(d)
+            for d in attributed:
+                src[d]["comp_keys"].add(key)
+                by_dom = comp_sources.setdefault(key, {})
+                by_dom[d] = by_dom.get(d, 0) + 1
+    for c in competitors:
+        by_dom = comp_sources.get(c["key"])
+        if by_dom:
+            c["sources"] = [
+                {"domain": d, "count": n}
+                for d, n in sorted(by_dom.items(), key=lambda kv: -kv[1])[:5]
+            ]
+    sources = []
+    for d, e in sorted(src.items(), key=lambda kv: -kv[1]["count"])[:15]:
+        try:
+            path = urlparse(e["url"]).path or ""
+        except ValueError:
+            path = ""
+        sources.append({
+            "domain": d,
+            "count": e["count"],
+            "classification": _classify_source(d, path, store_host, set(counts)),
+            "cites_you": e["cites_you"],
+            "competitors": sorted(e["comp_keys"], key=lambda k: -counts.get(k, 0))[:6],
+            "url": e["url"],
+        })
 
     # Product brands mentioned in answers — informational, kept out of SoV math.
     pb_counts, pb_display, pb_carried = {}, {}, {}
@@ -567,6 +701,8 @@ def compute_share_of_voice(run_id):
         "product_brands": product_brands,
         "total_answers": len(buyer),
         "brand_hits": brand_hits,
+        "sources": sources,
+        "grounded_answers_with_citations": grounded_cited,
     }
 
 
@@ -696,7 +832,8 @@ def run_tracking(run_id):
                     if intent != "brand":
                         try:
                             entities, etok = _extract_entities_llm(
-                                client, extract_model, pr["prompt"], text[:4000], store["name"], brand_ck
+                                client, extract_model, pr["prompt"], text[:4000], store["name"], brand_ck,
+                                citations=citations if grounded else None,
                             )
                             cost += etok * COST_PER_TOKEN
                             if entities is not None:
@@ -784,6 +921,7 @@ def _run_summary(agg):
         "models": agg.get("models"),
         "total_answers": agg["total_answers"],
         "brand_hits": agg["brand_hits"],
+        "sources": agg.get("sources"),
     }
 
 
@@ -815,7 +953,8 @@ def reanalyze_run(run_id):
             cur.execute("SELECT * FROM stores WHERE id = %s", (store_id,))
             store = dict(cur.fetchone())
             cur.execute(
-                """SELECT m.id, m.prompt, m.response_text, p.intent FROM ai_mention_results m
+                """SELECT m.id, m.prompt, m.response_text, m.citations, m.grounded, p.intent
+                   FROM ai_mention_results m
                    LEFT JOIN ai_prompts p ON p.id = m.prompt_id WHERE m.run_id = %s""",
                 (run_id,),
             )
@@ -831,7 +970,8 @@ def reanalyze_run(run_id):
                 continue
             try:
                 entities, tokens = _extract_entities_llm(
-                    client, extract_model, r.get("prompt") or "", r["response_text"], store["name"], brand_ck
+                    client, extract_model, r.get("prompt") or "", r["response_text"], store["name"], brand_ck,
+                    citations=(r.get("citations") or None) if r.get("grounded") else None,
                 )
             except Exception as e:
                 logger.warning("Reanalyze extraction failed (%s): %s", extract_model, e)

@@ -394,6 +394,10 @@ def delete_brand_collection(gc_id):
     with db.get_cursor() as cur:
         cur.execute("DELETE FROM generated_collections WHERE id = %s", (gc_id,))
         if collection_id:
+            cur.execute(
+                "DELETE FROM technical_seo_analyses WHERE item_type = 'collection' AND item_id = %s",
+                (collection_id,),
+            )
             cur.execute("DELETE FROM synced_collections WHERE id = %s", (collection_id,))
 
     return jsonify({"ok": True})

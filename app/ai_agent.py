@@ -4368,8 +4368,17 @@ def run_task(task_type, task_input, store_id=None):
                 images = json.loads(images)
             item_context["image_count"] = len(images)
             item_context["images_without_alt"] = [
-                {"media_id": img.get("media_id", ""), "src": img.get("src", "")}
+                {"media_id": img.get("media_id", ""), "src": img.get("url", "")}
                 for img in images if not img.get("alt")
+            ]
+            # Full image list with current alts — alt-balance fixes rewrite
+            # EXISTING alts, so the model must see them and their media_ids.
+            # (Synced images store the URL under "url"; the filename in it is
+            # often the only hint of what the image shows.)
+            item_context["images"] = [
+                {"media_id": img.get("media_id", ""), "alt": img.get("alt") or "",
+                 "src": img.get("url", "")}
+                for img in images
             ]
 
         _PROMO_RE = re.compile(r'\b(\d+)\s*for\s*\$?(\d+(?:\.\d{1,2})?[c¢]?)\b', re.IGNORECASE)
@@ -4557,7 +4566,11 @@ def run_task(task_type, task_input, store_id=None):
                 "+ [variant-specific tags]\n"
                 "- Image alt: write varied, descriptive alt texts; include the primary keyword in only "
                 "the one or two most relevant images (typically the first/hero image); NEVER put the "
-                "keyword in every alt\n"
+                "keyword in every alt. proposed_value MUST be an array of objects "
+                '[{"media_id": "<exact media_id from the images list>", "alt": "<alt text>"}] — never bare strings. '
+                "For missing alt text: one entry per images_without_alt item. For keyword-balance fixes "
+                "(image_alt_has_keyword failing): rewrite the EXISTING alts from the images list — keep the "
+                "keyword in the first/hero alt, remove it from the others by describing what each image shows\n"
             )
         else:
             tags_rules = "- Do NOT propose tags or image_alt fixes for collections\n"
