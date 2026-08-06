@@ -921,6 +921,8 @@ def _apply_link_fixes_to_source(store_id, shopify_client, config, source_ref, fi
     if not links_to_add:
         return results
 
+    pushed = False
+    recorded_handles = set()
     try:
         ai_links = [{"url": l["url"], "anchor_text": l["anchor_text"]} for l in links_to_add]
         new_html = sanitize_html(_inject_link_via_ai(source["html"], ai_links, config))
@@ -931,6 +933,7 @@ def _apply_link_fixes_to_source(store_id, shopify_client, config, source_ref, fi
             raise ValueError(f"AI output rejected: {reason}")
 
         _push_html_to_shopify(shopify_client, source["item_type"], source["shopify_id"], new_html)
+        pushed = True
         warning = None
         try:
             _update_local_db(source["item_type"], source["id"], new_html)
@@ -957,19 +960,34 @@ def _apply_link_fixes_to_source(store_id, shopify_client, config, source_ref, fi
                 },
                 anchor_text=l["anchor_text"],
             )
+            recorded_handles.add(fix.get("to_handle"))
             r = {"from_handle": from_handle, "to_handle": fix.get("to_handle"), "status": "applied"}
             if warning:
                 r["warning"] = warning
             results.append(r)
     except Exception as e:
         logger.exception("Failed to apply interlink fixes for %s '%s'", from_type, from_handle)
+        # The Shopify push is one atomic call. Links already recorded keep
+        # their "applied" rows; the rest are "applied with warning" if the
+        # push happened (they ARE live) or "error" if it never did.
         for l in links_to_add:
-            results.append({
-                "from_handle": from_handle,
-                "to_handle": l["_fix"].get("to_handle"),
-                "status": "error",
-                "reason": str(e),
-            })
+            to_handle = l["_fix"].get("to_handle")
+            if to_handle in recorded_handles:
+                continue
+            if pushed:
+                results.append({
+                    "from_handle": from_handle,
+                    "to_handle": to_handle,
+                    "status": "applied",
+                    "warning": f"Link is live on Shopify but post-apply bookkeeping failed: {e}",
+                })
+            else:
+                results.append({
+                    "from_handle": from_handle,
+                    "to_handle": to_handle,
+                    "status": "error",
+                    "reason": str(e),
+                })
     return results
 
 

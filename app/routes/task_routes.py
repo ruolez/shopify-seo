@@ -1088,6 +1088,7 @@ def list_tasks():
 # owning-page links live here so the frontend needs no per-type knowledge.
 
 AI_TASK_META = {
+    "cannibalization_bulk_fix": ("Cannibalization Bulk Fix", "/gsc"),
     "ai_seo_scan": ("AI SEO Scan", "/ai-seo"),
     "feed_readiness_scan": ("Feed Readiness Audit", "/ai-seo"),
     "article_seo": ("Article SEO Analysis", "/blog"),

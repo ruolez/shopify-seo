@@ -1085,12 +1085,22 @@ async function bulkFixCannibalization(groupIndex) {
     btn.innerHTML = `<span class="spinner" style="width:14px;height:14px;border-width:2px;"></span> Fixing ${actionableItems.length} items...`;
 
     try {
-        const result = await apiRequest("/api/gsc/cannibalization/bulk-fix", {
+        // Runs as a background task — synchronous execution hit the proxy
+        // timeout on big batches while writes kept landing behind a 504.
+        const start = await apiRequest("/api/gsc/cannibalization/bulk-fix", {
             method: "POST",
-            body: { items: actionableItems },
+            body: { items: actionableItems, store_id: currentStoreId },
         });
-
-        showToast(`Bulk fix complete: ${result.success} succeeded, ${result.failed} failed`, result.failed ? "warning" : "success");
+        const task = await pollTaskUntilDone(`/api/tasks/${start.task_id}`, {
+            intervalMs: 2500,
+            timeoutMs: Math.max(15, actionableItems.length * 3) * 60 * 1000,
+            onProgress: (t) => {
+                const p = t.result && t.result.progress;
+                if (p) btn.innerHTML = `<span class="spinner" style="width:14px;height:14px;border-width:2px;"></span> Fixing ${p.completed}/${p.total}...`;
+            },
+        });
+        const res = task.result || {};
+        showToast(`Bulk fix complete: ${res.success || 0} succeeded, ${res.failed || 0} failed`, res.failed ? "warning" : "success");
         loadCannibalization();
     } catch (err) {
         showToast("Bulk fix failed: " + err.message, "error");

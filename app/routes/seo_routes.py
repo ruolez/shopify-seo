@@ -2657,8 +2657,13 @@ def _inject_image_into_description(client, collection, image_url, alt_text, widt
         description,
     )
 
+    # This goes live on the storefront — a quote in the alt (even a benign
+    # AI-generated one) must not break out of the attribute.
+    import html as _html
+    safe_alt = _html.escape(str(alt_text or ""), quote=True)
+    safe_src = _html.escape(str(image_url or ""), quote=True)
     img_tag = (
-        f'<img src="{image_url}" alt="{alt_text}" class="collection-banner-img"'
+        f'<img src="{safe_src}" alt="{safe_alt}" class="collection-banner-img"'
         f' width="{width}" height="{height}"'
         f' loading="eager" fetchpriority="high"'
         f' style="width:100%;max-width:100%;height:auto;border-radius:8px;margin-bottom:16px;" />'
@@ -2706,7 +2711,7 @@ def apply_collection_image(collection_id):
 
         mime = "image/webp" if filename.endswith(".webp") else "image/jpeg"
         staged = client.staged_upload_create(filename, mime, len(image_bytes), resource="IMAGE")
-        resource_url = client.upload_staged_file(staged, image_bytes)
+        resource_url = client.upload_staged_file(staged, image_bytes, content_type=mime, filename=filename)
         logger.info("Staged upload complete for collection %s: %s", collection_id, resource_url)
         result = client.update_collection_image(collection["shopify_id"], resource_url, alt_text)
         logger.info("collectionUpdate result for %s: %s", collection_id, result)
@@ -2794,7 +2799,7 @@ def _run_bulk_collection_images(bulk_task_id, collection_ids):
 
             mime = "image/webp" if filename.endswith(".webp") else "image/jpeg"
             staged = client.staged_upload_create(filename, mime, len(image_bytes), resource="IMAGE")
-            resource_url = client.upload_staged_file(staged, image_bytes)
+            resource_url = client.upload_staged_file(staged, image_bytes, content_type=mime, filename=filename)
             result = client.update_collection_image(collection["shopify_id"], resource_url, alt_text)
 
             final_url = resource_url

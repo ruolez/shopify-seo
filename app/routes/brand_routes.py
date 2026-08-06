@@ -648,12 +648,15 @@ def _build_brands_landing_html(brand_collections, store_name, vendor_product_typ
             count_text = f"{count} product{'s' if count != 1 else ''}" if count > 0 else ""
 
             product_types = vendor_product_types.get(c["title"], [])
-            pt_text = ", ".join(html_lib.escape(pt) for pt in product_types[:2])
-            if pt_text:
-                alt_text = f"Shop {title} {pt_text} - {count_text} at {safe_store}"
+            # Compose from RAW values, truncate, then escape exactly once —
+            # double-escaping rendered "H&M" as "H&amp;amp;M", and truncating
+            # an already-escaped string could slice an entity in half.
+            raw_pt_text = ", ".join(product_types[:2])
+            if raw_pt_text:
+                raw_alt = f"Shop {c['title'] or ''} {raw_pt_text} - {count_text} at {store_name}"
             else:
-                alt_text = f"Shop {title} collection - {count_text} at {safe_store}"
-            alt_text = html_lib.escape(alt_text[:125])
+                raw_alt = f"Shop {c['title'] or ''} collection - {count_text} at {store_name}"
+            alt_text = html_lib.escape(raw_alt[:125])
 
             card_categories = ""
             if product_types:
@@ -1061,7 +1064,7 @@ def _find_and_upload_brand_logo(store_id, brand_name, shopify_collection_id, col
     try:
         mime = "image/webp" if filename.endswith(".webp") else "image/jpeg"
         staged = client.staged_upload_create(filename, mime, len(image_bytes), resource="IMAGE")
-        resource_url = client.upload_staged_file(staged, image_bytes)
+        resource_url = client.upload_staged_file(staged, image_bytes, content_type=mime, filename=filename)
         result = client.update_collection_image(shopify_collection_id, resource_url, alt_text)
 
         final_url = resource_url
@@ -1537,7 +1540,9 @@ def _get_interlink_suggestions(store_id, collection_id, vendor_name=None):
                     reason = f"Shared product type: {pt}"
                     break
 
-            if not reason and vendor_name.lower() in coll_title_lower:
+            # vendor_name can be empty ("" in x is always True) — never emit
+            # a blank "Related to brand:" suggestion.
+            if not reason and vendor_name and vendor_name.lower() in coll_title_lower:
                 reason = f"Related to brand: {vendor_name}"
 
             if reason:

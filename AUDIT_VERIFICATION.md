@@ -464,7 +464,7 @@ trustworthy again.
   otherwise re-raise.
   **Benefit:** No duplicate landing pages appearing on your store after a hiccup.
 
-- [ ] **4.8 Bulk cannibalization fix runs inside the web request** *(failure mode corrected)*
+- [x] **4.8 Bulk cannibalization fix runs inside the web request** *(failure mode corrected)*
   **Problem:** `routes/gsc_routes.py:720-911` runs AI + Shopify writes synchronously.
   Verified correction: persistence is per-item, so completed fixes are NOT lost; the real
   failure is that past ~300s nginx returns a 504 while the backend keeps working — you see a
@@ -474,14 +474,14 @@ trustworthy again.
   **Benefit:** Long bulk fixes show live progress instead of timing out with a scary error
   while secretly still running.
 
-- [ ] **4.9 Interlinking partial failure misreports applied links as errors**
+- [x] **4.9 Interlinking partial failure misreports applied links as errors**
   **Problem:** `routes/interlinking_routes.py:941-972` — the Shopify push is one atomic call,
   but if *recording* link N fails afterward, error rows are appended for **all** links,
   including ones already applied and live (some get both an "applied" and an "error" row).
   **Fix:** In the except handler, append error rows only for links not yet recorded as applied.
   **Benefit:** The results list tells you exactly which links are live — no contradictions.
 
-- [ ] **4.10 Editing the cannibalization prompt in Settings can break every fix**
+- [x] **4.10 Editing the cannibalization prompt in Settings can break every fix**
   **Problem:** Three sites in `routes/gsc_routes.py` (:422-423, :525-537, :787-799) use
   `.format()` on user-editable prompt templates. The defaults survive only because their JSON
   examples are `{{`-escaped; the natural user edit (unescaping braces) breaks every call.
@@ -489,7 +489,7 @@ trustworthy again.
   **Fix:** Switch all three to `.replace()` placeholder substitution.
   **Benefit:** Editing prompts in Settings can never crash the features that use them.
 
-- [ ] **4.11 OAuth error text reflected raw into the redirect**
+- [x] **4.11 OAuth error text reflected raw into the redirect**
   **Problem (scope corrected):** `routes/gsc_routes.py:76, 98` reflect raw exception text
   unencoded into the redirect Location — corrupted query strings and internal-detail leaks.
   Verified: the audit's refresh-token crash is largely defused (`prompt="consent"` forces
@@ -506,7 +506,7 @@ trustworthy again.
   "connection failed — check token" warning in the response and UI).
   **Benefit:** Typos in tokens/domains are caught the moment you add the store.
 
-- [ ] **4.13 Staged uploads pass defaults instead of real content type (tidy-up)**
+- [x] **4.13 Staged uploads pass defaults instead of real content type (tidy-up)**
   **Problem (impact corrected):** `routes/brand_routes.py:1067-1068` declares webp/jpeg + real
   filename to Shopify but calls `upload_staged_file` with default `image/png`/`image.png`;
   `landing_routes.py:1299` omits filename; verified third site `seo_routes.py:2703-2705`.
@@ -535,7 +535,7 @@ trustworthy again.
   **Fix:** Key the merged dicts by `(store_id, path)` and look up with the item's store_id.
   **Benefit:** Each store's traffic numbers appear only on that store's items.
 
-- [ ] **4.16 Alt text interpolated unescaped into live collection HTML**
+- [x] **4.16 Alt text interpolated unescaped into live collection HTML**
   **Problem (scope corrected):** `routes/seo_routes.py:2647-2664` interpolates `alt_text` into
   an `<img>` tag unescaped and pushes it live. Verified: `image_url` is server-derived (not
   client-controlled, as the audit claimed) — but `alt_text` is, and even a benign
@@ -544,7 +544,7 @@ trustworthy again.
   **Benefit:** Collection descriptions can't be corrupted (or scripted) by a quote in alt
   text.
 
-- [ ] **4.17 "H&M" renders as "H&amp;amp;M" on brand landing pages**
+- [x] **4.17 "H&M" renders as "H&amp;amp;M" on brand landing pages**
   **Problem:** `routes/brand_routes.py:657-660` escapes already-escaped strings a second time
   when composing alt/aria-label text. Verified bonus defect: the `[:125]` truncation happens
   *between* the two escapes and can slice an entity in half.
@@ -552,7 +552,7 @@ trustworthy again.
   end.
   **Benefit:** Brand names with `&` display correctly on your live landing pages.
 
-- [ ] **4.18 Empty vendor name tags every collection as "Related to brand: " (latent)**
+- [x] **4.18 Empty vendor name tags every collection as "Related to brand: " (latent)**
   **Problem:** `routes/brand_routes.py:1512-1514, 1543` — a missing/empty collection title
   yields `vendor_name=""`, and `"" in title` is always true, so every collection (up to the
   10-cap) gets a blank "Related to brand: " suggestion. Verified: reachable only when a brand

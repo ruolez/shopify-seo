@@ -1296,7 +1296,7 @@ def generate_hero_image(page_id):
                 img_bytes, filename, alt_text, width, height = result
                 mime = "image/webp" if filename.endswith(".webp") else "image/jpeg"
                 staged = client.staged_upload_create(filename, mime, len(img_bytes), resource="IMAGE")
-                resource_url = client.upload_staged_file(staged, img_bytes, content_type=mime)
+                resource_url = client.upload_staged_file(staged, img_bytes, content_type=mime, filename=filename)
                 file_obj = client.file_create(resource_url, filename=filename, alt_text=alt_text)
                 file_id = file_obj.get("id")
                 if not file_id:

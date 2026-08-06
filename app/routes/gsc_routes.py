@@ -2,6 +2,7 @@ import json
 import logging
 import threading
 from datetime import datetime, timedelta, timezone
+from urllib.parse import quote
 
 from flask import Blueprint, jsonify, redirect, render_template, request, session, url_for
 
@@ -75,7 +76,9 @@ def auth_callback():
     error = request.args.get("error")
 
     if error:
-        return redirect("/gsc?error=" + error)
+        # URL-encode — this value is attacker-controllable query input and
+        # must not be reflected raw into the Location header.
+        return redirect("/gsc?error=" + quote(error, safe=""))
 
     if not code:
         return redirect("/gsc?error=no_code")
@@ -97,7 +100,7 @@ def auth_callback():
         gsc_service.save_credentials(store_id, token_data)
         return redirect("/gsc?connected=true&store_id=" + str(store_id))
     except Exception as e:
-        return redirect("/gsc?error=" + str(e))
+        return redirect("/gsc?error=" + quote(str(e), safe=""))
 
 
 # ── Property Selection ──
@@ -378,6 +381,15 @@ def _get_ai_client():
     return client, model, None
 
 
+def _fill_prompt(template, **values):
+    """Placeholder substitution via .replace, not .format — a user-edited
+    prompt containing a stray { must not crash every call (same rule as
+    interlinking_routes)."""
+    for key, val in values.items():
+        template = template.replace("{" + key + "}", str(val))
+    return template
+
+
 def _ai_json_call(client, model, prompt, max_tokens=1500):
     response = client.chat.completions.create(
         model=model,
@@ -422,7 +434,7 @@ def analyze_cannibalization():
         extra_context += f"\n\nIMPORTANT: The user has manually designated {manual_winner} as the WINNER page. Do NOT change this decision. Provide recommendations only for the OTHER pages."
 
     prompt_template = get_setting("prompts.cannibalization_analysis", DEFAULTS["prompts.cannibalization_analysis"])
-    prompt = prompt_template.format(query=query, pages_description=pages_desc) + extra_context
+    prompt = _fill_prompt(prompt_template, query=query, pages_description=pages_desc) + extra_context
 
     try:
         result = _ai_json_call(client, model, prompt)
@@ -502,7 +514,8 @@ def generate_cannibalization_fix():
         return jsonify({"error": err}), 400
 
     prompt_template = get_setting("prompts.cannibalization_fix", DEFAULTS["prompts.cannibalization_fix"])
-    prompt = prompt_template.format(
+    prompt = _fill_prompt(
+        prompt_template,
         item_type=item_type,
         current_title=item.get("title") or "",
         current_meta_title=item.get("meta_title") or "",
@@ -702,6 +715,34 @@ def verify_fixes():
 
 @gsc_bp.route("/api/gsc/cannibalization/bulk-fix", methods=["POST"])
 def bulk_cannibalization_fix():
+    """Spawn the bulk fix as a background task — running it inside the web
+    request hit nginx's proxy timeout on big batches, showing a 504 while the
+    backend kept writing to Shopify behind the user's back."""
+    from app.database import db
+    from app.services.task_runner import spawn as spawn_task
+
+    data = request.get_json(silent=True) or {}
+    items = data.get("items", [])
+    if not items:
+        return jsonify({"error": "items array required"}), 400
+
+    _client_ai, _model, err = _get_ai_client()
+    if err:
+        return jsonify({"error": err}), 400
+
+    with db.get_cursor() as cur:
+        cur.execute(
+            "INSERT INTO ai_tasks (store_id, task_type, status, input) "
+            "VALUES (%s, 'cannibalization_bulk_fix', 'running', %s) RETURNING id",
+            (data.get("store_id"), json.dumps({"total": len(items)})),
+        )
+        task_id = cur.fetchone()["id"]
+
+    spawn_task("ai_tasks", task_id, _run_bulk_cannibalization_fix, task_id, items)
+    return jsonify({"ok": True, "task_id": task_id, "total": len(items)}), 202
+
+
+def _run_bulk_cannibalization_fix(task_id, items):
     from app.auth import decrypt_value
     from app.database import db
     from app.settings_manager import get_setting
@@ -709,17 +750,42 @@ def bulk_cannibalization_fix():
     from app.services.ai_output_guard import guard_shopify_fields
     from app.shopify_client import ShopifyClient
 
-    data = request.get_json(silent=True) or {}
-    items = data.get("items", [])
-    if not items:
-        return jsonify({"error": "items array required"}), 400
+    results = []
+    ownership_by_store = {}
+
+    def _write_progress(status=None):
+        success = sum(1 for r in results if r["status"] == "ok")
+        failed = sum(1 for r in results if r["status"] == "error")
+        payload = {
+            "progress": {"total": len(items), "completed": len(results), "failed": failed, "success": success},
+            "results": results,
+            "success": success,
+            "failed": failed,
+        }
+        with db.get_cursor() as cur:
+            if status:
+                cur.execute(
+                    "UPDATE ai_tasks SET status = %s, result = %s, completed_at = NOW() WHERE id = %s",
+                    (status, json.dumps(payload), task_id),
+                )
+            else:
+                cur.execute("UPDATE ai_tasks SET result = %s WHERE id = %s", (json.dumps(payload), task_id))
+
+    def add_result(r):
+        # Per-item persistence: completed fixes survive a crash mid-batch and
+        # the UI polls live progress.
+        results.append(r)
+        _write_progress()
 
     client_ai, model, err = _get_ai_client()
     if err:
-        return jsonify({"error": err}), 400
+        with db.get_cursor() as cur:
+            cur.execute(
+                "UPDATE ai_tasks SET status = 'failed', error = %s, completed_at = NOW() WHERE id = %s",
+                (err, task_id),
+            )
+        return
 
-    ownership_by_store = {}
-    results = []
     for item_data in items:
         item_type = item_data.get("item_type")
         item_id = item_data.get("item_id")
@@ -731,7 +797,7 @@ def bulk_cannibalization_fix():
 
         try:
             if item_type not in ("product", "collection"):
-                results.append({"item_id": item_id, "status": "error", "error": f"Invalid item_type: {item_type}"})
+                add_result({"item_id": item_id, "status": "error", "error": f"Invalid item_type: {item_type}"})
                 continue
             table = "synced_products" if item_type == "product" else "synced_collections"
             with db.get_cursor() as cur:
@@ -742,7 +808,7 @@ def bulk_cannibalization_fix():
                 item = cur.fetchone()
 
             if not item:
-                results.append({"item_id": item_id, "status": "error", "error": "Not found"})
+                add_result({"item_id": item_id, "status": "error", "error": "Not found"})
                 continue
 
             if item["store_id"] not in ownership_by_store:
@@ -756,10 +822,10 @@ def bulk_cannibalization_fix():
             except Exception:
                 # Fail closed per item — never rewrite on an unverified keyword.
                 logger.exception("Keyword safety check failed for %s %s", item_type, item_id)
-                results.append({"item_id": item_id, "status": "error", "error": "Keyword safety check failed"})
+                add_result({"item_id": item_id, "status": "error", "error": "Keyword safety check failed"})
                 continue
             if conflict:
-                results.append({"item_id": item_id, "status": "skipped", "error": conflict})
+                add_result({"item_id": item_id, "status": "skipped", "error": conflict})
                 continue
 
             images = []
@@ -774,7 +840,8 @@ def bulk_cannibalization_fix():
                     images_context = f"\n\nCURRENT IMAGE ALT TEXTS ({len(images)} images):\n{alt_lines}"
 
             prompt_template = get_setting("prompts.cannibalization_fix", DEFAULTS["prompts.cannibalization_fix"])
-            prompt = prompt_template.format(
+            prompt = _fill_prompt(
+                prompt_template,
                 item_type=item_type,
                 current_title=item.get("title") or "",
                 current_meta_title=item.get("meta_title") or "",
@@ -790,7 +857,7 @@ def bulk_cannibalization_fix():
 
             fix = _ai_json_call(client_ai, model, prompt, max_tokens=1200)
             if is_failed_result(fix):
-                results.append({"item_id": item_id, "status": "error", "error": "AI returned an unusable response"})
+                add_result({"item_id": item_id, "status": "error", "error": "AI returned an unusable response"})
                 continue
 
             shopify_client = ShopifyClient(
@@ -821,7 +888,7 @@ def bulk_cannibalization_fix():
 
             has_alt_suggestions = bool(item_type == "product" and fix.get("image_alt_suggestions"))
             if not fields and not has_alt_suggestions:
-                results.append({"item_id": item_id, "status": "skipped", "updated": [], "explanation": fix.get("explanation", "AI proposed no changes")})
+                add_result({"item_id": item_id, "status": "skipped", "updated": [], "explanation": fix.get("explanation", "AI proposed no changes")})
                 continue
 
             if fields:
@@ -846,7 +913,7 @@ def bulk_cannibalization_fix():
 
             if not updated:
                 # Nothing to apply — don't stamp last_optimized_at or record a fix row.
-                results.append({"item_id": item_id, "status": "skipped", "updated": [], "explanation": fix.get("explanation", "AI proposed no changes")})
+                add_result({"item_id": item_id, "status": "skipped", "updated": [], "explanation": fix.get("explanation", "AI proposed no changes")})
                 continue
 
             with db.get_cursor() as cur:
@@ -893,11 +960,10 @@ def bulk_cannibalization_fix():
                          image_alts_changed),
                     )
 
-            results.append({"item_id": item_id, "status": "ok", "updated": updated, "explanation": fix.get("explanation", "")})
+            add_result({"item_id": item_id, "status": "ok", "updated": updated, "explanation": fix.get("explanation", "")})
         except Exception as e:
             logger.error("Bulk fix failed for %s %s: %s", item_type, item_id, str(e))
-            results.append({"item_id": item_id, "status": "error", "error": str(e)})
+            add_result({"item_id": item_id, "status": "error", "error": str(e)})
 
-    success = sum(1 for r in results if r["status"] == "ok")
     failed = sum(1 for r in results if r["status"] == "error")
-    return jsonify({"ok": True, "results": results, "success": success, "failed": failed})
+    _write_progress("completed_with_errors" if failed else "completed")
