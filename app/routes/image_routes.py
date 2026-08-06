@@ -212,13 +212,20 @@ def bulk_upload():
         return jsonify({"error": "product_ids is required"}), 400
 
     with db.get_cursor() as cur:
+        # Validate up front — unknown ids would be enqueued but never processed
+        # (executor JOIN drops them), leaving completed+failed < total forever.
+        cur.execute("SELECT id FROM synced_products WHERE id = ANY(%s)", ([int(i) for i in product_ids],))
+        valid_ids = [r["id"] for r in cur.fetchall()]
+        if not valid_ids:
+            return jsonify({"error": "No matching products found"}), 400
+
         cur.execute(
             "INSERT INTO bulk_tasks (status, total, auto_apply, task_type) VALUES ('pending', %s, true, 'placeholder_image') RETURNING id",
-            (len(product_ids),),
+            (len(valid_ids),),
         )
         bulk_task_id = cur.fetchone()["id"]
 
-        for pid in product_ids:
+        for pid in valid_ids:
             cur.execute(
                 "INSERT INTO bulk_task_items (bulk_task_id, product_id) VALUES (%s, %s)",
                 (bulk_task_id, pid),
@@ -226,7 +233,7 @@ def bulk_upload():
 
     spawn_task("bulk_tasks", bulk_task_id, _execute_bulk_upload, bulk_task_id)
 
-    return jsonify({"ok": True, "bulk_task_id": bulk_task_id, "total": len(product_ids)}), 201
+    return jsonify({"ok": True, "bulk_task_id": bulk_task_id, "total": len(valid_ids)}), 201
 
 
 @image_bp.route("/api/images/bulk-status/<int:bulk_task_id>", methods=["GET"])
@@ -428,13 +435,20 @@ def bulk_replace():
         return jsonify({"error": "product_ids is required"}), 400
 
     with db.get_cursor() as cur:
+        # Validate up front — unknown ids would be enqueued but never processed
+        # (executor JOIN drops them), leaving completed+failed < total forever.
+        cur.execute("SELECT id FROM synced_products WHERE id = ANY(%s)", ([int(i) for i in product_ids],))
+        valid_ids = [r["id"] for r in cur.fetchall()]
+        if not valid_ids:
+            return jsonify({"error": "No matching products found"}), 400
+
         cur.execute(
             "INSERT INTO bulk_tasks (status, total, auto_apply, task_type) VALUES ('pending', %s, true, 'replace_placeholder_image') RETURNING id",
-            (len(product_ids),),
+            (len(valid_ids),),
         )
         bulk_task_id = cur.fetchone()["id"]
 
-        for pid in product_ids:
+        for pid in valid_ids:
             cur.execute(
                 "INSERT INTO bulk_task_items (bulk_task_id, product_id) VALUES (%s, %s)",
                 (bulk_task_id, pid),
@@ -442,7 +456,7 @@ def bulk_replace():
 
     spawn_task("bulk_tasks", bulk_task_id, _execute_bulk_replace, bulk_task_id)
 
-    return jsonify({"ok": True, "bulk_task_id": bulk_task_id, "total": len(product_ids)}), 201
+    return jsonify({"ok": True, "bulk_task_id": bulk_task_id, "total": len(valid_ids)}), 201
 
 
 def _execute_bulk_replace(bulk_task_id):

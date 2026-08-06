@@ -141,7 +141,7 @@ trustworthy again.
   **Benefit:** A page is either a CTR opportunity or it isn't — the home page stops flagging
   and unflagging the same page depending on which engine looked at it.
 
-- [ ] **2.8 Deleted-store bulk tasks finish as "success" with 0 results**
+- [x] **2.8 Deleted-store bulk tasks finish as "success" with 0 results**
   **Problem:** Six bulk executors (`routes/brand_routes.py:96-102, 937-940, 1331-1334`;
   `routes/seo_routes.py:1773-1779, 2006-2012, 2221-2227`) mark the task `completed` and return
   when the store row is missing — no error, 0/N done, all items left pending.
@@ -159,14 +159,14 @@ trustworthy again.
   **Benefit:** You can tell the difference between "AI models don't mention your brand" and
   "the check itself broke" — critical distinction for trusting the report.
 
-- [ ] **2.10 Schema repush no-op toasts "started"**
+- [x] **2.10 Schema repush no-op toasts "started"**
   **Problem:** `/api/ai-seo/schema/repush` can return `ok: true, message: "Nothing to repush"`
   (`routes/ai_seo_routes.py:1714`), but the JS (`static/js/seo.js:3316, 3332`) toasts "started
   — progress in the background tasks panel" on any OK response; `message` is never read.
   **Fix:** In both callers, show `resp.message` when `resp.batches` is empty.
   **Benefit:** No more hunting the tasks panel for a job that was never created.
 
-- [ ] **2.11 Bulk progress bars silently under-report** *(corrected consequence)*
+- [x] **2.11 Bulk progress bars silently under-report** *(corrected consequence)*
   **Problem:** Bulk-titles (`routes/task_routes.py:739-762, 883-906`) and image bulk
   upload/replace (`routes/image_routes.py:206-229, 422-445`) insert unvalidated ids with
   `total = len(ids)`; executors' JOINs silently drop unknown ids. Verified correction: the
@@ -176,7 +176,7 @@ trustworthy again.
   validate ids against the DB first, insert only valid ones, set `total` accordingly.
   **Benefit:** Progress bars reach 100% and reflect reality.
 
-- [ ] **2.12 API "total" disagrees between creation response and polling**
+- [x] **2.12 API "total" disagrees between creation response and polling**
   **Problem:** `routes/task_routes.py:226` (and :318) return `total: len(submitted_ids)` while
   the DB row stores `len(valid_ids)` — every subsequent poll disagrees with the creation
   response.
@@ -193,7 +193,7 @@ trustworthy again.
   **Benefit:** Your Semrush overview stops overstating how many keywords you win — the numbers
   become real.
 
-- [ ] **2.14 Activity feed mislabels every AI-SEO batch as "Product SEO Optimization"**
+- [x] **2.14 Activity feed mislabels every AI-SEO batch as "Product SEO Optimization"**
   **Problem:** `bulk_tasks.task_type` defaults to `'product'` (`database.py:360-365`) and the
   GEO / fact-boost / schema-repush creators set only `kind`
   (`routes/ai_seo_routes.py:1299, 1541, 1780`), so the feed discriminator
@@ -204,7 +204,7 @@ trustworthy again.
   discriminator to prefer `kind`).
   **Benefit:** The Activity feed tells you what each job actually was, and filters work.
 
-- [ ] **2.15 Interlinking batches that finish "with errors" vanish from Activity**
+- [x] **2.15 Interlinking batches that finish "with errors" vanish from Activity**
   **Problem:** Interlinking apply batches can end `completed_with_errors`
   (`routes/interlinking_routes.py:1095`), but the Activity feed's ai_tasks branch lists only
   `('completed','failed')` (`routes/task_routes.py:1166`) — even though app.js has a

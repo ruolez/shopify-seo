@@ -1296,7 +1296,7 @@ def optimize_batch():
     item_col = "collection_id" if resource_type == "collection" else "product_id"
     with db.get_cursor() as cur:
         cur.execute(
-            "INSERT INTO bulk_tasks (status, total, auto_apply, store_id, kind, resource_type) VALUES ('pending', %s, TRUE, %s, 'geo_optimize', %s) RETURNING id",
+            "INSERT INTO bulk_tasks (status, total, auto_apply, store_id, kind, task_type, resource_type) VALUES ('pending', %s, TRUE, %s, 'geo_optimize', 'geo_optimize', %s) RETURNING id",
             (len(ids), int(store_id), resource_type),
         )
         batch_id = cur.fetchone()["id"]
@@ -1538,7 +1538,7 @@ def facts_batch():
     item_col = "collection_id" if resource_type == "collection" else "product_id"
     with db.get_cursor() as cur:
         cur.execute(
-            "INSERT INTO bulk_tasks (status, total, auto_apply, store_id, kind, resource_type) VALUES ('pending', %s, TRUE, %s, 'fact_boost', %s) RETURNING id",
+            "INSERT INTO bulk_tasks (status, total, auto_apply, store_id, kind, task_type, resource_type) VALUES ('pending', %s, TRUE, %s, 'fact_boost', 'fact_boost', %s) RETURNING id",
             (len(ids), int(store_id), resource_type),
         )
         batch_id = cur.fetchone()["id"]
@@ -1777,9 +1777,9 @@ def _spawn_ai_seo_batch(store_id, kind, resource_type, ids):
     ids = [int(i) for i in ids]
     with db.get_cursor() as cur:
         cur.execute(
-            "INSERT INTO bulk_tasks (status, total, auto_apply, store_id, kind, resource_type) "
-            "VALUES ('pending', %s, TRUE, %s, %s, %s) RETURNING id",
-            (len(ids), int(store_id), kind, resource_type),
+            "INSERT INTO bulk_tasks (status, total, auto_apply, store_id, kind, task_type, resource_type) "
+            "VALUES ('pending', %s, TRUE, %s, %s, %s, %s) RETURNING id",
+            (len(ids), int(store_id), kind, kind, resource_type),
         )
         batch_id = cur.fetchone()["id"]
         for rid in ids:

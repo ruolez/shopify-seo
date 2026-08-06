@@ -18,7 +18,7 @@ from app.services.ai_output_guard import (
     guard_shopify_fields,
     sanitize_html,
 )
-from app.services.task_runner import spawn as spawn_task
+from app.services.task_runner import finalize_failed, spawn as spawn_task
 from app.services.image_generator import (
     build_seo_alt_text,
     generate_collection_image,
@@ -1774,11 +1774,7 @@ def _execute_bulk_apply_tags(bulk_task_id, store_id, assignments):
         store = cur.fetchone()
 
     if not store:
-        with db.get_cursor() as cur:
-            cur.execute(
-                "UPDATE bulk_tasks SET status = 'completed', completed_at = NOW() WHERE id = %s",
-                (bulk_task_id,),
-            )
+        finalize_failed("bulk_tasks", bulk_task_id, "Store no longer exists")
         return
 
     client = ShopifyClient(
@@ -2007,11 +2003,7 @@ def _execute_generate_collections(bulk_task_id, store_id, tags, auto_optimize):
         store = cur.fetchone()
 
     if not store:
-        with db.get_cursor() as cur:
-            cur.execute(
-                "UPDATE bulk_tasks SET status = 'completed', completed_at = NOW() WHERE id = %s",
-                (bulk_task_id,),
-            )
+        finalize_failed("bulk_tasks", bulk_task_id, "Store no longer exists")
         return
 
     client = ShopifyClient(
@@ -2222,11 +2214,7 @@ def _execute_generate_taxonomy_collections(bulk_task_id, store_id, categories, p
         store = cur.fetchone()
 
     if not store:
-        with db.get_cursor() as cur:
-            cur.execute(
-                "UPDATE bulk_tasks SET status = 'completed', completed_at = NOW() WHERE id = %s",
-                (bulk_task_id,),
-            )
+        finalize_failed("bulk_tasks", bulk_task_id, "Store no longer exists")
         return
 
     client = ShopifyClient(

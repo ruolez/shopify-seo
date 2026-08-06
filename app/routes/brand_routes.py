@@ -9,7 +9,7 @@ from flask import Blueprint, jsonify, render_template, request
 from app.auth import decrypt_value
 from app.database import db
 from app.services.ai_output_guard import guard_shopify_fields
-from app.services.task_runner import is_failed_result, spawn as spawn_task
+from app.services.task_runner import finalize_failed, is_failed_result, spawn as spawn_task
 from app.shopify_client import ShopifyClient
 
 logger = logging.getLogger(__name__)
@@ -94,11 +94,7 @@ def _execute_brand_collections(bulk_task_id, store_id, vendors):
         store = cur.fetchone()
 
     if not store:
-        with db.get_cursor() as cur:
-            cur.execute(
-                "UPDATE bulk_tasks SET status = 'completed', completed_at = NOW() WHERE id = %s",
-                (bulk_task_id,),
-            )
+        finalize_failed("bulk_tasks", bulk_task_id, "Store no longer exists")
         return
 
     client = ShopifyClient(
@@ -935,8 +931,7 @@ def _execute_bulk_brand_logos(bulk_task_id, store_id, gc_ids):
         store = cur.fetchone()
 
     if not store:
-        with db.get_cursor() as cur:
-            cur.execute("UPDATE bulk_tasks SET status = 'completed', completed_at = NOW() WHERE id = %s", (bulk_task_id,))
+        finalize_failed("bulk_tasks", bulk_task_id, "Store no longer exists")
         return
 
     for gc_id in gc_ids:
@@ -1329,8 +1324,7 @@ def _execute_bulk_brand_optimize(bulk_task_id, store_id, gc_ids, auto_apply):
         store = cur.fetchone()
 
     if not store:
-        with db.get_cursor() as cur:
-            cur.execute("UPDATE bulk_tasks SET status = 'completed', completed_at = NOW() WHERE id = %s", (bulk_task_id,))
+        finalize_failed("bulk_tasks", bulk_task_id, "Store no longer exists")
         return
 
     client = ShopifyClient(

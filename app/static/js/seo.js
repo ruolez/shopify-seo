@@ -3313,8 +3313,10 @@ async function batchGenerateSchemas() {
             method: "POST",
             body: { store_id: storeId, type: "all", ids: "all" },
         });
-        if (resp.ok) {
+        if (resp.ok && resp.batches && resp.batches.length) {
             showToast("Schema regenerate + push started — progress in the background tasks panel", "success");
+        } else if (resp.ok) {
+            showToast(resp.message || "Nothing to repush", "info");
         }
     } catch (err) {
         showToast(`Batch schema job failed to start: ${err.message}`, "error");
@@ -3329,8 +3331,10 @@ async function batchPushSchemas() {
             method: "POST",
             body: { store_id: storeId, type: "all", ids: "stale" },
         });
-        if (resp.ok) {
+        if (resp.ok && resp.batches && resp.batches.length) {
             showToast("Push of pending schemas started — progress in the background tasks panel", "success");
+        } else if (resp.ok) {
+            showToast(resp.message || "Nothing to repush", "info");
         }
     } catch (err) {
         showToast(`Batch schema job failed to start: ${err.message}`, "error");

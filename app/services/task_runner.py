@@ -37,6 +37,12 @@ def is_failed_result(result):
     return False
 
 
+def finalize_failed(table, task_id, message):
+    """Mark a task row failed (public: executors bailing early — e.g. store
+    deleted mid-flight — must not leave the row completed or running)."""
+    return _finalize_failed(table, task_id, message)
+
+
 def _finalize_failed(table, task_id, message):
     if table not in _HAS_ERROR_COLUMN:
         raise ValueError(f"Unknown task table: {table}")

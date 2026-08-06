@@ -223,7 +223,7 @@ def create_bulk_task():
 
     spawn_task("bulk_tasks", bulk_task_id, _execute_bulk_task, bulk_task_id)
 
-    return jsonify({"ok": True, "bulk_task_id": bulk_task_id, "total": len(product_ids)}), 201
+    return jsonify({"ok": True, "bulk_task_id": bulk_task_id, "total": len(valid_ids)}), 201
 
 
 @task_bp.route("/api/tasks/bulk/<int:bulk_task_id>", methods=["GET"])
@@ -315,7 +315,7 @@ def create_bulk_collection_task():
 
     spawn_task("bulk_tasks", bulk_task_id, _execute_bulk_collection_task, bulk_task_id)
 
-    return jsonify({"ok": True, "bulk_task_id": bulk_task_id, "total": len(collection_ids)}), 201
+    return jsonify({"ok": True, "bulk_task_id": bulk_task_id, "total": len(valid_ids)}), 201
 
 
 def _owned_claims_for(ownership, item_type, item_id, cap=150):
@@ -745,13 +745,20 @@ def create_bulk_title_task():
         return jsonify({"error": "product_ids is required"}), 400
 
     with db.get_cursor() as cur:
+        # Validate up front — unknown ids would be enqueued but never processed
+        # (executor JOIN drops them), leaving completed+failed < total forever.
+        cur.execute("SELECT id FROM synced_products WHERE id = ANY(%s)", ([int(i) for i in product_ids],))
+        valid_ids = [r["id"] for r in cur.fetchall()]
+        if not valid_ids:
+            return jsonify({"error": "No matching products found"}), 400
+
         cur.execute(
             "INSERT INTO bulk_tasks (status, total, auto_apply, task_type) VALUES ('pending', %s, true, 'title') RETURNING id",
-            (len(product_ids),),
+            (len(valid_ids),),
         )
         bulk_task_id = cur.fetchone()["id"]
 
-        for pid in product_ids:
+        for pid in valid_ids:
             cur.execute(
                 "INSERT INTO bulk_task_items (bulk_task_id, product_id) VALUES (%s, %s)",
                 (bulk_task_id, pid),
@@ -759,7 +766,7 @@ def create_bulk_title_task():
 
     spawn_task("bulk_tasks", bulk_task_id, _execute_bulk_title_task, bulk_task_id)
 
-    return jsonify({"ok": True, "bulk_task_id": bulk_task_id, "total": len(product_ids)}), 201
+    return jsonify({"ok": True, "bulk_task_id": bulk_task_id, "total": len(valid_ids)}), 201
 
 
 def _execute_bulk_title_task(bulk_task_id):
@@ -889,13 +896,20 @@ def create_bulk_collection_title_task():
         return jsonify({"error": "collection_ids is required"}), 400
 
     with db.get_cursor() as cur:
+        # Validate up front — unknown ids would be enqueued but never processed
+        # (executor JOIN drops them), leaving completed+failed < total forever.
+        cur.execute("SELECT id FROM synced_collections WHERE id = ANY(%s)", ([int(i) for i in collection_ids],))
+        valid_ids = [r["id"] for r in cur.fetchall()]
+        if not valid_ids:
+            return jsonify({"error": "No matching collections found"}), 400
+
         cur.execute(
             "INSERT INTO bulk_tasks (status, total, auto_apply, task_type) VALUES ('pending', %s, true, 'collection_title') RETURNING id",
-            (len(collection_ids),),
+            (len(valid_ids),),
         )
         bulk_task_id = cur.fetchone()["id"]
 
-        for cid in collection_ids:
+        for cid in valid_ids:
             cur.execute(
                 "INSERT INTO bulk_task_items (bulk_task_id, collection_id) VALUES (%s, %s)",
                 (bulk_task_id, cid),
@@ -903,7 +917,7 @@ def create_bulk_collection_title_task():
 
     spawn_task("bulk_tasks", bulk_task_id, _execute_bulk_collection_title_task, bulk_task_id)
 
-    return jsonify({"ok": True, "bulk_task_id": bulk_task_id, "total": len(collection_ids)}), 201
+    return jsonify({"ok": True, "bulk_task_id": bulk_task_id, "total": len(valid_ids)}), 201
 
 
 def _execute_bulk_collection_title_task(bulk_task_id):
@@ -1163,7 +1177,7 @@ def active_tasks():
                       result->'progress' AS progress
                FROM ai_tasks
                WHERE status IN ('pending','running')
-                  OR (status IN ('completed','failed') AND completed_at > NOW() - INTERVAL '{hours} hours')
+                  OR (status IN ('completed','failed','completed_with_errors') AND completed_at > NOW() - INTERVAL '{hours} hours')
                ORDER BY id DESC LIMIT 50"""
         )
         for r in cur.fetchall():
@@ -1182,11 +1196,14 @@ def active_tasks():
                       current_product_title, created_at, completed_at
                FROM bulk_tasks
                WHERE status IN ('pending','running')
-                  OR (status IN ('completed','failed') AND completed_at > NOW() - INTERVAL '{hours} hours')
+                  OR (status IN ('completed','failed','completed_with_errors') AND completed_at > NOW() - INTERVAL '{hours} hours')
                ORDER BY id DESC LIMIT 50"""
         )
         for r in cur.fetchall():
-            key = r["task_type"] or r["kind"]
+            # kind first: AI-SEO batch creators set kind while task_type falls
+            # to its 'product' column default — task_type-first mislabeled
+            # every GEO/fact-boost/schema-repush batch as product SEO.
+            key = r["kind"] or r["task_type"]
             label, page = BULK_TASK_META.get(key, (_fallback_label(key), None))
             tasks.append({
                 "source": "bulk", "id": r["id"], "label": label, "page": page,
