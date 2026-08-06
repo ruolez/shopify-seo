@@ -212,8 +212,40 @@ function collectItemIssues(item) {
         }));
 }
 
+/* The server's issue_scanner list is authoritative (same scan as the Issues
+ * tab, including duplicate/schema categories). The local derivation renders
+ * instantly as a placeholder and is swapped out when the fetch returns. */
+function scheduleItemIssuesRefresh(item, itemType) {
+    const storeId = item.store_id || (typeof _getSeoStoreId === "function" ? _getSeoStoreId() : "");
+    if (!storeId || !item.id) return;
+    setTimeout(async () => {
+        try {
+            const resp = await apiRequest(`/api/seo/issues/item/${itemType}/${item.id}?store_id=${storeId}`);
+            const panel = document.querySelector(".item-issues-panel");
+            if (!panel || !resp || !Array.isArray(resp.issues)) return;
+            // Don't clobber an in-flight or rendered AI-fix flow.
+            const fixes = document.getElementById("issue-fixes-container");
+            if (fixes && fixes.innerHTML.trim() && !(item.keyword_analysis && item.keyword_analysis.ai_fixes)) return;
+            const issues = resp.issues.map((i) => ({
+                key: i.key,
+                label: i.label,
+                issue: i.detail,
+                fixable: i.fixable,
+                severity: i.severity,
+            }));
+            panel.outerHTML = renderItemIssuesPanelHtml(issues, item, itemType);
+        } catch (e) {
+            /* keep the locally derived fallback */
+        }
+    }, 0);
+}
+
 function renderItemIssuesPanel(item, itemType) {
-    const issues = collectItemIssues(item);
+    scheduleItemIssuesRefresh(item, itemType);
+    return renderItemIssuesPanelHtml(collectItemIssues(item), item, itemType);
+}
+
+function renderItemIssuesPanelHtml(issues, item, itemType) {
     const ka = item.keyword_analysis;
     const fixableCount = issues.filter(i => i.fixable).length;
 
@@ -239,8 +271,9 @@ function renderItemIssuesPanel(item, itemType) {
 
     html += '<ul class="item-issues-list">';
     for (const iss of issues) {
+        const sev = iss.severity ? `sev-${iss.severity}` : (iss.fixable ? "sev-med" : "sev-low");
         html += `<li class="item-issue">
-            <span class="issue-severity-dot ${iss.fixable ? "sev-med" : "sev-low"}"></span>
+            <span class="issue-severity-dot ${sev}"></span>
             <span class="item-issue-text"><strong>${escapeHtml(iss.label)}:</strong> ${escapeHtml(iss.issue)}</span>
             ${iss.fixable ? "" : '<span class="badge badge-not-analyzed" title="Informational — no automatic fix">info</span>'}
         </li>`;

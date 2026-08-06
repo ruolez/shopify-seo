@@ -37,6 +37,23 @@ def expected_ctr_for_position(position, curve=None):
     return DEFAULT_CTR_CURVE[999]
 
 
+# The single app-wide rule for "this page's CTR underperforms its position".
+# Top-10 only: past page one, CTR is dominated by position, not snippet quality.
+CTR_UNDERPERFORMER_MIN_IMPRESSIONS = 200
+CTR_UNDERPERFORMER_MAX_POSITION = 10
+CTR_UNDERPERFORMER_RATIO = 0.8
+
+
+def is_ctr_underperformer(position, ctr, impressions, curve=None):
+    """One definition of a CTR opportunity, shared by every engine that feeds
+    the home queue — a page is either an opportunity everywhere or nowhere."""
+    if not impressions or impressions < CTR_UNDERPERFORMER_MIN_IMPRESSIONS:
+        return False
+    if not position or position <= 0 or position > CTR_UNDERPERFORMER_MAX_POSITION:
+        return False
+    return (ctr or 0) < expected_ctr_for_position(position, curve) * CTR_UNDERPERFORMER_RATIO
+
+
 def _bucket_for_position(pos):
     if pos <= 1.5:
         return 1

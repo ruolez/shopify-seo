@@ -37,27 +37,15 @@ logger = logging.getLogger(__name__)
 
 seo_bp = Blueprint("seo", __name__)
 
-# Checks the keyword-alignment analyzer shares with the content analyzer —
-# excluded when counting keyword-pillar issues so they aren't double counted.
-CONTENT_DEDUP_CHECK_KEYS = {
-    "meta_title_length",
-    "meta_desc_length",
-    "description_word_count",
-    "image_alt_coverage",
-}
-
-
 def _count_unified_issues(seo_breakdown, tsa_checks):
     """Issues across both pillars: content checks below their good band plus
-    keyword-analysis issues, minus the overlap (content path is canonical)."""
+    keyword-analysis issues, minus the overlap (content path is canonical).
+    Keyword issues use the same whitelist as the Issues tab (issue_scanner),
+    so informational checks like url_has_keyword don't inflate list counts."""
+    from app.services.issue_scanner import keyword_issue_map
+
     content_issues = sum(1 for c in (seo_breakdown or {}).values() if c["score"] < 100)
-    keyword_issues = 0
-    if tsa_checks:
-        keyword_issues = sum(
-            1 for k, c in tsa_checks.items()
-            if k not in CONTENT_DEDUP_CHECK_KEYS and c.get("issue")
-        )
-    return content_issues + keyword_issues
+    return content_issues + len(keyword_issue_map(tsa_checks))
 
 
 def _fetch_keyword_analysis(store_id, item_type, item_id):

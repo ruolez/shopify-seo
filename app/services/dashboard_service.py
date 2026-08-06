@@ -358,7 +358,7 @@ def _brand_tokens(store):
 def get_ctr_opportunities(store_id, limit=10, min_impressions=200):
     """Queries ranking in the top 10 whose CTR trails the expected curve for
     their position — the cheapest wins on the site (meta title rewrites)."""
-    from app.services.ctr_benchmarks import get_expected_ctr_curve
+    from app.services.ctr_benchmarks import get_expected_ctr_curve, is_ctr_underperformer
     from app.services.seo_analyzer import _expected_ctr
     from app.services.url_utils import url_path_key
 
@@ -398,7 +398,7 @@ def get_ctr_opportunities(store_id, limit=10, min_impressions=200):
         actual = int(r["clicks"] or 0) / impressions if impressions else 0
         position = float(r["position"])
         expected = _expected_ctr(position, ctr_curve)
-        if actual >= expected * 0.8:
+        if not is_ctr_underperformer(position, actual, impressions, ctr_curve):
             continue
         candidates.append(
             {
@@ -1159,21 +1159,14 @@ def get_store_insights(store_id):
         gaps = cur.fetchone()
         insights["content_gaps"] = {"total": gaps["total"], "new": gaps["new_gaps"]}
 
-        # Technical SEO issues
-        cur.execute(
-            """SELECT COUNT(*) as total,
-                      SUM(issues_count) as total_issues,
-                      SUM(fixable_count) as fixable_issues
-               FROM technical_seo_analyses
-               WHERE store_id = %s AND issues_count > 0""",
-            (store_id,),
-        )
-        tech = cur.fetchone()
-        insights["technical_seo"] = {
-            "items_with_issues": int(tech["total"]),
-            "total_issues": int(tech["total_issues"] or 0),
-            "fixable_issues": int(tech["fixable_issues"] or 0),
-        }
+        # Technical SEO issues — same scan as the Issues tab (issue_scanner is
+        # the single definition), so the badge and the tab always agree.
+        from app.services.issue_scanner import count_store_issues
+        try:
+            insights["technical_seo"] = count_store_issues(store_id)
+        except Exception:
+            logger.exception("Issue count failed for store %s", store_id)
+            insights["technical_seo"] = {"items_with_issues": 0, "total_issues": 0, "fixable_issues": 0}
 
         # Interlinking health
         cur.execute(

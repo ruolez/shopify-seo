@@ -116,7 +116,7 @@ trustworthy again.
   **Benefit:** One consistent rule for what counts as an AI failure, so error handling can't
   silently diverge between pages in the future.
 
-- [ ] **2.6 Three different definitions of "issue" — numbers never agree**
+- [x] **2.6 Three different definitions of "issue" — numbers never agree**
   **Problem (verified, direction corrected):** The home/nav badge sums stored
   `tsa.issues_count` (`services/dashboard_service.py:1163-1176`), which counts every check with
   an issue message including `url_has_keyword`. The Issues tab
@@ -131,7 +131,7 @@ trustworthy again.
   **Benefit:** The issue count on the sidebar, the Issues tab, and each item's popup will
   finally show the same number — no more "which number is right?".
 
-- [ ] **2.7 Two definitions of "CTR underperformer"**
+- [x] **2.7 Two definitions of "CTR underperformer"**
   **Problem:** `services/dashboard_service.py:401` (actual < expected×0.8, ≥200 impressions,
   top-10 only) vs `services/seo_priority_service.py:372` (ctr < expected×0.6, >50 impressions,
   no position limit; additionally only fires when no other recommendation exists). Both feed

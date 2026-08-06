@@ -2,7 +2,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 
 from app.database import db
-from app.services.ctr_benchmarks import get_expected_ctr_curve
+from app.services.ctr_benchmarks import get_expected_ctr_curve, is_ctr_underperformer
 from app.services.keyword_resolver import _norm, get_owned_primary_keywords
 from app.services.seo_analyzer import (
     _expected_ctr,
@@ -365,11 +365,14 @@ def get_priority_ranked_items(store_id, item_type="product", limit=50, measuring
                         f"may cause cannibalization. Consider a long-tail variation instead."
                     )
 
-        if not recommended_action and float(gsc.get("gsc_impressions") or 0) > 50:
+        if not recommended_action:
             ctr_val = float(gsc.get("gsc_ctr") or 0)
             pos_val = float(gsc.get("gsc_position") or 0)
-            expected = _expected_ctr(pos_val, ctr_curve)
-            if ctr_val < expected * 0.6:
+            impressions_val = float(gsc.get("gsc_impressions") or 0)
+            # Shared rule — the home queue must agree with the CTR-opportunities
+            # engine on what counts as an underperformer.
+            if is_ctr_underperformer(pos_val, ctr_val, impressions_val, ctr_curve):
+                expected = _expected_ctr(pos_val, ctr_curve)
                 recommended_action = f"Improve CTR — {ctr_val:.1%} vs {expected:.1%} expected at position {pos_val:.1f}"
                 action_kind = "improve_ctr"
 
