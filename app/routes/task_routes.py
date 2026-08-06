@@ -63,6 +63,30 @@ def create_task():
     if not task_type:
         return jsonify({"error": "task_type is required"}), 400
 
+    # Ownership guard at the single write boundary: every retarget path
+    # (keyword chips, deep links, work sessions) funnels through here, so a
+    # keyword another page owns is rejected before any AI work starts.
+    target_keyword = (task_input.get("target_keyword") or "").strip() if isinstance(task_input, dict) else ""
+    if target_keyword and task_type in ("product_seo", "collection_seo"):
+        item_type = "product" if task_type == "product_seo" else "collection"
+        item_id = task_input.get("product_id") if item_type == "product" else task_input.get("collection_id")
+        guard_store_id = store_id
+        if not guard_store_id and item_id:
+            table = "synced_products" if item_type == "product" else "synced_collections"
+            with db.get_cursor() as cur:
+                cur.execute(f"SELECT store_id FROM {table} WHERE id = %s", (item_id,))
+                row = cur.fetchone()
+                guard_store_id = row["store_id"] if row else None
+        if guard_store_id and item_id:
+            from app.services.keyword_resolver import keyword_ownership_guard
+            try:
+                _, conflict = keyword_ownership_guard(guard_store_id, item_type, int(item_id), target_keyword)
+            except Exception:
+                logger.exception("Keyword safety check failed for %s %s", item_type, item_id)
+                return jsonify({"error": "Keyword safety check failed — try again"}), 502
+            if conflict:
+                return jsonify({"error": conflict}), 409
+
     with db.get_cursor() as cur:
         cur.execute(
             "INSERT INTO ai_tasks (store_id, task_type, input) VALUES (%s, %s, %s) RETURNING id",

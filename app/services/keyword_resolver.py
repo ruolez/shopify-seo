@@ -750,6 +750,34 @@ def get_owned_primary_keywords(store_id, exclude=None):
     return owned
 
 
+def keyword_ownership_guard(store_id, item_type, item_id, retarget_kw, ownership=None):
+    """The shared retarget guard: returns (resolved_primary, conflict_error).
+    conflict_error is set when the retarget keyword is already another page's
+    primary — rewriting this page onto it would just move the cannibalization,
+    not fix it. Pass a prebuilt `ownership` map when calling in a loop.
+
+    Raises on internal failure — callers must fail closed (surface an error),
+    never proceed as if the check passed."""
+    resolved_primary = ""
+    resolution = get_or_refresh_resolution(store_id, item_type, item_id)
+    rp = (resolution or {}).get("primary")
+    if rp and rp.get("keyword"):
+        resolved_primary = rp["keyword"]
+    tk = _norm(retarget_kw or "")
+    if tk and tk != _norm(resolved_primary):
+        if ownership is None:
+            ownership = get_owned_primary_keywords(store_id, exclude=(item_type, item_id))
+        owner = ownership.get(tk)
+        if owner and (owner["item_type"], owner["item_id"]) != (item_type, item_id):
+            return resolved_primary, (
+                f'Target keyword "{retarget_kw}" is already the primary keyword of another page '
+                f'({owner["item_type"]} #{owner["item_id"]}'
+                + (", manually assigned" if owner.get("manual") else "")
+                + "). Retargeting this page onto it would create new cannibalization — pick a different keyword."
+            )
+    return resolved_primary, None
+
+
 def dedupe_primary_ownership(store_id, item_type):
     """One keyword, one page. After a bulk resolution, redistribute auto-picked
     primaries so no two items of a type share one — the anti-cannibalization

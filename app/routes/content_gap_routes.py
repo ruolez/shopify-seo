@@ -192,8 +192,14 @@ def optimize_existing(gap_id):
                         "existing_pages": risk.get("existing_pages", [])[:3],
                         "on_site_matches": risk.get("on_site_matches", [])[:3],
                     }), 409
-        except Exception as e:
-            logger.warning("Cannibalization check failed, proceeding: %s", e)
+        except Exception:
+            # Fail closed — this flow rewrites live pages, and this check is
+            # the only keyword-conflict protection on it (the apply route has
+            # no gate). Same polarity as generate_content above.
+            logger.exception("Cannibalization check failed for gap %s", gap_id)
+            return jsonify({
+                "error": "Cannibalization check failed — retry, or resend with skip_cannibalization_check to override",
+            }), 502
 
     try:
         result = content_gap_service.optimize_existing_page(store_id, gap_id, override_keyword, override_volume)

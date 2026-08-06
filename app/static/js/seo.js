@@ -1990,11 +1990,12 @@ function closeProductModal() {
 
 function reoptimizeWithKeyword(itemId, keyword) {
     const itemType = currentItemType || "product";
-    const context = `Re-optimize targeting primary keyword: "${keyword}". Build the meta title, description, and content around this keyword.`;
+    // A real target_keyword, not free-text context — the server's ownership
+    // guard and the prompt's resolved-primary deference only apply to it.
     if (itemType === "product") {
-        analyzeProduct(itemId, context);
+        analyzeProduct(itemId, "", { targetKeyword: keyword });
     } else {
-        analyzeCollection(itemId, context);
+        analyzeCollection(itemId, "", { targetKeyword: keyword });
     }
 }
 

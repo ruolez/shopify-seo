@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 from flask import Blueprint, jsonify, redirect, render_template, request, session, url_for
 
 from app.services import gsc_service
+from app.services.keyword_resolver import keyword_ownership_guard
 from app.services.task_runner import is_failed_result
 
 logger = logging.getLogger(__name__)
@@ -433,37 +434,6 @@ def analyze_cannibalization():
         return jsonify({"error": str(e)}), 500
 
 
-def _cannibalization_keyword_guard(store_id, item_type, item_id, retarget_kw, ownership=None):
-    """Resolver guard for cannibalization retargeting. Returns
-    (resolved_primary, conflict_error): conflict_error is set when the
-    retarget keyword is already another page's primary — rewriting this page
-    onto it would just move the cannibalization, not fix it. Pass a prebuilt
-    `ownership` map when calling in a loop."""
-    resolved_primary = ""
-    try:
-        from app.services.keyword_resolver import _norm, get_or_refresh_resolution, get_owned_primary_keywords
-
-        resolution = get_or_refresh_resolution(store_id, item_type, item_id)
-        rp = (resolution or {}).get("primary")
-        if rp and rp.get("keyword"):
-            resolved_primary = rp["keyword"]
-        tk = _norm(retarget_kw or "")
-        if tk and tk != _norm(resolved_primary):
-            if ownership is None:
-                ownership = get_owned_primary_keywords(store_id, exclude=(item_type, item_id))
-            owner = ownership.get(tk)
-            if owner and (owner["item_type"], owner["item_id"]) != (item_type, item_id):
-                return resolved_primary, (
-                    f'Target keyword "{retarget_kw}" is already the primary keyword of another page '
-                    f'({owner["item_type"]} #{owner["item_id"]}'
-                    + (", manually assigned" if owner.get("manual") else "")
-                    + "). Retargeting this page onto it would create new cannibalization — pick a different keyword."
-                )
-    except Exception:
-        logger.warning("Cannibalization keyword guard failed for %s %s", item_type, item_id)
-    return resolved_primary, None
-
-
 def _resolved_primary_suffix(resolved_primary):
     if not resolved_primary:
         return ""
@@ -503,9 +473,15 @@ def generate_cannibalization_fix():
     if not item:
         return jsonify({"error": f"{item_type} not found"}), 404
 
-    resolved_primary, conflict = _cannibalization_keyword_guard(
-        item["store_id"], item_type, item_id, target_keyword or competing_query
-    )
+    try:
+        resolved_primary, conflict = keyword_ownership_guard(
+            item["store_id"], item_type, item_id, target_keyword or competing_query
+        )
+    except Exception:
+        # Fail closed — a broken safety check must not silently let two pages
+        # be optimized into competing for the same keyword.
+        logger.exception("Keyword safety check failed for %s %s", item_type, item_id)
+        return jsonify({"error": "Keyword safety check failed — try again"}), 502
     if conflict:
         return jsonify({"error": conflict}), 409
 
@@ -772,10 +748,16 @@ def bulk_cannibalization_fix():
             if item["store_id"] not in ownership_by_store:
                 from app.services.keyword_resolver import get_owned_primary_keywords
                 ownership_by_store[item["store_id"]] = get_owned_primary_keywords(item["store_id"])
-            resolved_primary, conflict = _cannibalization_keyword_guard(
-                item["store_id"], item_type, item_id, target_keyword or competing_query,
-                ownership=ownership_by_store[item["store_id"]],
-            )
+            try:
+                resolved_primary, conflict = keyword_ownership_guard(
+                    item["store_id"], item_type, item_id, target_keyword or competing_query,
+                    ownership=ownership_by_store[item["store_id"]],
+                )
+            except Exception:
+                # Fail closed per item — never rewrite on an unverified keyword.
+                logger.exception("Keyword safety check failed for %s %s", item_type, item_id)
+                results.append({"item_id": item_id, "status": "error", "error": "Keyword safety check failed"})
+                continue
             if conflict:
                 results.append({"item_id": item_id, "status": "skipped", "error": conflict})
                 continue

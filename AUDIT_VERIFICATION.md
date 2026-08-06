@@ -398,7 +398,7 @@ trustworthy again.
 
 # Part 4 — Safety guards & data-loss paths
 
-- [ ] **4.1 Cannibalization guard fails open on any error**
+- [x] **4.1 Cannibalization guard fails open on any error**
   **Problem:** `routes/gsc_routes.py:459-460` wraps the entire resolver/ownership check in
   `except Exception: logger.warning(...)` — any resolver error silently disables the
   protection and the fix is generated and applied anyway.
@@ -407,7 +407,7 @@ trustworthy again.
   **Benefit:** A broken safety check can never silently let two pages be optimized into
   competing for the same keyword.
 
-- [ ] **4.2 Same gate, opposite polarity in content-gap routes**
+- [x] **4.2 Same gate, opposite polarity in content-gap routes**
   **Problem:** `generate_content` fails closed (:120-132) but `optimize_existing` fails open
   (:179-196, "proceeding") — and the optimize-existing suggestions are applied to live pages
   by an apply route that has **no gate at all** (verified), so this fail-open check is the only
@@ -416,7 +416,7 @@ trustworthy again.
   **Benefit:** The flow that rewrites live pages gets the same keyword-conflict protection as
   the flow that creates new ones.
 
-- [ ] **4.3 Keyword-chip re-optimize has no ownership guard** *(mechanism corrected)*
+- [x] **4.3 Keyword-chip re-optimize has no ownership guard** *(mechanism corrected)*
   **Problem:** Clicking any keyword chip (`static/js/seo.js:2177-2183`) triggers a re-optimize
   with **no server-side ownership check**. Verified correction: the chip sends the keyword as
   free-text `priority_context`, not `target_keyword` — so even the prompt-level "resolved
@@ -427,7 +427,7 @@ trustworthy again.
   `target_keyword` so prompt-side handling applies.
   **Benefit:** You can't accidentally point two pages at the same keyword with one click.
 
-- [ ] **4.4 Lightweight assign endpoint bypasses parts of the resolver pipeline**
+- [x] **4.4 Lightweight assign endpoint bypasses parts of the resolver pipeline**
   **Problem (corrected):** `POST /api/keyword-strategy/keywords/<id>/assign`
   (`routes/keyword_strategy_routes.py:295-332`) accepts product/collection although its own
   docstring routes them to the full primary-keyword pipeline. Verified: ownership IS still

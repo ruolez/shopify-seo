@@ -292,46 +292,6 @@ def keyword_detail(keyword_id):
     return jsonify(data)
 
 
-@keyword_strategy_bp.route("/api/keyword-strategy/keywords/<int:keyword_id>/assign", methods=["POST"])
-def assign_keyword(keyword_id):
-    """Manually assign a keyword to a page. Products and collections should go
-    through POST /api/seo/items/<type>/<id>/primary-keyword (full resolver
-    pipeline); this lightweight path covers articles and pages, which have no
-    resolver — the accepted assignment row alone makes them the owner."""
-    store_id = _get_store_id()
-    if not store_id:
-        return jsonify({"error": "store_id required"}), 400
-    body = request.get_json(force=True)
-    item_type = body.get("item_type")
-    item_id = body.get("item_id")
-    if item_type not in ("product", "collection", "article", "page") or not item_id:
-        return jsonify({"error": "item_type and item_id required"}), 400
-
-    from app.database import db
-
-    with db.get_cursor() as cur:
-        cur.execute(
-            "SELECT id FROM master_keywords WHERE id = %s AND store_id = %s",
-            (keyword_id, store_id),
-        )
-        if not cur.fetchone():
-            return jsonify({"error": "Keyword not found"}), 404
-        cur.execute(
-            """INSERT INTO keyword_assignments
-               (store_id, master_keyword_id, assigned_item_type, assigned_item_id,
-                assignment_reason, status)
-               VALUES (%s, %s, %s, %s, 'manual_assign', 'accepted')
-               ON CONFLICT (store_id, master_keyword_id) DO UPDATE SET
-                 assigned_item_type = EXCLUDED.assigned_item_type,
-                 assigned_item_id = EXCLUDED.assigned_item_id,
-                 assignment_reason = 'manual_assign',
-                 status = 'accepted',
-                 updated_at = NOW()""",
-            (store_id, keyword_id, item_type, int(item_id)),
-        )
-    return jsonify({"assigned": True})
-
-
 @keyword_strategy_bp.route("/api/keyword-strategy/keywords/<int:keyword_id>/mentions")
 def keyword_mentions(keyword_id):
     store_id = _get_store_id()
