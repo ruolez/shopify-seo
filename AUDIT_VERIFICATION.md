@@ -225,7 +225,7 @@ trustworthy again.
 
 # Part 3 — Broken features
 
-- [ ] **3.1 Content-gap image generation has never worked**
+- [x] **3.1 Content-gap image generation has never worked**
   **Problem:** `services/content_gap_service.py:765, 798` call `client.upload_collection_image`
   / `client.upload_image` — neither exists on `ShopifyClient`. The `AttributeError` is
   swallowed and logged as "image generation failed", so generated images are thrown away every
@@ -235,7 +235,7 @@ trustworthy again.
   working pattern from `brand_routes.py` or `news_routes.py`).
   **Benefit:** AI-generated images for content-gap publishes finally appear on your store.
 
-- [ ] **3.2 Publishing a content gap as a Page crashes every time (and orphans a live page)**
+- [x] **3.2 Publishing a content gap as a Page crashes every time (and orphans a live page)**
   **Problem:** `services/content_gap_service.py:834-836` writes `synced_pages.synced_at` — the
   column doesn't exist. Verified aggravation: the Shopify page is created *before* the crash,
   so every attempt leaves a live page on your store that the app doesn't track, and the gap
@@ -244,7 +244,7 @@ trustworthy again.
   **Benefit:** "Publish as page" works, and no more stray untracked pages accumulating on the
   store.
 
-- [ ] **3.3 A fresh database cannot boot the app**
+- [x] **3.3 A fresh database cannot boot the app**
   **Problem:** `database.py:786-791` runs `ALTER TABLE content_gaps` ~400 lines before
   `CREATE TABLE content_gaps` (:1183), and the guard catches only `duplicate_column`, not
   `undefined_table`. On an empty database `init_tables()` raises and the app never starts
@@ -252,7 +252,7 @@ trustworthy again.
   **Fix:** Move the ALTER after the CREATE (or add `undefined_table` to the exception guard).
   **Benefit:** Disaster recovery works — you can stand the app up on a fresh database again.
 
-- [ ] **3.4 "Optimize existing" on a gap with no brief → error 500**
+- [x] **3.4 "Optimize existing" on a gap with no brief → error 500**
   **Problem:** `services/content_gap_service.py:865` uses `gap.get("brief", {})`, but the key
   always exists as `None` (nullable column), so `.get(...)` on `None` raises. Line :608 already
   does it correctly with `gap.get("brief") or {}`.
@@ -340,7 +340,7 @@ trustworthy again.
   **Benefit:** No more phantom "keyword stuffing" warnings on perfectly fine short
   descriptions — and no AI rewrites triggered by them.
 
-- [ ] **3.14 Content-gap intent misclassified by substring matching**
+- [x] **3.14 Content-gap intent misclassified by substring matching**
   **Problem (impact bounded):** `classify_intent` (`services/content_gap_service.py:108-119`)
   matches signals as raw substrings — `"deal" in "ideal gift"` → transactional (4× multiplier
   vs the 3× default). Verified: individual scores shift by bounded ratios (up to ~2.7×),
@@ -349,7 +349,7 @@ trustworthy again.
   **Benefit:** Content-gap priorities reflect real buyer intent, not accidental letter
   overlaps.
 
-- [ ] **3.15 "Add matched product to new collection" never happens**
+- [x] **3.15 "Add matched product to new collection" never happens**
   **Problem:** `get_gap` (`services/content_gap_service.py:367-382`) omits
   `matched_product_id`/`matched_collection_id` from its return dict, and `publish_content`
   (:750) fetches the gap only through it — the branch is permanently falsy, with no log.

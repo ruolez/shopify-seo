@@ -1,5 +1,6 @@
 import json
 import logging
+import re
 from datetime import datetime, timedelta, timezone
 
 from app.database import db
@@ -105,16 +106,22 @@ CONTENT_TYPE_SIGNALS = {
 }
 
 
+def _has_signal(kw, term):
+    """Word-boundary match — raw substring matching classified 'ideal gift'
+    as transactional ('deal') and 'suitcase' as a product ('case')."""
+    return re.search(rf"\b{re.escape(term)}\b", kw) is not None
+
+
 def classify_intent(keyword):
     kw = keyword.lower()
     for term in INTENT_TRANSACTIONAL:
-        if term in kw:
+        if _has_signal(kw, term):
             return "transactional"
     for term in INTENT_COMMERCIAL:
-        if term in kw:
+        if _has_signal(kw, term):
             return "commercial"
     for term in INTENT_INFORMATIONAL:
-        if term in kw:
+        if _has_signal(kw, term):
             return "informational"
     return "commercial"
 
@@ -123,7 +130,7 @@ def _suggest_content_type(keyword):
     kw = keyword.lower()
     for content_type, signals in CONTENT_TYPE_SIGNALS.items():
         for signal in signals:
-            if signal in kw:
+            if _has_signal(kw, signal):
                 return content_type
     return "collection"
 
@@ -377,6 +384,8 @@ def get_gap(store_id, gap_id):
         "competitor_positions": r["competitor_positions"],
         "opportunity_score": float(r["opportunity_score"] or 0),
         "suggested_content_type": r["suggested_content_type"],
+        "matched_product_id": r["matched_product_id"],
+        "matched_collection_id": r["matched_collection_id"],
         "status": r["status"],
         "brief": r["brief"],
     }
@@ -699,6 +708,15 @@ def generate_content(store_id, gap_id, selected_title, content_type):
     return result
 
 
+def _upload_image_to_cdn(client, image_bytes, filename, alt_text):
+    """Stage, upload, and register an image as a Shopify File; return its final CDN url."""
+    mime = "image/webp" if filename.endswith(".webp") else "image/jpeg"
+    staged = client.staged_upload_create(filename, mime, len(image_bytes), resource="IMAGE")
+    resource_url = client.upload_staged_file(staged, image_bytes, content_type=mime, filename=filename)
+    file_obj = client.file_create(resource_url, filename=filename, alt_text=alt_text)
+    return client.file_get_url(file_obj.get("id"))
+
+
 def publish_content(store_id, gap_id, content_data):
     from app.auth import decrypt_value
     from app.services.ai_output_guard import guard_shopify_fields
@@ -762,7 +780,10 @@ def publish_content(store_id, gap_id, content_data):
                 from app.services.image_generator import generate_collection_image_ai
                 img_bytes, filename, alt_text, w, h = generate_collection_image_ai(title, [], keywords=[gap.get("keyword", "")])
                 if img_bytes:
-                    client.upload_collection_image(shopify_id, img_bytes, filename, alt_text)
+                    mime = "image/webp" if filename.endswith(".webp") else "image/jpeg"
+                    staged = client.staged_upload_create(filename, mime, len(img_bytes), resource="IMAGE")
+                    resource_url = client.upload_staged_file(staged, img_bytes, content_type=mime, filename=filename)
+                    client.update_collection_image(shopify_id, resource_url, alt_text)
             except Exception as e:
                 logger.warning("Collection image generation failed: %s", str(e))
 
@@ -795,8 +816,7 @@ def publish_content(store_id, gap_id, content_data):
                 from app.services.image_generator import generate_collection_image_ai
                 img_bytes, filename, alt_text, w, h = generate_collection_image_ai(title, [], keywords=[gap.get("keyword", "")])
                 if img_bytes:
-                    upload_result = client.upload_image(img_bytes, filename)
-                    image_url = upload_result.get("url")
+                    image_url = _upload_image_to_cdn(client, img_bytes, filename, alt_text)
             except Exception as e:
                 logger.warning("Article image generation failed: %s", str(e))
 
@@ -845,9 +865,9 @@ def publish_content(store_id, gap_id, content_data):
 
         with db.get_cursor() as cur:
             cur.execute(
-                """INSERT INTO synced_pages (store_id, shopify_id, title, handle, body_html, seo_title, seo_description, is_published, synced_at)
+                """INSERT INTO synced_pages (store_id, shopify_id, title, handle, body_html, seo_title, seo_description, is_published, updated_at)
                    VALUES (%s, %s, %s, %s, %s, %s, %s, TRUE, NOW())
-                   ON CONFLICT (store_id, shopify_id) DO UPDATE SET title = EXCLUDED.title, body_html = EXCLUDED.body_html, synced_at = NOW()""",
+                   ON CONFLICT (store_id, shopify_id) DO UPDATE SET title = EXCLUDED.title, body_html = EXCLUDED.body_html, updated_at = NOW()""",
                 (store_id, shopify_id, title, handle, body_html, meta_title, meta_description),
             )
         result = {"shopify_id": shopify_id, "handle": handle, "url": f"https://{store['domain']}/pages/{handle}"}
@@ -876,7 +896,7 @@ def optimize_existing_page(store_id, gap_id, override_keyword=None, override_vol
         if override_volume is not None:
             gap["search_volume"] = override_volume
 
-    risk = gap.get("brief", {}).get("cannibalization_risk") or check_cannibalization_risk(store_id, gap["keyword"])
+    risk = (gap.get("brief") or {}).get("cannibalization_risk") or check_cannibalization_risk(store_id, gap["keyword"])
 
     best_page = None
     if risk.get("on_site_matches"):

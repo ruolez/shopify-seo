@@ -786,7 +786,11 @@ class Database:
             cur.execute("""
                 DO $$ BEGIN
                     ALTER TABLE content_gaps ADD COLUMN addressed_at TIMESTAMP;
-                EXCEPTION WHEN duplicate_column THEN NULL;
+                EXCEPTION
+                    WHEN duplicate_column THEN NULL;
+                    -- Fresh database: content_gaps is created ~400 lines later;
+                    -- without this guard init_tables dies and the app can't boot.
+                    WHEN undefined_table THEN NULL;
                 END $$
             """)
             cur.execute("""
@@ -1198,6 +1202,7 @@ class Database:
                     matched_collection_id INTEGER,
                     status VARCHAR(50) DEFAULT 'new',
                     brief JSONB,
+                    addressed_at TIMESTAMP,
                     created_at TIMESTAMP DEFAULT NOW(),
                     updated_at TIMESTAMP DEFAULT NOW(),
                     UNIQUE(store_id, keyword)
