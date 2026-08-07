@@ -742,10 +742,31 @@ function renderIssuesTab() {
 
     container.innerHTML = html;
 
-    // Re-render any previously expanded rows from cache
+    // Re-render previously expanded rows — from cache when fresh, otherwise
+    // re-fetch (a quick-edit invalidates its issue's cache; without the fetch
+    // the row would show its spinner forever).
     for (const key of expandedIssueKeys) {
         const body = container.querySelector(`.issue-row[data-issue-key="${key}"] .issue-row-body`);
-        if (body && issueItemsCache.has(key)) body.innerHTML = renderIssueItems(issueItemsCache.get(key), key);
+        if (!body) continue;
+        if (issueItemsCache.has(key)) {
+            body.innerHTML = renderIssueItems(issueItemsCache.get(key), key);
+        } else {
+            fetchIssueItems(key, body);
+        }
+    }
+}
+
+async function fetchIssueItems(key, body) {
+    body.innerHTML = '<div class="loading-spinner" style="padding:20px 0;"><div class="spinner"></div></div>';
+    try {
+        const storeId = await _ensureStoreId();
+        let url = `/api/seo/issues/${key}/items?store_id=${storeId}&limit=100`;
+        if (issuesTypeFilter) url += `&item_type=${issuesTypeFilter}`;
+        const data = await apiRequest(url);
+        issueItemsCache.set(key, data.items);
+        if (expandedIssueKeys.has(key)) body.innerHTML = renderIssueItems(data.items, key);
+    } catch (err) {
+        body.innerHTML = `<p style="padding: 10px 14px; color: var(--error); font-size: 13px;">${escapeHtml(err.message)}</p>`;
     }
 }
 
@@ -868,17 +889,7 @@ async function toggleIssueRow(key) {
         return;
     }
 
-    body.innerHTML = '<div class="loading-spinner" style="padding:20px 0;"><div class="spinner"></div></div>';
-    try {
-        const storeId = await _ensureStoreId();
-        let url = `/api/seo/issues/${key}/items?store_id=${storeId}&limit=100`;
-        if (issuesTypeFilter) url += `&item_type=${issuesTypeFilter}`;
-        const data = await apiRequest(url);
-        issueItemsCache.set(key, data.items);
-        if (expandedIssueKeys.has(key)) body.innerHTML = renderIssueItems(data.items, key);
-    } catch (err) {
-        body.innerHTML = `<p style="padding: 10px 14px; color: var(--error); font-size: 13px;">${escapeHtml(err.message)}</p>`;
-    }
+    await fetchIssueItems(key, body);
 }
 
 /* Bulk progress for issue fixes / analyze-all. Own poller (not seo.js's
