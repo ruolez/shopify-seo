@@ -37,15 +37,35 @@ logger = logging.getLogger(__name__)
 
 seo_bp = Blueprint("seo", __name__)
 
-def _count_unified_issues(seo_breakdown, tsa_checks):
-    """Issues across both pillars: content checks below their good band plus
-    keyword-analysis issues, minus the overlap (content path is canonical).
-    Keyword issues use the same whitelist as the Issues tab (issue_scanner),
-    so informational checks like url_has_keyword don't inflate list counts."""
-    from app.services.issue_scanner import keyword_issue_map
+# Below these scores a content check is a real issue; above, it's merely
+# not-perfect (an "acceptable" 47-char title must not count as an issue the
+# fix loop can never clear). Mirrors issue_scanner's live-check flags.
+_CONTENT_ISSUE_THRESHOLDS = {
+    "meta_title": 60,
+    "meta_description": 60,
+    "description": 70,
+    "image_alt": 100,
+}
 
-    content_issues = sum(1 for c in (seo_breakdown or {}).values() if c["score"] < 100)
-    return content_issues + len(keyword_issue_map(tsa_checks))
+
+def _count_unified_issues(seo_breakdown, tsa_checks):
+    """(issues_count, fixable_count) across both pillars, using the same
+    definition as the Issues tab and item panel (issue_scanner): content
+    checks below their acceptable band plus whitelisted keyword issues.
+    (Store-wide categories — duplicates, schema — live only in the scan.)"""
+    from app.services.issue_scanner import ISSUE_DEFS, keyword_issue_map
+
+    issues = 0
+    fixable = 0
+    for key, c in (seo_breakdown or {}).items():
+        if c["score"] < _CONTENT_ISSUE_THRESHOLDS.get(key, 100):
+            issues += 1
+            fixable += 1
+    for key in keyword_issue_map(tsa_checks):
+        issues += 1
+        if ISSUE_DEFS.get(key, {}).get("fixable"):
+            fixable += 1
+    return issues, fixable
 
 
 def _fetch_keyword_analysis(store_id, item_type, item_id):
@@ -85,8 +105,9 @@ def _attach_unified_scores(item, seo, search_perf, kw):
     item["search_score"] = unified["search_score"]
     item["search_breakdown"] = unified["search_breakdown"]
     item["pillar_weights"] = unified["pillar_weights"]
-    item["issues_count"] = _count_unified_issues(seo["breakdown"], kw["checks"] if kw else None)
-    item["fixable_count"] = kw["fixable_count"] if kw else None
+    item["issues_count"], item["fixable_count"] = _count_unified_issues(
+        seo["breakdown"], kw["checks"] if kw else None
+    )
     item["keyword_analysis"] = kw
 
 
@@ -339,7 +360,7 @@ def list_products_seo():
         item["search_score"] = unified["search_score"]
         item["search_breakdown"] = unified["search_breakdown"]
         item["pillar_weights"] = unified["pillar_weights"]
-        item["issues_count"] = _count_unified_issues(seo["breakdown"], p.get("_kw_checks"))
+        item["issues_count"], item["fixable_count"] = _count_unified_issues(seo["breakdown"], p.get("_kw_checks"))
         item["keyword_analyzed_at"] = p["_kw_analyzed_at"].isoformat() if p.get("_kw_analyzed_at") else None
 
         result.append(item)
@@ -1425,7 +1446,7 @@ def list_collections_seo():
         item["search_score"] = unified["search_score"]
         item["search_breakdown"] = unified["search_breakdown"]
         item["pillar_weights"] = unified["pillar_weights"]
-        item["issues_count"] = _count_unified_issues(seo["breakdown"], c.get("_kw_checks"))
+        item["issues_count"], item["fixable_count"] = _count_unified_issues(seo["breakdown"], c.get("_kw_checks"))
         item["keyword_analyzed_at"] = c["_kw_analyzed_at"].isoformat() if c.get("_kw_analyzed_at") else None
 
         result.append(item)

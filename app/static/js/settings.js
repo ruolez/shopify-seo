@@ -511,6 +511,7 @@ window.saveRules = async function (key) {
             body: { value },
         });
         showToast(`Saved ${key}`, "success");
+        showToast("Run Re-analyze All (SEO → Issues tab) to re-score existing items with the new rules", "info");
         loadRules();
     } catch (err) {
         showToast(`Failed to save: ${err.message}`, "error");

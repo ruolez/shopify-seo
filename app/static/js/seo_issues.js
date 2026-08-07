@@ -719,6 +719,10 @@ function renderIssuesTab() {
             <button class="filter-chip ${issuesTypeFilter === "product" ? "active" : ""}" data-type-filter="product">Products</button>
             <button class="filter-chip ${issuesTypeFilter === "collection" ? "active" : ""}" data-type-filter="collection">Collections</button>
         </div>
+        <button class="btn btn-secondary btn-sm" data-issues-reanalyze-all style="margin-left: 12px;"
+            title="Re-resolve keywords and re-score every product & collection with the current rules (runs locally, no AI cost)">
+            <span class="material-symbols-rounded">refresh</span> Re-analyze All
+        </button>
     </div>`;
 
     const visible = _visibleIssues();
