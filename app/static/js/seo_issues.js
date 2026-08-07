@@ -771,6 +771,14 @@ function renderIssueRow(issue) {
     </div>`;
 }
 
+/* Fields simple enough to edit inline from an issue row, with the char count
+ * the scorer's good band aims for. */
+const QUICK_EDIT_FIELDS = {
+    title: { label: "Title", hint: "" },
+    meta_title: { label: "Meta title", hint: "aim ~50, max 60 chars" },
+    meta_description: { label: "Meta description", hint: "aim ~150, max 160 chars" },
+};
+
 function renderIssueItems(items, issueKey) {
     if (!items || items.length === 0) {
         return '<p style="padding: 10px 14px; font-size: 13px; color: var(--on-surface-secondary);">No items.</p>';
@@ -779,7 +787,30 @@ function renderIssueItems(items, issueKey) {
     const actionLink = issue && issue.action_href
         ? `<a class="btn btn-secondary btn-sm" href="${escapeAttr(issue.action_href)}" data-issue-action>${escapeHtml(issue.action_label || "Open")}</a>`
         : "";
-    return items.map(it => `<div class="issue-item-row">
+    const editField = issue && issue.fixable && issue.fix_fields && QUICK_EDIT_FIELDS[issue.fix_fields[0]]
+        ? issue.fix_fields[0] : null;
+    return items.map(it => {
+        const editorId = `qe-${issueKey}-${it.item_type}-${it.id}`;
+        const current = editField ? (it[editField] || (editField === "title" ? it.title : "") || "") : "";
+        const fieldMeta = editField ? QUICK_EDIT_FIELDS[editField] : null;
+        const editBtn = editField
+            ? `<button class="btn btn-secondary btn-sm" data-quick-edit="${editorId}" title="Type the ${fieldMeta.label.toLowerCase()} yourself and push it to Shopify"><span class="material-symbols-rounded">edit</span></button>`
+            : "";
+        const editor = editField
+            ? `<div class="qe-editor" id="${editorId}" style="display:none; padding: 8px 14px 12px 56px;">
+                <div style="display:flex; gap:8px; align-items:center;">
+                    <input type="text" id="${editorId}-input" value="${escapeAttr(current)}"
+                        style="flex:1; padding:7px 10px; font-size:13px; background:var(--surface); color:var(--on-surface); border:1px solid var(--outline); border-radius:6px;"
+                        oninput="document.getElementById('${editorId}-count').textContent = this.value.length + ' chars'"
+                        onkeydown="if (event.key === 'Enter') quickEditSave('${it.item_type}', ${it.id}, '${editField}', '${issueKey}', this)">
+                    <span id="${editorId}-count" style="font-size:11.5px; color:var(--on-surface-secondary); white-space:nowrap;">${current.length} chars</span>
+                    <button class="btn btn-primary btn-sm" onclick="quickEditSave('${it.item_type}', ${it.id}, '${editField}', '${issueKey}', this)">Save to Shopify</button>
+                    <button class="btn btn-secondary btn-sm" onclick="document.getElementById('${editorId}').style.display='none'">Cancel</button>
+                </div>
+                ${fieldMeta.hint ? `<div style="font-size:11.5px; color:var(--on-surface-secondary); margin-top:4px;">${fieldMeta.label} — ${fieldMeta.hint}</div>` : ""}
+            </div>`
+            : "";
+        return `<div class="issue-item-row">
         ${it.keyword_score != null ? renderScoreRing(it.keyword_score, 32) : '<span class="badge badge-not-analyzed">—</span>'}
         <div class="issue-item-main">
             <div class="issue-item-title">${escapeHtml(it.title)}</div>
@@ -787,9 +818,35 @@ function renderIssueItems(items, issueKey) {
         </div>
         <span class="badge badge-info" style="font-size: 10px;">${it.item_type}</span>
         ${actionLink}
+        ${editBtn}
         <button class="btn btn-secondary btn-sm" data-view-item="${it.item_type}:${it.id}">View</button>
-    </div>`).join("");
+    </div>${editor}`;
+    }).join("");
 }
+
+window.quickEditSave = async function (itemType, itemId, field, issueKey, el) {
+    const editor = el.closest(".qe-editor");
+    const input = editor.querySelector("input");
+    const value = input.value.trim();
+    if (!value) {
+        showToast("Value cannot be empty", "error");
+        return;
+    }
+    const saveBtn = editor.querySelector(".btn-primary");
+    if (saveBtn) { saveBtn.disabled = true; saveBtn.textContent = "Saving..."; }
+    try {
+        const resp = await apiRequest("/api/technical-seo/apply", {
+            method: "POST",
+            body: { item_type: itemType, item_id: itemId, fixes: [{ field, value }] },
+        });
+        showToast(`Updated on Shopify${resp.new_score != null ? ` — keyword score now ${resp.new_score}` : ""}`, "success");
+        issueItemsCache.delete(issueKey);
+        loadIssues();
+    } catch (e) {
+        showToast(`Update failed: ${e.message}`, "error");
+        if (saveBtn) { saveBtn.disabled = false; saveBtn.textContent = "Save to Shopify"; }
+    }
+};
 
 async function toggleIssueRow(key) {
     const row = document.querySelector(`.issue-row[data-issue-key="${key}"]`);
@@ -958,6 +1015,16 @@ function initIssuesEvents() {
         if (reanalyzeBtn) {
             e.preventDefault();
             analyzeAllForIssues(true);
+            return;
+        }
+        const quickEditBtn = e.target.closest("[data-quick-edit]");
+        if (quickEditBtn) {
+            const editor = document.getElementById(quickEditBtn.dataset.quickEdit);
+            if (editor) {
+                const open = editor.style.display !== "none";
+                editor.style.display = open ? "none" : "";
+                if (!open) editor.querySelector("input").focus();
+            }
             return;
         }
         const sevChip = e.target.closest("[data-sev-filter]");

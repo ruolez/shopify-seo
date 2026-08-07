@@ -342,6 +342,9 @@ def scan_store_issues(store_id):
             "detail": detail,
             "keyword_score": row.get("kw_score"),
             "analyzed_at": row["kw_analyzed_at"].isoformat() if row.get("kw_analyzed_at") else None,
+            # Current values for the Issues tab's inline quick-edit prefill.
+            "meta_title": row.get("meta_title"),
+            "meta_description": row.get("meta_description"),
         })
 
     def duplicate_issues(row, item_type):
