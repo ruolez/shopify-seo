@@ -1050,7 +1050,10 @@ def _push_and_rescore(store, resource_type, item, description_html, meta_title, 
     resource_id = item["id"]
     shopify_id = item["shopify_id"]
 
-    description_html = sanitize_html(description_html) if description_html else description_html
+    if description_html:
+        from app.services.ai_output_guard import restore_missing_images
+        description_html = sanitize_html(
+            restore_missing_images(item.get("description"), description_html))
     meta_title = clamp_meta_title(meta_title) if meta_title else meta_title
     meta_description = clamp_meta_description(meta_description) if meta_description else meta_description
 

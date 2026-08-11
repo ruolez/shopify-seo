@@ -4757,6 +4757,16 @@ def run_task(task_type, task_input, store_id=None):
                     + links_list + "\n"
                     "  Place them naturally within relevant paragraphs. Do NOT change the href or link text.\n"
                 )
+            img_matches = _re.findall(r"<img\b[^>]*>", current_desc, flags=_re.IGNORECASE)
+            if img_matches:
+                imgs_list = "\n".join(f"  {i+1}. {t}" for i, t in enumerate(img_matches))
+                links_instruction += (
+                    "- CRITICAL: The current description contains image tag(s) — typically the injected "
+                    "hero image, which some themes render nowhere else — that MUST be preserved exactly "
+                    "as-is at their current position (hero stays at the very top):\n"
+                    + imgs_list + "\n"
+                    "  Do NOT drop, modify, or relocate them.\n"
+                )
 
             stuffing_instruction = ""
             density_check = failing_checks.get("keyword_density", {})
@@ -4787,7 +4797,7 @@ def run_task(task_type, task_input, store_id=None):
                 + "- If word count is low, expand with relevant product information (features, usage, benefits)\n"
                 "- If headings are missing, add H2/H3 subheadings to structure the content\n"
                 "- NEVER use <h1> tags in the description — the page already has an H1 (the title); use h2/h3 only\n"
-                "- Output valid HTML (p, h2, h3, ul, li tags)\n"
+                "- Output valid HTML (p, h2, h3, ul, li tags — plus any preserved a/img tags listed above)\n"
                 + links_instruction
             )
 

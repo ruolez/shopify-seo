@@ -846,7 +846,9 @@ def apply_fixes():
 
         _enforce_meta_limits(shopify_fields)
         if shopify_fields.get("description_html"):
-            shopify_fields["description_html"] = sanitize_html(shopify_fields["description_html"])
+            from app.services.ai_output_guard import restore_missing_images
+            shopify_fields["description_html"] = sanitize_html(restore_missing_images(
+                item.get("description"), shopify_fields["description_html"]))
 
         # Snapshot before-state so View Impact has history for targeted fixes
         _record_change_event(item_type, item, fixes, "technical_fix")
@@ -1220,7 +1222,9 @@ def _execute_bulk_fix_apply(bulk_task_id, item_type, only_fields=None, only_chec
                     else:
                         _enforce_meta_limits(shopify_fields)
                         if shopify_fields.get("description_html"):
-                            shopify_fields["description_html"] = sanitize_html(shopify_fields["description_html"])
+                            from app.services.ai_output_guard import restore_missing_images
+                            shopify_fields["description_html"] = sanitize_html(restore_missing_images(
+                                full_item.get("description"), shopify_fields["description_html"]))
 
                         # Snapshot before-state so View Impact has history
                         _record_change_event(

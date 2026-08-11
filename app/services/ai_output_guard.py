@@ -55,6 +55,24 @@ def sanitize_html(html):
     return cleaned.strip()
 
 
+_IMG_TAG_RE = re.compile(r"<img\b[^>]*>", re.IGNORECASE)
+
+
+def restore_missing_images(original_html, new_html):
+    """Re-insert <img> tags that existed in the original description but are
+    entirely absent from an AI rewrite. Injected hero images live in the
+    description body precisely because some themes render collection.image
+    nowhere else — a rewrite that drops them strips the page's only visual.
+    Restores in original order at the top (where hero injection places them);
+    if the rewrite kept ANY image, placement is left alone."""
+    if not original_html or not new_html:
+        return new_html
+    originals = _IMG_TAG_RE.findall(original_html)
+    if not originals or _IMG_TAG_RE.search(new_html):
+        return new_html
+    return "".join(originals) + new_html
+
+
 def clamp_title(text):
     return _clamp(text, MAX_TITLE)
 

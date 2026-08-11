@@ -537,7 +537,14 @@ def _execute_bulk_collection_task(bulk_task_id):
                     if not skip_title and ai_result.get("h1_tag"):
                         collection_fields["title"] = clamp_title(ai_result["h1_tag"])
                     if ai_result.get("optimized_description"):
-                        collection_fields["description_html"] = sanitize_html(ai_result["optimized_description"])
+                        # Fresh read — the batch snapshot may be hours old, and
+                        # injected hero images must survive the rewrite.
+                        from app.services.ai_output_guard import restore_missing_images
+                        with db.get_cursor() as cur:
+                            cur.execute("SELECT description FROM synced_collections WHERE id = %s", (collection_id,))
+                            _cur_desc = ((cur.fetchone() or {}).get("description")) or ""
+                        collection_fields["description_html"] = sanitize_html(
+                            restore_missing_images(_cur_desc, ai_result["optimized_description"]))
                     if ai_result.get("optimized_meta_title"):
                         collection_fields["meta_title"] = clamp_meta_title(ai_result["optimized_meta_title"])
                     if ai_result.get("optimized_meta_description"):
@@ -701,7 +708,12 @@ def _execute_bulk_task(bulk_task_id):
                     if not skip_title and ai_result.get("h1_tag"):
                         product_fields["title"] = clamp_title(ai_result["h1_tag"])
                     if ai_result.get("optimized_description"):
-                        product_fields["description_html"] = sanitize_html(ai_result["optimized_description"])
+                        from app.services.ai_output_guard import restore_missing_images
+                        with db.get_cursor() as cur:
+                            cur.execute("SELECT description FROM synced_products WHERE id = %s", (product_id,))
+                            _cur_desc = ((cur.fetchone() or {}).get("description")) or ""
+                        product_fields["description_html"] = sanitize_html(
+                            restore_missing_images(_cur_desc, ai_result["optimized_description"]))
                     if ai_result.get("optimized_meta_title"):
                         product_fields["meta_title"] = clamp_meta_title(ai_result["optimized_meta_title"])
                     if ai_result.get("optimized_meta_description"):

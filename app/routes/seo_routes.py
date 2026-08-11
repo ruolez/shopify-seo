@@ -1248,7 +1248,9 @@ def apply_product_changes(product_id):
             product_fields["title"] = data["title"]
             updated_fields.append("title")
         if data.get("description_html"):
-            product_fields["description_html"] = data["description_html"]
+            from app.services.ai_output_guard import restore_missing_images
+            product_fields["description_html"] = restore_missing_images(
+                product.get("description"), data["description_html"])
             updated_fields.append("description_html")
         if data.get("meta_title"):
             product_fields["meta_title"] = data["meta_title"]
@@ -1592,7 +1594,9 @@ def apply_collection_changes(collection_id):
             fields["title"] = data["title"]
             updated_fields.append("title")
         if data.get("description_html"):
-            fields["description_html"] = data["description_html"]
+            from app.services.ai_output_guard import restore_missing_images
+            fields["description_html"] = restore_missing_images(
+                collection.get("description"), data["description_html"])
             updated_fields.append("description_html")
         if data.get("meta_title"):
             fields["meta_title"] = data["meta_title"]
@@ -2618,7 +2622,7 @@ def _auto_optimize_generated_collections(store_id, collection_ids, hierarchy=Non
                 )
 
                 with db.get_cursor() as cur:
-                    cur.execute("SELECT shopify_id FROM synced_collections WHERE id = %s", (cid,))
+                    cur.execute("SELECT shopify_id, description FROM synced_collections WHERE id = %s", (cid,))
                     row = cur.fetchone()
 
                 if not row:
@@ -2628,7 +2632,9 @@ def _auto_optimize_generated_collections(store_id, collection_ids, hierarchy=Non
                 if ai_result.get("h1_tag"):
                     fields["title"] = ai_result["h1_tag"]
                 if ai_result.get("optimized_description"):
-                    fields["description_html"] = ai_result["optimized_description"]
+                    from app.services.ai_output_guard import restore_missing_images
+                    fields["description_html"] = restore_missing_images(
+                        row.get("description"), ai_result["optimized_description"])
                 if ai_result.get("optimized_meta_title"):
                     fields["meta_title"] = ai_result["optimized_meta_title"]
                 if ai_result.get("optimized_meta_description"):
