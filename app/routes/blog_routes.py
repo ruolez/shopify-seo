@@ -1444,7 +1444,8 @@ def _wizard_step_publish(session, store, client, is_published=True):
         "title": generated.get("title", session["topic"]),
         "body": generated.get("body_html", ""),
         "summary": generated.get("summary", ""),
-        "tags": generated.get("tags", []),
+        "tags": _scrub_query_echo_tags(
+            session["store_id"], generated.get("tags", []), session.get("target_keywords")),
         "meta_title": generated.get("meta_title", ""),
         "meta_description": generated.get("meta_description", ""),
         "is_published": is_published,
@@ -1542,6 +1543,37 @@ def _wizard_step_publish(session, store, client, is_published=True):
             )
 
     return {"article_id": article_row["id"], "shopify_id": result["shopify_id"]}
+
+
+def _scrub_query_echo_tags(store_id, tags, target_keywords=None):
+    """Drop tags that would create a /tagged/ archive competing with this
+    article's own target queries or with a money page's primary keyword —
+    Shopify indexes tag archives, and the wizard once shipped its raw target
+    keywords as tags (articles manufacturing their own cannibals). Fails open."""
+    if not tags:
+        return tags
+    try:
+        from app.services.keyword_identity import variant_key
+        from app.services.keyword_resolver import get_owned_primary_keywords
+
+        kws = target_keywords
+        if isinstance(kws, str):
+            try:
+                kws = json.loads(kws)
+            except (ValueError, TypeError):
+                kws = [kws]
+        blocked = {variant_key(str(k)) for k in (kws or []) if k}
+        try:
+            blocked |= set(get_owned_primary_keywords(store_id))
+        except Exception:
+            pass
+        kept = [t for t in tags if variant_key(str(t)) not in blocked]
+        if len(kept) < len(tags):
+            logger.info("Scrubbed %d query-echo tag(s) at publish (store %s)",
+                        len(tags) - len(kept), store_id)
+        return kept
+    except Exception:
+        return tags
 
 
 def _money_page_keyword_warning(store_id, keywords):

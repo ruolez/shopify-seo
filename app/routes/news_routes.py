@@ -414,6 +414,10 @@ def _step_publish(session, store, client, is_published=True, regen_hub=True):
     body_html = sanitize_html(body_html)
 
     tags = edited.get("tags") or []
+    # Entity tags ("RAW Rolling Papers") can collide with a money page's
+    # primary keyword — same /tagged/ archive cannibalization as blog tags.
+    from app.routes.blog_routes import _scrub_query_echo_tags
+    tags = _scrub_query_echo_tags(session["store_id"], tags)
     if "type:news" not in tags:
         tags = ["type:news"] + tags
     headline = edited.get("headline") or "Untitled News"

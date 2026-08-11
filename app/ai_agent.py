@@ -662,6 +662,33 @@ def _format_search_context(gsc_totals, gsc_queries, semrush_keywords, inbound_li
 def _get_article_title_styles():
     return get_setting("lists.article_title_styles", DEFAULTS["lists.article_title_styles"])
 
+_TAG_QUALIFIERS = {"best", "top", "ranked", "ranking", "review", "reviews", "guide",
+                   "vs", "how", "to", "the", "a", "an", "for", "of", "compared",
+                   "comparison", "cheap", "buy", "near", "me", "ultimate", "complete"}
+
+
+def _broad_article_tags(keywords, cap=4):
+    """Broad topical tags derived from target keywords: qualifier words and
+    years stripped, deduped by variant_key, and never a verbatim target
+    keyword — Shopify creates an indexable /tagged/ archive per tag, so a tag
+    equal to the article's own query manufactures a competing page."""
+    from app.services.keyword_identity import variant_key
+    kw_keys = {variant_key(str(k)) for k in (keywords or []) if k}
+    out, seen = [], set()
+    for k in keywords or []:
+        toks = [t for t in re.findall(r"[a-z0-9']+", str(k).lower())
+                if t not in _TAG_QUALIFIERS and not re.fullmatch(r"(19|20)\d{2}", t)]
+        tag = " ".join(toks)
+        vk = variant_key(tag)
+        if not tag or vk in seen or vk in kw_keys:
+            continue
+        seen.add(vk)
+        out.append(tag)
+        if len(out) >= cap:
+            break
+    return out
+
+
 def _split_keywords(keywords):
     primary = keywords[0] if keywords else ""
     secondary = keywords[1:] if len(keywords) > 1 else []
@@ -5917,8 +5944,12 @@ def run_task(task_type, task_input, store_id=None):
         except Exception:
             summary = text_only[:155] + "..." if len(text_only) > 155 else text_only
 
-        # Generate tags
-        tags = keywords[:5] if keywords else []
+        # Tags used to be the raw target keywords — Shopify auto-creates an
+        # indexable /blogs/<blog>/tagged/<tag> archive per tag, so every
+        # article manufactured competitor pages for its own target queries
+        # (self-cannibalization, seen live: "blunt wrap brands ranked").
+        # Broaden to theme terms; the publish step scrubs remaining echoes.
+        tags = _broad_article_tags(keywords)
 
         return {
             "title": article_title,
