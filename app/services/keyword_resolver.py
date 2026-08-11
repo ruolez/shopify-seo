@@ -26,22 +26,10 @@ from app.settings_manager import get_setting
 logger = logging.getLogger(__name__)
 
 
-def _norm(kw):
-    """Lowercase, strip punctuation, collapse whitespace — so GSC queries like
-    'loose leaf.' merge with 'loose leaf' instead of evading dedup."""
-    cleaned = re.sub(r"[^\w\s'&-]", " ", (kw or "").lower())
-    return re.sub(r"\s+", " ", cleaned).strip()
-
-
-def variant_key(kw):
-    """Cluster key for ownership claims: plural-folded, order-insensitive
-    tokens, so 'dutch masters', 'dutch master' and 'masters dutch' all claim
-    one slot. Singular/plural and word-order variants share a SERP, and two
-    pages holding them as primaries cannibalize each other exactly like an
-    exact-string duplicate would."""
-    def _fold(t):
-        return t[:-1] if t.endswith("s") and len(t) > 3 else t
-    return " ".join(sorted(_fold(t) for t in _norm(kw).split()))
+# The shared identity primitives live in keyword_identity; re-exported here
+# because most consumers import them from this module.
+from app.services.keyword_identity import fold_token, variant_key  # noqa: F401
+from app.services.keyword_identity import norm as _norm  # noqa: F401
 
 
 def _rules():
@@ -67,7 +55,8 @@ def build_prefetch(store_id, item_type, item_ids):
     with db.get_cursor() as cur:
         cur.execute("SELECT gsc_property FROM gsc_credentials WHERE store_id = %s", (store_id,))
         cred = cur.fetchone()
-    base_url = (cred["gsc_property"] or "").rstrip("/") if cred and cred.get("gsc_property") else ""
+    from app.services.url_utils import gsc_base_url
+    base_url = gsc_base_url(cred.get("gsc_property") if cred else "")
 
     with db.get_cursor() as cur:
         cur.execute(
@@ -97,12 +86,14 @@ def build_prefetch(store_id, item_type, item_ids):
             rows.sort(key=lambda r: float(r["clicks"] or 0), reverse=True)
 
     with db.get_cursor() as cur:
+        # No volume cap here: the old store-wide top-500 starved items of
+        # their own low-volume long-tail URL matches. Only the semantic
+        # fallback pool (scored against every item in the batch) stays capped.
         cur.execute(
             """SELECT keyword, position, search_volume, cpc, url
                FROM semrush_keywords
                WHERE store_id = %s AND url IS NOT NULL AND url != ''
-               ORDER BY search_volume DESC NULLS LAST
-               LIMIT 500""",
+               ORDER BY search_volume DESC NULLS LAST""",
             (store_id,),
         )
         semrush = cur.fetchall()
@@ -126,13 +117,15 @@ def build_prefetch(store_id, item_type, item_ids):
 
         cur.execute(
             """SELECT ka.assigned_item_id, ka.status, ka.updated_at,
+                      ka.assignment_reason,
                       mk.keyword, mk.search_volume, mk.intent
                FROM keyword_assignments ka
                JOIN master_keywords mk ON mk.id = ka.master_keyword_id
                WHERE ka.store_id = %s AND ka.assigned_item_type = %s
                  AND ka.assigned_item_id = ANY(%s)
                  AND ka.status IN ('accepted', 'applied')
-               ORDER BY ka.updated_at DESC""",
+               ORDER BY (ka.assignment_reason = 'manual_primary') DESC NULLS LAST,
+                        ka.updated_at DESC""",
             (store_id, item_type, list(item_ids)),
         )
         for r in cur.fetchall():
@@ -143,6 +136,7 @@ def build_prefetch(store_id, item_type, item_ids):
         "handles": handles,
         "gsc_pages": gsc_pages,
         "semrush": semrush,
+        "semrush_semantic_pool": semrush[:500],
         "strategy": strategy,
         "assignments": assignments,
         "date_from": date_from,
@@ -161,9 +155,10 @@ def _semantic_semrush_matches(item, semrush_rows):
     if ptype and len(ptype) > 2:
         identity_phrases.append(ptype)
 
-    generic_words = {"the", "and", "for", "with", "pack", "packs", "box", "can", "cans",
-                     "100", "1pk", "5pk", "10pk", "pre", "priced", "new", "best", "buy",
-                     "shop", "online", "sale", "product"}
+    generic_words = set(_rules().get("semantic_generic_words") or [
+        "the", "and", "for", "with", "pack", "packs", "box", "can", "cans",
+        "100", "1pk", "5pk", "10pk", "pre", "priced", "new", "best", "buy",
+        "shop", "online", "sale", "product"])
     handle_str = (item.get("handle") or "").replace("-", " ").lower()
     hw = handle_str.split()
     handle_words = [w for w in hw if len(w) > 2 and w not in generic_words]
@@ -219,7 +214,7 @@ def _relevance(candidate, fields, rel_rules):
 
 def resolve_item_keywords(store_id, item_type, item_id, item=None, prefetch=None):
     """Full keyword resolution for one item. Returns
-    {primary, on_page_primary, candidates, resolved_at} or a shell when the
+    {primary, candidates, resolved_at} or a shell when the
     item has no resolvable keywords at all."""
     rules = _rules()
 
@@ -278,7 +273,6 @@ def resolve_item_keywords(store_id, item_type, item_id, item=None, prefetch=None
 
     # 1. On-page n-grams (relevance anchor)
     on_page = _extract_keywords(item) or []
-    on_page_primary = on_page[0]["keyword"] if on_page else None
     for kw in on_page:
         cand = get_cand(kw["keyword"])
         if cand is None:
@@ -315,7 +309,8 @@ def resolve_item_keywords(store_id, item_type, item_id, item=None, prefetch=None
     sr_rows = url_matched
     sr_source = "semrush"
     if not sr_rows:
-        sr_rows = _semantic_semrush_matches(item, prefetch["semrush"])
+        sr_rows = _semantic_semrush_matches(
+            item, prefetch.get("semrush_semantic_pool") or prefetch["semrush"])
         sr_source = "semrush_semantic"
     for r in sr_rows:
         cand = get_cand(r["keyword"])
@@ -353,13 +348,15 @@ def resolve_item_keywords(store_id, item_type, item_id, item=None, prefetch=None
         if r.get("intent"):
             cand["intent"] = r["intent"]
         add_source(cand, "strategy")
-        if manual_kw is None:  # rows are ordered updated_at DESC — first wins
+        # Explicit user pins outrank plan-accepted assignments regardless of
+        # recency — a later plan-accept must never silently override a pin.
+        # Rows are ordered manual_primary-first, then updated_at DESC.
+        if manual_kw is None:
             manual_kw = _norm(r["keyword"])
 
     if not candidates:
         return {
             "primary": None,
-            "on_page_primary": on_page_primary,
             "candidates": [],
             "resolved_at": datetime.now(timezone.utc).isoformat(),
         }
@@ -390,10 +387,8 @@ def resolve_item_keywords(store_id, item_type, item_id, item=None, prefetch=None
         # light plural folding) carries no distinguishing token of this item —
         # every sibling product would share it. Head terms like that belong to
         # the brand/category collection; product pages target the long tail.
-        def _stem(t):
-            return t[:-1] if t.endswith("s") and len(t) > 3 else t
-        family_stems = {_stem(t) for t in vendor_tokens} | {_stem(t) for t in ptype_norm.split()}
-        kw_stems = {_stem(t) for t in kw_tokens}
+        family_stems = {fold_token(t) for t in vendor_tokens} | {fold_token(t) for t in ptype_norm.split()}
+        kw_stems = {fold_token(t) for t in kw_tokens}
 
         if item_type == "product" and vendor_tokens and kw_tokens.issubset(vendor_tokens):
             specificity = spec.get("vendor_only_product", 0.4)
@@ -406,7 +401,7 @@ def resolve_item_keywords(store_id, item_type, item_id, item=None, prefetch=None
             generic = True
         elif word_count == 1:
             specificity = (spec.get("single_word_product", 0.5) if item_type == "product"
-                           else spec.get("single_word_collection", 0.8))
+                           else spec.get("single_word_collection", 0.6))
         elif word_count >= 3:
             specificity = spec.get("multi_word_bonus", 1.05)
         else:
@@ -514,7 +509,6 @@ def resolve_item_keywords(store_id, item_type, item_id, item=None, prefetch=None
 
     result = {
         "primary": primary,
-        "on_page_primary": on_page_primary,
         "candidates": final,
         "resolved_at": datetime.now(timezone.utc).isoformat(),
     }
@@ -654,15 +648,7 @@ def get_or_refresh_resolution(store_id, item_type, item_id, max_age_days=None):
         return resolution
 
     try:
-        from app.routes.technical_seo_routes import (
-            _enrich_collection_data,
-            _resolve_and_analyze,
-            _upsert_analysis,
-        )
-        from app.services.technical_seo_analyzer import (
-            analyze_collection_technical_seo,
-            analyze_product_technical_seo,
-        )
+        from app.routes.technical_seo_routes import _resolve_and_analyze, _upsert_analysis
 
         with db.get_cursor() as cur:
             cur.execute(
@@ -673,19 +659,10 @@ def get_or_refresh_resolution(store_id, item_type, item_id, max_age_days=None):
         if not item:
             return resolution
 
+        # _resolve_and_analyze already ran _swap_primary_if_claimed before
+        # computing the checks — a second swap here re-scanned the whole
+        # store and re-analyzed the item again on every lazy refresh.
         analysis, fresh = _resolve_and_analyze(item_type, dict(item))
-        if fresh and fresh.get("primary") and not fresh["primary"].get("manual"):
-            if _swap_primary_if_claimed(store_id, item_type, item_id, fresh):
-                item_dict = dict(item)
-                if item_type == "collection":
-                    item_dict = _enrich_collection_data(item_dict)
-                    analysis = analyze_collection_technical_seo(
-                        item_dict, primary_keyword=fresh["primary"]["keyword"])
-                else:
-                    analysis = analyze_product_technical_seo(
-                        item_dict, primary_keyword=fresh["primary"]["keyword"])
-                analysis["detected_keywords"] = fresh["candidates"]
-                analysis["keyword_resolution"] = fresh
         _upsert_analysis(store_id, item_type, item_id, analysis, fresh)
         return fresh or resolution
     except Exception:

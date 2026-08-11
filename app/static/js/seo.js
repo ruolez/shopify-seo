@@ -1,6 +1,12 @@
 let currentSort = loadFilter("productSort", { by: "title", dir: "asc" });
 let collectionSort = loadFilter("collectionSort", { by: "title", dir: "asc" });
-let collectionFilters = loadFilter("collectionFilters", { type: "", published: "", seo: "" });
+// Merged over the defaults, not read raw: a saved filter object from before a
+// new facet shipped would leave that key undefined, and `undefined === ""`
+// is false, so its "All" chip would render inactive.
+let collectionFilters = Object.assign(
+    { type: "", published: "", seo: "", image: "" },
+    loadFilter("collectionFilters", {}),
+);
 let currentStatusFilter = loadFilter("productStatus", "");
 let statusCounts = {};
 let selectedProductIds = new Set();
@@ -86,6 +92,24 @@ function renderScoreRing(score, size = 44, item = null) {
 function itemInitials(title) {
     return (title || "").split(/\s+/).filter(Boolean).slice(0, 2)
         .map(w => w[0]).join("").toUpperCase() || "?";
+}
+
+// A collection with no image gets no card in Google/social previews and shows
+// an empty hero on the storefront, so the list flags it explicitly.
+let collectionsMissingImageCount = 0;
+
+let collectionsHeroNotShownCount = 0;
+
+function hasCollectionImage(c) {
+    return Boolean((c.image_url || "").trim());
+}
+
+// Has a hero attached in Shopify, but nothing renders it: most themes ignore
+// collection.image, so the page shows an empty hero until the <img> is in the
+// description body. "Missing" and "not shown" look identical on the storefront
+// and need completely different fixes.
+function isHeroNotShown(c) {
+    return hasCollectionImage(c) && c.hero_in_body === false;
 }
 
 function renderItemThumb(url, title) {
@@ -421,6 +445,14 @@ document.addEventListener("DOMContentLoaded", () => {
 function handleDeepLink() {
     const params = new URLSearchParams(window.location.search);
 
+    // Set before the tab click below — clicking the tab loads the list, so a
+    // filter applied afterwards would need a second round-trip.
+    const imageParam = params.get("image");
+    if (["missing", "has", "not_shown"].includes(imageParam)) {
+        collectionFilters.image = imageParam;
+        saveFilter("collectionFilters", collectionFilters);
+    }
+
     // /seo?tab=<name> deep link (dashboard insight cards link here)
     const tabParam = params.get("tab");
     if (tabParam) {
@@ -531,7 +563,12 @@ function initTabs() {
     const tabBtn = document.querySelector(`.tab[data-tab="${savedTab}"]`) ||
         document.querySelector('.tab[data-tab="priorities"]');
     // Absent when seo.js is loaded on a non-/seo page for its item modal
-    if (tabBtn) tabBtn.click();
+    if (tabBtn) {
+        tabBtn.click();
+        // Not awaited: the count decorates the tab whenever it lands, so a
+        // slow priority scan never delays the tab you actually opened.
+        loadQueuedPriorities();
+    }
 }
 
 async function loadStatusCounts() {
@@ -921,8 +958,20 @@ async function loadCollections() {
                 return true;
             });
         }
+        // Counted before the image filter narrows the list, so the chip keeps
+        // showing how many are missing while you're looking at them.
+        collectionsMissingImageCount = collections.filter(c => !hasCollectionImage(c)).length;
+        collectionsHeroNotShownCount = collections.filter(isHeroNotShown).length;
+        if (collectionFilters.image === "not_shown") {
+            collections = collections.filter(isHeroNotShown);
+        } else if (collectionFilters.image) {
+            const wantMissing = collectionFilters.image === "missing";
+            collections = collections.filter(c => hasCollectionImage(c) !== wantMissing);
+        }
+
         currentCollections = collections;
-        const hasCollectionFilters = collectionFilters.type || collectionFilters.published || collectionFilters.seo;
+        const hasCollectionFilters = collectionFilters.type || collectionFilters.published
+            || collectionFilters.seo || collectionFilters.image;
         if (collections.length === 0 && !hasCollectionFilters) {
             container.innerHTML = `
                 <div class="empty-state">
@@ -942,7 +991,61 @@ async function loadCollections() {
 }
 
 let priorityTypeFilter = "product";
-let priorityViewMode = "needs_work"; // "needs_work" or "optimized"
+let priorityViewMode = "needs_work"; // "queued", "needs_work" or "optimized"
+
+// The items behind the sidebar SEO badge, fetched once per page load. The
+// ranked list is per-type and 50 deep; the queue is the top 10 across both,
+// so without this the tab gives no way to tell which rows the badge counted.
+let _queuedPriorities = [];
+let _queuedPriorityKeys = new Set();
+
+function _priorityKey(item) {
+    return `${item.item_type}:${item.id}`;
+}
+
+async function loadQueuedPriorities() {
+    try {
+        const storeId = await _ensureStoreId();
+        if (!storeId) return;
+        const data = await apiRequest(`/api/seo/priorities/queued?store_id=${storeId}`);
+        _queuedPriorities = data.items || [];
+        _queuedPriorityKeys = new Set(_queuedPriorities.map(_priorityKey));
+        renderPriorityTabCount();
+        // The tab may have rendered before this landed — repaint so the rows
+        // pick up their highlight and the toolbar its count.
+        if (priorityViewMode !== "optimized"
+            && document.querySelector('.tab[data-tab="priorities"]')?.classList.contains("active")) {
+            loadPriorities();
+        }
+    } catch (e) {
+        /* the count is decoration — never block the tab */
+    }
+}
+
+// Applying stamps last_optimized_at, which moves the item out of the
+// actionable queue into the re-measuring band. The queued set is fetched once
+// per page load, so without this the item you just optimized stays on screen
+// — in the tab count, the In Queue list and the sidebar badge.
+async function refreshQueueAfterApply() {
+    try {
+        await loadQueuedPriorities();          // repaints the tab + list itself
+        if (typeof NavBadges !== "undefined") NavBadges.refresh();
+    } catch (e) {
+        /* never let a refresh failure surface over a successful apply */
+    }
+}
+
+function renderPriorityTabCount() {
+    const tab = document.querySelector('.tab[data-tab="priorities"]');
+    if (!tab) return;
+    tab.querySelector(".tab-count")?.remove();
+    if (!_queuedPriorities.length) return;
+    const chip = document.createElement("span");
+    chip.className = "tab-count";
+    chip.textContent = _queuedPriorities.length;
+    chip.title = `${_queuedPriorities.length} items queued for optimization — the same count as the SEO badge in the sidebar`;
+    tab.appendChild(chip);
+}
 let optimizedSort = { by: "days_since", dir: "asc" };
 let _cachedOptimizedItems = [];
 
@@ -971,15 +1074,21 @@ async function _ensureStoreId() {
 }
 
 function _priorityToolbar() {
+    // The queue spans both item types, so the Products/Collections split has
+    // no meaning there — hidden rather than shown inert.
+    const showTypeFilter = priorityViewMode !== "queued";
     return `<div class="toolbar-row" style="gap:12px;flex-wrap:wrap;">
         <div class="status-filter-bar">
+            <button class="filter-chip ${priorityViewMode === "queued" ? "active" : ""}" onclick="setPriorityView('queued')"
+                title="The items counted by the SEO badge in the sidebar">
+                In Queue${_queuedPriorities.length ? ` <span class="filter-chip-count">${_queuedPriorities.length}</span>` : ""}</button>
             <button class="filter-chip ${priorityViewMode === "needs_work" ? "active" : ""}" onclick="setPriorityView('needs_work')">Needs Work</button>
             <button class="filter-chip ${priorityViewMode === "optimized" ? "active" : ""}" onclick="setPriorityView('optimized')">Recently Optimized</button>
         </div>
-        <div class="status-filter-bar" style="margin-left:auto;">
+        ${showTypeFilter ? `<div class="status-filter-bar" style="margin-left:auto;">
             <button class="filter-chip ${priorityTypeFilter === "product" ? "active" : ""}" onclick="setPriorityType('product')">Products</button>
             <button class="filter-chip ${priorityTypeFilter === "collection" ? "active" : ""}" onclick="setPriorityType('collection')">Collections</button>
-        </div>
+        </div>` : ""}
     </div>`;
 }
 
@@ -989,6 +1098,12 @@ async function loadPriorities() {
     const storeId = await _ensureStoreId();
     if (!storeId) {
         container.innerHTML = '<div class="empty-state"><span class="material-symbols-rounded">store</span><p>No stores found. Add a store first.</p></div>';
+        return;
+    }
+
+    // Served from the cache the tab count already fetched — no second request.
+    if (priorityViewMode === "queued") {
+        renderPrioritiesTable(container, _queuedPriorities);
         return;
     }
 
@@ -1205,6 +1320,45 @@ document.addEventListener("keydown", (e) => {
     else if (e.key === "k" || e.key === "ArrowLeft") openSessionItem(_sessionIndex - 1);
 });
 
+// What clicking ⚡ will actually do. The old column showed top_opportunity —
+// the *supporting* keyword, which is often not the one the optimizer targets
+// (and is blank exactly when the primary resolved cleanly), so the column
+// described something adjacent to the work.
+const ACTION_KIND_LABELS = {
+    striking_distance: { label: "Keyword", cls: "kind-keyword", hint: "Optimizes the page for a specific keyword" },
+    improve_ctr: { label: "CTR", cls: "kind-ctr", hint: "Rewrites meta title & description to earn more clicks at the current position" },
+    onpage_fundamentals: { label: "On-page", cls: "kind-onpage", hint: "General on-page fixes: meta title, description, content" },
+    onpage_issues: { label: "Issues", cls: "kind-onpage", hint: "Optimized recently, but rule-based issues are still open — those are measurable now, unlike search position" },
+    unspecified: { label: "None", cls: "kind-none", hint: "Ranked in on priority score alone — no specific opportunity was identified" },
+};
+
+function renderSuggestedAction(item) {
+    const kind = ACTION_KIND_LABELS[item.action_kind] || ACTION_KIND_LABELS.unspecified;
+    let html = `<span class="action-kind-chip ${kind.cls}" title="${escapeAttr(kind.hint)}">${kind.label}</span>`;
+
+    if (item.target_keyword) {
+        const meta = [];
+        if (item.target_keyword_position) meta.push(`pos ${Math.round(item.target_keyword_position)}`);
+        if (item.target_keyword_volume) meta.push(`vol ${item.target_keyword_volume.toLocaleString()}`);
+        html += `<div class="action-line" title="${escapeAttr(item.recommended_action || "")}">Optimize for
+            <strong>&ldquo;${escapeHtml(item.target_keyword)}&rdquo;</strong>${meta.length ? ` <span class="action-meta">${meta.join(" · ")}</span>` : ""}</div>`;
+        // Only when it names a different keyword — otherwise it just repeats.
+        if (item.top_opportunity && !item.top_opportunity.toLowerCase().startsWith(item.target_keyword.toLowerCase() + " (")) {
+            html += `<div class="action-support">supporting: ${escapeHtml(item.top_opportunity)}</div>`;
+        }
+    } else if (item.recommended_action) {
+        html += `<div class="action-line">${escapeHtml(item.recommended_action)}</div>`;
+    } else {
+        html += `<div class="action-line action-none">Queued on score — no specific opportunity identified</div>`;
+    }
+
+    if (item.cannibalization_warning) {
+        html += `<div class="action-cannibal" title="${escapeAttr(item.cannibalization_warning)}">
+            <span class="material-symbols-rounded">warning</span>Cannibalization risk</div>`;
+    }
+    return html;
+}
+
 function renderPrioritiesTable(container, items) {
     let html = _priorityToolbar();
 
@@ -1219,14 +1373,18 @@ function renderPrioritiesTable(container, items) {
     renderSessionNav();
 
     if (items.length === 0) {
-        html += '<div class="empty-state"><span class="material-symbols-rounded">check_circle</span><p>No priority items found. Connect GSC or import Semrush data to see SEO priorities.</p></div>';
+        html += priorityViewMode === "queued"
+            ? '<div class="empty-state"><span class="material-symbols-rounded">check_circle</span><p>Nothing queued — no SEO work is waiting. The badge in the sidebar will be clear too.</p></div>'
+            : '<div class="empty-state"><span class="material-symbols-rounded">check_circle</span><p>No priority items found. Connect GSC or import Semrush data to see SEO priorities.</p></div>';
         container.innerHTML = html;
         return;
     }
 
+    const queuedShown = items.filter(i => _queuedPriorityKeys.has(_priorityKey(i))).length;
     const cannibalCount = items.filter(i => i.cannibalization_warning).length;
     html += `<div class="summary-strip">
-        <span class="stat-item"><strong>${items.length}</strong> items with opportunities</span>
+        <span class="stat-item"><strong>${items.length}</strong> ${priorityViewMode === "queued" ? "items in your queue" : "items with opportunities"}</span>
+        ${priorityViewMode !== "queued" && queuedShown ? `<span class="stat-divider"></span><span class="stat-item" style="color:var(--primary);"><strong>${queuedShown}</strong> of these are queued</span>` : ""}
         <span class="stat-divider"></span>
         <span class="stat-item" style="color:var(--error);"><strong>${items.filter(i => i.priority_score >= 80).length}</strong> high priority</span>
         <span class="stat-item" style="color:var(--warning);"><strong>${items.filter(i => i.priority_score >= 60 && i.priority_score < 80).length}</strong> medium</span>
@@ -1245,7 +1403,7 @@ function renderPrioritiesTable(container, items) {
     html += '<th>Impressions</th>';
     html += '<th>CTR</th>';
     html += '<th>Position</th>';
-    html += '<th>Top Opportunity</th>';
+    html += '<th>Suggested Action</th>';
     html += '<th>Potential Clicks</th>';
     html += '<th>Actions</th>';
     html += '</tr></thead><tbody>';
@@ -1254,15 +1412,23 @@ function renderPrioritiesTable(container, items) {
         const item = items[i];
         const optimizedLabel = item.last_optimized_at ? `<div style="font-size:10px;color:var(--on-surface-secondary);margin-top:2px;">Optimized ${new Date(item.last_optimized_at).toLocaleDateString('en-US', {month:'short',day:'numeric'})}${item.measuring ? ' <span class="badge badge-warning" style="font-size:9px;" title="Applied to Shopify within the last 28 days — Google has not re-measured it yet. Optimizing again now would overwrite work whose results are still unknown.">re-measuring</span>' : ''}</div>` : '';
         const recommendedAction = item.recommended_action ? escapeAttr(item.recommended_action) : 'Optimize';
-        html += `<tr>
+        const isQueued = _queuedPriorityKeys.has(_priorityKey(item));
+        // In the queued view every row is queued — the marker would be noise.
+        const queuedMark = isQueued && priorityViewMode !== "queued"
+            ? ' <span class="queued-pill" title="Counted by the SEO badge in the sidebar — this is queued work">queued</span>'
+            : '';
+        const typeMark = priorityViewMode === "queued"
+            ? `<span class="row-type-tag">${item.item_type === "product" ? "product" : "collection"}</span> `
+            : '';
+        html += `<tr class="${isQueued ? "row-queued" : ""}">
             <td class="row-num-col">${i + 1}</td>
-            <td><strong>${escapeHtml(item.title)}</strong>${optimizedLabel}</td>
+            <td>${typeMark}<strong>${escapeHtml(item.title)}</strong>${queuedMark}${optimizedLabel}</td>
             <td>${renderPriorityBadge(item.priority_score)}</td>
             <td>${renderScoreRing(item.seo_score, 36, item)}</td>
             <td>${item.gsc_impressions != null ? Math.round(item.gsc_impressions).toLocaleString() : '—'}</td>
             <td>${item.gsc_ctr != null ? (item.gsc_ctr * 100).toFixed(1) + '%' : '—'}</td>
             <td>${item.gsc_position != null ? renderPositionBadge(item.gsc_position) : '—'}</td>
-            <td style="max-width:220px;font-size:12px;">${item.top_opportunity ? escapeHtml(item.top_opportunity) : '<span style="color:var(--on-surface-secondary)">—</span>'}${item.cannibalization_warning ? `<div style="margin-top:3px;font-size:11px;color:var(--error);display:flex;align-items:center;gap:3px;" title="${escapeAttr(item.cannibalization_warning)}"><span class="material-symbols-rounded" style="font-size:14px;">warning</span>Cannibalization risk</div>` : ''}</td>
+            <td class="suggested-action-cell">${renderSuggestedAction(item)}</td>
             <td>${item.potential_clicks_gain > 0 ? '+' + item.potential_clicks_gain.toLocaleString() : '—'}</td>
             <td>
                 <div class="actions-cell">
@@ -1402,6 +1568,21 @@ function renderCollectionsTable(container, collections) {
             <button class="filter-chip ${collectionFilters.seo === "medium" ? "active" : ""}" onclick="setCollectionFilter('seo','medium')">Fair</button>
             <button class="filter-chip ${collectionFilters.seo === "low" ? "active" : ""}" onclick="setCollectionFilter('seo','low')">Poor</button>
         </div>
+        <div class="filter-group-divider"></div>
+        <div class="filter-group">
+            <span class="filter-group-label">Image</span>
+            <button class="filter-chip ${collectionFilters.image === "" ? "active" : ""}" onclick="setCollectionFilter('image','')">All</button>
+            <button class="filter-chip ${collectionFilters.image === "missing" ? "active" : ""}" onclick="setCollectionFilter('image','missing')">
+                Missing${collectionsMissingImageCount ? ` <span class="filter-chip-count">${collectionsMissingImageCount}</span>` : ""}</button>
+            <button class="filter-chip ${collectionFilters.image === "not_shown" ? "active" : ""}" onclick="setCollectionFilter('image','not_shown')"
+                title="Hero image is attached in Shopify but no <img> is in the description — most themes render nothing, so the page looks image-less">
+                Not shown${collectionsHeroNotShownCount ? ` <span class="filter-chip-count">${collectionsHeroNotShownCount}</span>` : ""}</button>
+            <button class="filter-chip ${collectionFilters.image === "has" ? "active" : ""}" onclick="setCollectionFilter('image','has')">Has image</button>
+            <button class="btn btn-secondary btn-sm" style="margin-left:8px;" onclick="rescanCollectionImages(this)"
+                title="Re-read every collection's image from Shopify. The cached value can claim an image the live store never received.">
+                <span class="material-symbols-rounded">sync</span> Rescan
+            </button>
+        </div>
     </div>`;
 
     if (collections.length === 0) {
@@ -1482,6 +1663,8 @@ function renderCollectionsTable(container, collections) {
                         <span class="pub-dot ${c.published ? "pub-on" : "pub-off"}" title="${c.published ? "Published" : "Draft"}"></span>
                         <span>${c.collection_type === "smart" ? "Smart" : "Manual"}</span>
                         ${c.published ? "" : '<span class="item-sub-warn">Draft</span>'}
+                        ${hasCollectionImage(c) ? "" : '<span class="item-sub-warn" title="No collection image — nothing to show in search/social previews or the storefront hero">No image</span>'}
+                        ${isHeroNotShown(c) ? '<span class="item-sub-warn" title="Hero image is attached in Shopify but not in the description body — the theme renders nothing">Hero not shown</span>' : ""}
                         <span>· /${escapeHtml(c.handle || "")}</span>
                     </div>
                 </div>
@@ -1520,6 +1703,45 @@ function toggleCollectionSort(key) {
     loadCollections();
 }
 
+// Shopify is the source of truth for whether a collection actually has an
+// image; the cached column can be optimistic. After reconciling, drop the user
+// straight onto the ones that turned out to be missing so they can re-upload.
+async function rescanCollectionImages(btn) {
+    const original = btn ? btn.innerHTML : null;
+    if (btn) {
+        btn.disabled = true;
+        btn.innerHTML = '<span class="material-symbols-rounded spin">sync</span> Rescanning…';
+    }
+    try {
+        const storeId = await _ensureStoreId();
+        const r = await apiRequest("/api/seo/collections/rescan-images", {
+            method: "POST",
+            body: { store_id: parseInt(storeId) },
+        });
+        const parts = [`${r.checked} checked`, `${r.missing_on_shopify} missing on Shopify`];
+        if (r.restored_from_shopify) parts.push(`${r.restored_from_shopify} found on Shopify`);
+        // An empty-looking hero is usually NOT a missing image — it's an image
+        // the theme never renders. Say so, or "0 missing" reads as a false negative.
+        if (r.hero_not_rendered) {
+            parts.push(`${r.hero_not_rendered} attached but not rendered on the page — fix with “Insert hero images” in the Issues tab`);
+        }
+        showToast(parts.join(" · "),
+            (r.missing_on_shopify || r.hero_not_rendered) ? "warning" : "success");
+        if (r.missing_on_shopify) {
+            collectionFilters.image = "missing";
+            saveFilter("collectionFilters", collectionFilters);
+        } else if (r.hero_not_rendered) {
+            collectionFilters.image = "not_shown";
+            saveFilter("collectionFilters", collectionFilters);
+        }
+        selectedCollectionIds.clear();
+        loadCollections();
+    } catch (err) {
+        showToast(`Rescan failed: ${err.message}`, "error");
+        if (btn) { btn.disabled = false; btn.innerHTML = original; }
+    }
+}
+
 function setCollectionFilter(filterKey, value) {
     collectionFilters[filterKey] = collectionFilters[filterKey] === value ? "" : value;
     saveFilter("collectionFilters", collectionFilters);
@@ -1529,7 +1751,7 @@ function setCollectionFilter(filterKey, value) {
 }
 
 function clearAllCollectionFilters() {
-    collectionFilters = { type: "", published: "", seo: "" };
+    collectionFilters = { type: "", published: "", seo: "", image: "" };
     saveFilter("collectionFilters", collectionFilters);
     selectedCollectionIds.clear();
     lastClickedCollectionIndex = -1;
@@ -2312,6 +2534,7 @@ async function applyChanges(productId) {
 
         if (resp.ok) {
             showToast(`Changes applied! Updated: ${resp.updated_fields.join(", ")}`, "success");
+            refreshQueueAfterApply();
             closeProductModal();
             loadProducts();
         } else {
@@ -2673,6 +2896,7 @@ async function applyCollectionChanges(collectionId) {
 
         if (resp.ok) {
             showToast(`Changes applied! Updated: ${resp.updated_fields.join(", ")}`, "success");
+            refreshQueueAfterApply();
             closeProductModal();
             loadCollections();
         } else {
@@ -2954,6 +3178,7 @@ async function applyProductTitleOnly(productId) {
 
         if (resp.ok) {
             showToast("Title applied!", "success");
+            refreshQueueAfterApply();
             closeProductModal();
             loadProducts();
         } else {
@@ -2994,6 +3219,7 @@ async function applyCollectionTitleOnly(collectionId) {
 
         if (resp.ok) {
             showToast("Title applied!", "success");
+            refreshQueueAfterApply();
             closeProductModal();
             loadCollections();
         } else {

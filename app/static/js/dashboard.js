@@ -237,8 +237,15 @@ async function loadActionQueue() {
 
         const totals = data.total_by_source || {};
         const totalCount = Object.values(totals).reduce((a, b) => a + b, 0);
+        // total_items is the pre-truncation queue size — the number the
+        // sidebar badge shows. Say so when the list is cut short, otherwise
+        // the badge looks wrong against a shorter list.
+        const queued = data.total_items != null ? data.total_items : data.items.length;
+        const shownNote = queued > data.items.length
+            ? `showing ${data.items.length} of ${queued} queued · `
+            : "";
         document.getElementById("queue-note").textContent = data.items.length
-            ? `top ${data.items.length} of ${totalCount.toLocaleString()} tracked opportunities`
+            ? `${shownNote}${queued} queued from ${totalCount.toLocaleString()} tracked opportunities`
             : "";
 
         const ms = data.measuring_summary || {};
@@ -353,6 +360,11 @@ async function dismissQueueItem(actionKey, snoozeDays, btn) {
         const row = btn && btn.closest(".queue-row");
         if (row) row.remove();
         showToast(snoozeDays ? `Snoozed for ${snoozeDays} days` : "Dismissed", "success");
+        // The sidebar count is server-cached — without this it keeps showing
+        // the pre-dismissal number until the next poll. NavBadges is a
+        // top-level const in ui.js, so it is a global binding but NOT a
+        // window property — check the identifier, not window.
+        if (typeof NavBadges !== "undefined") NavBadges.refresh();
     } catch (err) {
         showToast(`Failed: ${err.message}`, "error");
         if (btn) btn.disabled = false;

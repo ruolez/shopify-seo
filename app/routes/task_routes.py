@@ -356,6 +356,90 @@ def _owned_claims_for(ownership, item_type, item_id, cap=150):
     return [o.get("keyword") or kw for kw, o in claims[:cap]]
 
 
+def _near_duplicate(text, seen_token_sets, threshold=0.85):
+    """True when text's token set overlaps a previously applied one ≥threshold
+    (Jaccard). Catches templated metas that vary by one token across a batch —
+    the uniqueness failure Google's scaled-content guidance names — without
+    tripping on legitimately similar sibling products."""
+    from app.services.keyword_identity import tokens
+    t = set(tokens(text))
+    if not t:
+        return False
+    for prev in seen_token_sets:
+        union = len(t | prev)
+        if union and len(t & prev) / union >= threshold:
+            return True
+    return False
+
+
+def _drop_duplicate_metas(fields, applied_meta_tokens, item_label):
+    """Remove near-duplicate meta fields from a bulk apply; returns the list
+    of dropped field names."""
+    dropped = []
+    for f in ("meta_title", "meta_description"):
+        val = fields.get(f)
+        if val and _near_duplicate(val, applied_meta_tokens[f]):
+            fields.pop(f)
+            dropped.append(f)
+    if dropped:
+        logger.warning("Bulk optimize: dropped near-duplicate %s for %s — "
+                       "boilerplate across a batch reads as scaled content",
+                       "+".join(dropped), item_label)
+    return dropped
+
+
+def _record_applied_metas(fields, applied_meta_tokens):
+    from app.services.keyword_identity import tokens
+    for f in ("meta_title", "meta_description"):
+        if fields.get(f):
+            applied_meta_tokens[f].append(set(tokens(fields[f])))
+
+
+def _ownership_for(cache, store_id):
+    """Per-store ownership map, built lazily — a mixed-store batch used to
+    share the first item's map, guarding every item against the wrong store."""
+    if store_id not in cache:
+        try:
+            from app.services.keyword_resolver import get_owned_primary_keywords
+            cache[store_id] = get_owned_primary_keywords(store_id)
+        except Exception:
+            cache[store_id] = {}
+    return cache[store_id]
+
+
+def _claim_keyword(ownership, kw, item_type, item_id):
+    """Claim kw in the in-memory ownership map by variant_key, so later items
+    in the batch can't take a plural/word-order variant of it (raw-string
+    claims let 'dutch master' slip past a 'dutch masters' claim)."""
+    try:
+        from app.services.keyword_resolver import variant_key
+        vk = variant_key(kw)
+        if vk and vk not in ownership:
+            ownership[vk] = {"item_type": item_type, "item_id": item_id,
+                             "score": None, "manual": False, "volume": 0,
+                             "keyword": kw}
+    except Exception:
+        pass
+
+
+def _claim_applied_primary(ownership, store_id, item_type, item_id):
+    """After an apply, claim the item's re-resolved primary — what was actually
+    written and scored, not the model's self-reported keyword."""
+    try:
+        with db.get_cursor() as cur:
+            cur.execute(
+                """SELECT keyword_resolution->'primary'->>'keyword' AS kw
+                   FROM technical_seo_analyses
+                   WHERE store_id = %s AND item_type = %s AND item_id = %s""",
+                (store_id, item_type, item_id),
+            )
+            row = cur.fetchone()
+        if row and row.get("kw"):
+            _claim_keyword(ownership, row["kw"], item_type, item_id)
+    except Exception:
+        logger.warning("Post-apply keyword claim failed for %s %s", item_type, item_id)
+
+
 def _record_bulk_change_event(store_id, item_type, item_id, change_type, fields):
     """Minimal seo_change_events row for a bulk apply. View Impact keys its
     GSC before/after windows off the event's created_at — without a row,
@@ -397,14 +481,8 @@ def _execute_bulk_collection_task(bulk_task_id):
 
     auto_apply = bulk_task["auto_apply"]
     skip_title = bulk_task.get("skip_title", False)
-    claimed_keywords = []
-    ownership = {}
-    if items:
-        try:
-            from app.services.keyword_resolver import get_owned_primary_keywords
-            ownership = get_owned_primary_keywords(items[0]["store_id"])
-        except Exception:
-            ownership = {}
+    ownership_cache = {}
+    applied_meta_tokens = {"meta_title": [], "meta_description": []}
 
     for item in items:
         item_id = item["item_id"]
@@ -422,10 +500,10 @@ def _execute_bulk_collection_task(bulk_task_id):
 
         try:
             task_input = {"collection_id": collection_id}
+            ownership = _ownership_for(ownership_cache, item["store_id"])
             owned_claims = _owned_claims_for(ownership, "collection", collection_id)
-            all_claims = owned_claims + [kw for kw in claimed_keywords if kw not in owned_claims]
-            if all_claims:
-                task_input["claimed_keywords"] = all_claims
+            if owned_claims:
+                task_input["claimed_keywords"] = owned_claims
             ai_result = run_task("collection_seo", task_input)
 
             item_error = None
@@ -441,10 +519,11 @@ def _execute_bulk_collection_task(bulk_task_id):
             if "error" not in ai_result and "raw_response" not in ai_result:
                 target_kw = ai_result.get("target_keywords") or {}
                 primary_kw = target_kw.get("primary", "") if isinstance(target_kw, dict) else ""
-                if isinstance(primary_kw, str) and primary_kw:
-                    clean_kw = primary_kw.split("(")[0].strip().lower()
-                    if clean_kw:
-                        claimed_keywords.append(clean_kw)
+                if isinstance(primary_kw, str) and primary_kw.strip():
+                    # Provisional claim from the model's self-report; superseded
+                    # by the re-resolved primary after an apply.
+                    _claim_keyword(ownership, primary_kw.split("(")[0].strip(),
+                                   "collection", collection_id)
 
             if auto_apply and "error" not in ai_result and "raw_response" not in ai_result:
                 try:
@@ -464,6 +543,9 @@ def _execute_bulk_collection_task(bulk_task_id):
                     if ai_result.get("optimized_meta_description"):
                         collection_fields["meta_description"] = clamp_meta_description(ai_result["optimized_meta_description"])
 
+                    _drop_duplicate_metas(collection_fields, applied_meta_tokens,
+                                          f"collection {collection_id}")
+
                     if collection_fields:
                         client.update_collection(item["shopify_id"], collection_fields)
 
@@ -482,6 +564,8 @@ def _execute_bulk_collection_task(bulk_task_id):
 
                     from app.services.analysis_refresh import refresh_item_analysis
                     refresh_item_analysis(item["store_id"], "collection", collection_id)
+                    _claim_applied_primary(ownership, item["store_id"], "collection", collection_id)
+                    _record_applied_metas(collection_fields, applied_meta_tokens)
 
                     with db.get_cursor() as cur:
                         cur.execute(
@@ -561,14 +645,8 @@ def _execute_bulk_task(bulk_task_id):
     auto_apply = bulk_task["auto_apply"]
     skip_tags = bulk_task.get("skip_tags", True)
     skip_title = bulk_task.get("skip_title", False)
-    claimed_keywords = []
-    ownership = {}
-    if items:
-        try:
-            from app.services.keyword_resolver import get_owned_primary_keywords
-            ownership = get_owned_primary_keywords(items[0]["store_id"])
-        except Exception:
-            ownership = {}
+    ownership_cache = {}
+    applied_meta_tokens = {"meta_title": [], "meta_description": []}
 
     for item in items:
         item_id = item["item_id"]
@@ -586,10 +664,10 @@ def _execute_bulk_task(bulk_task_id):
 
         try:
             task_input = {"product_id": product_id, "skip_tags": skip_tags}
+            ownership = _ownership_for(ownership_cache, item["store_id"])
             owned_claims = _owned_claims_for(ownership, "product", product_id)
-            all_claims = owned_claims + [kw for kw in claimed_keywords if kw not in owned_claims]
-            if all_claims:
-                task_input["claimed_keywords"] = all_claims
+            if owned_claims:
+                task_input["claimed_keywords"] = owned_claims
             ai_result = run_task("product_seo", task_input)
 
             item_error = None
@@ -605,10 +683,11 @@ def _execute_bulk_task(bulk_task_id):
             if "error" not in ai_result and "raw_response" not in ai_result:
                 target_kw = ai_result.get("target_keywords") or {}
                 primary_kw = target_kw.get("primary", "") if isinstance(target_kw, dict) else ""
-                if isinstance(primary_kw, str) and primary_kw:
-                    clean_kw = primary_kw.split("(")[0].strip().lower()
-                    if clean_kw:
-                        claimed_keywords.append(clean_kw)
+                if isinstance(primary_kw, str) and primary_kw.strip():
+                    # Provisional claim from the model's self-report; superseded
+                    # by the re-resolved primary after an apply.
+                    _claim_keyword(ownership, primary_kw.split("(")[0].strip(),
+                                   "product", product_id)
 
             if auto_apply and "error" not in ai_result and "raw_response" not in ai_result:
                 try:
@@ -629,6 +708,9 @@ def _execute_bulk_task(bulk_task_id):
                         product_fields["meta_description"] = clamp_meta_description(ai_result["optimized_meta_description"])
                     if not skip_tags and ai_result.get("suggested_tags") and isinstance(ai_result["suggested_tags"], list):
                         product_fields["tags"] = ai_result["suggested_tags"]
+
+                    _drop_duplicate_metas(product_fields, applied_meta_tokens,
+                                          f"product {product_id}")
 
                     if product_fields:
                         client.update_product(item["shopify_id"], product_fields)
@@ -707,6 +789,8 @@ def _execute_bulk_task(bulk_task_id):
 
                     from app.services.analysis_refresh import refresh_item_analysis
                     refresh_item_analysis(item["store_id"], "product", product_id)
+                    _claim_applied_primary(ownership, item["store_id"], "product", product_id)
+                    _record_applied_metas(product_fields, applied_meta_tokens)
 
                     with db.get_cursor() as cur:
                         cur.execute(

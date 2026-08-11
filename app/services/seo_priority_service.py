@@ -3,7 +3,7 @@ from datetime import datetime, timedelta, timezone
 
 from app.database import db
 from app.services.ctr_benchmarks import get_expected_ctr_curve, is_ctr_underperformer
-from app.services.keyword_resolver import _norm, get_owned_primary_keywords, variant_key
+from app.services.keyword_resolver import get_owned_primary_keywords, variant_key
 from app.services.seo_analyzer import (
     _expected_ctr,
     analyze_collection_seo,
@@ -58,25 +58,42 @@ def _get_semrush_metrics_for_store(store_id):
     return get_semrush_metrics_for_store(store_id)
 
 
-def _get_striking_keywords_for_url(store_id, url_path, base_url=""):
-    full_url_patterns = [url_path]
-    if base_url:
-        full_url_patterns.append(f"{base_url}/{url_path}")
+def _striking_band():
+    """[lo, hi] from rules.keyword_resolution.opportunity.striking_band — the
+    setting existed but this module hardcoded 4-20 next to it."""
+    try:
+        from app.prompt_defaults import DEFAULTS
+        from app.settings_manager import get_setting
+        rules = get_setting("rules.keyword_resolution", DEFAULTS["rules.keyword_resolution"])
+        band = (rules.get("opportunity") or {}).get("striking_band") or [4, 20]
+        return int(band[0]), int(band[1])
+    except Exception:
+        return 4, 20
 
+
+def _get_striking_keywords_for_url(store_id, url_path, base_url=""):
+    from app.services.url_utils import url_path_key
+
+    target = url_path_key(url_path)
+    if not target:
+        return []
+    handle = target.rsplit("/", 1)[-1]
+    lo, hi = _striking_band()
     with db.get_cursor() as cur:
-        placeholders = " OR ".join(["url ILIKE %s"] * len(full_url_patterns))
-        params = [f"%{p}%" for p in full_url_patterns]
         cur.execute(
-            f"""SELECT keyword, position, search_volume
+            """SELECT keyword, position, search_volume, url
                FROM semrush_keywords
-               WHERE store_id = %s AND ({placeholders})
-                 AND position >= 4 AND position <= 20
+               WHERE store_id = %s AND url ILIKE %s
+                 AND position >= %s AND position <= %s
                  AND search_volume IS NOT NULL AND search_volume > 0
-               ORDER BY search_volume DESC
-               LIMIT 10""",
-            [store_id] + params,
+               ORDER BY search_volume DESC""",
+            (store_id, f"%{handle}%", lo, hi),
         )
-        return cur.fetchall()
+        rows = cur.fetchall()
+    # ILIKE only narrows the scan; the exact-path compare is what stops
+    # products/x from inheriting products/x-large's keywords — the same
+    # substring bug already fixed in the cannibalization checker below.
+    return [r for r in rows if url_path_key(r["url"]) == target][:10]
 
 
 def compute_unified_item_score(seo, kw_score, gsc, sr, ctr_curve):
@@ -238,13 +255,29 @@ def get_priority_ranked_items(store_id, item_type="product", limit=50, measuring
                 _owner_titles[okey] = f"{owner['item_type']} #{owner['item_id']}"
         return _owner_titles[okey]
 
+    # Outstanding rule-based issues per item. The measuring window exists
+    # because GSC needs ~28 days to re-measure a change — that reasoning only
+    # applies to SEARCH-driven work. On-page issues are measurable right now,
+    # so an item that still has them must not be silenced (an alt-text-only
+    # optimize used to hide a product whose meta description was still missing).
+    try:
+        from app.services.issue_scanner import fixable_issue_counts
+        issue_counts = fixable_issue_counts(store_id)
+    except Exception:
+        logger.warning("Priority ranking: issue counts unavailable", exc_info=True)
+        issue_counts = {}
+
     results = []
     measuring_results = []
     for item in items:
         # Freshly optimized items are demoted while Google re-measures —
         # re-flagging them off pre-change data is noise. Demoted, not hidden:
         # a catalog-wide bulk optimize must not blank the whole queue.
-        in_measuring_window = _within_measuring_window(item.get("last_optimized_at"), measuring_days)
+        recently_optimized = _within_measuring_window(item.get("last_optimized_at"), measuring_days)
+        open_issues = issue_counts.get((item_type, item["id"]), 0)
+        # Still broken -> stays actionable, but the recommendation below is
+        # rewritten to the on-page work, never a keyword play off stale data.
+        in_measuring_window = recently_optimized and not open_issues
 
         handle = item.get("handle") or ""
         path = f"{prefix}/{handle}"
@@ -283,12 +316,14 @@ def get_priority_ranked_items(store_id, item_type="product", limit=50, measuring
         target_keyword = None
         target_keyword_position = None
         target_keyword_volume = None
-        keyword_aligned = False
         primary_review_suggested = False
         keyword_unresolved = False
 
         resolved = resolved_primaries.get(item["id"])
-        resolved_kw_norm = _norm(resolved["keyword"]) if resolved else None
+        # variant_key throughout this branch — the claim identity. Mixing _norm
+        # here let a plural/word-order variant of the page's own primary be
+        # recommended "against" itself as a supporting opportunity.
+        resolved_kw_key = variant_key(resolved["keyword"]) if resolved else None
 
         if striking:
             own_key = (item_type, item["id"])
@@ -298,11 +333,11 @@ def get_priority_ranked_items(store_id, item_type="product", limit=50, measuring
                 return o if o and (o["item_type"], o["item_id"]) != own_key else None
 
             resolved_striking = next(
-                (k for k in striking if resolved_kw_norm and _norm(k["keyword"]) == resolved_kw_norm),
+                (k for k in striking if resolved_kw_key and variant_key(k["keyword"]) == resolved_kw_key),
                 None,
             )
             unowned = [k for k in striking
-                       if _norm(k["keyword"]) != resolved_kw_norm and not _foreign_owner(k["keyword"])]
+                       if variant_key(k["keyword"]) != resolved_kw_key and not _foreign_owner(k["keyword"])]
 
             best = None
             if resolved_striking:
@@ -310,15 +345,13 @@ def get_priority_ranked_items(store_id, item_type="product", limit=50, measuring
                 pos = float(best.get("position") or 0)
                 recommended_action = (f"Optimize for \"{best['keyword']}\" — resolved primary in "
                                       f"striking distance at position {pos:.0f}")
-                keyword_aligned = True
-            elif resolved_kw_norm:
+            elif resolved_kw_key:
                 # Queue and optimizer must agree: recommend the resolved
                 # primary; unowned striking keywords are supporting evidence.
                 target_keyword = resolved["keyword"]
                 target_keyword_position = resolved.get("gsc_position") or resolved.get("semrush_position")
                 target_keyword_volume = resolved.get("volume")
                 action_kind = "striking_distance"
-                keyword_aligned = True
                 support = unowned[0] if unowned else None
                 if support:
                     s_vol = int(support.get("search_volume") or 0)
@@ -328,7 +361,10 @@ def get_priority_ranked_items(store_id, item_type="product", limit=50, measuring
                         f"Optimize for \"{resolved['keyword']}\" (supporting opportunity: "
                         f"\"{support['keyword']}\" pos {s_pos:.0f}, vol {s_vol:,})"
                     )
-                    if s_vol > 3 * int(resolved.get("volume") or 0):
+                    # Floor of 50: with a zero-volume resolved primary (common
+                    # for long-tail product picks) 3×0 made ANY support volume
+                    # trigger the flag.
+                    if s_vol >= 50 and s_vol > 3 * int(resolved.get("volume") or 0):
                         primary_review_suggested = True
                 else:
                     recommended_action = f"Optimize for \"{resolved['keyword']}\" — your resolved primary keyword"
@@ -365,7 +401,7 @@ def get_priority_ranked_items(store_id, item_type="product", limit=50, measuring
                 # The resolved primary already passed the resolver's own
                 # cannibalization checks — don't warn the user off it.
                 cannibal = None
-                if _norm(best["keyword"]) != resolved_kw_norm:
+                if variant_key(best["keyword"]) != resolved_kw_key:
                     # Full URL — GSC pages are absolute; the exact compare in
                     # the checker needs matching shapes.
                     cannibal = _check_keyword_cannibalization(store_id, best["keyword"], f"{base_url}/{path}" if base_url else path)
@@ -390,6 +426,28 @@ def get_priority_ranked_items(store_id, item_type="product", limit=50, measuring
         if not recommended_action and composite["on_page_score"] < 50:
             recommended_action = "Improve on-page SEO fundamentals (meta title, description, content)"
             action_kind = "onpage_fundamentals"
+
+        if recently_optimized and open_issues:
+            # Kept in the queue despite the recent optimize, so say why and
+            # point at the work that is actually measurable today. The keyword
+            # target is dropped deliberately: its GSC/Semrush position predates
+            # the change, so re-optimizing for it would chase stale data.
+            recommended_action = (
+                f"Fix {open_issues} outstanding on-page issue"
+                f"{'s' if open_issues != 1 else ''} — recently optimized, so search "
+                "data is still re-measuring"
+            )
+            action_kind = "onpage_issues"
+            target_keyword = None
+            target_keyword_position = None
+            target_keyword_volume = None
+
+        if not recommended_action:
+            # Ranked in on priority score alone: no striking keyword, not a CTR
+            # underperformer, on-page score too high for the fundamentals
+            # branch. An explicit kind — callers used to see a blank and
+            # substitute a label the engine never produced.
+            action_kind = "unspecified"
 
         potential_clicks = 0
         if striking:
@@ -433,8 +491,6 @@ def get_priority_ranked_items(store_id, item_type="product", limit=50, measuring
                 "keyword": resolved.get("keyword"),
                 "manual": bool(resolved.get("manual")),
             }
-        if keyword_aligned:
-            result_entry["keyword_aligned"] = True
         if primary_review_suggested:
             result_entry["primary_review_suggested"] = True
         if in_measuring_window:
@@ -452,3 +508,45 @@ def get_priority_ranked_items(store_id, item_type="product", limit=50, measuring
     if len(results) < limit:
         results.extend(measuring_results[: limit - len(results)])
     return results[:limit]
+
+
+# The sidebar SEO badge, the home action queue and the Priorities tab all
+# answer "what SEO work is queued?" — they must answer it identically, so the
+# selection lives here once. Everything else derives from it.
+QUEUED_PRIORITY_LIMIT = 10
+
+# Shown wherever an item ranked in without a diagnosis. Never sent to the AI as
+# a priority focus — it describes the absence of an instruction, not one.
+UNSPECIFIED_ACTION_LABEL = "Queued on score — no specific opportunity identified"
+
+
+def priority_action_key(item):
+    """Stable key for dismiss/snooze, matching the home queue's action_key."""
+    return f"priority:{item['item_type']}:{item['id']}"
+
+
+def get_queued_priorities(store_id, dismissed_keys=None, limit=QUEUED_PRIORITY_LIMIT):
+    """(queued, measuring) — the actionable priority work for a store.
+
+    Top `limit` by priority score across BOTH item types, with re-measuring
+    items split off (a page applied to Shopify is done until GSC re-measures
+    it) and dismissed/snoozed keys removed. Dismissals are applied BEFORE the
+    truncation so the count always equals the number of items returned."""
+    actionable, measuring = [], []
+    for item_type in ("product", "collection"):
+        act, meas = get_priority_ranked_items(
+            store_id, item_type=item_type, limit=limit, split_measuring=True
+        )
+        actionable.extend(act)
+        measuring.extend(meas)
+
+    if dismissed_keys is None:
+        # Local import: dashboard_service imports this module.
+        from app.services.dashboard_service import _dismissed_action_keys
+
+        dismissed_keys = _dismissed_action_keys(store_id)
+    actionable = [p for p in actionable if priority_action_key(p) not in dismissed_keys]
+
+    actionable.sort(key=lambda p: p["priority_score"], reverse=True)
+    measuring.sort(key=lambda p: p["priority_score"], reverse=True)
+    return actionable[:limit], measuring

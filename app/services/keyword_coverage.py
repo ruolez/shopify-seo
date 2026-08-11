@@ -47,24 +47,45 @@ def get_ownership_map(store_id, keyword_ids):
     """{kw_id: {"owner": best-or-None, "owners": [all ranked owners]}}"""
     if not keyword_ids:
         return {}
+    from app.services.keyword_identity import variant_key
+
+    # Rank 1 — resolver primaries, joined in Python by variant_key: ownership
+    # folds plurals and word order (the claim identity every guard uses), which
+    # SQL string equality — even a _norm mirror — cannot. "dutch masters" must
+    # read as owned by the page whose primary is "dutch master".
+    with db.get_cursor() as cur:
+        cur.execute(
+            """SELECT item_type, item_id,
+                      keyword_resolution->'primary'->>'keyword' AS kw
+               FROM technical_seo_analyses
+               WHERE store_id = %s
+                 AND keyword_resolution->'primary'->>'keyword' IS NOT NULL""",
+            (store_id,),
+        )
+        primary_rows = cur.fetchall()
+        cur.execute(
+            "SELECT id, keyword FROM master_keywords WHERE store_id = %s AND id = ANY(%s)",
+            (store_id, list(keyword_ids)),
+        )
+        mk_rows = cur.fetchall()
+
+    primaries_by_vk = {}
+    for r in primary_rows:
+        vk = variant_key(r["kw"])
+        if vk:
+            primaries_by_vk.setdefault(vk, []).append(r)
+
+    rows = []
+    for mk in mk_rows:
+        for owner in primaries_by_vk.get(variant_key(mk["keyword"]), []):
+            rows.append({"kw_id": mk["id"], "rank": 1, "role": "resolved_primary",
+                         "item_type": owner["item_type"], "item_id": owner["item_id"]})
+
     with db.get_cursor() as cur:
         cur.execute(
             """SELECT kw_id, rank, role, item_type, item_id FROM (
-                 SELECT mk.id AS kw_id, 1 AS rank, 'resolved_primary' AS role,
-                        tsa.item_type, tsa.item_id
-                   FROM master_keywords mk
-                   JOIN technical_seo_analyses tsa
-                     ON tsa.store_id = mk.store_id
-                    -- Resolver primaries are stored _norm-ed (punctuation
-                    -- stripped, whitespace collapsed); mk.keyword is only
-                    -- lowercased — mirror _norm on the mk side or punctuated
-                    -- keywords show "unowned" although a page owns them.
-                    AND (tsa.keyword_resolution->'primary'->>'keyword')
-                        = btrim(regexp_replace(regexp_replace(lower(mk.keyword), '[^\\w\\s''&-]', ' ', 'g'), '\\s+', ' ', 'g'))
-                  WHERE mk.store_id = %(sid)s AND mk.id = ANY(%(ids)s)
-                 UNION ALL
-                 SELECT ka.master_keyword_id, 2, 'assigned',
-                        ka.assigned_item_type, ka.assigned_item_id
+                 SELECT ka.master_keyword_id AS kw_id, 2 AS rank, 'assigned' AS role,
+                        ka.assigned_item_type AS item_type, ka.assigned_item_id AS item_id
                    FROM keyword_assignments ka
                   WHERE ka.store_id = %(sid)s AND ka.status IN ('accepted', 'applied')
                     AND ka.assigned_item_type IS NOT NULL AND ka.assigned_item_id IS NOT NULL
@@ -78,7 +99,9 @@ def get_ownership_map(store_id, keyword_ids):
                ) owners ORDER BY kw_id, rank""",
             {"sid": store_id, "ids": list(keyword_ids)},
         )
-        rows = cur.fetchall()
+        rows.extend(cur.fetchall())
+
+    rows.sort(key=lambda r: (r["kw_id"], r["rank"]))
 
     titles = _resolve_titles(store_id, rows)
     result = {}
@@ -270,7 +293,11 @@ def _gsc_contenders(store_id, queries, limit=6):
                       SUM(position * impressions) / NULLIF(SUM(impressions), 0) AS pos,
                       SUM(clicks)::int AS clicks, SUM(impressions)::int AS impressions
                FROM gsc_daily_metrics
-               WHERE store_id = %s AND date >= CURRENT_DATE - 30 AND query = ANY(%s)
+               WHERE store_id = %s
+                 -- 30d window ending today-3: GSC's last ~3 days are partial,
+                 -- and unsettled days skewed the conflict view's positions.
+                 AND date >= CURRENT_DATE - 33 AND date <= CURRENT_DATE - 3
+                 AND query = ANY(%s)
                GROUP BY page HAVING SUM(impressions) > 0
                ORDER BY pos ASC LIMIT %s""",
             (store_id, list(queries), limit),

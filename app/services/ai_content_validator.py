@@ -17,26 +17,13 @@ import json
 import logging
 import re
 
-from app.prompt_defaults import DEFAULTS
-from app.services.technical_seo_analyzer import (
-    _keyword_in_text,
-    _keyword_position_in_title,
-)
-from app.settings_manager import get_setting
+from app.services.technical_seo_analyzer import _keyword_in_text
 
 logger = logging.getLogger(__name__)
 
 META_TITLE_MAX = 60
 META_DESC_MAX = 160
 ALT_MAX = 125
-
-
-def _title_first_n():
-    try:
-        rules = get_setting("rules.technical_product", DEFAULTS["rules.technical_product"])
-        return int(rules.get("thresholds", {}).get("keyword_at_title_start", 5))
-    except Exception:
-        return 5
 
 
 def alt_text_of(entry):
@@ -91,18 +78,39 @@ def find_violations(fields, primary_keyword):
             "kind": "length", "field": "meta_description", "length": len(md),
             "limit": META_DESC_MAX, "aim": 150,
         })
+    # Containment gates; position doesn't. Google has no first-word rule, and
+    # gating on position while the analyzer scored containment let titles
+    # clear this gate then immediately raise the high-severity
+    # title_has_keyword issue on re-analysis.
     title = fields.get("title")
     if title and primary_keyword:
-        if _keyword_position_in_title(primary_keyword, title, _title_first_n()) != 100:
+        if not _keyword_in_text(primary_keyword, title):
             violations.append({"kind": "title_keyword", "field": "title"})
+    # Presence (not position): the analyzer scores meta_title_has_keyword /
+    # meta_desc_has_keyword, so a rewrite that drops the primary keyword —
+    # length-only scoped fixes did exactly this — raises an issue on arrival.
+    if primary_keyword:
+        for meta_field in ("meta_title", "meta_description"):
+            val = fields.get(meta_field)
+            if val and not _keyword_in_text(primary_keyword, val):
+                violations.append({"kind": "meta_keyword_missing", "field": meta_field})
+    # Mirrors image_alt_has_keyword in technical_seo_analyzer: the keyword
+    # belongs in 1..n-1 of the alts (the hero, in practice). BOTH ends fail —
+    # none at all misses the image-search signal, every one reads as stuffing.
+    # Checking only the stuffing end let "0/n alts contain X" ship straight
+    # into the Issues tab right after an optimize.
     alts = fields.get("alts")
-    if alts and primary_keyword and len(alts) >= 2:
+    if alts and primary_keyword:
+        n = len(alts)
         with_kw = [i for i, a in enumerate(alts) if a and _keyword_in_text(primary_keyword, a)]
-        if len(with_kw) == len(alts):
-            # All alts carry the keyword — the scorer treats this as stuffing.
+        if not with_kw:
+            violations.append({
+                "kind": "alt_keyword_missing", "field": "alts", "indexes": [0],
+            })
+        elif n >= 2 and len(with_kw) == n:
             violations.append({
                 "kind": "alt_stuffing", "field": "alts",
-                "indexes": list(range(1, len(alts))),
+                "indexes": list(range(1, n)),
             })
     return violations
 
@@ -128,9 +136,10 @@ def _corrective_prompt(violations, fields, primary_keyword):
             keys.append("title")
             lines.append(
                 f'- title: "{fields.get("title")}"\n'
-                f'  The primary keyword must begin within the first {_title_first_n()} words. '
-                "REORDER the existing elements (brand, product name, pack size, count, "
-                "flavor) — keep every element, drop nothing, invent nothing."
+                f'  The primary keyword "{primary_keyword}" is missing from the title. '
+                "Rework it so the keyword appears naturally (near the front is nice but "
+                "NOT required) using the existing elements (brand, product name, pack "
+                "size, count, flavor) — keep every element, drop nothing, invent nothing."
             )
         elif v["kind"] == "alt_stuffing":
             keys.append("alts")
@@ -142,6 +151,29 @@ def _corrective_prompt(violations, fields, primary_keyword):
                 f'phrase "{primary_keyword}" (describe the image naturally — angle, '
                 f"detail, packaging, lifestyle; under {ALT_MAX} characters). Return "
                 'them under "alts" as {"<index>": "<new alt>"}:\n' + numbered
+            )
+        elif v["kind"] == "meta_keyword_missing":
+            keys.append(v["field"])
+            limit = META_TITLE_MAX if v["field"] == "meta_title" else META_DESC_MAX
+            lines.append(
+                f'- {v["field"]}: "{fields.get(v["field"])}"\n'
+                f'  It never mentions the primary keyword. Rework it so the phrase '
+                f'"{primary_keyword}" appears naturally ONCE — do not tack it on with '
+                f"a dash or repeat it, and stay within {limit} characters."
+            )
+        elif v["kind"] == "alt_keyword_missing":
+            keys.append("alts")
+            alts = fields.get("alts") or []
+            hero = alts[0] if alts else ""
+            lines.append(
+                f'- No image alt contains the primary keyword "{primary_keyword}", '
+                "so the images give search engines nothing to match. Rewrite ONLY "
+                f'the hero alt (index 0) to include the exact phrase "{primary_keyword}" '
+                f"naturally while still describing the image, under {ALT_MAX} characters. "
+                "Leave every other alt alone — the keyword must NOT appear in more "
+                "than one or two alts.\n"
+                f'  0: "{hero}"\n'
+                'Return it under "alts" as {"0": "<new alt>"}'
             )
     lines.append(
         "Respond with ONLY a JSON object containing exactly these keys: "
@@ -183,6 +215,40 @@ def _apply_alt_fallback(alts, primary_keyword):
     return [alts[0]] + [strip_keyword_phrase(a, primary_keyword) for a in alts[1:]]
 
 
+def add_keyword_to_alt(alt, primary_keyword):
+    """Put the keyword at the front of one alt, keeping the description."""
+    hero = (alt or "").strip()
+    if not hero:
+        return primary_keyword[:ALT_MAX]
+    return clamp_word_boundary(f"{primary_keyword} — {hero}", ALT_MAX)
+
+
+def _apply_alt_keyword_fallback(alts, primary_keyword):
+    """Hero alt carries the keyword; the rest are left untouched.
+
+    Only the hero, never all of them — the analyzer scores keyword-in-every-alt
+    as stuffing, so a blunt "add it everywhere" fix would just swap one issue
+    for the other."""
+    return [add_keyword_to_alt(alts[0], primary_keyword)] + list(alts[1:])
+
+
+def balance_alt_keyword(alts, primary_keyword):
+    """Bring an alt set into the 1..n-1 band image_alt_has_keyword scores as
+    good, deterministically and with no model call.
+
+    Shared by every generator that writes alt text so they can't each carry a
+    half-copy of the rule — the alt-text preview used to guard only the
+    stuffing end and could ship a set where no alt carried the keyword."""
+    if not alts or not primary_keyword:
+        return alts
+    for v in find_violations({"alts": alts}, primary_keyword):
+        if v["kind"] == "alt_stuffing":
+            alts = _apply_alt_fallback(alts, primary_keyword)
+        elif v["kind"] == "alt_keyword_missing":
+            alts = _apply_alt_keyword_fallback(alts, primary_keyword)
+    return alts
+
+
 def _validate_fields(fields, primary_keyword, client, model, qa):
     """Shared core: violations -> one corrective call -> re-check -> fallbacks.
 
@@ -218,11 +284,20 @@ def _validate_fields(fields, primary_keyword, client, model, qa):
         for v in remaining:
             if v["kind"] == "alt_stuffing" and fields.get("alts"):
                 fields["alts"] = _apply_alt_fallback(fields["alts"], primary_keyword)
+            elif v["kind"] == "alt_keyword_missing" and fields.get("alts"):
+                fields["alts"] = _apply_alt_keyword_fallback(fields["alts"], primary_keyword)
             elif v["kind"] == "title_keyword":
                 # Never machine-mangle a title — log and leave it to the human.
                 logger.info(
                     "Title still lacks leading keyword %r after rephrase: %r",
                     primary_keyword, fields.get("title"),
+                )
+            elif v["kind"] == "meta_keyword_missing":
+                # No deterministic fallback — mechanically prepending the
+                # keyword is the boilerplate pattern the gate exists to avoid.
+                logger.info(
+                    "%s still lacks keyword %r after rephrase: %r",
+                    v["field"], primary_keyword, fields.get(v["field"]),
                 )
         qa["fallbacks"] = [v["kind"] for v in remaining]
     return fields
@@ -337,11 +412,14 @@ def _fix_str(fix):
 
 
 def ensure_applied_alt_balance(images, media_updates, primary_keyword):
-    """Apply-time deterministic backstop: if the post-apply alt set would have
-    the primary keyword in EVERY alt, strip it from non-hero updates (and, if
-    needed, add one de-keyworded update for an existing non-hero alt) so the
-    applied state can't score as stuffing. Returns the (possibly extended)
-    media_updates list."""
+    """Apply-time deterministic backstop against BOTH failure ends of
+    image_alt_has_keyword, computed on the post-apply alt set:
+
+    - keyword in EVERY alt -> strip it from non-hero updates (and, if needed,
+      add one de-keyworded update for an existing non-hero alt);
+    - keyword in NO alt -> add it to the hero alt.
+
+    Returns the (possibly extended) media_updates list."""
     try:
         if not primary_keyword or not images or not media_updates:
             return media_updates
@@ -354,6 +432,22 @@ def ensure_applied_alt_balance(images, media_updates, primary_keyword):
             alt = (upd.get(alt_key) if upd else img.get("alt")) or ""
             final_alts.append((mid, alt, upd is not None))
         real = [(m, a, u) for m, a, u in final_alts if a]
+        if not real:
+            return media_updates
+
+        if not any(_keyword_in_text(primary_keyword, a) for _, a, _ in real):
+            # Nothing would carry the keyword — the scorer flags "0/n alts
+            # contain X". Seed the hero only; more would read as stuffing.
+            hero_mid, hero_alt, hero_is_update = real[0]
+            if hero_mid is not None:
+                fixed = add_keyword_to_alt(hero_alt, primary_keyword)
+                if hero_is_update:
+                    by_media[hero_mid][alt_key] = fixed
+                else:
+                    media_updates.append({"media_id": hero_mid, alt_key: fixed})
+                logger.info("Seeded hero image alt with keyword %r", primary_keyword)
+            return media_updates
+
         if len(real) < 2:
             return media_updates
         if not all(_keyword_in_text(primary_keyword, a) for _, a, _ in real):

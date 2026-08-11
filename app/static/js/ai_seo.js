@@ -1696,19 +1696,86 @@ async function loadPrompts() {
                 <p>No prompts yet. Type your own question above, or click <b>Auto-generate</b> to seed a buyer-intent prompt set.</p></div>`;
             return;
         }
-        container.innerHTML = prompts
-            .map(
-                (p) => `<div style="display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid var(--outline);">
-                <span class="material-symbols-rounded" style="color:var(--on-surface-secondary);font-size:18px;">forum</span>
-                <div style="flex:1;font-size:13px;">${escapeHtml(p.prompt)}</div>
-                <span class="badge ${p.intent === "brand" ? "badge-info" : ""}" ${p.intent === "brand" ? "" : 'style="background:var(--surface-dim);color:var(--on-surface-secondary);"'}>${escapeHtml(p.intent || "buyer")}</span>
-                <button class="icon-btn" onclick="deletePrompt(${p.id})"><span class="material-symbols-rounded" style="font-size:18px;">delete</span></button>
-            </div>`
-            )
-            .join("");
+        container.innerHTML = prompts.map(renderPromptRow).join("");
     } catch (err) {
         showToast(`Failed to load prompts: ${err.message}`, "error");
     }
+}
+
+function renderPromptRow(p) {
+    const paused = p.is_active === false;
+    return `<div class="prompt-row" data-prompt-id="${p.id}" style="display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid var(--outline);${paused ? "opacity:0.55;" : ""}">
+        <span class="material-symbols-rounded" style="color:var(--on-surface-secondary);font-size:18px;">forum</span>
+        <div class="prompt-text" style="flex:1;font-size:13px;${paused ? "text-decoration:line-through;" : ""}">${escapeHtml(p.prompt)}</div>
+        <span class="badge ${p.intent === "brand" ? "badge-info" : ""}" ${p.intent === "brand" ? "" : 'style="background:var(--surface-dim);color:var(--on-surface-secondary);"'}>${escapeHtml(p.intent || "buyer")}</span>
+        <button class="icon-btn" title="Edit this question" onclick="startEditPrompt(${p.id})"><span class="material-symbols-rounded" style="font-size:18px;">edit</span></button>
+        <button class="icon-btn" title="${paused ? "Resume probing this question" : "Pause — keep the question but stop probing it"}" onclick="togglePrompt(${p.id})"><span class="material-symbols-rounded" style="font-size:18px;">${paused ? "play_arrow" : "pause"}</span></button>
+        <button class="icon-btn" title="Delete" onclick="deletePrompt(${p.id})"><span class="material-symbols-rounded" style="font-size:18px;">delete</span></button>
+    </div>`;
+}
+
+// Inline edit: swap the row's text for an input. Past runs keep their own copy
+// of the wording, so editing never rewrites what a model was actually asked.
+function startEditPrompt(id) {
+    const row = document.querySelector(`.prompt-row[data-prompt-id="${id}"]`);
+    if (!row || row.querySelector(".prompt-edit-input")) return;
+    const textEl = row.querySelector(".prompt-text");
+    const current = textEl.textContent;
+    textEl.innerHTML = `<input type="text" class="form-control prompt-edit-input" style="width:100%;font-size:13px;" value="${escapeAttr(current)}">`;
+    const input = textEl.querySelector("input");
+    input.focus();
+    input.setSelectionRange(input.value.length, input.value.length);
+    input.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") { e.preventDefault(); savePromptEdit(id, input.value); }
+        else if (e.key === "Escape") { textEl.textContent = current; }
+    });
+    input.addEventListener("blur", () => {
+        if (input.value.trim() && input.value.trim() !== current) savePromptEdit(id, input.value);
+        else textEl.textContent = current;
+    });
+}
+
+async function savePromptEdit(id, value) {
+    const prompt = (value || "").trim();
+    if (!prompt) { loadPrompts(); return; }
+    try {
+        await apiRequest("/api/ai-seo/prompts", {
+            method: "POST",
+            body: { action: "update", store_id: parseInt(getStoreId()), prompt_id: id, prompt },
+        });
+        showToast("Question updated", "success");
+    } catch (err) {
+        showToast(`Update failed: ${err.message}`, "error");
+    }
+    loadPrompts();
+}
+
+// Jump from a result row to the same question in the prompt set, already in
+// edit mode — the questions live in Settings, but that's not where you notice
+// a bad one.
+async function editQuestionFromResults(promptId) {
+    switchVisSub("settings");
+    await loadPrompts();
+    const row = document.querySelector(`.prompt-row[data-prompt-id="${promptId}"]`);
+    if (!row) {
+        showToast("That question is no longer in your prompt set — add it again to edit it", "warning");
+        return;
+    }
+    row.scrollIntoView({ behavior: "smooth", block: "center" });
+    startEditPrompt(promptId);
+}
+
+async function togglePrompt(id) {
+    try {
+        const r = await apiRequest("/api/ai-seo/prompts", {
+            method: "POST",
+            body: { action: "toggle", store_id: parseInt(getStoreId()), prompt_id: id },
+        });
+        showToast(r.is_active ? "Question resumed" : "Question paused — kept, but no longer probed", "success");
+    } catch (err) {
+        showToast(`Failed: ${err.message}`, "error");
+    }
+    loadPrompts();
 }
 
 async function addPrompt() {
@@ -1721,7 +1788,13 @@ async function addPrompt() {
     }
     const intent = document.getElementById("prompt-add-intent").value;
     try {
-        await apiRequest("/api/ai-seo/prompts", { method: "POST", body: { action: "add", store_id: parseInt(storeId), prompt, intent } });
+        const r = await apiRequest("/api/ai-seo/prompts", { method: "POST", body: { action: "add", store_id: parseInt(storeId), prompt, intent } });
+        const n = (r.added || []).length;
+        const dupes = (r.skipped || []).length;
+        showToast(
+            `${n} question${n === 1 ? "" : "s"} added` + (dupes ? `, ${dupes} already in the set` : ""),
+            "success",
+        );
         input.value = "";
         loadPrompts();
     } catch (err) {
@@ -2295,6 +2368,9 @@ function renderBreakdown(results) {
     const groups = [...byPrompt.entries()]
         .map(([prompt, rows]) => {
             const hits = rows.filter((r) => r.brand_mentioned).length;
+            // Rows carry prompt_id from the join, so the question can be edited
+            // straight from the results instead of hunting for it in Settings.
+            const promptId = rows.map((r) => r.prompt_id).find((id) => id != null);
             const recCounts = {};
             for (const r of rows)
                 for (const b of r.recommended_brands || []) {
@@ -2323,6 +2399,9 @@ function renderBreakdown(results) {
                 <summary style="cursor:pointer;list-style:none;display:flex;gap:10px;align-items:baseline;">
                     <span class="badge ${hits ? "badge-success" : "badge-warning"}" style="flex-shrink:0;" title="Answers naming your store for this question">${hits}/${rows.length}</span>
                     <span style="flex:1;font-size:13px;">${escapeHtml(prompt)}</span>
+                    ${promptId != null
+                        ? `<button class="icon-btn" title="Edit this question in your prompt set" onclick="event.preventDefault();event.stopPropagation();editQuestionFromResults(${promptId});"><span class="material-symbols-rounded" style="font-size:17px;">edit</span></button>`
+                        : ""}
                 </summary>
                 <div style="padding:6px 0 4px 8px;">
                     ${top.length ? `<div style="font-size:12px;color:var(--on-surface-secondary);margin-bottom:4px;">AI recommends: ${top.map(([n, c]) => `${escapeHtml(n)} (${c}×)`).join(", ")}</div>` : ""}

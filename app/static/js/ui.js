@@ -244,9 +244,14 @@ const NavBadges = (() => {
     async function refresh() {
         try {
             const counts = await apiRequest("/api/nav/badges");
+            const tips = counts._tooltips || {};
             document.querySelectorAll(".nav-badge[data-badge]").forEach((el) => {
-                const n = counts[el.dataset.badge] || 0;
+                const key = el.dataset.badge;
+                const n = counts[key] || 0;
                 el.textContent = n ? (n > 99 ? "99+" : String(n)) : "";
+                // The number sums several kinds of work; hovering says which.
+                if (n && tips[key]) el.title = tips[key];
+                else el.removeAttribute("title");
             });
         } catch (e) { /* badges are decoration — never block the page */ }
     }
@@ -254,6 +259,12 @@ const NavBadges = (() => {
         if (!document.querySelector(".nav-badge[data-badge]")) return;
         refresh();
         setInterval(() => { if (!document.hidden) refresh(); }, 60000);
+        // The interval skips hidden tabs, so a backgrounded page kept showing
+        // whatever the badge said when you left it — for hours, if you never
+        // switched back within a tick. Repaint the moment it regains focus.
+        document.addEventListener("visibilitychange", () => {
+            if (!document.hidden) refresh();
+        });
     }
     return { init, refresh };
 })();

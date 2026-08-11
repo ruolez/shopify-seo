@@ -2,6 +2,7 @@ import base64
 import io
 import json
 import logging
+import re
 import threading
 import time
 
@@ -34,6 +35,9 @@ from app.services.seo_analyzer import (
 from app.shopify_client import ShopifyClient
 
 logger = logging.getLogger(__name__)
+
+# A collection hero only renders on most themes when it is in the body HTML.
+_IMG_IN_BODY_RE = re.compile(r"<img[\s>]", re.IGNORECASE)
 
 seo_bp = Blueprint("seo", __name__)
 
@@ -150,7 +154,8 @@ def _get_gsc_metrics_for_store(store_id):
         )
         rows = cur.fetchall()
 
-    base_url = cred["gsc_property"].rstrip("/")
+    from app.services.url_utils import gsc_base_url
+    base_url = gsc_base_url(cred["gsc_property"])
     metrics = {}
     for r in rows:
         path = r["page"].replace(base_url, "").strip("/")
@@ -388,6 +393,25 @@ def seo_priorities():
         return jsonify(results)
     except Exception as e:
         logger.exception("Priority ranking failed: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
+@seo_bp.route("/api/seo/priorities/queued", methods=["GET"])
+def seo_priorities_queued():
+    """The priority items that make up the sidebar SEO badge — the same
+    selection the home action queue shows, so the Priorities tab can mark
+    exactly which of its rows are the queued work."""
+    from app.services.seo_priority_service import get_queued_priorities
+
+    store_id = request.args.get("store_id")
+    if not store_id:
+        return jsonify({"error": "store_id required"}), 400
+
+    try:
+        queued, _measuring = get_queued_priorities(int(store_id))
+        return jsonify({"total": len(queued), "items": queued})
+    except Exception as e:
+        logger.exception("Queued priority lookup failed: %s", e)
         return jsonify({"error": str(e)}), 500
 
 
@@ -714,9 +738,8 @@ def _preview_image_alt_text(data, store_id):
     from openai import OpenAI
     from app.settings_manager import get_setting as _gs
     from app.prompt_defaults import DEFAULTS as _defs
+    from app.services.ai_content_validator import balance_alt_keyword
     from app.services.ai_content_validator import clean_keyword as clean_alt_keyword
-    from app.services.ai_content_validator import strip_keyword_phrase
-    from app.services.technical_seo_analyzer import _keyword_in_text as _kw_in_text
 
     item_id = data.get("item_id")
     scope = data.get("scope", "single")
@@ -797,11 +820,17 @@ def _preview_image_alt_text(data, store_id):
             alts = []
             if s >= 0 and e > s:
                 alts = json.loads(content[s:e]).get("alts", [])
-            # Deterministic balance backstop: keyword stays in the hero alt only.
-            if primary_kw and len(alts) >= 2 and all(
-                a and _kw_in_text(primary_kw, a) for a in alts
-            ):
-                alts = [alts[0]] + [strip_keyword_phrase(a, primary_kw) for a in alts[1:]]
+            # Pad to one alt per image BEFORE balancing — the padding text
+            # carries no keyword, so balancing first could still leave a set
+            # where nothing matches the primary.
+            alts = [
+                alts[i] if i < len(alts) and alts[i] else f"{product['title']} — image {i + 1}"
+                for i in range(len(actionable_images))
+            ]
+            # Deterministic balance backstop, both ends: keyword in the hero
+            # alt only. Shared with the AI quality gate so this preview and the
+            # scorer can't disagree.
+            alts = balance_alt_keyword(alts, primary_kw)
 
             suggestions = []
             for i, img in enumerate(actionable_images):
@@ -809,7 +838,7 @@ def _preview_image_alt_text(data, store_id):
                     "media_id": img["media_id"],
                     "image_url": img.get("url", ""),
                     "current_alt": img.get("alt") or "",
-                    "suggested_alt": alts[i] if i < len(alts) else f"{product['title']} — image {i+1}",
+                    "suggested_alt": alts[i],
                 })
             preview.append({
                 "product_id": product["id"],
@@ -840,11 +869,28 @@ def _apply_image_alt_text(data, store_id, client):
 
         try:
             media_updates = [{"media_id": u["media_id"], "alt": u["alt"]} for u in updates]
-            client.update_product_media(product_shopify_id, media_updates)
 
             with db.get_cursor() as cur:
                 cur.execute("SELECT * FROM synced_products WHERE id = %s", (product_id,))
                 row = cur.fetchone()
+
+            # Write-time balance guard, same as the other apply paths. The user
+            # can edit the suggested alts before confirming, so the preview's
+            # guard is not enough on its own.
+            if row:
+                from app.services.ai_content_validator import (
+                    clean_keyword as _ck,
+                    ensure_applied_alt_balance,
+                )
+                _imgs = row.get("images") or []
+                if isinstance(_imgs, str):
+                    _imgs = json.loads(_imgs)
+                _kw = _fetch_keyword_analysis(store_id, "product", product_id)
+                _pk = _ck((((_kw or {}).get("keyword_resolution") or {}).get("primary") or {}).get("keyword"))
+                media_updates = ensure_applied_alt_balance(_imgs, media_updates, _pk)
+
+            client.update_product_media(product_shopify_id, media_updates)
+
             if row:
                 from app.routes.technical_seo_routes import _record_change_event
                 _record_change_event(
@@ -855,12 +901,21 @@ def _apply_image_alt_text(data, store_id, client):
                 images = row.get("images") or []
                 if isinstance(images, str):
                     images = json.loads(images)
-                alt_map = {u["media_id"]: u["alt"] for u in updates}
+                # Read back from media_updates, not `updates` — the balance
+                # guard may have rewritten or added entries.
+                alt_map = {u["media_id"]: u["alt"] for u in media_updates}
                 for img in images:
                     if img.get("media_id") in alt_map:
                         img["alt"] = alt_map[img["media_id"]]
                 with db.get_cursor() as cur:
-                    cur.execute("UPDATE synced_products SET images = %s WHERE id = %s", (json.dumps(images), product_id))
+                    # last_optimized_at is what moves the item out of the
+                    # actionable priority queue into the re-measuring band.
+                    # Without it an alt-only optimization was invisible to the
+                    # queue and the item stayed queued forever.
+                    cur.execute(
+                        "UPDATE synced_products SET images = %s, last_optimized_at = NOW() WHERE id = %s",
+                        (json.dumps(images), product_id),
+                    )
                 # Re-analyze so Issues/Checks stop flagging the alts just fixed
                 from app.services.analysis_refresh import refresh_item_analysis
                 refresh_item_analysis(store_id, "product", product_id)
@@ -1419,6 +1474,9 @@ def list_collections_seo():
             "collection_type": c["collection_type"],
             "published": c["published"],
             "image_url": c["image_url"],
+            # Attached vs actually rendered: most themes ignore collection.image,
+            # so the list needs to distinguish "has an image" from "shows one".
+            "hero_in_body": bool(_IMG_IN_BODY_RE.search(c.get("description") or "")),
             "seo_breakdown": seo["breakdown"],
             "last_optimized_at": c["last_optimized_at"].isoformat() if c["last_optimized_at"] else None,
         }
@@ -2530,11 +2588,25 @@ def _auto_optimize_generated_collections(store_id, collection_ids, hierarchy=Non
                         + ", ".join(f"{t} (/collections/{h})" for t, h in zip(siblings, sibling_handles) if h)
                     )
 
+    # A freshly generated batch shares one topic space — without claims every
+    # collection converges on the same head term. Same guard bulk optimize uses.
+    from app.routes.task_routes import (
+        _claim_applied_primary,
+        _claim_keyword,
+        _owned_claims_for,
+        _ownership_for,
+    )
+    ownership_cache = {}
+
     for cid in collection_ids:
         try:
             task_input = {"collection_id": cid}
             if cid in hierarchy_context_map:
                 task_input["hierarchy_context"] = hierarchy_context_map[cid]
+            ownership = _ownership_for(ownership_cache, store_id)
+            owned_claims = _owned_claims_for(ownership, "collection", cid)
+            if owned_claims:
+                task_input["claimed_keywords"] = owned_claims
 
             ai_result = ai_run_task("collection_seo", task_input)
 
@@ -2583,6 +2655,17 @@ def _auto_optimize_generated_collections(store_id, collection_ids, hierarchy=Non
                         (cid,),
                     )
 
+                # Without a refresh these enter the catalog with no resolution
+                # at all until someone runs a bulk analyze.
+                from app.services.analysis_refresh import refresh_item_analysis
+                refresh_item_analysis(store_id, "collection", cid)
+                _claim_applied_primary(ownership, store_id, "collection", cid)
+
+                target_kw = ai_result.get("target_keywords") or {}
+                primary_kw = target_kw.get("primary", "") if isinstance(target_kw, dict) else ""
+                if isinstance(primary_kw, str) and primary_kw.strip():
+                    _claim_keyword(ownership, primary_kw.split("(")[0].strip(), "collection", cid)
+
                 logger.info("Auto-optimized generated collection %s", cid)
 
         except Exception:
@@ -2624,7 +2707,15 @@ def _generate_image_for_collection(client, collection):
             keywords = [resolved]
     except Exception:
         logger.warning("Resolved-primary lookup failed for collection %s", collection.get("id"))
-    keywords += [k for k in _extract_keywords(collection) if k not in keywords]
+    # _extract_keywords returns {keyword, confidence} dicts — appending them
+    # raw produced alts like "Shop T - {'keyword': ...} collection".
+    keywords += [
+        kw for kw in (
+            (k.get("keyword") if isinstance(k, dict) else str(k))
+            for k in _extract_keywords(collection)
+        )
+        if kw and kw not in keywords
+    ]
     products = client.get_collection_products_with_images(collection["shopify_id"], limit=4)
     product_image_bytes = []
     product_titles = []
@@ -2711,6 +2802,25 @@ def _inject_image_into_description(client, collection, image_url, alt_text, widt
     logger.info("Injected banner image into description for collection %s", collection["id"])
 
 
+def _confirm_collection_image(client, collection_shopify_id, attempts=3, delay=1.5):
+    """Read the collection back until Shopify reports an attached image.
+
+    Returns the CDN url, or "" if it never appeared — the caller must not record
+    an image_url it could not confirm."""
+    import time as _time
+
+    for i in range(attempts):
+        _time.sleep(delay * (i + 1))
+        try:
+            live = client.get_collection_image(collection_shopify_id)
+        except Exception:
+            logger.exception("Image confirmation read failed for %s", collection_shopify_id)
+            return ""
+        if live:
+            return live
+    return ""
+
+
 @seo_bp.route("/api/seo/collections/<int:collection_id>/apply-image", methods=["POST"])
 def apply_collection_image(collection_id):
     data = request.get_json(silent=True) or {}
@@ -2747,9 +2857,26 @@ def apply_collection_image(collection_id):
         result = client.update_collection_image(collection["shopify_id"], resource_url, alt_text)
         logger.info("collectionUpdate result for %s: %s", collection_id, result)
 
-        final_url = resource_url
-        if result and result.get("image"):
-            final_url = result["image"].get("url") or resource_url
+        # collectionUpdate attaches the image asynchronously — it commonly returns
+        # image: null with no userErrors while Shopify is still fetching, and a
+        # later failure is never reported. Caching resource_url (the temporary
+        # staged-upload target, not a CDN url) made the app claim an image the
+        # storefront never got. Confirm from Shopify before recording anything.
+        final_url = (result or {}).get("image", {}).get("url") or ""
+        if not final_url:
+            final_url = _confirm_collection_image(client, collection["shopify_id"])
+
+        if not final_url:
+            logger.warning(
+                "Collection %s: Shopify accepted the upload but reports no image yet",
+                collection_id,
+            )
+            return jsonify({
+                "ok": False,
+                "pending": True,
+                "error": "Shopify accepted the upload but has not attached the image yet. "
+                         "Give it a moment, then use Rescan images to confirm.",
+            }), 202
 
         _inject_image_into_description(client, collection, final_url, alt_text, width, height)
 
@@ -2763,6 +2890,199 @@ def apply_collection_image(collection_id):
     except Exception as e:
         logger.exception("Failed to apply collection image for %s", collection_id)
         return jsonify({"error": str(e)}), 500
+
+
+@seo_bp.route("/api/seo/collections/inject-hero-images", methods=["POST"])
+def inject_hero_images():
+    """Put each collection's EXISTING hero image at the top of its description.
+
+    Nothing is generated or uploaded — themes that ignore collection.image render
+    no visual at all, and an <img> in the body renders regardless of theme."""
+    data = request.get_json(silent=True) or {}
+    store_id = data.get("store_id")
+    if not store_id:
+        return jsonify({"error": "store_id is required"}), 400
+
+    requested = data.get("collection_ids")
+    with db.get_cursor() as cur:
+        if requested:
+            cur.execute(
+                """SELECT id FROM synced_collections
+                   WHERE store_id = %s AND id = ANY(%s)
+                     AND COALESCE(image_url, '') <> '' AND description !~* '<img[[:space:]>]'
+                   ORDER BY id""",
+                (int(store_id), [int(i) for i in requested]),
+            )
+        else:
+            cur.execute(
+                """SELECT id FROM synced_collections
+                   WHERE store_id = %s AND published = TRUE
+                     AND COALESCE(image_url, '') <> '' AND description !~* '<img[[:space:]>]'
+                   ORDER BY id""",
+                (int(store_id),),
+            )
+        ids = [r["id"] for r in cur.fetchall()]
+
+    if not ids:
+        return jsonify({"error": "No collections need the hero image inserted"}), 400
+
+    with db.get_cursor() as cur:
+        cur.execute(
+            "INSERT INTO bulk_tasks (status, total, auto_apply, task_type) "
+            "VALUES ('pending', %s, TRUE, 'collection_hero_inject') RETURNING id",
+            (len(ids),),
+        )
+        bulk_task_id = cur.fetchone()["id"]
+        for cid in ids:
+            cur.execute(
+                "INSERT INTO bulk_task_items (bulk_task_id, collection_id, status) VALUES (%s, %s, 'pending')",
+                (bulk_task_id, cid),
+            )
+
+    spawn_task("bulk_tasks", bulk_task_id, _run_hero_injection, bulk_task_id, ids)
+    return jsonify({"ok": True, "bulk_task_id": bulk_task_id, "total": len(ids)}), 201
+
+
+def _run_hero_injection(bulk_task_id, collection_ids):
+    with db.get_cursor() as cur:
+        cur.execute("UPDATE bulk_tasks SET status = 'running' WHERE id = %s", (bulk_task_id,))
+
+    for cid in collection_ids:
+        with db.get_cursor() as cur:
+            cur.execute(
+                "UPDATE bulk_task_items SET status = 'running' WHERE bulk_task_id = %s AND collection_id = %s",
+                (bulk_task_id, cid),
+            )
+        try:
+            collection = _get_collection_with_store(cid)
+            if not collection:
+                raise ValueError(f"collection {cid} not found")
+            if not (collection.get("image_url") or "").strip():
+                raise ValueError("no hero image to insert")
+
+            with db.get_cursor() as cur:
+                cur.execute("UPDATE bulk_tasks SET current_product_title = %s WHERE id = %s",
+                            (collection["title"], bulk_task_id))
+
+            client = _build_client(collection)
+            _inject_image_into_description(
+                client, collection, collection["image_url"],
+                f"{collection['title']} collection image",
+            )
+            with db.get_cursor() as cur:
+                cur.execute(
+                    "UPDATE bulk_task_items SET status = 'completed', completed_at = NOW() "
+                    "WHERE bulk_task_id = %s AND collection_id = %s",
+                    (bulk_task_id, cid),
+                )
+                cur.execute("UPDATE bulk_tasks SET completed = completed + 1 WHERE id = %s", (bulk_task_id,))
+        except Exception as e:
+            logger.exception("Hero image injection failed for collection %s", cid)
+            with db.get_cursor() as cur:
+                cur.execute(
+                    "UPDATE bulk_task_items SET status = 'failed', error = %s, completed_at = NOW() "
+                    "WHERE bulk_task_id = %s AND collection_id = %s",
+                    (str(e), bulk_task_id, cid),
+                )
+                cur.execute("UPDATE bulk_tasks SET failed = failed + 1 WHERE id = %s", (bulk_task_id,))
+        time.sleep(0.4)
+
+    with db.get_cursor() as cur:
+        cur.execute(
+            "UPDATE bulk_tasks SET status = 'completed', current_product_title = NULL, completed_at = NOW() "
+            "WHERE id = %s",
+            (bulk_task_id,),
+        )
+
+
+@seo_bp.route("/api/seo/collections/rescan-images", methods=["POST"])
+def rescan_collection_images():
+    """Reconcile synced_collections.image_url against the live storefront.
+
+    The local column can claim an image that Shopify does not have: collectionUpdate
+    attaches an image asynchronously, so the mutation can return image: null with no
+    userErrors while the download quietly fails afterwards. Shopify is the only
+    source of truth, so re-read it and overwrite what we cached."""
+    data = request.get_json(silent=True) or {}
+    store_id = data.get("store_id")
+    if not store_id:
+        return jsonify({"error": "store_id is required"}), 400
+
+    with db.get_cursor() as cur:
+        cur.execute("SELECT * FROM stores WHERE id = %s", (int(store_id),))
+        store = cur.fetchone()
+    if not store:
+        return jsonify({"error": "Store not found"}), 404
+
+    try:
+        client = ShopifyClient(
+            store["domain"], decrypt_value(store["access_token_enc"]), store["api_version"]
+        )
+        live = client.get_all_collections()
+    except Exception as e:
+        logger.exception("Collection image rescan failed for store %s", store_id)
+        return jsonify({"error": f"Could not read collections from Shopify: {e}"}), 502
+
+    live_images = {str(c["shopify_id"]): (c.get("image_url") or "").strip() for c in live}
+
+    with db.get_cursor() as cur:
+        cur.execute(
+            "SELECT id, shopify_id, title, image_url FROM synced_collections WHERE store_id = %s",
+            (int(store_id),),
+        )
+        rows = cur.fetchall()
+
+    lost, gained, unchanged, absent = [], 0, 0, 0
+    with db.get_cursor() as cur:
+        for row in rows:
+            sid = str(row["shopify_id"])
+            if sid not in live_images:
+                absent += 1  # deleted in Shopify or not returned — leave it alone
+                continue
+            shopify_url = live_images[sid]
+            local_url = (row["image_url"] or "").strip()
+            if bool(shopify_url) == bool(local_url) and shopify_url == local_url:
+                unchanged += 1
+                continue
+            cur.execute(
+                "UPDATE synced_collections SET image_url = %s WHERE id = %s",
+                (shopify_url or None, row["id"]),
+            )
+            if local_url and not shopify_url:
+                lost.append({"id": row["id"], "title": row["title"]})
+            elif shopify_url and not local_url:
+                gained += 1
+            else:
+                unchanged += 1  # same presence, refreshed CDN url
+
+    # Attached-in-Shopify and visible-on-the-page are different questions. Most
+    # themes never render collection.image, so a collection can pass this rescan
+    # and still show an empty hero — report that count here or the button looks
+    # like it found nothing while the storefront is visibly missing images.
+    with db.get_cursor() as cur:
+        cur.execute(
+            """SELECT COUNT(*) AS n FROM synced_collections
+               WHERE store_id = %s AND published = TRUE
+                 AND COALESCE(image_url, '') <> '' AND description !~* '<img[[:space:]>]'""",
+            (int(store_id),),
+        )
+        hero_not_rendered = cur.fetchone()["n"]
+
+    logger.info(
+        "Collection image rescan store %s: %d checked, %d falsely marked as having an image, "
+        "%d attached but not rendered in the body",
+        store_id, len(rows), len(lost), hero_not_rendered,
+    )
+    return jsonify({
+        "ok": True,
+        "checked": len(rows),
+        "missing_on_shopify": len(lost),
+        "restored_from_shopify": gained,
+        "unchanged": unchanged,
+        "not_in_shopify": absent,
+        "hero_not_rendered": hero_not_rendered,
+        "collections_missing": lost[:50],
+    })
 
 
 @seo_bp.route("/api/seo/collections/bulk-generate-images", methods=["POST"])

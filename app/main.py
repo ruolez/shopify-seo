@@ -140,6 +140,8 @@ with app.app_context():
         init_blog_scheduler()
         from app.services.rollup_service import init_scheduler as init_rollup_scheduler
         init_rollup_scheduler()
+        from app.services.resolution_sweeper import init_scheduler as init_resolution_sweeper
+        init_resolution_sweeper()
         # AI visibility tracking is manual-only: the scheduler fired a full
         # multi-model LLM run after every restart (real OpenRouter spend).
         # Trigger runs from the AI SEO page when wanted.

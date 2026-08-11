@@ -30,6 +30,10 @@ def _enforce_meta_limits(shopify_fields):
     meta_title = shopify_fields.get("meta_title")
     if meta_title and isinstance(meta_title, str):
         shopify_fields["meta_title"] = clamp_meta_title(meta_title)
+    title = shopify_fields.get("title")
+    if title and isinstance(title, str):
+        from app.services.ai_output_guard import clamp_title
+        shopify_fields["title"] = clamp_title(title)
     return shopify_fields
 
 
@@ -88,6 +92,27 @@ def _resolve_and_analyze(item_type, item_dict, prefetch=None):
 
     primary = (resolution or {}).get("primary")
     primary_kw = primary["keyword"] if primary else None
+    stored_detected = None
+    if primary_kw is None:
+        # Resolver failed — _upsert_analysis COALESCE-keeps the previous
+        # resolution, so score against ITS primary rather than a raw n-gram:
+        # otherwise the stored row advertises a primary its checks were never
+        # scored against (invisible split-brain). Keep the stored candidate
+        # list too, since scoring against a supplied primary skips extraction.
+        try:
+            with db.get_cursor() as cur:
+                cur.execute(
+                    """SELECT keyword_resolution->'primary'->>'keyword' AS kw,
+                              detected_keywords
+                       FROM technical_seo_analyses
+                       WHERE store_id = %s AND item_type = %s AND item_id = %s""",
+                    (store_id, item_type, item_dict["id"]),
+                )
+                row = cur.fetchone()
+            primary_kw = (row or {}).get("kw")
+            stored_detected = (row or {}).get("detected_keywords")
+        except Exception:
+            primary_kw = None
 
     if item_type == "product":
         analysis = analyze_product_technical_seo(item_dict, primary_keyword=primary_kw)
@@ -96,6 +121,8 @@ def _resolve_and_analyze(item_type, item_dict, prefetch=None):
 
     if resolution and resolution.get("candidates"):
         analysis["detected_keywords"] = resolution["candidates"]
+    elif primary_kw and stored_detected and not analysis.get("detected_keywords"):
+        analysis["detected_keywords"] = stored_detected
     analysis["keyword_resolution"] = resolution
     return analysis, resolution
 
@@ -137,142 +164,10 @@ def technical_seo_page():
     return redirect("/seo?tab=issues", code=301)
 
 
-@technical_seo_bp.route("/api/technical-seo/products", methods=["GET"])
-def list_products_technical_seo():
-    store_id = request.args.get("store_id")
-    status = request.args.get("status", "").strip().upper()
-    sort_by = request.args.get("sort_by", "title")
-    sort_dir = request.args.get("sort_dir", "asc")
-
-    valid_sql_sorts = {
-        "title": "sp.title",
-        "store": "s.name",
-        "status": "sp.status",
-    }
-    order_clause = "ORDER BY sp.title"
-    if sort_by in valid_sql_sorts:
-        direction = "DESC" if sort_dir == "desc" else "ASC"
-        order_clause = f"ORDER BY {valid_sql_sorts[sort_by]} {direction}"
-
-    valid_statuses = {"ACTIVE", "DRAFT", "ARCHIVED"}
-    conditions = []
-    params = []
-
-    if store_id:
-        conditions.append("sp.store_id = %s")
-        params.append(store_id)
-    if status in valid_statuses:
-        conditions.append("sp.status = %s")
-        params.append(status)
-
-    where_clause = ("WHERE " + " AND ".join(conditions)) if conditions else ""
-
-    with db.get_cursor() as cur:
-        cur.execute(
-            f"""
-            SELECT sp.id, sp.store_id, sp.shopify_id, sp.title, sp.handle, sp.status,
-                   COALESCE(s.shop_name, s.name) as store_name,
-                   tsa.score as tech_seo_score,
-                   tsa.issues_count,
-                   tsa.updated_at as analyzed_at
-            FROM synced_products sp
-            JOIN stores s ON s.id = sp.store_id
-            LEFT JOIN technical_seo_analyses tsa
-                ON tsa.store_id = sp.store_id AND tsa.item_type = 'product' AND tsa.item_id = sp.id
-            {where_clause}
-            {order_clause}
-            """,
-            tuple(params),
-        )
-        products = cur.fetchall()
-
-    result = [
-        {
-            "id": p["id"],
-            "store_id": p["store_id"],
-            "store_name": p["store_name"],
-            "shopify_id": p["shopify_id"],
-            "title": p["title"],
-            "handle": p["handle"],
-            "status": p["status"],
-            "tech_seo_score": p["tech_seo_score"],
-            "issues_count": p["issues_count"],
-            "analyzed_at": p["analyzed_at"].isoformat() if p["analyzed_at"] else None,
-        }
-        for p in products
-    ]
-
-    if sort_by == "tech_seo_score":
-        reverse = sort_dir == "desc"
-        result.sort(key=lambda x: x["tech_seo_score"] if x["tech_seo_score"] is not None else -1, reverse=reverse)
-
-    return jsonify(result)
-
-
-@technical_seo_bp.route("/api/technical-seo/collections", methods=["GET"])
-def list_collections_technical_seo():
-    store_id = request.args.get("store_id")
-    sort_by = request.args.get("sort_by", "title")
-    sort_dir = request.args.get("sort_dir", "asc")
-
-    valid_sql_sorts = {
-        "title": "sc.title",
-        "store": "s.name",
-        "products_count": "sc.products_count",
-    }
-    order_clause = "ORDER BY sc.title"
-    if sort_by in valid_sql_sorts:
-        direction = "DESC" if sort_dir == "desc" else "ASC"
-        order_clause = f"ORDER BY {valid_sql_sorts[sort_by]} {direction}"
-
-    conditions = []
-    params = []
-    if store_id:
-        conditions.append("sc.store_id = %s")
-        params.append(store_id)
-
-    where_clause = ("WHERE " + " AND ".join(conditions)) if conditions else ""
-
-    with db.get_cursor() as cur:
-        cur.execute(
-            f"""
-            SELECT sc.id, sc.store_id, sc.shopify_id, sc.title, sc.handle, sc.products_count,
-                   COALESCE(s.shop_name, s.name) as store_name,
-                   tsa.score as tech_seo_score,
-                   tsa.issues_count,
-                   tsa.updated_at as analyzed_at
-            FROM synced_collections sc
-            JOIN stores s ON s.id = sc.store_id
-            LEFT JOIN technical_seo_analyses tsa
-                ON tsa.store_id = sc.store_id AND tsa.item_type = 'collection' AND tsa.item_id = sc.id
-            {where_clause}
-            {order_clause}
-            """,
-            tuple(params),
-        )
-        collections = cur.fetchall()
-
-    result = [
-        {
-            "id": c["id"],
-            "store_id": c["store_id"],
-            "store_name": c["store_name"],
-            "shopify_id": c["shopify_id"],
-            "title": c["title"],
-            "handle": c["handle"],
-            "products_count": c["products_count"],
-            "tech_seo_score": c["tech_seo_score"],
-            "issues_count": c["issues_count"],
-            "analyzed_at": c["analyzed_at"].isoformat() if c["analyzed_at"] else None,
-        }
-        for c in collections
-    ]
-
-    if sort_by == "tech_seo_score":
-        reverse = sort_dir == "desc"
-        result.sort(key=lambda x: x["tech_seo_score"] if x["tech_seo_score"] is not None else -1, reverse=reverse)
-
-    return jsonify(result)
+# The /api/technical-seo/products and /collections list endpoints were
+# removed: no UI called them since the page merged into /seo, and they
+# surfaced the raw analyzer issues_count — a different number than the
+# scanner-aligned counts every live surface uses.
 
 
 @technical_seo_bp.route("/api/technical-seo/analyze", methods=["POST"])
@@ -419,7 +314,13 @@ def _execute_bulk_analyze(bulk_task_id, item_type):
 
     # Ownership pass: one keyword, one page — redistribute duplicate
     # auto-primaries now that every item's candidates are fresh. Once per
-    # store in the batch, not just the first item's store.
+    # store in the batch, not just the first item's store. Only for
+    # substantial batches: the store-wide greedy pass redistributes EVERY
+    # item's primary using whatever scores are stored, so a 3-item outdated
+    # sweep would reshuffle 1,000 pages on stale data — small batches are
+    # already guarded by the per-item _swap_primary_if_claimed above.
+    if len(items) < 50:
+        store_of_ref = {}
     for dedup_store_id in sorted(set(store_of_ref.values())):
         try:
             from app.services.keyword_resolver import dedupe_primary_ownership
@@ -439,6 +340,105 @@ def _execute_bulk_analyze(bulk_task_id, item_type):
             "UPDATE bulk_tasks SET status = 'completed', current_product_title = NULL, completed_at = NOW() WHERE id = %s",
             (bulk_task_id,),
         )
+
+
+_BULK_SPECS = {
+    "product": ("synced_products", "product_id", "t.status = 'ACTIVE'"),
+    "collection": ("synced_collections", "collection_id", "t.published = TRUE"),
+}
+
+
+def queue_bulk_analyze(store_id, scope="outdated", item_types=("product", "collection")):
+    """Create tseo_analyze bulk tasks for items needing (re-)analysis and run
+    them in ONE background thread, product pass then collection pass — the two
+    passes read each other's primaries when claiming ownership, so concurrent
+    runs made final ownership non-deterministic.
+
+    scope:
+      'unanalyzed' — no analysis row yet
+      'outdated'   — analysis predates the item's own last content change
+                     (includes unanalyzed)
+      'stale'      — outdated, or older than the resolution TTL
+                     (rules.keyword_resolution.resolution_max_age_days)
+      'all'        — everything visible
+    Returns [{item_type, bulk_task_id, total}]; empty when nothing to do."""
+    outdated_clause = """(tsa.id IS NULL
+        OR tsa.updated_at < GREATEST(
+             COALESCE(t.shopify_updated_at, '-infinity'::timestamp),
+             COALESCE(t.last_optimized_at, '-infinity'::timestamp)))"""
+    created = []
+    pairs = []
+    for item_type in item_types:
+        table, item_col, visibility = _BULK_SPECS[item_type]
+        with db.get_cursor() as cur:
+            if scope == "all":
+                cur.execute(
+                    f"SELECT t.id FROM {table} t WHERE t.store_id = %s AND {visibility} ORDER BY t.id",
+                    (store_id,),
+                )
+            elif scope == "unanalyzed":
+                cur.execute(
+                    f"""SELECT t.id FROM {table} t
+                        LEFT JOIN technical_seo_analyses tsa
+                          ON tsa.store_id = t.store_id AND tsa.item_type = %s AND tsa.item_id = t.id
+                        WHERE t.store_id = %s AND {visibility} AND tsa.id IS NULL
+                        ORDER BY t.id""",
+                    (item_type, store_id),
+                )
+            elif scope == "stale":
+                from app.services.keyword_resolver import _rules as _kw_rules
+                max_age = int(_kw_rules().get("resolution_max_age_days", 7))
+                cur.execute(
+                    f"""SELECT t.id FROM {table} t
+                        LEFT JOIN technical_seo_analyses tsa
+                          ON tsa.store_id = t.store_id AND tsa.item_type = %s AND tsa.item_id = t.id
+                        WHERE t.store_id = %s AND {visibility}
+                          AND ({outdated_clause}
+                               OR tsa.updated_at < NOW() - make_interval(days => %s))
+                        ORDER BY t.id""",
+                    (item_type, store_id, max_age),
+                )
+            else:  # outdated
+                cur.execute(
+                    f"""SELECT t.id FROM {table} t
+                        LEFT JOIN technical_seo_analyses tsa
+                          ON tsa.store_id = t.store_id AND tsa.item_type = %s AND tsa.item_id = t.id
+                        WHERE t.store_id = %s AND {visibility} AND {outdated_clause}
+                        ORDER BY t.id""",
+                    (item_type, store_id),
+                )
+            ids = [r["id"] for r in cur.fetchall()]
+
+        if not ids:
+            continue
+
+        with db.get_cursor() as cur:
+            cur.execute(
+                "INSERT INTO bulk_tasks (status, total, auto_apply, task_type) VALUES ('pending', %s, FALSE, 'tseo_analyze') RETURNING id",
+                (len(ids),),
+            )
+            bulk_task_id = cur.fetchone()["id"]
+            for iid in ids:
+                cur.execute(
+                    f"INSERT INTO bulk_task_items (bulk_task_id, {item_col}) VALUES (%s, %s)",
+                    (bulk_task_id, iid),
+                )
+        pairs.append((bulk_task_id, item_type))
+        created.append({"item_type": item_type, "bulk_task_id": bulk_task_id, "total": len(ids)})
+
+    if pairs:
+        spawn_task("bulk_tasks", pairs[0][0], _run_bulk_analyzes_serial, pairs)
+    return created
+
+
+def _run_bulk_analyzes_serial(pairs):
+    from app.services.task_runner import finalize_failed
+    for bulk_task_id, item_type in pairs:
+        try:
+            _execute_bulk_analyze(bulk_task_id, item_type)
+        except Exception as e:
+            logger.exception("Serial bulk analyze failed for task %s", bulk_task_id)
+            finalize_failed("bulk_tasks", bulk_task_id, str(e))
 
 
 @technical_seo_bp.route("/api/technical-seo/analysis/<item_type>/<int:item_id>", methods=["GET"])
@@ -471,6 +471,49 @@ def get_analysis(item_type, item_id):
 
 
 _ALLOWED_FIX_FIELDS = {"meta_title", "meta_description", "title", "tags", "description", "image_alt"}
+
+# Analyzer check keys a caller may scope a fix to. Derived from the issue
+# definitions so the two surfaces can't drift; guard checks are allowed too
+# because the prompt builder adds them for whichever fields are in scope.
+def _allowed_fix_checks():
+    from app.services.issue_scanner import FIX_GUARD_CHECKS, ISSUE_DEFS
+
+    allowed = {c for d in ISSUE_DEFS.values() for c in (d.get("checks") or [])}
+    allowed.update(c for cs in FIX_GUARD_CHECKS.values() for c in cs)
+    return allowed
+
+
+_ALLOWED_FIX_CHECKS = _allowed_fix_checks()
+
+
+def _balanced_media_updates(item, media_updates):
+    """Run the alt keyword-balance backstop for `item`'s resolved primary.
+
+    Every path that writes alts needs this; it lives here so the single-item
+    apply and the bulk fix-apply share one call shape."""
+    try:
+        from app.services.ai_content_validator import (
+            clean_keyword,
+            ensure_applied_alt_balance,
+        )
+
+        images = item.get("images") or []
+        if isinstance(images, str):
+            images = json.loads(images)
+        with db.get_cursor() as cur:
+            cur.execute(
+                """SELECT keyword_resolution->'primary'->>'keyword' AS kw
+                   FROM technical_seo_analyses
+                   WHERE store_id = %s AND item_type = 'product' AND item_id = %s""",
+                (item["store_id"], item["id"]),
+            )
+            row = cur.fetchone()
+        return ensure_applied_alt_balance(
+            images, media_updates, clean_keyword((row or {}).get("kw"))
+        )
+    except Exception:
+        logger.exception("Alt balance backstop failed — updates passed through")
+        return media_updates
 
 
 def _normalize_media_updates(item, value):
@@ -539,6 +582,7 @@ def create_fix_task():
     item_type = data.get("item_type", "product")
     item_id = data.get("item_id")
     only_fields = data.get("only_fields")
+    only_checks = data.get("only_checks")
     fix_context = data.get("fix_context")
 
     if not item_id:
@@ -549,6 +593,12 @@ def create_fix_task():
         # full-item rewrite (downstream treats falsy as "no restriction").
         if not only_fields:
             return jsonify({"error": "No valid fields in only_fields"}), 400
+    if only_checks:
+        if not only_fields:
+            return jsonify({"error": "only_checks requires only_fields"}), 400
+        only_checks = [c for c in only_checks if c in _ALLOWED_FIX_CHECKS]
+        if not only_checks:
+            return jsonify({"error": "No valid checks in only_checks"}), 400
 
     with db.get_cursor() as cur:
         table = "synced_products" if item_type == "product" else "synced_collections"
@@ -560,24 +610,19 @@ def create_fix_task():
 
     store_id = item["store_id"]
 
+    # The fix task reads the stored resolution as-is, so run it through the
+    # TTL/manual-supersede rules first — a fix generated from a stale or
+    # manually-superseded primary writes a stale keyword to Shopify. This also
+    # seeds the analysis when missing (dashboard-queue fixes) and never raises.
+    from app.services.keyword_resolver import get_or_refresh_resolution
+    get_or_refresh_resolution(store_id, item_type, item_id)
+
     with db.get_cursor() as cur:
         cur.execute(
             "SELECT * FROM technical_seo_analyses WHERE item_type = %s AND item_id = %s",
             (item_type, item_id),
         )
         analysis = cur.fetchone()
-
-    if not analysis:
-        # Seed the analysis inline (same path the bulk fix uses) so a fix can
-        # be requested straight from the dashboard queue.
-        try:
-            analysis_data, resolution = _resolve_and_analyze(item_type, dict(item))
-            analysis_pk = _upsert_analysis(store_id, item_type, item_id, analysis_data, resolution)
-            with db.get_cursor() as cur:
-                cur.execute("SELECT * FROM technical_seo_analyses WHERE id = %s", (analysis_pk,))
-                analysis = cur.fetchone()
-        except Exception:
-            logger.exception("Inline analysis failed for %s %s", item_type, item_id)
     if not analysis:
         return jsonify({"error": "Run analysis first before requesting fixes"}), 400
 
@@ -588,6 +633,8 @@ def create_fix_task():
     }
     if only_fields:
         task_input["only_fields"] = only_fields
+    if only_checks:
+        task_input["only_checks"] = only_checks
     if fix_context:
         task_input["fix_context"] = fix_context
 
@@ -732,6 +779,23 @@ def apply_fixes():
     if not item:
         return jsonify({"error": f"{item_type} not found"}), 404
 
+    if data.get("from_ai_fixes"):
+        # AI-proposed fixes are single-use: applying them (or re-analyzing the
+        # item) clears technical_seo_analyses.ai_fixes, so a stale browser tab
+        # must not re-apply a superseded proposal against changed content.
+        # Manual quick-edits don't send this flag and are unaffected.
+        with db.get_cursor() as cur:
+            cur.execute(
+                "SELECT ai_fixes FROM technical_seo_analyses WHERE item_type = %s AND item_id = %s",
+                (item_type, item_id),
+            )
+            row = cur.fetchone()
+        if not row or not row.get("ai_fixes"):
+            return jsonify({
+                "error": "These AI fixes are no longer current — the item changed "
+                         "or they were already applied. Generate fixes again."
+            }), 409
+
     try:
         client = ShopifyClient(
             item["domain"],
@@ -794,6 +858,10 @@ def apply_fixes():
                 client.update_collection(item["shopify_id"], shopify_fields)
 
         if media_updates and item_type == "product":
+            # Write-time balance guard. The generation gate already ran, but
+            # these alts are editable in the modal before applying, so the
+            # only reliable place to check is right before the write.
+            media_updates = _balanced_media_updates(item, media_updates)
             client.update_product_media(item["shopify_id"], media_updates)
 
         with db.get_cursor() as cur:
@@ -904,11 +972,13 @@ def set_primary_keyword(item_type, item_id):
                    updated_at = NOW()""",
             (store_id, mk_id, item_type, item_id),
         )
-        # One manual primary per item — demote previous picks
+        # One primary per item — demote ALL previous accepted picks, plan-
+        # accepted included (only manual_primary rows used to be demoted, so a
+        # stale plan-accept lingered and could win again on recency).
         cur.execute(
             """UPDATE keyword_assignments SET status = 'superseded', updated_at = NOW()
                WHERE store_id = %s AND assigned_item_type = %s AND assigned_item_id = %s
-                 AND assignment_reason = 'manual_primary' AND master_keyword_id != %s
+                 AND master_keyword_id != %s
                  AND status = 'accepted'""",
             (store_id, item_type, item_id, mk_id),
         )
@@ -930,6 +1000,35 @@ def set_primary_keyword(item_type, item_id):
 
     analysis, resolution = _resolve_and_analyze(item_type, item)
     analysis["analysis_id"] = _upsert_analysis(store_id, item_type, item_id, analysis, resolution)
+
+    # Dispossess previous owners: any other page whose stored primary matches
+    # this keyword (by variant_key) keeps advertising it until re-resolved —
+    # re-resolve them now so the manual claim walks them onto their next-best
+    # candidate instead of leaving a silent shared primary.
+    try:
+        from app.services.keyword_resolver import variant_key
+        vk = variant_key(keyword)
+        with db.get_cursor() as cur:
+            cur.execute(
+                """SELECT item_type, item_id,
+                          keyword_resolution->'primary'->>'keyword' AS kw
+                   FROM technical_seo_analyses
+                   WHERE store_id = %s
+                     AND keyword_resolution->'primary'->>'keyword' IS NOT NULL
+                     AND NOT (item_type = %s AND item_id = %s)""",
+                (store_id, item_type, item_id),
+            )
+            losers = [r for r in cur.fetchall() if variant_key(r["kw"]) == vk]
+        for r in losers:
+            loser_table = "synced_products" if r["item_type"] == "product" else "synced_collections"
+            with db.get_cursor() as cur:
+                cur.execute(f"SELECT * FROM {loser_table} WHERE id = %s", (r["item_id"],))
+                loser = cur.fetchone()
+            if loser:
+                loser_analysis, loser_resolution = _resolve_and_analyze(r["item_type"], dict(loser))
+                _upsert_analysis(store_id, r["item_type"], r["item_id"], loser_analysis, loser_resolution)
+    except Exception:
+        logger.warning("Dispossession re-resolve failed after manual pin for %s %s", item_type, item_id)
 
     return jsonify(analysis)
 
@@ -967,9 +1066,13 @@ def bulk_fix_apply():
     return jsonify({"ok": True, "bulk_task_id": bulk_task_id, "total": len(item_ids)}), 201
 
 
-def _execute_bulk_fix_apply(bulk_task_id, item_type, only_fields=None):
-    """Analyze → AI fix → apply for each item. When only_fields is set (issue-type
-    bulk fixes), the AI and the apply step are scoped to those fix fields."""
+def _execute_bulk_fix_apply(bulk_task_id, item_type, only_fields=None, only_checks=None):
+    """Analyze → AI fix → apply for each item.
+
+    only_fields scopes the WRITE (which Shopify fields may change); only_checks
+    scopes the READ (which failing checks the AI is asked to address). Issue-type
+    bulk fixes set both, so "Fix all with AI" on one issue rewrites the field for
+    that issue only. Both unset = full-item fix (the Optimize path)."""
     import time
     from app.ai_agent import run_task
 
@@ -1027,9 +1130,13 @@ def _execute_bulk_fix_apply(bulk_task_id, item_type, only_fields=None):
             analysis_id = _upsert_analysis(store_id, item_type, ref_id, analysis, resolution)
 
             if only_fields:
+                # Re-analysis happens after the scan that queued this item, so
+                # the check may already be clean — skip rather than rewrite the
+                # field for some *other* issue the user didn't ask about.
                 relevant_fixable = sum(
-                    1 for c in analysis["checks"].values()
+                    1 for key, c in analysis["checks"].items()
                     if c.get("issue") and c.get("fix_type") in only_fields
+                    and (not only_checks or key in only_checks)
                 )
             else:
                 relevant_fixable = analysis["fixable_count"]
@@ -1046,6 +1153,8 @@ def _execute_bulk_fix_apply(bulk_task_id, item_type, only_fields=None):
             task_input = {"item_type": item_type, "item_id": ref_id, "analysis_id": analysis_id}
             if only_fields:
                 task_input["only_fields"] = list(only_fields)
+            if only_checks:
+                task_input["only_checks"] = list(only_checks)
             ai_result = run_task("technical_seo_fix", task_input, store_id)
 
             with db.get_cursor() as cur:
@@ -1126,6 +1235,7 @@ def _execute_bulk_fix_apply(bulk_task_id, item_type, only_fields=None):
                                 client.update_collection(item["shopify_id"], shopify_fields)
 
                         if media_updates and item_type == "product":
+                            media_updates = _balanced_media_updates(full_item, media_updates)
                             client.update_product_media(item["shopify_id"], media_updates)
 
                         with db.get_cursor() as cur:
@@ -1218,6 +1328,33 @@ def _execute_bulk_fix_apply(bulk_task_id, item_type, only_fields=None):
                 cur.execute("UPDATE bulk_tasks SET failed = failed + 1 WHERE id = %s", (bulk_task_id,))
 
         time.sleep(0.5)
+
+    # Ownership pass — bulk AI fixes rewrite titles/metas, which shifts
+    # resolver scores; without this two pages could leave the batch sharing a
+    # primary until the next full analyze (the analyze executor has had this
+    # pass all along). Same size gate: small batches are covered by the
+    # per-item swap inside each refresh.
+    try:
+        _item_col = "product_id" if item_type == "product" else "collection_id"
+        _ref_table = "synced_products" if item_type == "product" else "synced_collections"
+        with db.get_cursor() as cur:
+            cur.execute(
+                f"""SELECT DISTINCT t.store_id FROM bulk_task_items bti
+                    JOIN {_ref_table} t ON t.id = bti.{_item_col}
+                    WHERE bti.bulk_task_id = %s""",
+                (bulk_task_id,),
+            )
+            _store_ids = [r["store_id"] for r in cur.fetchall()]
+            cur.execute("SELECT total FROM bulk_tasks WHERE id = %s", (bulk_task_id,))
+            _total = (cur.fetchone() or {}).get("total") or 0
+        if _total >= 50:
+            from app.services.keyword_resolver import dedupe_primary_ownership
+            for _sid in _store_ids:
+                reassigned = dedupe_primary_ownership(_sid, item_type)
+                if reassigned:
+                    logger.info("Post-fix ownership pass reassigned %s %ss", reassigned, item_type)
+    except Exception:
+        logger.warning("Post-fix ownership pass failed for bulk task %s", bulk_task_id)
 
     with db.get_cursor() as cur:
         cur.execute(

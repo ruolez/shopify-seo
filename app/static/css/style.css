@@ -940,6 +940,104 @@ tbody tr:hover { background: rgba(13,148,136,0.04); }
 
 .tab:hover { color: var(--on-surface); }
 
+/* Pending-work count on a tab, so the number in the sidebar badge is traceable
+   to the tab that holds those items. */
+.tab-count {
+    display: inline-block;
+    margin-left: 7px;
+    min-width: 18px;
+    padding: 1px 6px;
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 700;
+    line-height: 1.5;
+    font-variant-numeric: tabular-nums;
+    background: var(--surface-dim);
+    color: var(--on-surface-secondary);
+}
+
+.tab.active .tab-count {
+    background: var(--primary);
+    color: #fff;
+}
+
+/* A row that is part of the queued work the SEO badge counts. */
+.row-queued > td:first-child {
+    box-shadow: inset 3px 0 0 var(--primary);
+}
+
+.queued-pill {
+    display: inline-block;
+    margin-left: 6px;
+    padding: 1px 7px;
+    border-radius: 999px;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.03em;
+    text-transform: uppercase;
+    background: var(--primary-light);
+    color: var(--primary);
+    vertical-align: 1px;
+}
+
+/* Suggested Action column — states what ⚡ will do, not an adjacent fact. */
+.suggested-action-cell {
+    max-width: 300px;
+    font-size: 12px;
+    line-height: 1.45;
+}
+
+.action-kind-chip {
+    display: inline-block;
+    margin-bottom: 3px;
+    padding: 1px 7px;
+    border-radius: 5px;
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    background: var(--surface-dim);
+    color: var(--on-surface-secondary);
+}
+
+.action-kind-chip.kind-keyword { background: var(--primary-light); color: var(--primary); }
+.action-kind-chip.kind-ctr { background: rgba(234, 179, 8, 0.16); color: #a16207; }
+.action-kind-chip.kind-onpage { background: rgba(99, 102, 241, 0.16); color: #4f46e5; }
+
+[data-theme="dark"] .action-kind-chip.kind-ctr { color: #fbbf24; }
+[data-theme="dark"] .action-kind-chip.kind-onpage { color: #a5b4fc; }
+
+.action-line { color: var(--on-surface); }
+.action-line strong { font-weight: 700; }
+.action-none { color: var(--on-surface-secondary); font-style: italic; }
+.action-meta { color: var(--on-surface-secondary); font-size: 11px; white-space: nowrap; }
+.action-support { color: var(--on-surface-secondary); font-size: 11px; margin-top: 2px; }
+
+.action-cannibal {
+    margin-top: 3px;
+    font-size: 11px;
+    color: var(--error);
+    display: flex;
+    align-items: center;
+    gap: 3px;
+}
+
+.action-cannibal .material-symbols-rounded { font-size: 14px; }
+
+.row-type-tag {
+    display: inline-block;
+    margin-right: 6px;
+    padding: 1px 6px;
+    border-radius: 5px;
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    background: var(--surface-dim);
+    color: var(--on-surface-secondary);
+    vertical-align: 1px;
+}
+
 .tab.active {
     color: var(--primary);
     font-weight: 600;
@@ -1148,6 +1246,24 @@ tbody tr:hover { background: rgba(13,148,136,0.04); }
 
 [data-theme="dark"] .filter-chip.active {
     box-shadow: 0 2px 8px rgba(45,212,191,0.2);
+}
+
+/* How many rows the chip would show — lets you see the size of the problem
+   without applying the filter first. */
+.filter-chip-count {
+    margin-left: 6px;
+    padding: 1px 6px;
+    border-radius: 999px;
+    font-size: 11px;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    background: var(--surface-dim);
+    color: var(--on-surface-secondary);
+}
+
+.filter-chip.active .filter-chip-count {
+    background: rgba(255, 255, 255, 0.22);
+    color: #fff;
 }
 
 /* ─── Bulk Toolbar ─── */
@@ -4801,6 +4917,26 @@ tbody tr:hover .row-actions,
     border-radius: 6px;
     padding: 3px 8px;
     white-space: nowrap;
+}
+
+/* What an AI fix for this issue rewrites — the issue is narrow, the write is
+   field-wide, so the row says so before you click. */
+.issue-write-tag {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 11px;
+    font-weight: 500;
+    color: var(--on-surface-secondary);
+    border: 1px solid var(--outline);
+    border-radius: 6px;
+    padding: 2px 8px 2px 6px;
+    white-space: nowrap;
+}
+
+.issue-write-tag .material-symbols-rounded {
+    font-size: 14px;
+    opacity: 0.75;
 }
 
 .issue-chevron {

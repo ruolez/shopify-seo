@@ -1031,10 +1031,14 @@ def optimize_preview():
     )
 
 
-def _push_and_rescore(store, resource_type, item, description_html, meta_title, meta_description, faqpage, client):
+def _push_and_rescore(store, resource_type, item, description_html, meta_title, meta_description, faqpage, client,
+                      allow_dropped_primary=False):
     """Push GEO content to Shopify, persist locally, and rescore the item.
 
-    Shared by single-item apply and batch optimize. Raises on Shopify errors.
+    Shared by single-item apply and batch optimize. Raises on Shopify errors,
+    and refuses (ValueError) a rewrite that drops the item's resolved primary
+    keyword — the preview's dropped_keywords list is informational, this is
+    the enforcement. `allow_dropped_primary=True` is the deliberate override.
     """
     from app.services.ai_output_guard import (
         clamp_meta_description,
@@ -1049,6 +1053,39 @@ def _push_and_rescore(store, resource_type, item, description_html, meta_title, 
     description_html = sanitize_html(description_html) if description_html else description_html
     meta_title = clamp_meta_title(meta_title) if meta_title else meta_title
     meta_description = clamp_meta_description(meta_description) if meta_description else meta_description
+
+    if not allow_dropped_primary and (description_html or meta_title or meta_description):
+        primary = None
+        try:
+            with db.get_cursor() as cur:
+                cur.execute(
+                    """SELECT keyword_resolution->'primary'->>'keyword' AS kw
+                       FROM technical_seo_analyses
+                       WHERE store_id = %s AND item_type = %s AND item_id = %s""",
+                    (store_id, resource_type, resource_id),
+                )
+                row = cur.fetchone()
+            primary = (row or {}).get("kw")
+        except Exception:
+            logger.warning("Primary lookup failed for %s %s", resource_type, resource_id)
+        if primary:
+            from app.services.technical_seo_analyzer import _keyword_in_text
+            old_text = " ".join([
+                re.sub(r"<[^>]+>", " ", item.get("description") or ""),
+                item.get("meta_title") or "", item.get("meta_description") or "",
+            ])
+            # Fields not being pushed keep their current value (mirrors the
+            # UPDATE below), so judge the post-apply effective content.
+            new_text = " ".join([
+                re.sub(r"<[^>]+>", " ", description_html or (item.get("description") or "")),
+                meta_title or (item.get("meta_title") or ""),
+                meta_description or (item.get("meta_description") or ""),
+            ])
+            if _keyword_in_text(primary, old_text) and not _keyword_in_text(primary, new_text):
+                raise ValueError(
+                    f'Rewrite drops the resolved primary keyword "{primary}" from the page — '
+                    "regenerate the content, or apply with allow_dropped_primary to override."
+                )
 
     fields = {}
     if description_html:
@@ -1166,6 +1203,7 @@ def optimize_apply():
             store, resource_type, item,
             data.get("description_html", ""), data.get("meta_title", ""),
             data.get("meta_description", ""), data.get("faqpage_jsonld"), client,
+            allow_dropped_primary=bool(data.get("allow_dropped_primary")),
         )
     except Exception as e:
         logger.exception("GEO apply failed: %s", e)
@@ -1887,26 +1925,84 @@ def manage_prompts():
         return jsonify({"ok": True, "prompts": saved})
 
     if action == "add":
-        prompt = (data.get("prompt") or "").strip()
-        if not prompt:
+        # One question per line, so a whole set can be pasted in at once.
+        lines = [ln.strip() for ln in (data.get("prompt") or "").splitlines() if ln.strip()]
+        if not lines:
             return jsonify({"error": "prompt is required"}), 400
         intent = data.get("intent") or "buyer"
         if intent not in ("buyer", "brand"):
             return jsonify({"error": "intent must be 'buyer' or 'brand'"}), 400
+
+        added, skipped = [], []
+        with db.get_cursor() as cur:
+            for prompt in lines:
+                cur.execute(
+                    "SELECT 1 FROM ai_prompts WHERE store_id = %s AND LOWER(prompt) = LOWER(%s)",
+                    (int(store_id), prompt),
+                )
+                if cur.fetchone():
+                    skipped.append(prompt)
+                    continue
+                cur.execute(
+                    "INSERT INTO ai_prompts (store_id, prompt, intent) VALUES (%s, %s, %s) "
+                    "RETURNING id, prompt, intent, is_active",
+                    (int(store_id), prompt, intent),
+                )
+                added.append(dict(cur.fetchone()))
+        if not added and skipped:
+            return jsonify({"error": "Already in your prompt set", "skipped": skipped}), 400
+        return jsonify({"ok": True, "added": added, "skipped": skipped, **(added[0] if added else {})})
+
+    if action == "update":
+        prompt_id = data.get("prompt_id")
+        if not prompt_id:
+            return jsonify({"error": "prompt_id is required"}), 400
+        prompt = (data.get("prompt") or "").strip()
+        if not prompt:
+            return jsonify({"error": "prompt cannot be empty"}), 400
+        intent = data.get("intent")
+        if intent is not None and intent not in ("buyer", "brand"):
+            return jsonify({"error": "intent must be 'buyer' or 'brand'"}), 400
         with db.get_cursor() as cur:
             cur.execute(
-                "SELECT 1 FROM ai_prompts WHERE store_id = %s AND LOWER(prompt) = LOWER(%s)",
-                (int(store_id), prompt),
+                "SELECT 1 FROM ai_prompts WHERE store_id = %s AND LOWER(prompt) = LOWER(%s) AND id <> %s",
+                (int(store_id), prompt, int(prompt_id)),
             )
             if cur.fetchone():
-                return jsonify({"error": "This prompt already exists"}), 400
+                return jsonify({"error": "Another prompt already uses this wording"}), 400
+            # Past results keep their own prompt snapshot in ai_mention_results,
+            # so history stays true to the question that was actually asked.
+            if intent:
+                cur.execute(
+                    "UPDATE ai_prompts SET prompt = %s, intent = %s WHERE id = %s AND store_id = %s "
+                    "RETURNING id, prompt, intent, is_active",
+                    (prompt, intent, int(prompt_id), int(store_id)),
+                )
+            else:
+                cur.execute(
+                    "UPDATE ai_prompts SET prompt = %s WHERE id = %s AND store_id = %s "
+                    "RETURNING id, prompt, intent, is_active",
+                    (prompt, int(prompt_id), int(store_id)),
+                )
+            row = cur.fetchone()
+        if not row:
+            return jsonify({"error": "Prompt not found"}), 404
+        return jsonify({"ok": True, **dict(row)})
+
+    if action == "toggle":
+        prompt_id = data.get("prompt_id")
+        if not prompt_id:
+            return jsonify({"error": "prompt_id is required"}), 400
+        with db.get_cursor() as cur:
             cur.execute(
-                "INSERT INTO ai_prompts (store_id, prompt, intent) VALUES (%s, %s, %s) "
-                "RETURNING id, prompt, intent, is_active",
-                (int(store_id), prompt, intent),
+                "UPDATE ai_prompts SET is_active = NOT COALESCE(is_active, TRUE) "
+                "WHERE id = %s AND store_id = %s RETURNING id, prompt, intent, is_active",
+                (int(prompt_id), int(store_id)),
             )
-            row = dict(cur.fetchone())
-        return jsonify({"ok": True, **row})
+            row = cur.fetchone()
+        if not row:
+            return jsonify({"error": "Prompt not found"}), 404
+        return jsonify({"ok": True, **dict(row)})
 
     if action == "delete":
         with db.get_cursor() as cur:

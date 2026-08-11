@@ -6,8 +6,43 @@ from app.services import dashboard_service
 
 dashboard_bp = Blueprint("dashboard", __name__)
 
+# store_id -> (computed_at, dismissal_token, payload). Gunicorn runs 2 workers
+# with --preload, so this dict is per-process: a TTL alone let one worker serve
+# a number the other had already recomputed. The token is a cheap shared stamp
+# of the state the user can change from the dashboard (dismiss / snooze), so
+# acting on the queue drops every worker's copy at once instead of leaving the
+# badge frozen for up to a minute.
 _badge_cache = {}
 _BADGE_TTL = 60
+
+
+def _queue_token(store_id):
+    """Cheap stamp of the state that moves items in and out of the queue:
+    dismissals/snoozes and optimizations. An optimize stamps last_optimized_at,
+    which drops the item into the re-measuring band — the badge has to notice
+    that immediately, not a minute later."""
+    from app.database import db
+
+    try:
+        with db.get_cursor() as cur:
+            cur.execute(
+                """SELECT
+                     (SELECT COUNT(*) FROM action_dismissals
+                       WHERE store_id = %(sid)s
+                         AND (snoozed_until IS NULL OR snoozed_until > NOW())) AS dismissals,
+                     (SELECT COALESCE(MAX(dismissed_at)::text, '') FROM action_dismissals
+                       WHERE store_id = %(sid)s) AS last_dismiss,
+                     (SELECT COALESCE(MAX(last_optimized_at)::text, '') FROM synced_products
+                       WHERE store_id = %(sid)s) AS product_opt,
+                     (SELECT COALESCE(MAX(last_optimized_at)::text, '') FROM synced_collections
+                       WHERE store_id = %(sid)s) AS collection_opt""",
+                {"sid": store_id},
+            )
+            r = cur.fetchone()
+        return f"{r['dismissals']}:{r['last_dismiss']}:{r['product_opt']}:{r['collection_opt']}"
+    except Exception:
+        # Unknown token — never reuse a cache entry we can't validate.
+        return None
 
 
 def _resolve_store_id():
@@ -35,11 +70,13 @@ def nav_badges():
     if not store_id:
         return jsonify({})
     now = time.time()
+    token = _queue_token(store_id)
     cached = _badge_cache.get(store_id)
-    if cached and now - cached[0] < _BADGE_TTL:
-        return jsonify(cached[1])
+    if (cached and now - cached[0] < _BADGE_TTL
+            and token is not None and cached[1] == token):
+        return jsonify(cached[2])
     payload = dashboard_service.get_nav_badges(store_id)
-    _badge_cache[store_id] = (now, payload)
+    _badge_cache[store_id] = (now, token, payload)
     return jsonify(payload)
 
 

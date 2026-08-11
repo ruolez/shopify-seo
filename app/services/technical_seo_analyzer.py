@@ -286,34 +286,57 @@ def _extract_keywords(product_or_collection):
     return keywords
 
 
+def _fold_tokens(text_or_kw):
+    """Tokenize + plural-fold, so containment matches the app's ownership
+    identity: 'swisher sweet' is present in 'Swisher Sweets Cigarillos'."""
+    from app.services.keyword_identity import fold_token
+    return [fold_token(t) for t in _tokenize(text_or_kw)]
+
+
 def _keyword_in_text(keyword, text):
+    """Token-boundary containment. Substring matching let 'pack' pass via
+    'packaging' — cheap false passes across every check built on this. A
+    phrase matches in order first, else as an unordered token subset (the
+    display forms vary; same tokens = same phrase for presence purposes)."""
     if not keyword or not text:
         return False
-    if keyword.lower() in text.lower():
-        return True
-    kw_tokens = set(_tokenize(keyword))
-    if len(kw_tokens) >= 2:
-        return kw_tokens.issubset(set(_tokenize(text)))
-    return False
+    kw_tokens = _fold_tokens(keyword)
+    if not kw_tokens:
+        return False
+    text_tokens = _fold_tokens(text)
+    if len(kw_tokens) == 1:
+        return kw_tokens[0] in text_tokens
+    n, m = len(text_tokens), len(kw_tokens)
+    for i in range(n - m + 1):
+        if text_tokens[i:i + m] == kw_tokens:
+            return True
+    return set(kw_tokens).issubset(set(text_tokens))
 
 
 def _keyword_position_in_title(keyword, title, first_n=5):
+    """Containment first, position second: 0 = keyword not in the title at
+    all; 100 = present and starting within the first first_n words; 50 =
+    present but later/out-of-order. The old first-token-only compare scored
+    100 for titles that failed the containment check outright."""
     if not keyword or not title:
         return 0
-    words = _tokenize(title)
-    kw_words = _tokenize(keyword)
+    if not _keyword_in_text(keyword, title):
+        return 0
+    words = _fold_tokens(title)
+    kw_words = _fold_tokens(keyword)
     if not kw_words:
         return 0
-    first_kw_word = kw_words[0]
     for i, w in enumerate(words):
-        if w == first_kw_word:
-            if i < first_n:
-                return 100
-            return 50
-    return 0
+        if w == kw_words[0]:
+            return 100 if i < first_n else 50
+    return 50
 
 
 def _keyword_density(keyword, body_html):
+    """Percent of body WORDS belonging to keyword matches — a one-directional
+    stuffing guard only (density is not a ranking factor; Google's spam policy
+    covers unnatural repetition). Counting occurrences instead of matched
+    words gave multi-word phrases ~n× more headroom before the guard fired."""
     text = _strip_html(body_html).lower()
     tokens = _tokenize(text)
     total_words = len(tokens)
@@ -321,6 +344,8 @@ def _keyword_density(keyword, body_html):
         return 0.0
     kw_tokens = _tokenize(keyword)
     kw_len = len(kw_tokens)
+    if kw_len == 0:
+        return 0.0
     if kw_len == 1:
         count = sum(1 for w in tokens if w == kw_tokens[0])
     else:
@@ -337,7 +362,7 @@ def _keyword_density(keyword, body_html):
                     i += kw_len
                 else:
                     i += 1
-    return (count / total_words) * 100
+    return (count * kw_len / total_words) * 100
 
 
 def _count_headings(body_html):
@@ -346,8 +371,28 @@ def _count_headings(body_html):
     return len(re.findall(r"<h[2-6][^>]*>", body_html, re.IGNORECASE))
 
 
+def _weighted_score(checks, weights):
+    """Weighted average over checks that exist and aren't N/A, normalized by
+    the weight actually applied — an N/A check (e.g. alt balance with no
+    images) drops out instead of silently scoring zero. Products used to
+    KeyError on a weight key with no matching check; collections silently
+    deflated when a weighted check was absent."""
+    total = 0.0
+    total_w = 0.0
+    for key, w in weights.items():
+        c = checks.get(key)
+        if not c or c.get("na"):
+            continue
+        total += c["score"] * w
+        total_w += w
+    return round(total / total_w) if total_w else 0
+
+
 def analyze_product_technical_seo(product, primary_keyword=None):
-    keywords = _extract_keywords(product)
+    # n-gram extraction only matters when no resolved primary was supplied —
+    # otherwise its output (fallback primary + detected_keywords) is unused
+    # and overwritten with resolver candidates.
+    keywords = [] if primary_keyword else _extract_keywords(product)
     primary_kw = primary_keyword or (keywords[0]["keyword"] if keywords else None)
     if not primary_kw:
         return {
@@ -402,7 +447,11 @@ def analyze_product_technical_seo(product, primary_keyword=None):
     checks["keyword_at_title_start"] = {
         "score": pos_score,
         "detail": pos_detail,
-        "issue": None if pos_score == 100 else f"Move the primary keyword into the first {title_first_n} words of the title",
+        # Only the "present but buried" case is this check's issue —
+        # a missing keyword is title_has_keyword's issue, and raising it
+        # twice double-counted one problem.
+        "issue": (f"Move the primary keyword into the first {title_first_n} words of the title"
+                  if pos_score == 50 else None),
         "fix_type": "title",
     }
 
@@ -473,7 +522,15 @@ def analyze_product_technical_seo(product, primary_keyword=None):
     # excessive exact-match repetition is penalized.
     density = _keyword_density(primary_kw, body_html)
     stuffing_max = tech_thresholds.get("keyword_stuffing_max", 4.0)
-    if density <= stuffing_max:
+    density_floor = tech_thresholds.get("density_min_body_words", 50)
+    if word_count < density_floor:
+        # On a 20-word description one mention is 5%+ — that's thin content
+        # (description_word_count's issue), not stuffing. Without the floor
+        # this check and body_first_100 were mutually unsatisfiable.
+        dens_score = 100
+        dens_detail = f"Body too short ({word_count} words) for a meaningful density read"
+        dens_issue = None
+    elif density <= stuffing_max:
         dens_score = 100
         dens_detail = f"No stuffing risk — keyword density {density:.1f}%"
         dens_issue = None
@@ -541,16 +598,23 @@ def analyze_product_technical_seo(product, primary_keyword=None):
     # 13. Alt text keyword balance — the keyword belongs in 1-2 of the most
     # relevant alts; putting it in every alt reads as stuffing (Google spam
     # guidance), and none at all misses an image-search signal.
-    n_imgs = len(images)
-    k_with_kw = sum(
-        1 for img in images
-        if img.get("alt") and _keyword_in_text(primary_kw, img["alt"])
-    )
-    if n_imgs == 0:
+    # Denominator = images that HAVE alt text, matching the validator and the
+    # apply-time backstop — counting alt-less images let the same product read
+    # "good balance" here and "stuffing" at the quality gate.
+    alts_present = [img["alt"] for img in images if img.get("alt")]
+    n_alts = len(alts_present)
+    k_with_kw = sum(1 for a in alts_present if _keyword_in_text(primary_kw, a))
+    img_kw_na = False
+    if len(images) == 0:
         img_kw_score = 0
-        img_kw_detail = "No images to check"
+        img_kw_na = True  # not scored — no images means nothing to balance
+        img_kw_detail = "No images — keyword balance not scored"
         img_kw_issue = None  # coverage check owns the no-images problem
-    elif n_imgs == 1:
+    elif n_alts == 0:
+        img_kw_score = 60
+        img_kw_detail = "No alt texts yet to carry the keyword"
+        img_kw_issue = None  # coverage check owns missing alts
+    elif n_alts == 1:
         if k_with_kw == 1:
             img_kw_score = 100
             img_kw_detail = f"Image alt contains '{primary_kw}'"
@@ -561,15 +625,15 @@ def analyze_product_technical_seo(product, primary_keyword=None):
             img_kw_issue = f"Include '{primary_kw}' in the image alt text"
     elif k_with_kw == 0:
         img_kw_score = 60
-        img_kw_detail = f"0/{n_imgs} alts contain '{primary_kw}'"
+        img_kw_detail = f"0/{n_alts} alts contain '{primary_kw}'"
         img_kw_issue = f"Include '{primary_kw}' in one or two of the most relevant image alts"
-    elif k_with_kw == n_imgs:
+    elif k_with_kw == n_alts:
         img_kw_score = 0
-        img_kw_detail = f"All {n_imgs} image alts contain '{primary_kw}'"
+        img_kw_detail = f"All {n_alts} image alts contain '{primary_kw}'"
         img_kw_issue = "Keyword in every image alt reads as stuffing — vary the descriptions"
     else:
         img_kw_score = 100
-        img_kw_detail = f"{k_with_kw}/{n_imgs} alts contain '{primary_kw}' — good balance (target 1-2)"
+        img_kw_detail = f"{k_with_kw}/{n_alts} alts contain '{primary_kw}' — good balance (target 1-2)"
         img_kw_issue = None
     checks["image_alt_has_keyword"] = {
         "score": img_kw_score,
@@ -577,10 +641,12 @@ def analyze_product_technical_seo(product, primary_keyword=None):
         "issue": img_kw_issue,
         "fix_type": "image_alt",
     }
+    if img_kw_na:
+        checks["image_alt_has_keyword"]["na"] = True
 
     weights = rules.get("weights", DEFAULTS["rules.technical_product"]["weights"])
 
-    overall = sum(checks[k]["score"] * weights.get(k, 0) for k in weights)
+    overall = _weighted_score(checks, weights)
     issues_count = sum(1 for c in checks.values() if c["issue"])
     fixable_count = sum(1 for c in checks.values() if c["issue"] and c["fix_type"])
 
@@ -594,7 +660,7 @@ def analyze_product_technical_seo(product, primary_keyword=None):
 
 
 def analyze_collection_technical_seo(collection, primary_keyword=None):
-    keywords = _extract_keywords(collection)
+    keywords = [] if primary_keyword else _extract_keywords(collection)
     primary_kw = primary_keyword or (keywords[0]["keyword"] if keywords else None)
     if not primary_kw:
         return {
@@ -642,7 +708,11 @@ def analyze_collection_technical_seo(collection, primary_keyword=None):
     checks["keyword_at_title_start"] = {
         "score": pos_score,
         "detail": pos_detail,
-        "issue": None if pos_score == 100 else f"Move the primary keyword into the first {title_first_n} words of the title",
+        # Only the "present but buried" case is this check's issue —
+        # a missing keyword is title_has_keyword's issue, and raising it
+        # twice double-counted one problem.
+        "issue": (f"Move the primary keyword into the first {title_first_n} words of the title"
+                  if pos_score == 50 else None),
         "fix_type": "title",
     }
 
@@ -713,7 +783,15 @@ def analyze_collection_technical_seo(collection, primary_keyword=None):
     # excessive exact-match repetition is penalized.
     density = _keyword_density(primary_kw, body_html)
     stuffing_max = tech_thresholds.get("keyword_stuffing_max", 4.0)
-    if density <= stuffing_max:
+    density_floor = tech_thresholds.get("density_min_body_words", 50)
+    if word_count < density_floor:
+        # On a 20-word description one mention is 5%+ — that's thin content
+        # (description_word_count's issue), not stuffing. Without the floor
+        # this check and body_first_100 were mutually unsatisfiable.
+        dens_score = 100
+        dens_detail = f"Body too short ({word_count} words) for a meaningful density read"
+        dens_issue = None
+    elif density <= stuffing_max:
         dens_score = 100
         dens_detail = f"No stuffing risk — keyword density {density:.1f}%"
         dens_issue = None
@@ -785,7 +863,7 @@ def analyze_collection_technical_seo(collection, primary_keyword=None):
     # Collections: rebalanced weights (no image_alt_has_keyword)
     weights = rules.get("weights", DEFAULTS["rules.technical_collection"]["weights"])
 
-    overall = sum(checks[k]["score"] * weights.get(k, 0) for k in checks)
+    overall = _weighted_score(checks, weights)
     issues_count = sum(1 for c in checks.values() if c["issue"])
     fixable_count = sum(1 for c in checks.values() if c["issue"] and c["fix_type"])
 

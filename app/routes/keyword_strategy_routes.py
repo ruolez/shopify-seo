@@ -322,17 +322,9 @@ def list_clusters():
     return jsonify({"clusters": data})
 
 
-@keyword_strategy_bp.route("/api/keyword-strategy/clusters/generate", methods=["POST"])
-def generate_clusters():
-    store_id = _get_store_id()
-    if not store_id:
-        return jsonify({"error": "store_id required"}), 400
-    try:
-        result = kws.cluster_keywords(store_id)
-        return jsonify(result)
-    except Exception as e:
-        logger.error("Clustering failed: %s", e)
-        return jsonify({"error": str(e)}), 500
+# /clusters/generate (Jaccard clustering) was removed: superseded by the AI
+# classifier, it had no UI caller left, and running it would have DELETEd the
+# AI-built family taxonomy (both writers wipe master_keyword_clusters first).
 
 
 @keyword_strategy_bp.route("/api/keyword-strategy/clusters/<int:cluster_id>", methods=["PUT"])

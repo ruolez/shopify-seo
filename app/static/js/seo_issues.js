@@ -30,6 +30,25 @@ const SEO_CHECK_GROUPS = [
     { label: "Images", icon: "image", keys: ["image_alt_has_keyword"] },
 ];
 
+// What a "Fix all with AI" run actually writes. An issue is narrow ("no
+// subheadings") but the fix rewrites the whole field it lives on, so every
+// surface that offers the fix says which field changes.
+const FIX_FIELD_LABELS = {
+    title: "title",
+    meta_title: "meta title",
+    meta_description: "meta description",
+    description: "description",
+    image_alt: "image alt text",
+    tags: "tags",
+};
+
+function fixFieldsLabel(fields) {
+    const names = (fields || []).map(f => FIX_FIELD_LABELS[f] || f.replace(/_/g, " "));
+    if (names.length === 0) return "";
+    if (names.length === 1) return names[0];
+    return names.slice(0, -1).join(", ") + " and " + names[names.length - 1];
+}
+
 /* ── Unified detail modal helpers ────────────────────────────────────── */
 
 function renderPillarBars(item) {
@@ -85,12 +104,24 @@ function renderUnifiedHero(item, itemType) {
 
 function renderKeywordChips(detectedKeywords) {
     if (!detectedKeywords || detectedKeywords.length === 0) return "";
+    // Two shapes share this field: resolver candidates (have sources[];
+    // confidence is the 0-100 resolution score) and raw on-page n-grams
+    // (confidence is a small extraction weight, stored only when keyword
+    // resolution hasn't run or failed). One badge scale misread both.
+    const isResolved = detectedKeywords.some(kw => Array.isArray(kw.sources));
     let html = '<div class="preview-section">';
-    html += '<div class="preview-section-title"><span class="material-symbols-rounded">key</span> Detected Keywords</div>';
+    html += `<div class="preview-section-title"><span class="material-symbols-rounded">key</span> ${
+        isResolved ? "Resolved Keywords" : "On-page Keywords"
+    }${isResolved ? "" : ' <span class="badge badge-warning" style="font-size:10px;">not demand-checked — re-analyze</span>'}</div>`;
     html += '<div class="preview-tags">';
     for (const kw of detectedKeywords) {
         if (kw.packaging_only) {
             html += `<span class="chip-display" style="border: 1px dashed var(--primary);"><strong>${escapeHtml(kw.keyword)}</strong> <span class="badge badge-info" style="font-size: 10px; margin-left: 4px;">pkg</span></span>`;
+        } else if (isResolved) {
+            const score = Math.round(kw.confidence || 0);
+            const cls = score >= 60 ? "badge-success" : score >= 30 ? "badge-warning" : "badge-info";
+            const srcs = Array.isArray(kw.sources) ? escapeHtml(kw.sources.join(", ")) : "";
+            html += `<span class="chip-display" title="${srcs}"><strong>${escapeHtml(kw.keyword)}</strong> <span class="badge ${cls}" style="font-size: 10px; margin-left: 4px;">${score}</span></span>`;
         } else {
             const conf = kw.confidence >= 15 ? "badge-success" : kw.confidence >= 8 ? "badge-warning" : "badge-info";
             html += `<span class="chip-display"><strong>${escapeHtml(kw.keyword)}</strong> <span class="badge ${conf}" style="font-size: 10px; margin-left: 4px;">${kw.confidence}</span></span>`;
@@ -426,7 +457,9 @@ async function applySelectedItemFixes(itemType, itemId) {
     try {
         const resp = await apiRequest("/api/technical-seo/apply", {
             method: "POST",
-            body: { item_type: itemType, item_id: itemId, fixes },
+            // from_ai_fixes: the server rejects the apply if these proposals
+            // were already consumed or invalidated (stale tab protection).
+            body: { item_type: itemType, item_id: itemId, fixes, from_ai_fixes: true },
         });
         if (resp.ok) {
             showToast(`Applied: ${(resp.updated_fields || []).join(", ")}${resp.new_score != null ? ` — new score ${resp.new_score}` : ""}`, "success");
@@ -449,6 +482,7 @@ async function applySelectedItemFixes(itemType, itemId) {
                 viewCollection(itemId, { tab: "checks" });
                 loadCollections();
             }
+            refreshQueueAfterApply();
         } else {
             showToast(`Apply failed: ${resp.error || "Unknown error"}`, "error");
             if (btn) {
@@ -630,6 +664,43 @@ const issueItemsCache = new Map();
 
 const ISSUE_SEVERITY_LABELS = { high: "High", med: "Medium", low: "Low" };
 
+// Once per page load: silently re-analyze items whose stored verdict predates
+// their own last content change. Local only — no AI cost, no Shopify write —
+// so it runs without asking. A wrong verdict must not survive just because
+// nobody happened to press the button.
+let _outdatedSweepDone = false;
+
+async function refreshOutdatedAnalyses(storeId) {
+    if (_outdatedSweepDone) return;
+    const cov = issuesData?.coverage || {};
+    const outdated = (cov.products?.outdated || 0) + (cov.collections?.outdated || 0);
+    if (!outdated) return;
+    _outdatedSweepDone = true;
+
+    const banner = document.createElement("div");
+    banner.className = "analyze-cta-banner";
+    banner.innerHTML = `<span class="material-symbols-rounded spin">sync</span>
+        <span>Re-analyzing <strong>${outdated.toLocaleString()}</strong> item${outdated === 1 ? "" : "s"} whose
+        content changed since they were last analyzed — the issues below may be out of date until this finishes.</span>`;
+    document.getElementById("issues-container")?.prepend(banner);
+
+    try {
+        const resp = await apiRequest("/api/seo/issues/analyze", {
+            method: "POST",
+            body: { store_id: parseInt(storeId), scope: "outdated" },
+        });
+        for (const t of resp.tasks || []) {
+            await pollTaskUntilDone(`/api/tasks/bulk/${t.bulk_task_id}`, { timeoutMs: Infinity });
+        }
+        banner.remove();
+        loadIssues();
+    } catch (err) {
+        banner.innerHTML = `<span class="material-symbols-rounded">error</span>
+            <span>Couldn't refresh outdated analyses: ${escapeHtml(err.message)}. The counts below may be stale —
+            use <b>Re-analyze All</b>.</span>`;
+    }
+}
+
 async function loadIssues() {
     const container = document.getElementById("issues-container");
     const storeId = await _ensureStoreId();
@@ -643,6 +714,7 @@ async function loadIssues() {
         issuesData = await apiRequest(`/api/seo/issues?store_id=${storeId}`);
         issueItemsCache.clear();
         renderIssuesTab();
+        refreshOutdatedAnalyses(storeId);
         // Deep link: /seo?tab=issues&issue=<key> auto-expands that row once.
         const issueParam = new URLSearchParams(location.search).get("issue");
         if (issueParam && issuesData.issues.some(i => i.key === issueParam) && !expandedIssueKeys.has(issueParam)) {
@@ -659,6 +731,46 @@ function _visibleIssues() {
     if (issuesSeverityFilter) issues = issues.filter(i => i.severity === issuesSeverityFilter);
     if (issuesTypeFilter) issues = issues.filter(i => (i.by_type[issuesTypeFilter] || 0) > 0);
     return issues;
+}
+
+// Keyword issues are read from STORED analyses, so "analyzed" alone is not a
+// useful number — a row written months ago is reported as current fact. This
+// tile reports FRESHNESS instead of mere existence: the old one showed 100%
+// while most of the catalog was still on a five-month-old verdict.
+function renderFreshnessCard(cov, covTotal, covAnalyzed, covPct) {
+    const outdated = (cov.products?.outdated || 0) + (cov.collections?.outdated || 0);
+    const stale = (cov.products?.stale || 0) + (cov.collections?.stale || 0);
+    const staleDays = cov.stale_days || 30;
+    const unanalyzed = covTotal - covAnalyzed;
+    const fresh = Math.max(0, covAnalyzed - outdated - stale);
+    const freshPct = covTotal ? Math.round((fresh / covTotal) * 100) : 0;
+
+    let color = "var(--success)";
+    let sub;
+    if (outdated) {
+        color = "var(--error)";
+        sub = `<strong>${outdated.toLocaleString()}</strong> changed since they were analyzed`
+            + (stale ? ` · ${stale.toLocaleString()} over ${staleDays}d old` : "");
+    } else if (stale || unanalyzed) {
+        color = "var(--warning)";
+        const bits = [];
+        if (stale) bits.push(`<strong>${stale.toLocaleString()}</strong> older than ${staleDays} days`);
+        if (unanalyzed) bits.push(`${unanalyzed.toLocaleString()} never analyzed`);
+        sub = bits.join(" · ");
+    } else {
+        // A bare "100%" looks identical to the old always-100% coverage tile,
+        // so show the age it is 100% *as of*.
+        const oldest = cov.oldest_analyzed_at ? formatRelativeTime(cov.oldest_analyzed_at) : null;
+        sub = `all ${covTotal.toLocaleString()} up to date`
+            + (oldest ? ` · oldest checked ${oldest}` : "");
+    }
+
+    return `<div class="stat-card">
+        <div class="stat-value" style="color:${color};">${freshPct}%</div>
+        <div class="stat-label" title="Keyword issues are read from stored analyses. An analysis older than the page it describes reports issues that may no longer exist — or hides ones that do.">Analysis freshness</div>
+        <div class="stat-sub">${sub} ·
+            <a href="#" data-issues-reanalyze-all style="color: var(--primary);">Re-analyze all</a></div>
+    </div>`;
 }
 
 function renderIssuesTab() {
@@ -679,7 +791,10 @@ function renderIssuesTab() {
         <div class="stat-card">
             <div class="stat-value">${totalIssues.toLocaleString()}</div>
             <div class="stat-label">Total Issues</div>
-            <div class="stat-sub">${all.length} issue type${all.length !== 1 ? "s" : ""}</div>
+            <div class="stat-sub" title="One page can hold several issues. The sidebar SEO badge counts pages, not issues — which is why the two numbers differ.">${all.length} issue type${all.length !== 1 ? "s" : ""}${
+                issuesData.items_with_issues != null
+                    ? ` · across <strong>${issuesData.items_with_issues.toLocaleString()}</strong> page${issuesData.items_with_issues === 1 ? "" : "s"}`
+                    : ""}</div>
         </div>
         <div class="stat-card">
             <div class="stat-value" style="color:${highCount ? "var(--error)" : "var(--success)"};">${highCount.toLocaleString()}</div>
@@ -691,12 +806,7 @@ function renderIssuesTab() {
             <div class="stat-label">Fixable with AI</div>
             <div class="stat-sub">bulk fix per issue type</div>
         </div>
-        <div class="stat-card">
-            <div class="stat-value" style="color:${covPct >= 90 ? "var(--success)" : "var(--warning)"};">${covPct}%</div>
-            <div class="stat-label">Keyword Coverage</div>
-            <div class="stat-sub">${covAnalyzed.toLocaleString()} of ${covTotal.toLocaleString()} analyzed ·
-                <a href="#" data-issues-reanalyze-all style="color: var(--primary);">Re-analyze all</a></div>
-        </div>
+        ${renderFreshnessCard(cov, covTotal, covAnalyzed, covPct)}
     </div>`;
 
     if (covTotal && covAnalyzed / covTotal < 0.5) {
@@ -781,8 +891,14 @@ function renderIssueRow(issue) {
             <span class="issue-row-label">${escapeHtml(issue.label)}</span>
             <span class="issue-row-count">${byType}</span>
             <span class="issue-pillar-tag">${issue.source === "keyword" ? "Keywords" : "Content"}</span>
+            ${issue.fixable && issue.fix_fields?.length
+                ? `<span class="issue-write-tag" title="An AI fix for this issue rewrites the ${escapeAttr(fixFieldsLabel(issue.fix_fields))} — no other field is touched">
+                       <span class="material-symbols-rounded">edit_note</span>${escapeHtml(fixFieldsLabel(issue.fix_fields))}</span>`
+                : ""}
             ${issue.fixable
                 ? `<button class="btn btn-primary btn-sm" data-issue-fix="${issue.key}"><span class="material-symbols-rounded">auto_fix_high</span> Fix all with AI</button>`
+                : issue.bulk_fix
+                ? `<button class="btn btn-primary btn-sm" data-issue-bulkfix="${issue.key}" title="Deterministic fix — no AI, no new content"><span class="material-symbols-rounded">bolt</span> ${escapeHtml(issue.bulk_fix.label)}</button>`
                 : issue.action_href
                     ? `<a class="btn btn-secondary btn-sm" href="${escapeAttr(issue.action_href)}" data-issue-action><span class="material-symbols-rounded">arrow_outward</span> ${escapeHtml(issue.action_label || "Open")}</a>`
                     : `<span class="badge badge-not-analyzed" title="Informational — no safe automatic fix">info only</span>`}
@@ -863,6 +979,7 @@ window.quickEditSave = async function (itemType, itemId, field, issueKey, el) {
         showToast(`Updated on Shopify${resp.new_score != null ? ` — keyword score now ${resp.new_score}` : ""}`, "success");
         issueItemsCache.delete(issueKey);
         loadIssues();
+        refreshQueueAfterApply();
     } catch (e) {
         showToast(`Update failed: ${e.message}`, "error");
         if (saveBtn) { saveBtn.disabled = false; saveBtn.textContent = "Save to Shopify"; }
@@ -930,11 +1047,16 @@ async function fixIssueType(key) {
     if (types.length === 0) return;
 
     const summary = types.map(t => `${issue.by_type[t]} ${t}${issue.by_type[t] !== 1 ? "s" : ""}`).join(" and ");
+    const fieldsLabel = fixFieldsLabel(issue.fix_fields);
     document.getElementById("confirm-dialog-title").textContent = `Fix: ${issue.label}`;
     document.getElementById("confirm-dialog-message").innerHTML =
-        `This will use AI to fix <strong>${escapeHtml(issue.label.toLowerCase())}</strong> on ${summary} and apply the changes to Shopify.`;
+        `AI will rewrite the <strong>${escapeHtml(fieldsLabel)}</strong> of ${summary} to fix
+         <strong>${escapeHtml(issue.label.toLowerCase())}</strong>, then apply the changes to Shopify.
+         <br><span style="color: var(--on-surface-secondary); font-size: 12.5px;">
+         Scoped to this issue — no other field is touched, and items that re-analyze clean are skipped.
+         Each item is re-analyzed after the write.</span>`;
     const okBtn = document.getElementById("confirm-dialog-ok");
-    okBtn.textContent = "Fix all with AI";
+    okBtn.textContent = `Rewrite ${fieldsLabel}`;
     okBtn.onclick = async () => {
         closeConfirmDialog();
         const storeId = await _ensureStoreId();
@@ -945,10 +1067,13 @@ async function fixIssueType(key) {
                     method: "POST",
                     body: { store_id: parseInt(storeId), item_type: itemType, limit: 500 },
                 });
-                const task = await pollIssuesBulk(resp.bulk_task_id, resp.total, `Fixing ${issue.label.toLowerCase()} (${itemType}s)...`);
+                const task = await pollIssuesBulk(
+                    resp.bulk_task_id, resp.total,
+                    `Rewriting ${fieldsLabel} to fix ${issue.label.toLowerCase()} (${itemType}s)...`,
+                );
                 const skipped = task.skipped || 0;
                 const fixed = Math.max(0, task.completed - skipped);
-                showToast(`${issue.label} — ${itemType}s: ${fixed} fixed`
+                showToast(`${issue.label} — ${fixed} ${itemType}${fixed !== 1 ? "s" : ""}: ${fieldsLabel} rewritten`
                     + (skipped ? `, ${skipped} already clean on re-analysis` : "")
                     + (task.failed ? `, ${task.failed} failed` : ""), task.failed ? "warning" : "success");
             } catch (err) {
@@ -961,6 +1086,41 @@ async function fixIssueType(key) {
         // Keep the item tables in sync with the applied changes
         if (types.includes("product")) loadProducts();
         if (types.includes("collection")) loadCollections();
+        refreshQueueAfterApply();
+    };
+    _openConfirmDialog();
+}
+
+// Deterministic bulk fix — declared on the issue definition, no AI involved.
+// Distinct from fixIssueType(), which runs the generate-then-apply pipeline.
+async function runIssueBulkFix(key) {
+    const issue = (issuesData?.issues || []).find(i => i.key === key);
+    if (!issue?.bulk_fix) return;
+
+    document.getElementById("confirm-dialog-title").textContent = issue.bulk_fix.label;
+    document.getElementById("confirm-dialog-message").innerHTML =
+        `${escapeHtml(issue.bulk_fix.confirm || "")}
+         <br><br><strong>${issue.count}</strong> collection${issue.count === 1 ? "" : "s"} will be updated on Shopify.`;
+    const okBtn = document.getElementById("confirm-dialog-ok");
+    okBtn.textContent = issue.bulk_fix.label;
+    okBtn.onclick = async () => {
+        closeConfirmDialog();
+        try {
+            const storeId = await _ensureStoreId();
+            const resp = await apiRequest(issue.bulk_fix.endpoint, {
+                method: "POST",
+                body: { store_id: parseInt(storeId) },
+            });
+            const task = await pollIssuesBulk(resp.bulk_task_id, resp.total, `${issue.bulk_fix.label}…`);
+            showToast(`${task.completed} updated` + (task.failed ? `, ${task.failed} failed` : ""),
+                task.failed ? "warning" : "success");
+        } catch (err) {
+            showToast(`Failed: ${err.message}`, "error");
+        }
+        expandedIssueKeys.delete(key);
+        loadIssues();
+        loadCollections();
+        if (typeof NavBadges !== "undefined") NavBadges.refresh();
     };
     _openConfirmDialog();
 }
@@ -1007,6 +1167,12 @@ function initIssuesEvents() {
         if (fixBtn) {
             e.stopPropagation();
             fixIssueType(fixBtn.dataset.issueFix);
+            return;
+        }
+        const bulkFixBtn = e.target.closest("[data-issue-bulkfix]");
+        if (bulkFixBtn) {
+            e.stopPropagation();
+            runIssueBulkFix(bulkFixBtn.dataset.issueBulkfix);
             return;
         }
         const viewBtn = e.target.closest("[data-view-item]");

@@ -64,18 +64,56 @@ def _prune_orphan_analyses(store_id, item_type, live_table):
     """Drop technical_seo_analyses rows whose product/collection no longer exists.
 
     item_id has no FK (it points into different tables by item_type), so pruning
-    synced rows leaves analyses behind — which then read as permanently stale."""
+    synced rows leaves analyses behind — which then read as permanently stale.
+    Returns the pruned rows' primary keywords: their ownership claims are freed,
+    and pages that were demoted by those claims need a re-resolve."""
     with db.get_cursor() as cur:
         cur.execute(
             f"""DELETE FROM technical_seo_analyses tsa
                 WHERE tsa.store_id = %s AND tsa.item_type = %s
                   AND NOT EXISTS (SELECT 1 FROM {live_table} t
-                                  WHERE t.id = tsa.item_id AND t.store_id = tsa.store_id)""",
+                                  WHERE t.id = tsa.item_id AND t.store_id = tsa.store_id)
+                RETURNING tsa.keyword_resolution->'primary'->>'keyword' AS kw""",
             (store_id, item_type),
         )
-        removed = cur.rowcount
-    if removed:
-        logger.info("Removed %d orphaned %s analyses for store %s", removed, item_type, store_id)
+        rows = cur.fetchall()
+    if rows:
+        logger.info("Removed %d orphaned %s analyses for store %s", len(rows), item_type, store_id)
+    return [r["kw"] for r in rows if r.get("kw")]
+
+
+def _recover_freed_claims(store_id, freed_keywords):
+    """Deleting/unpublishing an item silently releases its keyword claim;
+    pages demoted by that claim keep their next-best primary (and the
+    'owned by a higher-scoring page' note) forever unless re-resolved. Find
+    the demoted pages via the swap note and re-resolve them now that the
+    keyword is free again. Best-effort."""
+    if not freed_keywords:
+        return
+    try:
+        from app.routes.technical_seo_routes import _resolve_and_analyze, _upsert_analysis
+        targets = set()
+        with db.get_cursor() as cur:
+            for kw in set(freed_keywords):
+                cur.execute(
+                    """SELECT item_type, item_id FROM technical_seo_analyses
+                       WHERE store_id = %s AND keyword_resolution->>'note' LIKE %s""",
+                    (store_id, f"'{kw}' is owned by%"),
+                )
+                targets.update((r["item_type"], r["item_id"]) for r in cur.fetchall())
+        for item_type, item_id in targets:
+            table = "synced_products" if item_type == "product" else "synced_collections"
+            with db.get_cursor() as cur:
+                cur.execute(f"SELECT * FROM {table} WHERE id = %s AND store_id = %s", (item_id, store_id))
+                item = cur.fetchone()
+            if item:
+                analysis, resolution = _resolve_and_analyze(item_type, dict(item))
+                _upsert_analysis(store_id, item_type, item_id, analysis, resolution)
+        if targets:
+            logger.info("Re-resolved %d page(s) demoted by now-freed keyword claims for store %s",
+                        len(targets), store_id)
+    except Exception:
+        logger.exception("Freed-claim recovery failed for store %s (non-fatal)", store_id)
 
 
 def _upsert_product_batch(store_id, batch):
@@ -365,7 +403,7 @@ def _sync_store_inner(store_id):
             stale_count = cur.rowcount
         if stale_count:
             logger.info("Removed %d stale products for store %s", stale_count, store_id)
-        _prune_orphan_analyses(store_id, "product", "synced_products")
+        freed_claims = _prune_orphan_analyses(store_id, "product", "synced_products")
 
         with db.get_cursor() as cur:
             cur.execute(
@@ -525,7 +563,7 @@ def _sync_store_inner(store_id):
             stale_count = cur.rowcount
         if stale_count:
             logger.info("Removed %d stale collections for store %s", stale_count, store_id)
-        _prune_orphan_analyses(store_id, "collection", "synced_collections")
+        freed_claims += _prune_orphan_analyses(store_id, "collection", "synced_collections")
 
         # Clear stale interlinking analysis and re-run
         with db.get_cursor() as cur:
@@ -552,6 +590,20 @@ def _sync_store_inner(store_id):
             _enqueue_schema_drift_repush(store_id)
         except Exception:
             logger.exception("Schema drift check failed for store %s (non-fatal)", store_id)
+
+        # Keyword hygiene: sync just replaced the content the analyses (and
+        # ownership claims) were computed from — the one pipeline this step
+        # used to skip. Recover claims freed by deletions, then re-analyze
+        # anything whose analysis now predates its content (background task,
+        # visible in Activity; detection no longer waits for an Issues visit).
+        _recover_freed_claims(store_id, freed_claims)
+        try:
+            from app.routes.technical_seo_routes import queue_bulk_analyze
+            queued = queue_bulk_analyze(store_id, scope="outdated")
+            if queued:
+                logger.info("Post-sync keyword re-analysis queued for store %s: %s", store_id, queued)
+        except Exception:
+            logger.exception("Post-sync re-analysis queueing failed for store %s (non-fatal)", store_id)
 
         with db.get_cursor() as cur:
             cur.execute(

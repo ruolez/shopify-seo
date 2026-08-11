@@ -1892,6 +1892,20 @@ class ShopifyClient:
                 return True
         return False
 
+    def get_collection_image(self, collection_shopify_id):
+        """Live image url for one collection, "" if it has none.
+
+        collectionUpdate attaches images asynchronously, so this is the only way
+        to know an upload actually landed."""
+        query = """
+        query ($id: ID!) {
+          collection(id: $id) { id image { url } }
+        }
+        """
+        data = self._graphql(query, {"id": collection_shopify_id})
+        collection = data.get("collection") or {}
+        return ((collection.get("image") or {}).get("url")) or ""
+
     def update_collection_image(self, collection_shopify_id, image_src_url, alt_text):
         query = """
         mutation ($input: CollectionInput!) {

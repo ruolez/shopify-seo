@@ -40,6 +40,31 @@ def refresh_item_analysis(store_id, item_type, item_id, clear_ai_fixes=True):
                        WHERE store_id = %s AND item_type = %s AND item_id = %s""",
                     (store_id, item_type, item_id),
                 )
+        # Bust derived caches: the in-process issue scan (badges kept showing
+        # just-fixed issues for up to 5 minutes) and the SERP page-crawl cache
+        # for this item's URLs (a re-optimize within 24h would benchmark
+        # against the pre-change page).
+        try:
+            from app.services.issue_scanner import invalidate_scan_cache
+            invalidate_scan_cache(store_id)
+        except Exception:
+            pass
+        try:
+            from app.services.serp_scraper import evict_page_cache
+            handle = item.get("handle")
+            if handle:
+                with db.get_cursor() as cur:
+                    cur.execute("SELECT domain, primary_domain FROM stores WHERE id = %s", (store_id,))
+                    store = cur.fetchone() or {}
+                prefix = "products" if item_type == "product" else "collections"
+                urls = []
+                for host in {store.get("domain"), store.get("primary_domain")}:
+                    if host:
+                        h = host.replace("https://", "").replace("http://", "").rstrip("/")
+                        urls.append(f"https://{h}/{prefix}/{handle}")
+                evict_page_cache(urls)
+        except Exception:
+            pass
         return analysis
     except Exception:
         logger.warning("Post-apply analysis refresh failed for %s %s", item_type, item_id)

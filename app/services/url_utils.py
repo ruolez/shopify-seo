@@ -26,6 +26,28 @@ def store_base_url(store):
     return f"https://{host}" if host else None
 
 
+def gsc_base_url(gsc_property, store=None):
+    """Base URL for joining against gsc_daily_metrics.page, derived from a
+    Search Console property.
+
+    URL-prefix properties ("https://example.com/") are usable directly.
+    Domain properties ("sc-domain:example.com") carry no scheme/host — naive
+    concatenation built pages like "sc-domain:example.com/products/x" that
+    never match, silently zeroing GSC demand. Fall back to the store's public
+    host when it belongs to the domain, else https://<domain>. Returns "" for
+    empty input (callers treat that as "no GSC")."""
+    prop = (gsc_property or "").strip().rstrip("/")
+    if not prop:
+        return ""
+    if prop.startswith("sc-domain:"):
+        domain = prop[len("sc-domain:"):].strip("/")
+        host = store_host(store) if store else ""
+        if host and (host == domain or host.endswith("." + domain)):
+            return f"https://{host}"
+        return f"https://{domain}" if domain else ""
+    return prop
+
+
 def url_path_key(url):
     """Normalize an absolute or relative URL to a path key like
     'products/some-handle' — insensitive to scheme, host, www, query,

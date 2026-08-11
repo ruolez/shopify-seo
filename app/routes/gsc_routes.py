@@ -15,6 +15,35 @@ logger = logging.getLogger(__name__)
 gsc_bp = Blueprint("gsc", __name__)
 
 
+def _balance_alts(item, media_updates):
+    """Keyword-balance backstop for alt writes, against the item's resolved
+    primary — the keyword the scorer grades against. Fails open."""
+    try:
+        from app.database import db
+        from app.services.ai_content_validator import (
+            clean_keyword,
+            ensure_applied_alt_balance,
+        )
+
+        images = item.get("images") or []
+        if isinstance(images, str):
+            images = json.loads(images)
+        with db.get_cursor() as cur:
+            cur.execute(
+                """SELECT keyword_resolution->'primary'->>'keyword' AS kw
+                   FROM technical_seo_analyses
+                   WHERE store_id = %s AND item_type = 'product' AND item_id = %s""",
+                (item["store_id"], item["id"]),
+            )
+            row = cur.fetchone()
+        return ensure_applied_alt_balance(
+            images, media_updates, clean_keyword((row or {}).get("kw"))
+        )
+    except Exception:
+        logger.exception("Alt balance backstop failed — updates passed through")
+        return media_updates
+
+
 def _default_date_range():
     today = datetime.now(timezone.utc).date()
     date_to = (today - timedelta(days=3)).isoformat()
@@ -585,6 +614,19 @@ def apply_cannibalization_fix():
     if not item:
         return jsonify({"error": f"{item_type} not found"}), 404
 
+    # Re-guard at apply: the generate-time check doesn't protect against a
+    # payload applied after the ownership landscape changed (or a hand-edited
+    # one). Fail closed, same as generate.
+    try:
+        _, conflict = keyword_ownership_guard(
+            item["store_id"], item_type, item_id, cannibal_target or cannibal_query
+        )
+    except Exception:
+        logger.exception("Keyword safety check failed at apply for %s %s", item_type, item_id)
+        return jsonify({"error": "Keyword safety check failed — try again"}), 502
+    if conflict:
+        return jsonify({"error": conflict}), 409
+
     try:
         client = ShopifyClient(
             item["domain"],
@@ -618,6 +660,7 @@ def apply_cannibalization_fix():
         if image_alts and item_type == "product":
             valid_alts = [a for a in image_alts if a.get("media_id") and a.get("alt")]
             if valid_alts:
+                valid_alts = _balance_alts(item, valid_alts)
                 client.update_product_media(item["shopify_id"], valid_alts)
                 updated_fields.append("image_alts")
 
@@ -907,6 +950,11 @@ def _run_bulk_cannibalization_fix(task_id, items):
                         alts_to_push.append({"media_id": images[idx]["media_id"], "alt": sug["new_alt"]})
                         alt_by_media[images[idx]["media_id"]] = sug["new_alt"]
                 if alts_to_push:
+                    # The cannibalization prompt tells the model to swap the
+                    # competing query for the target keyword in every alt that
+                    # contains it — left unguarded that manufactures stuffing.
+                    alts_to_push = _balance_alts(item, alts_to_push)
+                    alt_by_media = {a["media_id"]: a["alt"] for a in alts_to_push}
                     shopify_client.update_product_media(item["shopify_id"], alts_to_push)
                     image_alts_changed = len(alts_to_push)
                     updated.append("image_alts")

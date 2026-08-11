@@ -37,7 +37,11 @@ RELEVANCE_WEIGHTS = {
 def consolidate_master_keywords(store_id):
     """Merge semrush_keywords + gsc_daily_metrics into master_keywords."""
     today = datetime.now(timezone.utc).date()
-    date_from = (today - timedelta(days=30)).isoformat()
+    # Same window the resolver scores with: 30 days ending today-3 — GSC's
+    # last ~3 days are partial, and including them made master_keywords
+    # volumes/positions disagree with resolver demand by construction.
+    date_from = (today - timedelta(days=33)).isoformat()
+    date_to = (today - timedelta(days=3)).isoformat()
 
     with db.get_cursor() as cur:
         # Create a run record
@@ -76,10 +80,10 @@ def consolidate_master_keywords(store_id):
                           MIN(position) FILTER (WHERE position > 0) AS best_position,
                           (ARRAY_AGG(page ORDER BY clicks DESC))[1] AS top_page
                    FROM gsc_daily_metrics
-                   WHERE store_id = %s AND date >= %s
+                   WHERE store_id = %s AND date >= %s AND date <= %s
                      AND query IS NOT NULL AND query != ''
                    GROUP BY LOWER(query)""",
-                (store_id, date_from),
+                (store_id, date_from, date_to),
             )
             gsc_data = {row["keyword"]: dict(row) for row in cur.fetchall()}
 
@@ -338,121 +342,9 @@ def get_master_keyword_overview(store_id):
 # ---------------------------------------------------------------------------
 
 
-def cluster_keywords(store_id):
-    """Group keywords by token-level Jaccard similarity."""
-    with db.get_cursor() as cur:
-        cur.execute(
-            "SELECT id, keyword, COALESCE(search_volume, 0) AS volume "
-            "FROM master_keywords WHERE store_id = %s AND status = 'active'",
-            (store_id,),
-        )
-        rows = cur.fetchall()
-
-    if not rows:
-        return {"clusters": 0, "keywords": 0}
-
-    volumes = {row["id"]: row["volume"] or 0 for row in rows}
-
-    # Tokenize all keywords
-    kw_tokens = {}
-    for row in rows:
-        tokens = set(_tokenize(row["keyword"]))
-        if tokens:
-            kw_tokens[row["id"]] = (row["keyword"], tokens)
-
-    # Build clusters via union-find approach with Jaccard similarity
-    parent = {}
-    for kid in kw_tokens:
-        parent[kid] = kid
-
-    def find(x):
-        while parent[x] != x:
-            parent[x] = parent[parent[x]]
-            x = parent[x]
-        return x
-
-    def union(a, b):
-        ra, rb = find(a), find(b)
-        if ra != rb:
-            parent[ra] = rb
-
-    # Inverted token index: Jaccard >= 0.5 requires at least one shared token,
-    # so only candidate pairs sharing a token need comparing — pure-Python
-    # all-pairs comparison hung for minutes at a few thousand keywords.
-    token_index = {}
-    for kid, (_, tokens) in kw_tokens.items():
-        for tok in tokens:
-            token_index.setdefault(tok, []).append(kid)
-
-    compared = set()
-    for tok, members in token_index.items():
-        if len(members) < 2 or len(members) > 500:
-            # a token shared by >500 keywords is a stop-word-like term; pairs
-            # relying on it alone can't reach Jaccard 0.5 anyway for multi-token
-            # keywords, and comparing them all would reintroduce the blowup
-            continue
-        for i in range(len(members)):
-            for j in range(i + 1, len(members)):
-                a, b = members[i], members[j]
-                pair = (a, b) if a < b else (b, a)
-                if pair in compared:
-                    continue
-                compared.add(pair)
-                t1 = kw_tokens[a][1]
-                t2 = kw_tokens[b][1]
-                intersection = len(t1 & t2)
-                union_size = len(t1 | t2)
-                if union_size > 0 and intersection / union_size >= 0.5:
-                    union(a, b)
-
-    # Group by cluster root
-    clusters = {}
-    for kid in kw_tokens:
-        root = find(kid)
-        if root not in clusters:
-            clusters[root] = []
-        clusters[root].append(kid)
-
-    # Persist clusters
-    with db.get_cursor() as cur:
-        # Clear old clusters for this store
-        cur.execute(
-            "UPDATE master_keywords SET cluster_id = NULL WHERE store_id = %s",
-            (store_id,),
-        )
-        cur.execute(
-            "DELETE FROM master_keyword_clusters WHERE store_id = %s",
-            (store_id,),
-        )
-
-        cluster_count = 0
-        for root, member_ids in clusters.items():
-            if len(member_ids) < 2:
-                continue
-
-            # Name by highest volume keyword
-            best_kw = max(member_ids, key=lambda kid: volumes.get(kid, 0))
-            cluster_name = kw_tokens[best_kw][0]
-            total_vol = sum(volumes.get(kid, 0) for kid in member_ids)
-
-            cur.execute(
-                """INSERT INTO master_keyword_clusters (store_id, name, keyword_count, total_volume)
-                   VALUES (%s, %s, %s, %s)
-                   ON CONFLICT (store_id, name) DO UPDATE SET
-                     keyword_count = EXCLUDED.keyword_count,
-                     total_volume = EXCLUDED.total_volume
-                   RETURNING id""",
-                (store_id, cluster_name, len(member_ids), total_vol),
-            )
-            cluster_id = cur.fetchone()["id"]
-
-            cur.execute(
-                "UPDATE master_keywords SET cluster_id = %s WHERE store_id = %s AND id = ANY(%s)",
-                (cluster_id, store_id, member_ids),
-            )
-            cluster_count += 1
-
-    return {"clusters": cluster_count, "keywords": len(kw_tokens)}
+# cluster_keywords (Jaccard union-find) was removed: superseded by the AI
+# classifier in keyword_ai_classifier.py — its clusters collapsed into one
+# mega-cluster, and running it would have wiped the AI family taxonomy.
 
 
 def _get_kw_volume(store_id, keyword_id):
@@ -699,12 +591,21 @@ def run_content_audit(store_id):
                     (total_kw, run_id),
                 )
 
-            # Clear old audit data
+            # Clear old audit data — except manual-pin mirrors (found_in
+            # ["manual"], written by set_primary_keyword): wiping them made an
+            # explicit user action vanish on the next audit.
             with db.get_cursor() as cur:
                 cur.execute(
-                    "DELETE FROM content_keyword_map WHERE store_id = %s",
+                    """DELETE FROM content_keyword_map WHERE store_id = %s
+                       AND NOT (found_in @> '["manual"]'::jsonb)""",
                     (store_id,),
                 )
+                cur.execute(
+                    """SELECT item_type, item_id FROM content_keyword_map
+                       WHERE store_id = %s AND is_primary = TRUE""",
+                    (store_id,),
+                )
+                manual_primary_items = {(r["item_type"], r["item_id"]) for r in cur.fetchall()}
 
             # Pre-build text index for all items (done once)
             item_index = _build_item_text_index(items)
@@ -750,9 +651,11 @@ def run_content_audit(store_id):
             if batch_rows:
                 _flush_audit_batch(batch_rows)
 
-            # Set primary flags
+            # Set primary flags — never over a preserved manual pin.
             with db.get_cursor() as cur:
                 for (item_type, item_id), (_, kw_id) in primary_tracker.items():
+                    if (item_type, item_id) in manual_primary_items:
+                        continue
                     cur.execute(
                         "UPDATE content_keyword_map SET is_primary = TRUE "
                         "WHERE store_id = %s AND master_keyword_id = %s "
@@ -776,6 +679,18 @@ def run_content_audit(store_id):
                     "completed_items=%s, summary=%s, completed_at=NOW() WHERE id=%s",
                     (completed, json.dumps(summary), run_id),
                 )
+
+            # The map feeds resolver relevance (ckm_relevance) — a rebuilt map
+            # silently rescores every non-manual resolution, so chain the
+            # re-analysis instead of leaving stored primaries computed against
+            # the previous map (mirrors consolidate auto-chaining classify).
+            try:
+                from app.routes.technical_seo_routes import queue_bulk_analyze
+                queued = queue_bulk_analyze(store_id, scope="all")
+                if queued:
+                    logger.info("Post-audit keyword re-analysis queued for store %s: %s", store_id, queued)
+            except Exception:
+                logger.exception("Post-audit re-analysis queueing failed for store %s (non-fatal)", store_id)
 
         except Exception as e:
             logger.error("Content audit failed: %s", e)
@@ -805,7 +720,8 @@ def _flush_audit_batch(batch_rows):
                    DO UPDATE SET
                      found_in = EXCLUDED.found_in,
                      is_primary = EXCLUDED.is_primary,
-                     relevance_score = EXCLUDED.relevance_score""",
+                     relevance_score = EXCLUDED.relevance_score
+                   WHERE NOT (content_keyword_map.found_in @> '["manual"]'::jsonb)""",
                 row,
             )
 
@@ -1327,6 +1243,53 @@ def bulk_accept_assignments(store_id, assignment_ids):
 # ---------------------------------------------------------------------------
 
 
+def _ai_meta_fix(keyword, title, meta_title, meta_desc, needs_title, needs_desc, secondary):
+    """One bounded AI call that reworks the metas to include the assigned
+    keyword naturally — integrated, not mechanically front-loaded (the
+    "Keyword - Title" prepend is exactly the boilerplate pattern Google
+    rewrites). Returns {} when AI is unconfigured or fails; callers fall back
+    to deterministic templates."""
+    try:
+        from openai import OpenAI
+        from app.auth import decrypt_value
+        with db.get_cursor() as cur:
+            cur.execute("SELECT * FROM ai_config ORDER BY id LIMIT 1")
+            ai_config = cur.fetchone()
+        if not ai_config or not ai_config.get("api_key_enc"):
+            return {}
+        client = OpenAI(base_url="https://openrouter.ai/api/v1",
+                        api_key=decrypt_value(ai_config["api_key_enc"]))
+        model = ai_config.get("model") or "anthropic/claude-sonnet-4"
+        wants = []
+        if needs_title:
+            wants.append('"meta_title" (max 60 chars, aim ~50)')
+        if needs_desc:
+            wants.append('"meta_description" (max 160 chars, aim ~150)')
+        prompt = (
+            f'Rework this page\'s meta fields so the phrase "{keyword}" appears naturally ONCE in each. '
+            "Integrate it into the sentence — do NOT just prepend it with a dash or pipe. "
+            "Keep brand and product names.\n"
+            f"Page title: {title}\n"
+            f"Current meta title: {meta_title or '(none)'}\n"
+            f"Current meta description: {meta_desc or '(none)'}\n"
+            + (f"Secondary keywords for context: {', '.join(secondary[:5])}\n" if secondary else "")
+            + "Respond with ONLY a JSON object containing exactly: " + ", ".join(wants)
+        )
+        resp = client.chat.completions.create(
+            model=model, messages=[{"role": "user", "content": prompt}],
+            temperature=0.3, max_tokens=300, timeout=30)
+        content = resp.choices[0].message.content or ""
+        start, end = content.find("{"), content.rfind("}") + 1
+        if start < 0 or end <= start:
+            return {}
+        data = json.loads(content[start:end])
+        return {k: v for k, v in data.items()
+                if k in ("meta_title", "meta_description") and isinstance(v, str) and v.strip()}
+    except Exception:
+        logger.warning("AI meta fix failed for keyword %r — using deterministic fallback", keyword)
+        return {}
+
+
 def generate_fixes_for_assignment(store_id, assignment_id):
     """Generate proposed changes for an assignment using AI."""
     with db.get_cursor() as cur:
@@ -1363,25 +1326,40 @@ def generate_fixes_for_assignment(store_id, assignment_id):
         )
         secondary = [r["keyword"] for r in cur.fetchall()]
 
-    # Simple rule-based fix generation (AI integration added in Phase 3 of implementation)
+    from app.services.ai_output_guard import clamp_meta_description, clamp_meta_title
+
     proposed = {}
     title = current.get("title") or ""
     meta_title = current.get("meta_title") or current.get("seo_title") or ""
     meta_desc = current.get("meta_description") or current.get("seo_description") or ""
 
-    # Check if keyword is missing from meta_title
-    if not _keyword_in_text(keyword, meta_title):
-        if meta_title:
-            proposed["meta_title"] = f"{keyword.title()} - {meta_title}"[:60]
-        else:
-            proposed["meta_title"] = f"{keyword.title()} | {title}"[:60]
+    # Same effective-field semantics the analyzer scores (meta_title falls
+    # back to title) — the old check proposed fixes for pages already passing.
+    needs_title = not _keyword_in_text(keyword, meta_title or title)
+    needs_desc = not _keyword_in_text(keyword, meta_desc)
 
-    # Check if keyword is missing from meta_description
-    if not _keyword_in_text(keyword, meta_desc):
-        if meta_desc:
-            proposed["meta_description"] = f"{keyword.title()}. {meta_desc}"[:160]
-        else:
-            proposed["meta_description"] = f"Shop {keyword} - {title}. Find the best {keyword} options."[:160]
+    if needs_title or needs_desc:
+        proposed = _ai_meta_fix(keyword, title, meta_title, meta_desc,
+                                needs_title, needs_desc, secondary)
+        # Only keep AI values that actually carry the keyword, clamped at
+        # word boundaries — never ship a proposal the analyzer would flag.
+        for field, clamp in (("meta_title", clamp_meta_title),
+                             ("meta_description", clamp_meta_description)):
+            if proposed.get(field):
+                proposed[field] = clamp(str(proposed[field]).strip())
+                if not _keyword_in_text(keyword, proposed[field]):
+                    proposed.pop(field)
+
+    # Deterministic fallback: keyword integrated at the natural end, not
+    # mechanically front-loaded; word-boundary clamps, no mid-word slicing.
+    if needs_title and not proposed.get("meta_title"):
+        base = meta_title or title
+        proposed["meta_title"] = clamp_meta_title(
+            f"{base} — {keyword.title()}" if base else keyword.title())
+    if needs_desc and not proposed.get("meta_description"):
+        base = (meta_desc or title).rstrip(" .")
+        proposed["meta_description"] = clamp_meta_description(
+            f"{base}. Explore our {keyword} selection.")
 
     with db.get_cursor() as cur:
         cur.execute(
@@ -1665,6 +1643,35 @@ def apply_single_step(store_id, assignment_id, step_index):
 
     if s_item_type == "page" and field == "tags":
         return {"error": "Pages have no tags field"}
+
+    # Cross-page guard: steps may rewrite a cannibalization victim (an item
+    # other than the assignment's own), with an AI-authored payload and no
+    # fresh resolution. De-optimizing it for the contested keyword is the
+    # goal — stripping that page's OWN primary keyword is not. Fail closed.
+    if ((s_item_type, s_item_id) != (assignment.get("assigned_item_type"), assignment.get("assigned_item_id"))
+            and s_item_type in ("product", "collection") and field in ("title", "meta_title")):
+        try:
+            from app.services.keyword_resolver import get_or_refresh_resolution, variant_key
+            from app.services.technical_seo_analyzer import _keyword_in_text
+            with db.get_cursor() as cur:
+                cur.execute(
+                    "SELECT keyword FROM master_keywords WHERE id = %s",
+                    (assignment["master_keyword_id"],),
+                )
+                mk_row = cur.fetchone()
+            assigned_kw = (mk_row or {}).get("keyword") or ""
+            res = get_or_refresh_resolution(store_id, s_item_type, s_item_id)
+            victim_primary = ((res or {}).get("primary") or {}).get("keyword")
+        except Exception:
+            logger.exception("Step keyword safety check failed for %s %s", s_item_type, s_item_id)
+            raise ValueError("Keyword safety check failed for this step — try again")
+        if (victim_primary and variant_key(victim_primary) != variant_key(assigned_kw)
+                and _keyword_in_text(victim_primary, old_value or "")
+                and not _keyword_in_text(victim_primary, new_value or "")):
+            raise ValueError(
+                f'This step would remove "{victim_primary}" — that page\'s own primary '
+                f"keyword — from its {field}. Regenerate the implementation steps."
+            )
 
     # Get the Shopify ID for this item
     content = _get_item_content(s_item_type, s_item_id)

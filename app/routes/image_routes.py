@@ -10,6 +10,7 @@ from app.auth import decrypt_value
 from app.database import db
 from app.services.task_runner import spawn as spawn_task, sweep_stale_jobs
 from app.services.image_generator import generate_placeholder_image
+from app.services.sync_service import _upsert_product_batch
 from app.shopify_client import ShopifyClient
 
 logger = logging.getLogger(__name__)
@@ -91,6 +92,81 @@ def _refresh_images_from_shopify(store_id, limit=30):
     return changed
 
 
+def _discover_products_since_last_sync(store_id, max_pages=40):
+    """Upsert products Shopify has that the mirror is missing or has stale.
+
+    The mirror only gains rows during a full store sync, so a product
+    published afterwards is invisible here — including a brand-new product
+    with no image at all, which is exactly what this scan exists to find.
+    Pull everything Shopify touched at/after the mirror's newest timestamp
+    and upsert it. Returns the local ids of products the mirror had never
+    seen."""
+    with db.get_cursor() as cur:
+        cur.execute(
+            "SELECT MAX(shopify_updated_at) AS cutoff FROM synced_products WHERE store_id = %s",
+            (store_id,),
+        )
+        cutoff = cur.fetchone()["cutoff"]
+        cur.execute(
+            "SELECT domain, access_token_enc, api_version FROM stores WHERE id = %s",
+            (store_id,),
+        )
+        store = cur.fetchone()
+    # No cutoff means the mirror is empty for this store — a full sync, not an
+    # incremental catch-up, is the right way to populate it.
+    if not store or not cutoff:
+        return []
+
+    client = ShopifyClient(
+        store["domain"], decrypt_value(store["access_token_enc"]), store["api_version"]
+    )
+    query_filter = (
+        "status:active AND published_status:published AND "
+        f"updated_at:>='{cutoff.strftime('%Y-%m-%dT%H:%M:%SZ')}'"
+    )
+    fetched = []
+    try:
+        for page_no, page in enumerate(client.iter_products(query_filter=query_filter), start=1):
+            fetched.extend(page)
+            if page_no >= max_pages:
+                logger.warning(
+                    "Product discovery for store %s hit the %d-page cap — run a full sync",
+                    store_id, max_pages,
+                )
+                break
+    except Exception:
+        logger.warning("Product discovery failed for store %s", store_id)
+        return []
+    if not fetched:
+        return []
+
+    shopify_ids = [p["shopify_id"] for p in fetched]
+    with db.get_cursor() as cur:
+        cur.execute(
+            "SELECT shopify_id FROM synced_products WHERE store_id = %s AND shopify_id = ANY(%s)",
+            (store_id, shopify_ids),
+        )
+        known = {r["shopify_id"] for r in cur.fetchall()}
+
+    _upsert_product_batch(int(store_id), fetched)
+
+    new_shopify_ids = [sid for sid in shopify_ids if sid not in known]
+    if not new_shopify_ids:
+        return []
+    with db.get_cursor() as cur:
+        cur.execute(
+            "SELECT id FROM synced_products WHERE store_id = %s AND shopify_id = ANY(%s)",
+            (store_id, new_shopify_ids),
+        )
+        new_ids = [r["id"] for r in cur.fetchall()]
+
+    from app.services.analysis_refresh import refresh_item_analysis
+    for pid in new_ids:
+        refresh_item_analysis(store_id, "product", pid)
+    logger.info("Discovered %d product(s) missing from the mirror for store %s", len(new_ids), store_id)
+    return new_ids
+
+
 @image_bp.route("/api/images/scan", methods=["GET"])
 def scan_missing_images():
     store_id = request.args.get("store_id")
@@ -98,7 +174,9 @@ def scan_missing_images():
         return jsonify({"error": "store_id is required"}), 400
 
     refreshed = 0
+    discovered = 0
     if request.args.get("refresh"):
+        discovered = len(_discover_products_since_last_sync(store_id))
         refreshed = _refresh_images_from_shopify(store_id)
 
     with db.get_cursor() as cur:
@@ -166,10 +244,13 @@ def scan_missing_images():
 
     with db.get_cursor() as cur:
         cur.execute(
-            "SELECT COUNT(*) as total FROM synced_products WHERE store_id = %s AND status = 'ACTIVE'",
+            """SELECT COUNT(*) as total, MAX(synced_at) as last_synced_at
+               FROM synced_products WHERE store_id = %s AND status = 'ACTIVE'""",
             (store_id,),
         )
-        total_active = cur.fetchone()["total"]
+        mirror = cur.fetchone()
+        total_active = mirror["total"]
+        last_synced_at = mirror["last_synced_at"]
 
     missing_count = sum(1 for r in results if not r["has_placeholder"] and r["image_count"] == 0)
     placeholder_count = sum(1 for r in results if r["has_placeholder"])
@@ -177,6 +258,8 @@ def scan_missing_images():
     return jsonify({
         "products": results,
         "refreshed_from_shopify": refreshed,
+        "discovered_from_shopify": discovered,
+        "mirror_synced_at": last_synced_at.isoformat() if last_synced_at else None,
         "stats": {
             "total_active": total_active,
             "missing_images": missing_count,
@@ -185,6 +268,36 @@ def scan_missing_images():
             "needs_seo_fix": needs_seo_fix,
         },
     })
+
+
+def _balance_placeholder_alt(item, product_id, alt_text):
+    """Keyword-balance backstop for placeholder alts. The alt is the product
+    title, which usually carries the resolved primary keyword — if an existing
+    image alt already carries it, strip the phrase from the placeholder's alt
+    so the set can't tip into keyword-in-every-alt (scored as stuffing).
+    Fails open."""
+    try:
+        from app.services.ai_content_validator import clean_keyword, strip_keyword_phrase
+        from app.services.technical_seo_analyzer import _keyword_in_text
+        with db.get_cursor() as cur:
+            cur.execute(
+                """SELECT keyword_resolution->'primary'->>'keyword' AS kw
+                   FROM technical_seo_analyses
+                   WHERE store_id = %s AND item_type = 'product' AND item_id = %s""",
+                (item["store_id"], product_id),
+            )
+            row = cur.fetchone()
+        kw = clean_keyword((row or {}).get("kw"))
+        if not kw or not _keyword_in_text(kw, alt_text):
+            return alt_text
+        images = item.get("images") or []
+        if isinstance(images, str):
+            images = json.loads(images)
+        if any(_keyword_in_text(kw, img.get("alt") or "") for img in images):
+            return strip_keyword_phrase(alt_text, kw) or alt_text
+    except Exception:
+        logger.warning("Placeholder alt balance failed for product %s", product_id)
+    return alt_text
 
 
 @image_bp.route("/api/images/generate-preview", methods=["POST"])
@@ -335,6 +448,7 @@ def _execute_bulk_upload(bulk_task_id):
             image_bytes, filename, alt_text = generate_placeholder_image(
                 item["title"], handle=item.get("handle")
             )
+            alt_text = _balance_placeholder_alt(item, product_id, alt_text)
 
             # Create Shopify client
             client = ShopifyClient(
@@ -513,6 +627,7 @@ def _execute_bulk_replace(bulk_task_id):
             image_bytes, filename, alt_text = generate_placeholder_image(
                 item["title"], handle=item.get("handle")
             )
+            alt_text = _balance_placeholder_alt(item, product_id, alt_text)
 
             # Upload new image
             staged = client.staged_upload_create(filename, "image/png", len(image_bytes))

@@ -1020,7 +1020,12 @@ def optimize_existing_page(store_id, gap_id, override_keyword=None, override_vol
     except ValueError:
         raise
     except Exception:
-        logger.warning("Content-gap resolver guard failed for %s %s", item_type, item_id)
+        # Fail closed — this flow rewrites a live page onto a new keyword; a
+        # broken ownership check must surface, not silently pass. (The route's
+        # skip_cannibalization_check flag bypasses only the fuzzy risk warning,
+        # never this hard ownership guard.)
+        logger.exception("Content-gap resolver guard failed for %s %s", item_type, item_id)
+        raise ValueError("Keyword safety check failed — try again")
 
     rankings_text = "\n".join([
         f"  - \"{r['keyword']}\" — pos {r['position']}, {r.get('impressions', 0)} impr, {r.get('clicks', 0)} clicks ({r['source']})"
@@ -1063,7 +1068,7 @@ def optimize_existing_page(store_id, gap_id, override_keyword=None, override_vol
         f"- DO NOT remove or weaken targeting for protected keywords\n"
         f"- Keep the meta title under 60 characters\n"
         f"- Keep the meta description between 145-160 characters\n"
-        f"- The description should naturally include the new keyword 2-3 times\n"
+        f"- Mention the new keyword naturally at least once early in the description — never force repetition to hit a count\n"
         f"- Do NOT use puffery words (premium, best, top, ultimate, finest)\n\n"
         f"Return JSON only:\n"
         f'{{"strategy": "2-3 sentence explanation of what changes you made and why",'

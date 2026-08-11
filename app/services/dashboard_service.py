@@ -489,26 +489,19 @@ def build_action_queue(store_id, limit=15):
     # in the buttonless re-measuring band until GSC has fresh data for it.
     measuring = []
     try:
-        from app.services.seo_priority_service import get_priority_ranked_items
-        priorities = []
-        for it in ("product", "collection"):
-            actionable, meas = get_priority_ranked_items(
-                store_id, item_type=it, limit=10, split_measuring=True
-            )
-            priorities.extend(actionable)
-            measuring.extend(meas)
-        priorities.sort(key=lambda p: p["priority_score"], reverse=True)
-        priorities = priorities[:10]
-        measuring.sort(key=lambda p: p["priority_score"], reverse=True)
+        from app.services.seo_priority_service import get_queued_priorities
+        priorities, measuring = get_queued_priorities(store_id, dismissed_keys=dismissed)
     except Exception as e:
         logger.warning("Action queue: priorities failed: %s", e)
         priorities = []
+    from app.services.seo_priority_service import UNSPECIFIED_ACTION_LABEL
     for p in priorities:
         key = f"priority:{p['item_type']}:{p['id']}"
-        if key in dismissed:
-            continue
         severity = "high" if p["priority_score"] >= 80 else "med" if p["priority_score"] >= 60 else "low"
-        action = p.get("recommended_action") or p.get("top_opportunity") or "Optimize on-page SEO"
+        # Display only. top_opportunity is a keyword, not an action — using it
+        # as the label (and the old "Optimize on-page SEO" default) described
+        # work the engine never actually recommended.
+        action = p.get("recommended_action") or UNSPECIFIED_ACTION_LABEL
         params = {"optimize": p["item_type"], "id": p["id"], "ak": key, "store_id": store_id}
         fix = None
         if p.get("target_keyword"):
@@ -524,14 +517,19 @@ def build_action_queue(store_id, limit=15):
                 params["pos"] = p["target_keyword_position"]
             if p.get("target_keyword_volume") is not None:
                 params["vol"] = p["target_keyword_volume"]
-        else:
-            params["action"] = action
+        elif p.get("recommended_action"):
+            # Only a real recommendation becomes the optimizer's priority focus.
+            # The unspecified label would read as an instruction to the AI.
+            params["action"] = p["recommended_action"]
         items.append(
             {
                 "source": "priority",
                 "severity": severity,
                 "title": p["title"],
-                "detail": action + (" · cannibalization risk" if p.get("cannibalization_warning") else ""),
+                "detail": action
+                + (" · cannibalization risk" if p.get("cannibalization_warning") else "")
+                + (" · a higher-volume keyword is available — review this page's primary"
+                   if p.get("primary_review_suggested") else ""),
                 "href": "/seo?" + urlencode(params),
                 "est_clicks_gain": p.get("potential_clicks_gain"),
                 "item_type": p["item_type"],
@@ -721,6 +719,10 @@ def build_action_queue(store_id, limit=15):
 
     return {
         "items": items[:limit],
+        # Pre-truncation count. The badge must not report a number the page
+        # can't show: it used to be len(items) from a limit=50 build while the
+        # dashboard renders limit=15.
+        "total_items": len(items),
         "total_by_source": counts,
         "measuring": measuring_rows,
         "measuring_summary": ms,
@@ -780,7 +782,7 @@ def get_nav_badges(store_id):
     insights = get_store_insights(store_id)
     tech_pages = (insights.get("technical_seo") or {}).get("items_with_issues", 0)
     badges = {
-        "home": len(q["items"]),
+        "home": q["total_items"],
         "seo": c.get("priority", 0) + c.get("ctr", 0) + tech_pages,
         "interlinking": c.get("links", 0),
         "content-gaps": c.get("gaps", 0),
@@ -788,7 +790,24 @@ def get_nav_badges(store_id):
         "ai-seo": ai_failed,
         "content": content_stuck,
     }
-    return {k: v for k, v in badges.items() if v}
+    payload = {k: v for k, v in badges.items() if v}
+    # Each badge sums differently-shaped work, so the raw number never matches
+    # any single count on the page it points at (SEO counts pages-with-issues,
+    # the Issues tab headlines total issues). Ship the arithmetic with it.
+    payload["_tooltips"] = {
+        "home": f"{q['total_items']} items in the action queue",
+        "seo": (
+            f"{c.get('priority', 0)} ranking opportunities"
+            f" + {c.get('ctr', 0)} CTR fixes"
+            f" + {tech_pages} pages with issues"
+        ),
+        "interlinking": f"{c.get('links', 0)} orphan or broken links",
+        "content-gaps": f"{c.get('gaps', 0)} new content gaps",
+        "competitors": f"{c.get('competitor', 0)} unread competitor alerts",
+        "ai-seo": f"{ai_failed} failed AI runs in the last 7 days",
+        "content": f"{content_stuck} scheduled posts stuck or errored",
+    }
+    return payload
 
 
 def get_coverage(store_id):
@@ -1172,7 +1191,10 @@ def get_store_insights(store_id):
         # the single definition), so the badge and the tab always agree.
         from app.services.issue_scanner import count_store_issues
         try:
-            insights["technical_seo"] = count_store_issues(store_id)
+            # 60s, not the 300s default: the badge endpoint caches its own
+            # result for 60s, and the two windows used to compound into a
+            # number that could lag the Issues tab by ~6 minutes.
+            insights["technical_seo"] = count_store_issues(store_id, max_age=60)
         except Exception:
             logger.exception("Issue count failed for store %s", store_id)
             insights["technical_seo"] = {"items_with_issues": 0, "total_issues": 0, "fixable_issues": 0}

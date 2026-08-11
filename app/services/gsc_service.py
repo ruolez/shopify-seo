@@ -828,7 +828,8 @@ def get_cannibalization(store_id, date_from, date_to, min_impressions=3, device=
     with db.get_cursor() as cur:
         cur.execute("SELECT gsc_property FROM gsc_credentials WHERE store_id = %s", (store_id,))
         cred = cur.fetchone()
-        base_url = (cred["gsc_property"] or "").rstrip("/") if cred else ""
+        from app.services.url_utils import gsc_base_url
+        base_url = gsc_base_url(cred.get("gsc_property") if cred else "")
 
         cur.execute("SELECT id, shopify_id, handle, title FROM synced_products WHERE store_id = %s", (store_id,))
         products = {p["handle"]: p for p in cur.fetchall() if p.get("handle")}
@@ -1240,8 +1241,42 @@ class PullScheduler:
             try:
                 pull_data(s["store_id"], pull_type="incremental")
                 verify_cannibalization_fixes(s["store_id"])
+                _consolidate_if_stale(s["store_id"])
             except Exception as e:
                 logger.error("GSC pull failed for store %d: %s", s["store_id"], str(e))
+
+
+def _consolidate_if_stale(store_id, max_age_days=7):
+    """Fresh GSC data is consolidation's input, but master_keywords (whose
+    volumes/positions the resolver scores with) used to refresh only when
+    someone pressed the Consolidate button — it once drifted 3+ months stale.
+    Chain it after a pull when older than the freshness strip's own 7-day
+    threshold, incremental classification included (mirrors the manual
+    route). Non-fatal."""
+    from datetime import datetime, timedelta, timezone
+    try:
+        with db.get_cursor() as cur:
+            cur.execute(
+                """SELECT MAX(completed_at) AS at FROM keyword_strategy_runs
+                   WHERE store_id = %s AND run_type = 'consolidate' AND status = 'completed'""",
+                (store_id,),
+            )
+            at = (cur.fetchone() or {}).get("at")
+        if at:
+            if at.tzinfo is None:
+                at = at.replace(tzinfo=timezone.utc)
+            if datetime.now(timezone.utc) - at < timedelta(days=max_age_days):
+                return
+        from app.services.keyword_strategy_service import consolidate_master_keywords
+        consolidate_master_keywords(store_id)
+        logger.info("Auto-consolidated master keywords for store %s after GSC pull", store_id)
+        try:
+            from app.services.keyword_ai_classifier import run_ai_classification
+            run_ai_classification(store_id, mode="incremental")
+        except Exception as e:
+            logger.warning("Post-consolidation classification skipped: %s", e)
+    except Exception:
+        logger.exception("Auto-consolidation failed for store %s (non-fatal)", store_id)
 
 
 def get_page_product_matches(store_id, date_from, date_to, device=None, country=None, limit=500):
@@ -1280,7 +1315,8 @@ def get_page_product_matches(store_id, date_from, date_to, device=None, country=
         )
         cred = cur.fetchone()
 
-    base_url = (cred["gsc_property"] or "").rstrip("/") if cred else ""
+    from app.services.url_utils import gsc_base_url
+    base_url = gsc_base_url(cred.get("gsc_property") if cred else "")
 
     product_handles = {p["handle"]: p for p in products if p.get("handle")}
     collection_handles = {c["handle"]: c for c in collections if c.get("handle")}

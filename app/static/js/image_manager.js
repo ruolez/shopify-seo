@@ -82,9 +82,12 @@ async function scanMissingImages(liveRefresh) {
         imgLastStats = data.stats;
         renderImgResults(resultsContainer, data);
         if (liveRefresh) {
-            showToast(data.refreshed_from_shopify
-                ? `Updated ${data.refreshed_from_shopify} product(s) from Shopify`
-                : "Checked Shopify — no image changes found", "success");
+            const parts = [];
+            if (data.discovered_from_shopify) parts.push(`${data.discovered_from_shopify} new product(s) found`);
+            if (data.refreshed_from_shopify) parts.push(`${data.refreshed_from_shopify} updated`);
+            showToast(parts.length
+                ? `Shopify: ${parts.join(", ")}`
+                : "Checked Shopify — no new products or image changes", "success");
         }
     } catch (err) {
         resultsContainer.innerHTML = `<div class="empty-state"><p>${escapeHtml(err.message)}</p></div>`;
@@ -144,7 +147,17 @@ function renderImgResults(container, data) {
         html += `<button class="filter-chip" onclick="clearImgStatusFilter()" style="border-style: dashed;">Clear filter</button>`;
     }
 
-    html += `<button class="btn btn-secondary btn-sm" onclick="scanMissingImages(true)" style="margin-left: auto;" title="Re-checks Shopify for image changes on imageless/placeholder products">
+    if (data.mirror_synced_at) {
+        const synced = new Date(data.mirror_synced_at);
+        const ageDays = Math.floor((Date.now() - synced.getTime()) / 86400000);
+        const stale = ageDays >= 1;
+        html += `<span style="margin-left: auto; font-size: 12px; color: var(--on-surface-secondary);"
+            title="Products added to Shopify after this date only appear once you re-scan or run a full sync">
+            Mirror synced ${synced.toLocaleDateString()}${stale ? ` (${ageDays}d ago)` : ""}
+        </span>`;
+    }
+
+    html += `<button class="btn btn-secondary btn-sm" onclick="scanMissingImages(true)" style="margin-left: ${data.mirror_synced_at ? "8px" : "auto"};" title="Pulls products added or changed on Shopify since the last sync, then re-checks images">
         <span class="material-symbols-rounded">refresh</span> Re-scan
     </button>`;
     html += '</div>';

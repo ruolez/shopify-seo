@@ -4,6 +4,7 @@ Sessions are prepared at approval time by /api/blog/schedule-from-suggestion (th
 pipeline runs immediately, the session parks in status 'scheduled' with scheduled_for set).
 Each tick claims due sessions atomically and publishes them via the wizard publish step.
 """
+import json
 import logging
 import threading
 
@@ -47,6 +48,7 @@ class BlogPublishScheduler:
         from app.routes.blog_routes import (
             _fetch_wizard_session,
             _get_store_client,
+            _money_page_keyword_warning,
             _wizard_step_publish,
         )
 
@@ -81,8 +83,27 @@ class BlogPublishScheduler:
                     if cur.rowcount == 0:
                         continue
                 try:
-                    _wizard_step_publish(_fetch_wizard_session(sid), store, client, True)
+                    sess = _fetch_wizard_session(sid)
+                    # Re-check the money-page guard at publish time — the
+                    # approval-time check may be weeks old and ownership can
+                    # have changed. Advisory (approval was the human decision
+                    # point), but the conflict must be surfaced, not silent.
+                    kws = sess.get("target_keywords") or []
+                    if isinstance(kws, str):
+                        try:
+                            kws = json.loads(kws)
+                        except (ValueError, TypeError):
+                            kws = []
+                    warning = _money_page_keyword_warning(store_id, kws)
+                    _wizard_step_publish(sess, store, client, True)
                     logger.info("Scheduled blog session %s published", sid)
+                    if warning:
+                        logger.warning("Blog session %s published with keyword conflict: %s", sid, warning)
+                        with db.get_cursor() as cur:
+                            cur.execute(
+                                "UPDATE article_wizard_sessions SET error = %s, updated_at = NOW() WHERE id = %s",
+                                (f"Published with warning: {warning}", sid),
+                            )
                 except Exception as e:
                     logger.exception("Scheduled blog publish failed for session %s: %s", sid, e)
                     with db.get_cursor() as cur:

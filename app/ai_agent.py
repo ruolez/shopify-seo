@@ -61,7 +61,8 @@ def _get_search_context_for_item(item_type, item_id, store_id):
             cur.execute("SELECT gsc_property FROM gsc_credentials WHERE store_id = %s", (effective_store_id,))
             cred = cur.fetchone()
 
-        base_url = (cred["gsc_property"] or "").rstrip("/") if cred else ""
+        from app.services.url_utils import gsc_base_url
+        base_url = gsc_base_url(cred.get("gsc_property") if cred else "")
         page_url = f"{base_url}/{url_path}" if base_url else ""
 
         today = datetime.now(timezone.utc).date()
@@ -178,7 +179,18 @@ def _get_search_context_for_item(item_type, item_id, store_id):
         from app.services.ctr_benchmarks import get_expected_ctr_curve
         ctr_curve = get_expected_ctr_curve(effective_store_id)
 
-        return _format_search_context(gsc_totals, gsc_queries, semrush_keywords, inbound_links, image_alt_status, faq_schema_status, cannibalization_risks, assigned_primary=assigned_primary, resolved_primary=resolved_primary, resolution_note=resolution_note, ctr_curve=ctr_curve)
+        # Other pages' claimed primaries must not surface as recommended
+        # secondaries — recommending them invites the model to write copy
+        # competing with our own money pages.
+        foreign_claims = {}
+        try:
+            from app.services.keyword_resolver import get_owned_primary_keywords
+            foreign_claims = get_owned_primary_keywords(
+                effective_store_id, exclude=(item_type, item_id))
+        except Exception:
+            logger.warning("Ownership map for search context failed for %s %s", item_type, item_id)
+
+        return _format_search_context(gsc_totals, gsc_queries, semrush_keywords, inbound_links, image_alt_status, faq_schema_status, cannibalization_risks, assigned_primary=assigned_primary, resolved_primary=resolved_primary, resolution_note=resolution_note, ctr_curve=ctr_curve, foreign_claims=foreign_claims)
 
     except Exception as e:
         logger.warning("Search context fetch failed for %s %s: %s", item_type, item_id, e)
@@ -397,7 +409,10 @@ def _get_faq_schema_status(item_type, item_id, store_id):
 
 
 def _norm_kw(kw):
-    return re.sub(r"\s+", " ", (kw or "").strip().lower())
+    # Shared identity, not a local lower(): a resolver primary with stripped
+    # punctuation must match its punctuated GSC/Semrush spelling here.
+    from app.services.keyword_identity import norm
+    return norm(kw)
 
 
 def _get_assigned_primary(store_id, item_type, item_id):
@@ -410,7 +425,8 @@ def _get_assigned_primary(store_id, item_type, item_id):
                    JOIN master_keywords mk ON mk.id = ka.master_keyword_id
                    WHERE ka.store_id = %s AND ka.assigned_item_type = %s
                      AND ka.assigned_item_id = %s AND ka.status IN ('accepted', 'applied')
-                   ORDER BY ka.updated_at DESC LIMIT 1""",
+                   ORDER BY (ka.assignment_reason = 'manual_primary') DESC NULLS LAST,
+                            ka.updated_at DESC LIMIT 1""",
                 (store_id, item_type, item_id),
             )
             return cur.fetchone()
@@ -418,7 +434,7 @@ def _get_assigned_primary(store_id, item_type, item_id):
         return None
 
 
-def _format_search_context(gsc_totals, gsc_queries, semrush_keywords, inbound_links=None, image_alt_status=None, faq_schema_status=None, cannibalization_risks=None, assigned_primary=None, resolved_primary=None, resolution_note=None, ctr_curve=None):
+def _format_search_context(gsc_totals, gsc_queries, semrush_keywords, inbound_links=None, image_alt_status=None, faq_schema_status=None, cannibalization_risks=None, assigned_primary=None, resolved_primary=None, resolution_note=None, ctr_curve=None, foreign_claims=None):
     """Format GSC + Semrush data as markdown for AI prompt injection."""
     lines = ["## REAL SEARCH PERFORMANCE DATA (Google Search Console + Semrush)"]
 
@@ -552,6 +568,20 @@ def _format_search_context(gsc_totals, gsc_queries, semrush_keywords, inbound_li
                                    or resolved_primary.get("semrush_position") or 0)}
 
     if primary_kw:
+        if foreign_claims:
+            # Volume-ranked picks can be other pages' claimed primaries —
+            # recommending one steers this page into its owner's SERP.
+            from app.services.keyword_identity import variant_key as _vk
+            if (not assigned_primary and not resolved_primary
+                    and _vk(primary_kw.get("keyword")) in foreign_claims):
+                # The volume-first fallback (articles/landing) picked another
+                # page's claim — walk to the best unclaimed candidate.
+                repl = next((k for k in secondary_kws
+                             if _vk(k.get("keyword")) not in foreign_claims), None)
+                if repl:
+                    primary_kw = repl
+            secondary_kws = [k for k in secondary_kws
+                             if _vk(k.get("keyword")) not in foreign_claims]
         secondary_kws = [k for k in secondary_kws
                          if _norm_kw(k.get("keyword")) != _norm_kw(primary_kw.get("keyword"))]
         vol = int(primary_kw.get("search_volume") or 0)
@@ -1920,6 +1950,39 @@ _ENRICH_STOPWORDS = {
 }
 
 
+def _reserved_money_page_keywords(store_id, cap=200):
+    """Keywords owned by money pages (resolver primaries + accepted manual
+    assignments), top `cap` by volume — blog/topic flows must never claim one
+    as an article's primary. Shared by topic_discovery and topic_enrich."""
+    with db.get_cursor() as cur:
+        cur.execute(
+            """SELECT DISTINCT ON (kw) kw, vol, item_type FROM (
+                   SELECT keyword_resolution->'primary'->>'keyword' AS kw,
+                          NULLIF(keyword_resolution->'primary'->>'volume', '')::numeric AS vol,
+                          item_type
+                   FROM technical_seo_analyses
+                   WHERE store_id = %s AND keyword_resolution->'primary'->>'keyword' IS NOT NULL
+                   UNION ALL
+                   SELECT mk.keyword, mk.search_volume::numeric, ka.assigned_item_type
+                   FROM keyword_assignments ka
+                   JOIN master_keywords mk ON mk.id = ka.master_keyword_id
+                   WHERE ka.store_id = %s AND ka.status IN ('accepted', 'applied')
+               ) sub WHERE kw IS NOT NULL
+               ORDER BY kw, vol DESC NULLS LAST""",
+            (store_id, store_id),
+        )
+        rows = cur.fetchall()
+    return sorted(rows, key=lambda r: float(r["vol"] or 0), reverse=True)[:cap]
+
+
+def _reserved_keywords_block(reserved, lead_in):
+    lines = "\n".join(
+        f"- \"{r['kw']}\"" + (f" (vol {int(r['vol']):,})" if r["vol"] else "") + f" — {r['item_type']} page"
+        for r in reserved
+    )
+    return f"\n{lead_in}\n{lines}\n"
+
+
 def _topic_enrich_context(store_id, topic, primary):
     """Store context for enriching one topic suggestion: inventory profile,
     coverage lists for the overlap guard, and REAL candidate link targets whose
@@ -2963,39 +3026,47 @@ def _validate_home_page_generate(result):
 
 def _validate_main_result(main_result, task_type, task_input, product_id, collection_id, client, config, store_id=None):
     """Quality-gate a product_seo/collection_seo main result: resolve the
-    primary keyword (task input > persisted resolution), then validate
+    primary keyword (persisted resolution > task input), then validate
     lengths / title keyword position / alt balance with one rephrase retry.
     With no vetted keyword, keyword-first enforcement is skipped (length and
     structure checks still run) — enforcing the model's own pick would lock
-    in a keyword nobody chose. Fails open."""
+    in a keyword nobody chose. Fails open.
+
+    The RESOLVED primary wins over the queue's target_keyword, because the
+    scorer (technical_seo_analyzer) grades the applied result against exactly
+    that keyword — and the fix prompt already tells the model a resolved or
+    user-assigned primary outranks the target. Validating against the target
+    instead meant a striking-distance optimize could satisfy the gate and still
+    trip 'Alt text keyword balance' the moment the item was re-analyzed."""
     try:
         from app.services.ai_content_validator import clean_keyword, validate_seo_result
 
         store_id = store_id or task_input.get("store_id")
-        primary_kw = clean_keyword(task_input.get("target_keyword"))
+        item_type = "product" if task_type == "product_seo" else "collection"
+        item_id = product_id if task_type == "product_seo" else collection_id
+        primary_kw = None
+        try:
+            with db.get_cursor() as cur:
+                if store_id:
+                    cur.execute(
+                        """SELECT keyword_resolution->'primary'->>'keyword' AS kw
+                           FROM technical_seo_analyses
+                           WHERE store_id = %s AND item_type = %s AND item_id = %s""",
+                        (store_id, item_type, item_id),
+                    )
+                else:
+                    cur.execute(
+                        """SELECT keyword_resolution->'primary'->>'keyword' AS kw
+                           FROM technical_seo_analyses
+                           WHERE item_type = %s AND item_id = %s""",
+                        (item_type, item_id),
+                    )
+                row = cur.fetchone()
+            primary_kw = clean_keyword(row["kw"]) if row else None
+        except Exception:
+            primary_kw = None
         if not primary_kw:
-            item_type = "product" if task_type == "product_seo" else "collection"
-            item_id = product_id if task_type == "product_seo" else collection_id
-            try:
-                with db.get_cursor() as cur:
-                    if store_id:
-                        cur.execute(
-                            """SELECT keyword_resolution->'primary'->>'keyword' AS kw
-                               FROM technical_seo_analyses
-                               WHERE store_id = %s AND item_type = %s AND item_id = %s""",
-                            (store_id, item_type, item_id),
-                        )
-                    else:
-                        cur.execute(
-                            """SELECT keyword_resolution->'primary'->>'keyword' AS kw
-                               FROM technical_seo_analyses
-                               WHERE item_type = %s AND item_id = %s""",
-                            (item_type, item_id),
-                        )
-                    row = cur.fetchone()
-                primary_kw = clean_keyword(row["kw"]) if row else None
-            except Exception:
-                primary_kw = None
+            primary_kw = clean_keyword(task_input.get("target_keyword"))
         validate_seo_result(main_result, primary_kw, client, config)
     except Exception:
         logger.exception("Main-result validation failed — passing through")
@@ -3318,10 +3389,12 @@ def run_task(task_type, task_input, store_id=None):
                 if search_ctx:
                     search_data_instruction = (
                         "\n\n## CRITICAL: Real Search Data Available\n"
-                        "The following data comes from Google Search Console and Semrush. "
-                        "Use this data to inform your keyword choices. Prioritize keywords "
-                        "that already have search volume and where this brand collection is in "
-                        "striking distance (positions 4-20). Do NOT ignore this data in favor of generic suggestions.\n\n"
+                        "The following data comes from Google Search Console, Semrush, and the "
+                        "store's keyword strategy. If a RESOLVED or USER-ASSIGNED PRIMARY KEYWORD "
+                        "is present, it was selected by the store's demand-grounded keyword "
+                        "strategy — use it as the primary and do NOT substitute a higher-volume "
+                        "keyword. Use the rest of the data for secondary keywords, CTR framing, "
+                        "and content ideas. Do NOT ignore this data in favor of generic suggestions.\n\n"
                         + search_ctx
                     )
         except Exception as e:
@@ -4452,14 +4525,25 @@ def run_task(task_type, task_input, store_id=None):
 
         failing_checks = {k: v for k, v in checks.items() if v.get("issue") and v.get("fix_type")}
 
-        # Issue-type bulk fixes scope the AI to specific fields — everything
-        # downstream (prompt, density/tags instructions) derives from
-        # failing_checks, so filtering here scopes the whole fix.
+        # Scoped fixes narrow what the AI sees as broken — everything downstream
+        # (prompt, density/tags instructions) derives from failing_checks, so
+        # filtering here scopes the whole fix. only_fields limits which fields
+        # may change; only_checks (issue-type bulk fixes) limits it further to
+        # the checks behind the one issue the user clicked, plus the guard
+        # checks for the fields being rewritten anyway.
         only_fields = task_input.get("only_fields")
+        only_checks = task_input.get("only_checks")
         if only_fields:
             failing_checks = {
                 k: v for k, v in failing_checks.items() if v.get("fix_type") in only_fields
             }
+        if only_checks:
+            from app.services.issue_scanner import FIX_GUARD_CHECKS
+
+            in_scope = set(only_checks)
+            for field in (only_fields or []):
+                in_scope.update(FIX_GUARD_CHECKS.get(field, []))
+            failing_checks = {k: v for k, v in failing_checks.items() if k in in_scope}
 
         sibling_context = ""
         category_context = ""
@@ -4547,13 +4631,38 @@ def run_task(task_type, task_input, store_id=None):
             }
         fix_context = task_input.get("fix_context") or {}
         if fix_context.get("kind") == "ctr_rewrite":
+            # A CTR rewrite steers meta phrasing toward real GSC queries — but
+            # without a resolved primary the queries silently become the
+            # target, and a query that is another page's claimed primary would
+            # move the cannibalization instead of raising clicks.
+            if not analysis_payload.get("primary_keyword"):
+                return {"error": "CTR rewrite needs a resolved primary keyword — "
+                                 "re-analyze this item first"}
+            ctr_queries = fix_context.get("queries") or []
+            try:
+                from app.services.keyword_resolver import (
+                    get_owned_primary_keywords,
+                    variant_key,
+                )
+                _owned = get_owned_primary_keywords(
+                    item["store_id"], exclude=(item_type, item_id))
+                _kept = [q for q in ctr_queries if variant_key(q) not in _owned]
+                if len(_kept) < len(ctr_queries):
+                    logger.info(
+                        "ctr_rewrite: dropped %d query(ies) owned by other pages for %s %s",
+                        len(ctr_queries) - len(_kept), item_type, item_id,
+                    )
+                ctr_queries = _kept
+            except Exception:
+                logger.warning("ctr_rewrite ownership filter failed for %s %s",
+                               item_type, item_id)
             analysis_payload["ctr_underperformance"] = {
                 "note": "This page already ranks well for the queries below but earns far "
                         "fewer clicks than expected for its position. Rewrite meta_title and "
                         "meta_description to raise SERP click-through: keep the resolved "
                         "primary_keyword primary, and naturally work in the phrasing of these "
                         "real Google queries. Do not keyword-stuff.",
-                "queries": fix_context.get("queries") or [],
+                "queries": ctr_queries,
                 "position": fix_context.get("position"),
                 "actual_ctr": fix_context.get("actual_ctr"),
                 "expected_ctr": fix_context.get("expected_ctr"),
@@ -4652,14 +4761,20 @@ def run_task(task_type, task_input, store_id=None):
             stuffing_instruction = ""
             density_check = failing_checks.get("keyword_density", {})
             if density_check.get("issue"):
-                primary_kw = detected_kws[0]["keyword"] if detected_kws else ""
+                # The keyword the density check actually measured: the
+                # resolution primary. detected_kws[0] only equals it when the
+                # stored candidates came from a successful resolution.
+                primary_kw = (
+                    ((analysis_payload.get("primary_keyword") or {}).get("keyword"))
+                    or (detected_kws[0]["keyword"] if detected_kws else "")
+                )
                 if primary_kw:
                     stuffing_instruction = (
                         f"- KEYWORD STUFFING FIX: The keyword '{primary_kw}' appears excessively in the "
                         "description. REDUCE exact-match repetitions, replacing most occurrences with "
-                        "natural synonyms, related terms, or pronouns — but you MUST keep the exact "
-                        "keyword at least once in the first paragraph and once in a heading. Never "
-                        "remove it entirely, and do NOT add more mentions.\n"
+                        "natural synonyms, related terms, or pronouns — but keep the exact keyword "
+                        "at least ONCE where it reads naturally (the first paragraph is a good spot). "
+                        "Never remove it entirely, and do NOT add more mentions.\n"
                     )
 
             description_rules = (
@@ -4686,6 +4801,16 @@ def run_task(task_type, task_input, store_id=None):
             "Propose specific fixes for the failing checks:\n\n"
             + analysis_context
         )
+        if only_checks and failing_checks:
+            user_prompt += (
+                "\n\nThis is a targeted fix for one specific problem: "
+                + ", ".join(sorted(failing_checks))
+                + ". failing_checks above lists ONLY those — other aspects of this "
+                f"{item_type} were checked and are fine. Change as little as possible: "
+                "keep the existing wording, structure, headings, and links, and edit only "
+                "what those checks require. Do NOT rewrite from scratch, and do NOT return "
+                "fixes for any other field."
+            )
         if fix_context.get("kind") == "ctr_rewrite":
             fields_list = ", ".join(only_fields) if only_fields else "meta_title, meta_description"
             user_prompt += (
@@ -5012,9 +5137,11 @@ def run_task(task_type, task_input, store_id=None):
                     search_data_instruction = (
                         "\n\n## CRITICAL: Real Search Data Available\n"
                         "The following data comes from Google Search Console and Semrush. "
-                        "Use this data to inform your keyword choices. Prioritize keywords "
-                        "that already have search volume and where this article is in striking "
-                        "distance (positions 4-20). Do NOT ignore this data in favor of generic suggestions.\n\n"
+                        "If a USER-ASSIGNED PRIMARY KEYWORD is present, use it as the primary — "
+                        "do NOT substitute a higher-volume keyword. Otherwise use this data to "
+                        "inform your keyword choices, favoring queries where this article is in "
+                        "striking distance (positions 4-20). Do NOT ignore this data in favor of "
+                        "generic suggestions.\n\n"
                         + search_ctx
                     )
         except Exception as e:
@@ -5878,6 +6005,18 @@ def run_task(task_type, task_input, store_id=None):
             + (f"\nARTICLES QUEUED OR IN PROGRESS (treat as existing):\n{ctx['queued']}\n" if ctx["queued"] else "")
             + (f"\nOTHER PENDING TOPIC SUGGESTIONS (avoid overlap):\n{ctx['other_suggestions']}\n" if ctx["other_suggestions"] else "")
         )
+        # Same money-page guard topic_discovery has — enrichment can reshape
+        # the primary keyword, so it needs the reserved list too.
+        te_reserved = _reserved_money_page_keywords(te_store_id)
+        if te_reserved:
+            user_prompt += _reserved_keywords_block(
+                te_reserved,
+                "RESERVED MONEY-PAGE KEYWORDS — each of these is the assigned primary "
+                "keyword of a product or collection page on this store. The enriched "
+                "topic's primary keyword must NOT be any of them (or a trivial "
+                "variation); that would cannibalize the money page. Supporting "
+                "informational content that links to the owning page is fine:",
+            )
         resp = client.chat.completions.create(
             model=config.get("topic_research_model") or config["model"],
             messages=[
@@ -5982,30 +6121,9 @@ def run_task(task_type, task_input, store_id=None):
                 (td_store_id,),
             )
             td_queued = cur.fetchall()
-            # Keywords owned by money pages (resolver primaries + accepted
-            # manual assignments) — a blog post must never target these as its
-            # own primary. Cap by volume: the high-demand terms are the ones a
-            # blog primary could realistically collide with.
-            cur.execute(
-                """SELECT DISTINCT ON (kw) kw, vol, item_type FROM (
-                       SELECT keyword_resolution->'primary'->>'keyword' AS kw,
-                              NULLIF(keyword_resolution->'primary'->>'volume', '')::numeric AS vol,
-                              item_type
-                       FROM technical_seo_analyses
-                       WHERE store_id = %s AND keyword_resolution->'primary'->>'keyword' IS NOT NULL
-                       UNION ALL
-                       SELECT mk.keyword, mk.search_volume::numeric, ka.assigned_item_type
-                       FROM keyword_assignments ka
-                       JOIN master_keywords mk ON mk.id = ka.master_keyword_id
-                       WHERE ka.store_id = %s AND ka.status IN ('accepted', 'applied')
-                   ) sub WHERE kw IS NOT NULL
-                   ORDER BY kw, vol DESC NULLS LAST""",
-                (td_store_id, td_store_id),
-            )
-            td_reserved_all = cur.fetchall()
-            td_reserved = sorted(
-                td_reserved_all, key=lambda r: float(r["vol"] or 0), reverse=True
-            )[:200]
+        # Keywords owned by money pages — a blog post must never target these
+        # as its own primary. Shared with topic_enrich.
+        td_reserved = _reserved_money_page_keywords(td_store_id)
 
         if not td_store:
             return {"error": "Store not found"}
@@ -6333,10 +6451,26 @@ def run_task(task_type, task_input, store_id=None):
         # the apply path only clamps (truncation, not rewording).
         from app.services.ai_content_validator import clean_keyword, validate_named_fields
         brand_kws = task_input.get("keywords") or []
+        # Validate against the collection's RESOLVED primary when it has one —
+        # the vendor-derived keyword list is a generation aid, not the keyword
+        # the analyzer will score this page against.
+        _val_kw = None
+        try:
+            with db.get_cursor() as cur:
+                cur.execute(
+                    """SELECT keyword_resolution->'primary'->>'keyword' AS kw
+                       FROM technical_seo_analyses
+                       WHERE item_type = 'collection' AND item_id = %s""",
+                    (collection_id,),
+                )
+                _row = cur.fetchone()
+            _val_kw = clean_keyword((_row or {}).get("kw"))
+        except Exception:
+            pass
         validate_named_fields(
             main_result,
             {"meta_title": "optimized_meta_title", "meta_description": "optimized_meta_description"},
-            clean_keyword(brand_kws[0]) if brand_kws else "", client, config,
+            _val_kw or (clean_keyword(brand_kws[0]) if brand_kws else ""), client, config,
         )
 
     return main_result

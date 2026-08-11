@@ -1544,6 +1544,27 @@ def _wizard_step_publish(session, store, client, is_published=True):
     return {"article_id": article_row["id"], "shopify_id": result["shopify_id"]}
 
 
+def _money_page_keyword_warning(store_id, keywords):
+    """Advisory money-page cannibalization check for a blog primary keyword.
+    Shared by wizard start (approval time) and the publish scheduler (publish
+    time — ownership may have changed while the session sat scheduled)."""
+    try:
+        from app.services.keyword_resolver import get_owned_primary_keywords, variant_key
+
+        primary = variant_key(keywords[0]) if keywords else ""
+        if primary:
+            owner = get_owned_primary_keywords(store_id).get(primary)
+            if owner:
+                return (
+                    f'"{keywords[0]}" is the primary keyword of a {owner["item_type"]} page in your '
+                    f"keyword strategy — a blog post targeting it would compete with your own money "
+                    f"page. Consider an informational long-tail variation instead."
+                )
+    except Exception:
+        pass
+    return None
+
+
 @blog_bp.route("/api/blog/wizard/start", methods=["POST"])
 def wizard_start():
     data = request.get_json(silent=True) or {}
@@ -1559,21 +1580,7 @@ def wizard_start():
 
     # Money-page keyword guard: a blog post whose primary keyword is a
     # product/collection's resolved primary would cannibalize it.
-    keyword_warning = None
-    try:
-        from app.services.keyword_resolver import get_owned_primary_keywords, variant_key
-
-        primary = variant_key(keywords[0]) if keywords else ""
-        if primary:
-            owner = get_owned_primary_keywords(store_id).get(primary)
-            if owner:
-                keyword_warning = (
-                    f'"{keywords[0]}" is the primary keyword of a {owner["item_type"]} page in your '
-                    f"keyword strategy — a blog post targeting it would compete with your own money "
-                    f"page. Consider an informational long-tail variation instead."
-                )
-    except Exception:
-        pass
+    keyword_warning = _money_page_keyword_warning(store_id, keywords)
 
     with db.get_cursor() as cur:
         cur.execute(

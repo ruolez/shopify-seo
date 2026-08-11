@@ -59,6 +59,20 @@ def _get_brave_api_key():
     return decrypt_value(row["brave_api_key_enc"])
 
 
+def evict_page_cache(urls):
+    """Delete cached page crawls for specific URLs. Applies change the page;
+    a 24h-cached copy (purged only at boot) would benchmark the next optimize
+    against the pre-change content."""
+    keys = [hashlib.sha256(f"page:{u}".encode()).hexdigest() for u in urls if u]
+    if not keys:
+        return
+    try:
+        with db.get_cursor() as cur:
+            cur.execute("DELETE FROM serp_cache WHERE cache_key = ANY(%s)", (keys,))
+    except Exception:
+        logger.warning("serp page-cache eviction failed")
+
+
 def _get_cached(cache_key):
     """Get cached data if not expired."""
     with db.get_cursor() as cur:

@@ -762,7 +762,7 @@ DEFAULTS = {
         "- Do NOT wrap output in ```html code fences or JSON — return raw HTML only\n"
         "- Do NOT include word counts, notes, disclaimers, or any meta-commentary in the output\n"
         "- Naturally incorporate the provided keywords throughout the content\n"
-        "- Use the brand name naturally 3-5 times throughout the description\n"
+        "- Mention the brand name naturally where it helps the reader — never force repetition to hit a count\n"
         "- Structure: brand overview paragraph → product range highlights (h2) → why shop this brand (h2) → related collections with links (h2) → closing paragraph\n"
         "- MUST include 2-5 internal links to related collections using /collections/{{handle}} URLs\n"
         "- Do NOT include links to individual products (/products/...) — Shopify already displays products on collection pages\n"
@@ -1193,46 +1193,63 @@ DEFAULTS = {
         "max_candidates": 15,
         "gsc_days": 30,
         "resolution_max_age_days": 7,
+        # Tokens ignored when matching handle words against Semrush keywords
+        # in the semantic fallback — store-specific packaging noise belongs
+        # here, not hardcoded in the resolver.
+        "semantic_generic_words": [
+            "the", "and", "for", "with", "pack", "packs", "box", "can", "cans",
+            "100", "1pk", "5pk", "10pk", "pre", "priced", "new", "best", "buy",
+            "shop", "online", "sale", "product",
+        ],
     },
+    # Weight philosophy (2026-08 rebalance, per Google guidance): the pillar
+    # rewards STATING the topic (title + early body) and CONTENT QUALITY
+    # (length bands as truncation heuristics, structure, alt coverage), not
+    # echoing one exact phrase in six places — density is not a ranking
+    # factor and unnatural repetition is a spam signal, so placement extras
+    # (meta fields, url, title position, alt) are low-weight and the
+    # stuffing guard carries real weight.
     "rules.technical_product": {
         "weights": {
-            "title_has_keyword": 0.10,
-            "keyword_at_title_start": 0.05,
-            "meta_title_has_keyword": 0.08,
-            "meta_title_length": 0.07,
-            "meta_desc_has_keyword": 0.08,
-            "meta_desc_length": 0.07,
-            "url_has_keyword": 0.06,
+            "title_has_keyword": 0.15,
+            "keyword_at_title_start": 0.03,
+            "meta_title_has_keyword": 0.05,
+            "meta_title_length": 0.08,
+            "meta_desc_has_keyword": 0.02,
+            "meta_desc_length": 0.09,
+            "url_has_keyword": 0.02,
             "body_first_100_has_keyword": 0.10,
-            "keyword_density": 0.02,
-            "description_word_count": 0.12,
-            "heading_structure": 0.05,
+            "keyword_density": 0.08,
+            "description_word_count": 0.15,
+            "heading_structure": 0.08,
             "image_alt_coverage": 0.10,
-            "image_alt_has_keyword": 0.10,
+            "image_alt_has_keyword": 0.05,
         },
         "thresholds": {
             "keyword_stuffing_max": 4.0,
+            "density_min_body_words": 50,
             "description_words": {"good": 300, "ok": 150, "short": 50, "very_short": 1},
             "keyword_at_title_start": 5,
         },
     },
     "rules.technical_collection": {
         "weights": {
-            "title_has_keyword": 0.12,
-            "keyword_at_title_start": 0.06,
-            "meta_title_has_keyword": 0.10,
-            "meta_title_length": 0.08,
-            "meta_desc_has_keyword": 0.10,
-            "meta_desc_length": 0.08,
-            "url_has_keyword": 0.06,
-            "body_first_100_has_keyword": 0.12,
-            "keyword_density": 0.02,
-            "description_word_count": 0.12,
-            "heading_structure": 0.06,
-            "image_alt_coverage": 0.08,
+            "title_has_keyword": 0.16,
+            "keyword_at_title_start": 0.03,
+            "meta_title_has_keyword": 0.05,
+            "meta_title_length": 0.09,
+            "meta_desc_has_keyword": 0.02,
+            "meta_desc_length": 0.10,
+            "url_has_keyword": 0.02,
+            "body_first_100_has_keyword": 0.11,
+            "keyword_density": 0.09,
+            "description_word_count": 0.17,
+            "heading_structure": 0.09,
+            "image_alt_coverage": 0.07,
         },
         "thresholds": {
             "keyword_stuffing_max": 4.0,
+            "density_min_body_words": 50,
             "description_words": {"good": 150, "ok": 75, "short": 25, "very_short": 1},
             "keyword_at_title_start": 5,
         },
@@ -1289,7 +1306,8 @@ DEFAULTS = {
         "- Internal linking: 3-5 internal links with descriptive anchor text\n"
         "  Format anchor text suggestions as {text, url, reason}\n"
         "- CTA placement: every page MUST have a CTA above the fold AND near the bottom\n"
-        "- Image optimization: all images need descriptive alt text with keyword inclusion\n"
+        "- Image optimization: every image needs descriptive alt text that says what the image shows; "
+        "the primary keyword belongs in AT MOST the one most relevant (hero) alt — keyword in every alt is spam per Google's image guidance\n"
         "- Schema markup: recommend WebPage or FAQPage schema if applicable\n"
         "- Mobile-friendliness: check for responsive section structures\n\n"
         "Format your final response as JSON with these keys:\n"
@@ -1299,7 +1317,7 @@ DEFAULTS = {
         "- section_improvements (array of objects): Each with {section_id, suggestions: [string]}\n"
         "- missing_elements (array of strings): Elements that should be added (e.g., FAQ section, schema markup)\n"
         "- internal_linking_opportunities (array of objects): Each with {text, url, reason}\n"
-        "- keyword_analysis (object): {primary_keyword, current_density, target_density, secondary_keywords}\n"
+        "- keyword_analysis (object): {primary_keyword, secondary_keywords, stuffing_risk (boolean — true only if the exact phrase repeats unnaturally)}\n"
         "- heading_structure (object): {current_h1_count, current_h2_count, recommendations: [string]}\n"
         "- cta_analysis (object): {has_above_fold, has_bottom, recommendations: [string]}\n"
         "- summary (string): Brief summary of all recommendations"
@@ -1399,7 +1417,7 @@ DEFAULTS = {
         "- Use action-oriented language ('Shop Now', 'Browse Collection', 'Get Started')\n\n"
         "IMAGE RULES:\n"
         "- Add descriptive alt text to any images that lack it\n"
-        "- Alt text should include the primary keyword naturally\n\n"
+        "- Alt text: describe what each image shows; the primary keyword belongs in at most ONE (hero) alt — never all of them\n\n"
         "SECURITY:\n"
         "- Strip any <script> tags from the content\n\n"
         "Return raw HTML only, no code fences, no commentary, no markdown."
@@ -1606,7 +1624,8 @@ DEFAULTS = {
         "- Keep the tone professional and conversion-focused for an ecommerce store\n"
         "- Do NOT use puffery words (premium, best, top, ultimate, finest)\n"
         "- The meta title should be compelling and click-worthy\n"
-        "- If image alt texts are provided, rewrite any that contain \"{competing_query}\" to use \"{target_keyword}\" instead\n"
+        "- If image alt texts are provided, rewrite any that contain \"{competing_query}\" to describe the image naturally instead; "
+        "\"{target_keyword}\" may appear in AT MOST one (hero) alt — putting it in several alts is keyword stuffing\n"
         "  * Keep alt text under 125 chars, natural and descriptive\n"
         "  * Only include images that need changes in the response array\n"
         "  * If no images need changes, omit the image_alt_suggestions field\n\n"

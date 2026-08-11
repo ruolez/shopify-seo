@@ -171,10 +171,10 @@
                                 <span style="font-size:12px;color:var(--on-surface-secondary);">the buyer questions we probe</span>
                             </summary>
                             <div style="padding:0 16px 16px;">
-                                <div class="toolbar-row" style="margin-bottom:8px;gap:8px;">
-                                    <input type="text" id="prompt-add-input" class="form-control" style="flex:1;"
-                                           placeholder="Type a question shoppers would ask an AI…"
-                                           onkeydown="if(event.key==='Enter')addPrompt()">
+                                <div class="toolbar-row" style="margin-bottom:4px;gap:8px;align-items:flex-start;">
+                                    <textarea id="prompt-add-input" class="form-control" rows="2" style="flex:1;resize:vertical;font-size:13px;"
+                                              placeholder="Type a question shoppers would ask an AI… (one per line to add several at once)"
+                                              onkeydown="if(event.key==='Enter'&&(event.metaKey||event.ctrlKey)){event.preventDefault();addPrompt();}"></textarea>
                                     <select id="prompt-add-intent" class="form-control" style="width:auto;">
                                         <option value="buyer" selected>Buyer</option>
                                         <option value="brand">Brand</option>
@@ -186,6 +186,10 @@
                                         <span class="material-symbols-rounded">auto_awesome</span> Auto-generate
                                     </button>
                                 </div>
+                                <p style="font-size:11.5px;color:var(--on-surface-secondary);margin:0 0 10px;">
+                                    One question per line. <b>⌘/Ctrl + Enter</b> to add. Editing a question here does not
+                                    change past runs — those keep the wording the models were actually asked.
+                                </p>
                                 <div id="prompts-container"></div>
                             </div>
                         </details>

@@ -12,6 +12,7 @@ from app.database import db
 from app.services.issue_scanner import (
     ISSUE_DEFS,
     SEVERITY_RANK,
+    fix_scope,
     item_issues,
     scan_store_issues,
 )
@@ -48,6 +49,7 @@ def list_issues():
             "fix_fields": definition["fix_fields"],
             "action_label": definition.get("action_label"),
             "action_href": definition.get("action_href"),
+            "bulk_fix": definition.get("bulk_fix"),
             "count": len(items),
             "by_type": by_type,
             "sample_items": [
@@ -58,7 +60,20 @@ def list_issues():
 
     issues.sort(key=lambda i: (SEVERITY_RANK[i["severity"]], -i["count"]))
 
-    return jsonify({"store_id": int(store_id), "coverage": coverage, "issues": issues})
+    # Distinct affected items. The sidebar SEO badge counts PAGES while this tab
+    # headlines total ISSUES, and one page can hold several — shipping both
+    # numbers is what makes 79 and 88 reconcilable instead of contradictory.
+    affected = {
+        (it["item_type"], it["id"])
+        for items in items_by_issue.values() for it in items
+    }
+
+    return jsonify({
+        "store_id": int(store_id),
+        "coverage": coverage,
+        "issues": issues,
+        "items_with_issues": len(affected),
+    })
 
 
 @seo_issues_bp.route("/api/seo/issues/item/<item_type>/<int:item_id>", methods=["GET"])
@@ -147,6 +162,10 @@ def fix_issue(issue_key):
     if not affected:
         return jsonify({"error": "No affected items to fix"}), 400
 
+    fix_fields, only_checks = fix_scope(issue_key)
+    if not fix_fields:
+        return jsonify({"error": f"'{definition['label']}' cannot be fixed automatically"}), 400
+
     item_col = "product_id" if item_type == "product" else "collection_id"
     with db.get_cursor() as cur:
         cur.execute(
@@ -162,7 +181,7 @@ def fix_issue(issue_key):
 
     spawn_task(
         "bulk_tasks", bulk_task_id, _execute_bulk_fix_apply,
-        bulk_task_id, item_type, definition["fix_fields"],
+        bulk_task_id, item_type, fix_fields, only_checks,
     )
 
     return jsonify({
@@ -170,6 +189,7 @@ def fix_issue(issue_key):
         "bulk_task_id": bulk_task_id,
         "total": len(affected),
         "issue_key": issue_key,
+        "fix_fields": fix_fields,
     }), 201
 
 
@@ -178,56 +198,21 @@ def analyze_unanalyzed():
     """Queue keyword-alignment analysis — one bulk task per item type.
     Default: only never-analyzed items. With {"force": true}: ALL visible
     items (used after scoring-threshold changes make stored analyses stale)."""
-    from app.routes.technical_seo_routes import _execute_bulk_analyze
+    # Delegates to the shared serial helper — the product and collection
+    # passes read each other's primaries when claiming ownership, so they
+    # must never run concurrently (this route used to spawn both at once).
+    from app.routes.technical_seo_routes import queue_bulk_analyze
 
     data = request.get_json(silent=True) or {}
     store_id = data.get("store_id")
     force = bool(data.get("force"))
+    # "outdated": only items whose stored analysis is older than their own last
+    # content change. Runs locally, no AI cost, no Shopify write — safe to fire
+    # automatically when the Issues tab notices the data has gone wrong.
+    scope = data.get("scope") or ""
     if not store_id:
         return jsonify({"error": "store_id required"}), 400
 
-    tasks = []
-    specs = [
-        ("product", "synced_products", "product_id", "t.status = 'ACTIVE'"),
-        ("collection", "synced_collections", "collection_id", "t.published = TRUE"),
-    ]
-    for item_type, table, item_col, visibility in specs:
-        with db.get_cursor() as cur:
-            if force:
-                cur.execute(
-                    f"SELECT t.id FROM {table} t WHERE t.store_id = %s AND {visibility} ORDER BY t.id",
-                    (store_id,),
-                )
-            else:
-                cur.execute(
-                    f"""
-                    SELECT t.id FROM {table} t
-                    LEFT JOIN technical_seo_analyses tsa
-                      ON tsa.store_id = t.store_id AND tsa.item_type = %s AND tsa.item_id = t.id
-                    WHERE t.store_id = %s AND {visibility}
-                      AND tsa.id IS NULL
-                    ORDER BY t.id
-                    """,
-                    (item_type, store_id),
-                )
-            ids = [r["id"] for r in cur.fetchall()]
-
-        if not ids:
-            continue
-
-        with db.get_cursor() as cur:
-            cur.execute(
-                "INSERT INTO bulk_tasks (status, total, auto_apply, task_type) VALUES ('pending', %s, FALSE, 'tseo_analyze') RETURNING id",
-                (len(ids),),
-            )
-            bulk_task_id = cur.fetchone()["id"]
-            for iid in ids:
-                cur.execute(
-                    f"INSERT INTO bulk_task_items (bulk_task_id, {item_col}) VALUES (%s, %s)",
-                    (bulk_task_id, iid),
-                )
-
-        spawn_task("bulk_tasks", bulk_task_id, _execute_bulk_analyze, bulk_task_id, item_type)
-        tasks.append({"item_type": item_type, "bulk_task_id": bulk_task_id, "total": len(ids)})
-
+    effective_scope = "all" if force else ("outdated" if scope == "outdated" else "unanalyzed")
+    tasks = queue_bulk_analyze(store_id, scope=effective_scope)
     return jsonify({"tasks": tasks}), 201 if tasks else 200

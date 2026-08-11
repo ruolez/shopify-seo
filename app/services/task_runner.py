@@ -99,9 +99,18 @@ def sweep_stale_jobs(min_interval_seconds=60):
         _last_sweep = now
     try:
         with db.get_cursor() as cur:
+            # Age alone isn't stuck: a whole-catalog run can legitimately pass
+            # 6 hours while its thread keeps working (and mutating) — marking
+            # it failed then just lies to the UI. Stuck = old AND no item has
+            # completed recently.
             cur.execute(
-                "UPDATE bulk_tasks SET status='failed', completed_at=NOW() "
-                "WHERE status IN ('pending','running') AND created_at < NOW() - INTERVAL '6 hours'"
+                """UPDATE bulk_tasks bt SET status='failed', completed_at=NOW()
+                   WHERE bt.status IN ('pending','running')
+                     AND bt.created_at < NOW() - INTERVAL '6 hours'
+                     AND NOT EXISTS (
+                       SELECT 1 FROM bulk_task_items bti
+                       WHERE bti.bulk_task_id = bt.id
+                         AND bti.completed_at > NOW() - INTERVAL '30 minutes')"""
             )
             cur.execute(
                 "UPDATE ai_tracking_runs SET status='failed', error=COALESCE(error,'Timed out'), completed_at=NOW() "
