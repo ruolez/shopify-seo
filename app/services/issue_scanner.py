@@ -159,12 +159,11 @@ ISSUE_DEFS = {
         "fix_fields": ["description"], "checks": ["body_first_100_has_keyword"],
         "item_types": ("product", "collection"),
     },
-    "keyword_at_title_start": {
-        "label": "Keyword not at start of title",
-        "severity": "low", "source": "keyword", "fixable": True,
-        "fix_fields": ["title"], "checks": ["keyword_at_title_start"],
-        "item_types": ("product", "collection"),
-    },
+    # keyword_at_title_start is deliberately absent (like url_has_keyword):
+    # Google has no keyword-position rule — the check survives in the item
+    # modal as a truncation-visibility note, but an issue row with a bulk-fix
+    # button invites mechanically front-loaded, boilerplate-shaped titles,
+    # the exact pattern Google rewrites.
     "keyword_density": {
         "label": "Keyword stuffing risk",
         "severity": "low", "source": "keyword", "fixable": True,
