@@ -330,6 +330,11 @@ def _gsc_contenders(store_id, queries, limit=6):
     contenders = []
     for p in parsed:
         rec = handles.get(p["item_type"], {}).get(p["handle"]) if p["handle"] else None
+        if p["handle"] and not rec:
+            # A products/collections URL with no live item behind it =
+            # deleted or consolidated; Google hasn't aged it out of the 30d
+            # window yet. Listing it inflates conflicts nobody can act on.
+            continue
         contenders.append({
             "url": p["page"],
             "item_type": p["item_type"] if rec else None,

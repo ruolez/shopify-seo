@@ -844,11 +844,17 @@ def get_cannibalization(store_id, date_from, date_to, min_impressions=3, device=
             p = products.get(handle)
             if p:
                 return {"type": "product", "id": p["id"], "title": p["title"]}
+            # A product path with no live product = deleted/unpublished.
+            return {"type": "removed", "id": None, "title": "/" + path}
         elif path.startswith("collections/"):
             handle = path.replace("collections/", "").split("?")[0].split("#")[0]
             c = collections.get(handle)
             if c:
                 return {"type": "collection", "id": c["id"], "title": c["title"]}
+            # Consolidated/deleted collections keep ranking inside the GSC
+            # window for weeks — they are not fixable pages, just Google
+            # catching up with a merge that already happened.
+            return {"type": "removed", "id": None, "title": "/" + path}
         if path == "" or path == "/":
             return {"type": "page", "id": None, "title": "Homepage"}
         return {"type": "page", "id": None, "title": "/" + path}
@@ -859,15 +865,21 @@ def get_cannibalization(store_id, date_from, date_to, min_impressions=3, device=
         if q not in grouped:
             grouped[q] = {
                 "query": q,
-                "page_count": r["page_count"],
+                "page_count": 0,
+                "removed_pages": 0,
                 "total_impressions": 0,
                 "total_clicks": 0,
                 "pages": [],
             }
+        match = _match_page(r["page"])
+        if match["type"] == "removed":
+            # Not a conflict the user can act on — the page is already gone
+            # (consolidated/deleted); its GSC rows just haven't aged out yet.
+            grouped[q]["removed_pages"] += 1
+            continue
         clicks = float(r["total_clicks"] or 0)
         impressions = float(r["total_impressions"] or 0)
         position = round(float(r["avg_position"] or 0), 1)
-        match = _match_page(r["page"])
 
         grouped[q]["total_impressions"] += impressions
         grouped[q]["total_clicks"] += clicks
@@ -879,8 +891,13 @@ def get_cannibalization(store_id, date_from, date_to, min_impressions=3, device=
             "match": match,
         })
 
+    # A query needs 2+ LIVE pages to still be a conflict — groups that only
+    # existed because of removed pages are already resolved.
+    grouped = {q: g for q, g in grouped.items() if len(g["pages"]) >= 2}
+
     for g in grouped.values():
         pages = g["pages"]
+        g["page_count"] = len(pages)
         if pages:
             winner = max(pages, key=lambda p: (p["clicks"], p["impressions"]))
             winner["is_winner"] = True
