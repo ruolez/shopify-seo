@@ -1158,6 +1158,7 @@ class ShopifyClient:
                 author { name }
                 image { url altText }
                 publishedAt
+                createdAt
                 templateSuffix
                 metafields(first: 10, namespace: "global") {
                   edges {
@@ -1209,6 +1210,7 @@ class ShopifyClient:
                 "image_url": image.get("url", ""),
                 "image_alt": image.get("altText", ""),
                 "published_at": node.get("publishedAt"),
+                "created_at": node.get("createdAt"),
                 "is_published": node.get("publishedAt") is not None,
                 "template_suffix": node.get("templateSuffix") or "",
                 "news_category": news_category,

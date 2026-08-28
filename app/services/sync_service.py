@@ -220,9 +220,10 @@ def _sync_blogs_and_articles(client, store_id, progress_cb=None):
                         INSERT INTO synced_articles
                             (store_id, blog_id, shopify_id, shopify_blog_id, title, handle,
                              body, summary, tags, author, meta_title, meta_description,
-                             image_url, image_alt, is_published, published_at, article_type, synced_at)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+                             image_url, image_alt, is_published, published_at, article_type, synced_at, shopify_created_at)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW(), %s)
                         ON CONFLICT (store_id, shopify_id) DO UPDATE SET
+                            shopify_created_at = COALESCE(EXCLUDED.shopify_created_at, synced_articles.shopify_created_at),
                             blog_id = EXCLUDED.blog_id,
                             shopify_blog_id = EXCLUDED.shopify_blog_id,
                             title = EXCLUDED.title,
@@ -258,6 +259,7 @@ def _sync_blogs_and_articles(client, store_id, progress_cb=None):
                             a["is_published"],
                             a["published_at"],
                             ("news" if (a.get("template_suffix") == "news" or "type:news" in (a.get("tags") or "")) else "blog"),
+                            a.get("created_at"),
                         ),
                     )
                     articles_synced += 1
