@@ -11,6 +11,24 @@ from app.auth import decrypt_value
 from app.database import db
 from app.services.ai_output_guard import guard_shopify_fields
 from app.services.blog_seo_analyzer import analyze_article_seo
+from app.services.article_visuals import (
+    STYLE_CLASSIC,
+    STYLE_VISUAL,
+    STYLES,
+    get_article_visuals,
+    save_store_visuals,
+    visuals_with_warnings,
+)
+from app.services.blog_template import (
+    BLOG_SECTION_FILE,
+    BLOG_TEMPLATE_FILE,
+    BLOG_TEMPLATE_MARKER,
+    BLOG_TEMPLATE_MARKER_PREFIX,
+    BLOG_TEMPLATE_SUFFIX,
+    BLOG_TEMPLATE_VERSION,
+    get_article_css,
+    get_blog_theme_files,
+)
 from app.shopify_client import ShopifyClient, is_gone_error
 
 logger = logging.getLogger(__name__)
@@ -27,6 +45,18 @@ def _get_store_client(store_id):
     access_token = decrypt_value(store["access_token_enc"])
     client = ShopifyClient(store["domain"], access_token, store["api_version"])
     return store, client
+
+
+def _session_style(session):
+    style = (session or {}).get("style") or STYLE_VISUAL
+    return style if style in STYLES else STYLE_VISUAL
+
+
+def _resolve_article_style(store_id, requested=None):
+    """Explicit request wins; otherwise the store's default style."""
+    if requested in STYLES:
+        return requested
+    return get_article_visuals(store_id)["default_style"]
 
 
 def _regen_landing_async(store_id, blog_id, client, store):
@@ -309,7 +339,9 @@ def list_articles():
         "blog": "sb.title",
         "status": "sa.is_published",
         "last_optimized_at": "sa.last_optimized_at",
+        "created_at": "COALESCE(sa.shopify_created_at, sa.published_at, sa.synced_at)",
     }
+    python_sorts = {"gsc_clicks", "gsc_impressions", "seo_score"}
     order_clause = "ORDER BY sa.title"
     if sort_by in valid_sql_sorts:
         direction = "DESC" if sort_dir == "desc" else "ASC"
@@ -343,15 +375,86 @@ def list_articles():
         )
         articles = cur.fetchall()
 
+    # The Articles tab filters by blog_id only — take the store from the rows.
+    metrics_store_id = store_id or (articles[0]["store_id"] if articles else None)
+    gsc_by_path, gsc_window = _gsc_article_metrics(metrics_store_id) if metrics_store_id else ({}, None)
+
     result = []
     for a in articles:
         article_dict = dict(a)
         seo = analyze_article_seo(article_dict)
         article_dict["seo_score"] = seo["score"]
         article_dict["seo_breakdown"] = seo["breakdown"]
+        article_dict["created_at_display"] = (
+            article_dict.get("shopify_created_at") or article_dict.get("published_at") or article_dict.get("synced_at")
+        )
+        path = f"/blogs/{article_dict.get('blog_handle') or ''}/{article_dict.get('handle') or ''}".lower()
+        metrics = gsc_by_path.get(path) or {}
+        article_dict["gsc_clicks"] = metrics.get("clicks")
+        article_dict["gsc_impressions"] = metrics.get("impressions")
+        article_dict["gsc_position"] = metrics.get("position")
+        article_dict["gsc_window"] = gsc_window
         result.append(article_dict)
 
+    if sort_by in python_sorts:
+        reverse = sort_dir == "desc"
+        result.sort(key=lambda r: (r.get(sort_by) is None, r.get(sort_by) or 0), reverse=reverse)
+        if reverse:
+            # Keep "no data" rows at the bottom in both directions.
+            result.sort(key=lambda r: r.get(sort_by) is None)
+
     return jsonify(result)
+
+
+def _gsc_article_metrics(store_id, days=30):
+    """{'/blogs/<blog>/<handle>': {clicks, impressions, position}} over the last
+    `days` days of GSC data (ending 3 days ago, GSC's finalization lag), plus
+    the window as {'from', 'to'}. Empty when GSC isn't connected."""
+    from datetime import date
+
+    today = date.today()
+    date_to = today - timedelta(days=3)
+    date_from = date_to - timedelta(days=days)
+    window = {"from": date_from.isoformat(), "to": date_to.isoformat(), "days": days}
+    try:
+        with db.get_cursor() as cur:
+            cur.execute("SELECT gsc_property FROM gsc_credentials WHERE store_id = %s", (store_id,))
+            cred = cur.fetchone()
+            if not cred:
+                return {}, None
+            cur.execute(
+                """SELECT page, SUM(clicks) AS clicks, SUM(impressions) AS impressions,
+                          CASE WHEN SUM(impressions) > 0 THEN SUM(position * impressions) / SUM(impressions) END AS position
+                   FROM gsc_daily_metrics
+                   WHERE store_id = %s AND date BETWEEN %s AND %s AND page LIKE '%%/blogs/%%'
+                   GROUP BY page""",
+                (store_id, date_from, date_to),
+            )
+            rows = cur.fetchall()
+    except Exception as e:
+        logger.warning("GSC article metrics unavailable: %s", e)
+        return {}, None
+
+    from urllib.parse import urlparse
+
+    out = {}
+    for r in rows:
+        path = urlparse(r["page"] or "").path.rstrip("/").lower()
+        if not path:
+            continue
+        entry = out.setdefault(path, {"clicks": 0.0, "impressions": 0.0, "_pos_w": 0.0})
+        clicks = float(r["clicks"] or 0)
+        imps = float(r["impressions"] or 0)
+        entry["clicks"] += clicks
+        entry["impressions"] += imps
+        if r.get("position") and imps:
+            entry["_pos_w"] += float(r["position"]) * imps
+    for entry in out.values():
+        entry["position"] = round(entry["_pos_w"] / entry["impressions"], 1) if entry["impressions"] else None
+        entry["clicks"] = int(round(entry["clicks"]))
+        entry["impressions"] = int(round(entry["impressions"]))
+        entry.pop("_pos_w", None)
+    return out, window
 
 
 @blog_bp.route("/api/blog/articles/<int:article_id>", methods=["GET"])
@@ -765,7 +868,14 @@ def bulk_optimize_articles():
                                 if result.get("optimized_meta_description"):
                                     fields["meta_description"] = result["optimized_meta_description"]
                                 if result.get("optimized_body"):
-                                    fields["body"] = result["optimized_body"]
+                                    from app.services.ai_output_guard import restore_missing_figures, restore_missing_images
+
+                                    with db.get_cursor() as cur:
+                                        cur.execute("SELECT body FROM synced_articles WHERE id = %s", (item["article_id"],))
+                                        current_row = cur.fetchone() or {}
+                                    current_body = current_row.get("body") or ""
+                                    new_body = restore_missing_figures(current_body, result["optimized_body"])
+                                    fields["body"] = restore_missing_images(current_body, new_body)
                                 if result.get("optimized_summary"):
                                     fields["summary"] = result["optimized_summary"]
                                 if fields:
@@ -1331,6 +1441,7 @@ def _wizard_step_outline(session):
     result = ai_run_task(
         "article_outline",
         {
+            "style": _session_style(session),
             "session_id": session["id"],
             "topic": session["topic"],
             "keywords": session["target_keywords"],
@@ -1339,10 +1450,11 @@ def _wizard_step_outline(session):
         },
         store_id=session["store_id"],
     )
+    media_plan = result.get("media_plan") if isinstance(result, dict) else None
     with db.get_cursor() as cur:
         cur.execute(
-            "UPDATE article_wizard_sessions SET outline_data = %s, updated_at = NOW() WHERE id = %s",
-            (json.dumps(result), session["id"]),
+            "UPDATE article_wizard_sessions SET outline_data = %s, media_plan = %s, updated_at = NOW() WHERE id = %s",
+            (json.dumps(result), json.dumps(media_plan) if media_plan else None, session["id"]),
         )
     return result
 
@@ -1354,6 +1466,8 @@ def _wizard_step_generate(session):
         "article_generate",
         {
             "session_id": session["id"],
+            "style": _session_style(session),
+            "media_plan": session.get("media_plan"),
             "topic": session["topic"],
             "keywords": session["target_keywords"],
             "outline_data": session["outline_data"],
@@ -1371,7 +1485,7 @@ def _wizard_step_generate(session):
 
 
 def _wizard_step_image(session, client, permanent=False):
-    from app.services.image_generator import generate_blog_image_ai
+    from app.services.image_generator import generate_article_hero_image, generate_blog_image_ai
 
     generated = session.get("generated_article") or {}
     title = generated.get("title") or session["topic"]
@@ -1387,7 +1501,13 @@ def _wizard_step_image(session, client, permanent=False):
             )
             product_titles = [r["title"] for r in cur.fetchall()]
 
-    result = generate_blog_image_ai(title, keywords=keywords, product_titles=product_titles)
+    if _session_style(session) == STYLE_VISUAL:
+        hero = ((session.get("media_plan") or {}).get("hero") or {})
+        result = generate_article_hero_image(
+            title, subject_prompt=hero.get("prompt"), alt_text=hero.get("alt"), keywords=keywords
+        )
+    else:
+        result = generate_blog_image_ai(title, keywords=keywords, product_titles=product_titles)
     if not result:
         raise Exception("Image generation returned no result")
     image_bytes, filename, alt_text, width, height = result
@@ -1395,9 +1515,9 @@ def _wizard_step_image(session, client, permanent=False):
     if permanent:
         # Scheduled sessions publish later — staged-upload urls expire before
         # the delayed publish, so register the file for a permanent CDN url.
-        from app.routes.news_routes import _upload_image_to_cdn
+        from app.services.article_media import upload_image_to_cdn
 
-        image_url = _upload_image_to_cdn(client, image_bytes, filename, alt_text)
+        image_url = upload_image_to_cdn(client, image_bytes, filename, alt_text)
     else:
         mime = "image/webp" if filename.endswith(".webp") else "image/jpeg"
         staged = client.staged_upload_create(filename, mime, len(image_bytes), resource="IMAGE")
@@ -1405,10 +1525,126 @@ def _wizard_step_image(session, client, permanent=False):
 
     with db.get_cursor() as cur:
         cur.execute(
-            "UPDATE article_wizard_sessions SET featured_image_url = %s, updated_at = NOW() WHERE id = %s",
-            (image_url, session["id"]),
+            "UPDATE article_wizard_sessions SET featured_image_url = %s, featured_image_alt = %s, updated_at = NOW() WHERE id = %s",
+            (image_url, alt_text, session["id"]),
         )
     return {"image_url": image_url, "alt_text": alt_text, "width": width, "height": height}
+
+
+def _load_product_reference_images(store_id, handles, limit=3):
+    """First image (bytes) of each named product, for product-composite scenes."""
+    handles = [h for h in (handles or []) if h]
+    if not handles or not store_id:
+        return []
+    import requests as http_req
+
+    with db.get_cursor() as cur:
+        cur.execute(
+            "SELECT handle, images FROM synced_products WHERE store_id = %s AND handle = ANY(%s)",
+            (store_id, handles),
+        )
+        rows = cur.fetchall()
+    out = []
+    for row in rows:
+        images = row.get("images") or []
+        if isinstance(images, str):
+            try:
+                images = json.loads(images)
+            except Exception:
+                images = []
+        first = images[0] if images else None
+        url = first.get("url") or first.get("src") if isinstance(first, dict) else first
+        if not url:
+            continue
+        try:
+            resp = http_req.get(url, timeout=15)
+            resp.raise_for_status()
+            out.append(resp.content)
+        except Exception as e:
+            logger.warning("Reference image fetch failed for %s: %s", row.get("handle"), e)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _generate_article_media(store_id, client, media_plan, article_slug, existing=None, only_index=None, allow_product_refs=None):
+    """Generate + upload every inline image in a media plan (per-image best-effort).
+
+    Returns the inline_images list: one entry per planned spec with
+    status 'ready' (cdn_url set) or 'failed'. Entries already 'ready' in
+    `existing` are kept unless `only_index` targets them. Always uploads to a
+    permanent CDN url — the body embeds these as <img src>.
+    """
+    from app.services.article_media import upload_image_to_cdn
+    from app.services.image_generator import generate_article_inline_image
+
+    visuals = get_article_visuals(store_id)
+    if allow_product_refs is None:
+        allow_product_refs = visuals["product_composite"]
+    specs = ((media_plan or {}).get("inline") or [])[: visuals["inline_image_count"] if only_index is None else None]
+    existing_by_token = {e.get("token"): e for e in (existing or []) if isinstance(e, dict)}
+    out = []
+    budget = max(0, visuals["max_images_per_article"] - 1)  # hero counts as one
+    for i, spec in enumerate(specs, start=1):
+        prior = existing_by_token.get(spec.get("token"))
+        if only_index is not None and i != only_index:
+            if prior:
+                out.append(prior)
+            continue
+        if only_index is None and prior and prior.get("status") == "ready" and prior.get("cdn_url"):
+            out.append(prior)
+            continue
+        entry = {
+            "token": spec.get("token"),
+            "section": spec.get("section"),
+            "kind": spec.get("kind"),
+            "prompt": spec.get("prompt"),
+            "alt": spec.get("alt"),
+            "caption": spec.get("caption"),
+            "product_handles": spec.get("product_handles") or [],
+            "cdn_url": "",
+            "status": "pending",
+        }
+        if len([e for e in out if e.get("status") == "ready"]) >= budget:
+            entry["status"] = "skipped"
+            entry["error"] = "image budget reached"
+            out.append(entry)
+            continue
+        try:
+            refs = []
+            if allow_product_refs and (spec.get("kind") == "product") and spec.get("product_handles"):
+                refs = _load_product_reference_images(store_id, spec.get("product_handles"))
+            result = generate_article_inline_image(spec, article_slug, i, reference_images=refs)
+            if not result:
+                raise Exception("no image returned")
+            image_bytes, filename, alt_text, width, height = result
+            cdn_url = upload_image_to_cdn(client, image_bytes, filename, alt_text)
+            entry.update({
+                "cdn_url": cdn_url, "alt": alt_text, "width": width, "height": height,
+                "status": "ready", "used_product_refs": len(refs),
+            })
+        except Exception as e:
+            logger.warning("Inline image failed for token %s: %s", spec.get("token"), e)
+            entry["status"] = "failed"
+            entry["error"] = str(e)[:300]
+        out.append(entry)
+    return out
+
+
+def _wizard_step_media(session, client, only_index=None):
+    """Generate the session's inline images from its media plan and persist them."""
+    generated = session.get("generated_article") or {}
+    slug = (generated.get("handle") or generated.get("title") or session.get("topic") or "article")
+    inline_images = _generate_article_media(
+        session["store_id"], client, session.get("media_plan") or {}, slug,
+        existing=session.get("inline_images") or [], only_index=only_index,
+    )
+    with db.get_cursor() as cur:
+        cur.execute(
+            "UPDATE article_wizard_sessions SET inline_images = %s, updated_at = NOW() WHERE id = %s",
+            (json.dumps(inline_images), session["id"]),
+        )
+    return inline_images
 
 
 def _wizard_step_publish(session, store, client, is_published=True):
@@ -1440,9 +1676,17 @@ def _wizard_step_publish(session, store, client, is_published=True):
 
     blog_id = blog["id"]
 
+    is_visual = _session_style(session) == STYLE_VISUAL
+    body_html = generated.get("body_html", "")
+    if is_visual:
+        from app.services.article_media import compose_article_body
+
+        visuals = get_article_visuals(session["store_id"])
+        body_html = compose_article_body(body_html, session.get("inline_images") or [], visuals)
+
     fields = {
         "title": generated.get("title", session["topic"]),
-        "body": generated.get("body_html", ""),
+        "body": body_html,
         "summary": generated.get("summary", ""),
         "tags": _scrub_query_echo_tags(
             session["store_id"], generated.get("tags", []), session.get("target_keywords")),
@@ -1458,7 +1702,12 @@ def _wizard_step_publish(session, store, client, is_published=True):
 
     if session.get("featured_image_url"):
         fields["image_url"] = session["featured_image_url"]
-        fields["image_alt"] = generated.get("title", session["topic"])
+        fields["image_alt"] = session.get("featured_image_alt") or generated.get("title", session["topic"])
+
+    if is_visual:
+        # Classic sessions leave the suffix unset and render on the theme's
+        # default article template exactly as before.
+        fields["template_suffix"] = BLOG_TEMPLATE_SUFFIX
 
     existing_article_id = session.get("shopify_article_id")
     if existing_article_id:
@@ -1484,6 +1733,16 @@ def _wizard_step_publish(session, store, client, is_published=True):
             else:
                 raise
 
+    if is_visual:
+        from app.services.article_media import faq_jsonld_string
+
+        faq_json = faq_jsonld_string(fields["body"])
+        try:
+            if faq_json:
+                client.set_article_metafields(result["shopify_id"], [("global", "faq_jsonld", faq_json, "json")])
+        except Exception as e:
+            logger.warning("FAQ metafield write failed for article %s: %s", result.get("shopify_id"), e)
+
     cdn_image_url = result.get("image_url", "")
     if not cdn_image_url or "shopify-staged-uploads" in cdn_image_url:
         cdn_image_url = fields.get("image_url", "")
@@ -1496,13 +1755,14 @@ def _wizard_step_publish(session, store, client, is_published=True):
                 (store_id, blog_id, shopify_id, shopify_blog_id, title, handle,
                  body, summary, tags, meta_title, meta_description,
                  image_url, image_alt, is_published, article_type, synced_at,
-                 published_at)
+                 published_at, template_suffix, shopify_created_at)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'blog', NOW(),
-                    CASE WHEN %s THEN NOW() END)
+                    CASE WHEN %s THEN NOW() END, %s, NOW())
             ON CONFLICT (store_id, shopify_id) DO UPDATE SET
                 title = EXCLUDED.title, handle = EXCLUDED.handle,
                 body = EXCLUDED.body, article_type = 'blog', synced_at = NOW(),
-                published_at = COALESCE(synced_articles.published_at, EXCLUDED.published_at)
+                published_at = COALESCE(synced_articles.published_at, EXCLUDED.published_at),
+                template_suffix = EXCLUDED.template_suffix
             RETURNING id""",
             (
                 session["store_id"],
@@ -1520,12 +1780,13 @@ def _wizard_step_publish(session, store, client, is_published=True):
                 result.get("image_alt", "") or fields.get("image_alt", ""),
                 is_published,
                 is_published,
+                fields.get("template_suffix", ""),
             ),
         )
         article_row = cur.fetchone()
 
         cur.execute(
-            "UPDATE article_wizard_sessions SET status = 'published', current_step = 6, shopify_article_id = %s, updated_at = NOW() WHERE id = %s",
+            "UPDATE article_wizard_sessions SET status = 'published', current_step = 7, shopify_article_id = %s, updated_at = NOW() WHERE id = %s",
             (result["shopify_id"], session_id),
         )
 
@@ -1610,6 +1871,8 @@ def wizard_start():
     if not store_id or not topic:
         return jsonify({"error": "store_id and topic are required"}), 400
 
+    style = _resolve_article_style(store_id, data.get("style"))
+
     # Money-page keyword guard: a blog post whose primary keyword is a
     # product/collection's resolved primary would cannibalize it.
     keyword_warning = _money_page_keyword_warning(store_id, keywords)
@@ -1617,13 +1880,13 @@ def wizard_start():
     with db.get_cursor() as cur:
         cur.execute(
             """INSERT INTO article_wizard_sessions
-                (store_id, topic, target_keywords, blog_id, target_product_ids, target_collection_ids, status, current_step)
-            VALUES (%s, %s, %s, %s, %s, %s, 'draft', 1) RETURNING id""",
-            (store_id, topic, json.dumps(keywords), blog_id, json.dumps(product_ids), json.dumps(collection_ids)),
+                (store_id, topic, target_keywords, blog_id, target_product_ids, target_collection_ids, status, current_step, style)
+            VALUES (%s, %s, %s, %s, %s, %s, 'draft', 1, %s) RETURNING id""",
+            (store_id, topic, json.dumps(keywords), blog_id, json.dumps(product_ids), json.dumps(collection_ids), style),
         )
         session_id = cur.fetchone()["id"]
 
-    resp = {"session_id": session_id}
+    resp = {"session_id": session_id, "style": style}
     if keyword_warning:
         resp["keyword_warning"] = keyword_warning
     return jsonify(resp)
@@ -2102,6 +2365,17 @@ def _run_blog_auto_pipeline(session_id, store, client):
             _wizard_step_image(session, client, permanent=True)
         except Exception as e:
             logger.warning("Blog auto pipeline: image failed, continuing: %s", e)
+        session = _fetch_wizard_session(session_id)
+    if (
+        _session_style(session) == STYLE_VISUAL
+        and (session.get("media_plan") or {}).get("inline")
+        and not (session.get("inline_images") or [])
+    ):
+        _set_status("auto_media")
+        try:
+            _wizard_step_media(session, client)
+        except Exception as e:
+            logger.warning("Blog auto pipeline: inline media failed, continuing: %s", e)
     _set_status("scheduled")
 
 
@@ -2179,14 +2453,15 @@ def schedule_from_suggestion():
     product_ids = _resolve_product_targets(store_id, suggestion.get("target_products"))
     collection_ids = _resolve_collection_targets(store_id, suggestion.get("target_collections"))
 
+    style = _resolve_article_style(store_id, data.get("style"))
     with db.get_cursor() as cur:
         cur.execute(
             """INSERT INTO article_wizard_sessions
                 (store_id, topic, target_keywords, target_product_ids, target_collection_ids,
-                 status, current_step, scheduled_for)
-            VALUES (%s, %s, %s, %s, %s, 'auto_queued', 1, %s) RETURNING id""",
+                 status, current_step, scheduled_for, style)
+            VALUES (%s, %s, %s, %s, %s, 'auto_queued', 1, %s, %s) RETURNING id""",
             (store_id, topic, json.dumps(keywords), json.dumps(product_ids),
-             json.dumps(collection_ids), scheduled_for),
+             json.dumps(collection_ids), scheduled_for, style),
         )
         session_id = cur.fetchone()["id"]
         cur.execute(
@@ -2206,7 +2481,7 @@ def list_scheduled_posts():
         return jsonify({"error": "store_id is required"}), 400
     with db.get_cursor() as cur:
         cur.execute(
-            """SELECT id, status, scheduled_for, error, created_at, updated_at, topic,
+            """SELECT id, status, scheduled_for, error, created_at, updated_at, topic, style,
                       COALESCE(generated_article->>'title', topic) AS title,
                       (featured_image_url IS NOT NULL) AS has_image
                FROM article_wizard_sessions
@@ -2478,6 +2753,152 @@ def wizard_generate_image(session_id):
     thread = threading.Thread(target=run_image_gen, daemon=True)
     thread.start()
     return jsonify({"task_id": task_id})
+
+
+def _run_session_media_task(session, client, task_type, only_index=None, resume_status="generated"):
+    """Background inline-image generation for a wizard session with an ai_tasks row."""
+    session_id = session["id"]
+    with db.get_cursor() as cur:
+        cur.execute(
+            "UPDATE article_wizard_sessions SET status = 'generating_media', updated_at = NOW() WHERE id = %s",
+            (session_id,),
+        )
+        cur.execute(
+            """INSERT INTO ai_tasks (store_id, task_type, status, input)
+            VALUES (%s, %s, 'pending', %s) RETURNING id""",
+            (session["store_id"], task_type, json.dumps({"session_id": session_id, "index": only_index})),
+        )
+        task_id = cur.fetchone()["id"]
+
+    def _run():
+        try:
+            with db.get_cursor() as cur:
+                cur.execute("UPDATE ai_tasks SET status = 'running' WHERE id = %s", (task_id,))
+            fresh = _fetch_wizard_session(session_id)
+            images = _wizard_step_media(fresh, client, only_index=only_index)
+            # Already-published article (restyle / regenerate after publish): push the recomposed body.
+            if fresh.get("shopify_article_id") and fresh.get("generated_article"):
+                from app.services.article_media import compose_article_body
+
+                body = compose_article_body(
+                    fresh["generated_article"].get("body_html", ""), images, get_article_visuals(fresh["store_id"])
+                )
+                client.update_article(fresh["shopify_article_id"], {"body": body})
+                with db.get_cursor() as cur:
+                    cur.execute(
+                        "UPDATE synced_articles SET body = %s WHERE store_id = %s AND shopify_id = %s",
+                        (body, fresh["store_id"], fresh["shopify_article_id"]),
+                    )
+            ready = len([i for i in images if i.get("status") == "ready"])
+            with db.get_cursor() as cur:
+                cur.execute(
+                    "UPDATE article_wizard_sessions SET status = %s, updated_at = NOW() WHERE id = %s",
+                    (resume_status, session_id),
+                )
+                cur.execute(
+                    "UPDATE ai_tasks SET status = 'completed', result = %s, completed_at = NOW() WHERE id = %s",
+                    (json.dumps({"ready": ready, "total": len(images), "inline_images": images}), task_id),
+                )
+        except Exception as e:
+            logger.exception("Article media generation failed: %s", e)
+            with db.get_cursor() as cur:
+                cur.execute(
+                    "UPDATE article_wizard_sessions SET status = %s, updated_at = NOW() WHERE id = %s",
+                    (resume_status, session_id),
+                )
+                cur.execute(
+                    "UPDATE ai_tasks SET status = 'failed', error = %s, completed_at = NOW() WHERE id = %s",
+                    (str(e), task_id),
+                )
+
+    threading.Thread(target=_run, daemon=True).start()
+    return task_id
+
+
+@blog_bp.route("/api/blog/wizard/<int:session_id>/generate-media", methods=["POST"])
+def wizard_generate_media(session_id):
+    session = _fetch_wizard_session(session_id)
+    if not session:
+        return jsonify({"error": "Session not found"}), 404
+    if _session_style(session) != STYLE_VISUAL:
+        return jsonify({"error": "Classic articles have no inline images"}), 400
+    if not (session.get("media_plan") or {}).get("inline"):
+        return jsonify({"error": "No inline images planned for this article"}), 400
+    store, client = _get_store_client(session["store_id"])
+    if not client:
+        return jsonify({"error": "Store not found"}), 404
+    resume = "published" if session.get("status") == "published" else "generated"
+    task_id = _run_session_media_task(session, client, "article_media", resume_status=resume)
+    return jsonify({"task_id": task_id})
+
+
+@blog_bp.route("/api/blog/wizard/<int:session_id>/media/<int:index>/regenerate", methods=["POST"])
+def wizard_regenerate_media(session_id, index):
+    data = request.get_json(silent=True) or {}
+    session = _fetch_wizard_session(session_id)
+    if not session:
+        return jsonify({"error": "Session not found"}), 404
+    plan = session.get("media_plan") or {}
+    inline = plan.get("inline") or []
+    if index < 1 or index > len(inline):
+        return jsonify({"error": "No such inline image"}), 404
+    # Optional prompt/alt/caption edits before regenerating.
+    spec = inline[index - 1]
+    changed = False
+    for key in ("prompt", "alt", "caption", "kind"):
+        if data.get(key) is not None:
+            spec[key] = str(data[key]).strip()
+            changed = True
+    if changed:
+        with db.get_cursor() as cur:
+            cur.execute(
+                "UPDATE article_wizard_sessions SET media_plan = %s, updated_at = NOW() WHERE id = %s",
+                (json.dumps(plan), session_id),
+            )
+        session["media_plan"] = plan
+    store, client = _get_store_client(session["store_id"])
+    if not client:
+        return jsonify({"error": "Store not found"}), 404
+    resume = "published" if session.get("status") == "published" else "generated"
+    task_id = _run_session_media_task(session, client, "article_media_regen", only_index=index, resume_status=resume)
+    return jsonify({"task_id": task_id})
+
+
+@blog_bp.route("/api/blog/wizard/<int:session_id>/media-plan", methods=["PUT"])
+def wizard_update_media_plan(session_id):
+    data = request.get_json(silent=True) or {}
+    session = _fetch_wizard_session(session_id)
+    if not session:
+        return jsonify({"error": "Session not found"}), 404
+    from app.services.article_media import normalize_media_plan
+
+    visuals = get_article_visuals(session["store_id"])
+    plan = normalize_media_plan(data.get("media_plan"), visuals["inline_image_count"])
+    with db.get_cursor() as cur:
+        cur.execute(
+            "UPDATE article_wizard_sessions SET media_plan = %s, updated_at = NOW() WHERE id = %s",
+            (json.dumps(plan), session_id),
+        )
+    return jsonify({"success": True, "media_plan": plan})
+
+
+@blog_bp.route("/api/blog/wizard/<int:session_id>/compose-preview", methods=["POST"])
+def wizard_compose_preview(session_id):
+    """Render the body exactly as publish would (figures, TOC, no stray tokens)."""
+    data = request.get_json(silent=True) or {}
+    session = _fetch_wizard_session(session_id)
+    if not session:
+        return jsonify({"error": "Session not found"}), 404
+    from app.services.ai_output_guard import sanitize_html
+    from app.services.article_media import compose_article_body, count_figures
+
+    body = data.get("body_html")
+    if body is None:
+        body = (session.get("generated_article") or {}).get("body_html", "")
+    if _session_style(session) == STYLE_VISUAL:
+        body = compose_article_body(body, session.get("inline_images") or [], get_article_visuals(session["store_id"]))
+    body = sanitize_html(body)
+    return jsonify({"body_html": body, "figures": count_figures(body)})
 
 
 @blog_bp.route("/api/blog/wizard/<int:session_id>/outline", methods=["POST"])
@@ -2966,6 +3387,403 @@ def _scan_and_fix_meta_descriptions(client, theme_id):
             logger.warning("Failed to process %s: %s", asset_key, e)
 
     return results
+
+
+# ── Visual settings + blog article theme template ─────────────────
+
+@blog_bp.route("/api/blog/visual-settings", methods=["GET"])
+def get_visual_settings():
+    store_id = request.args.get("store_id")
+    if not store_id:
+        return jsonify({"error": "store_id is required"}), 400
+    from app.services.article_visuals import get_store_overrides
+
+    effective = get_article_visuals(store_id)
+    return jsonify({
+        "effective": visuals_with_warnings(effective),
+        "overrides": get_store_overrides(store_id),
+        "styles": list(STYLES),
+    })
+
+
+@blog_bp.route("/api/blog/visual-settings", methods=["POST"])
+def post_visual_settings():
+    data = request.get_json(silent=True) or {}
+    store_id = data.get("store_id")
+    if not store_id:
+        return jsonify({"error": "store_id is required"}), 400
+    effective = save_store_visuals(store_id, data)
+    return jsonify({"success": True, "effective": visuals_with_warnings(effective)})
+
+
+@blog_bp.route("/api/blog/article-css", methods=["GET"])
+def article_css():
+    """The article stylesheet for the store's brand color — used by the wizard
+    preview so the review pane matches the storefront."""
+    store_id = request.args.get("store_id")
+    visuals = get_article_visuals(store_id) if store_id else get_article_visuals(None)
+    from flask import Response
+
+    return Response(get_article_css(visuals["brand_color"]), mimetype="text/css")
+
+
+def _blog_template_state(client):
+    """Return (theme_id, installed, outdated) for the blog article template."""
+    theme_id = client.get_main_theme_id()
+    if not theme_id:
+        return None, False, False
+    template = client.get_theme_asset(theme_id, BLOG_TEMPLATE_FILE)
+    installed = template is not None and BLOG_TEMPLATE_MARKER_PREFIX in (template or "")
+    outdated = installed and BLOG_TEMPLATE_MARKER not in (template or "")
+    return theme_id, installed, outdated
+
+
+@blog_bp.route("/api/blog/template-status", methods=["GET"])
+def blog_template_status():
+    store_id = request.args.get("store_id")
+    store, client = _get_store_client(store_id) if store_id else (None, None)
+    if not client:
+        return jsonify({"installed": False})
+    try:
+        theme_id, installed, outdated = _blog_template_state(client)
+    except Exception as e:
+        logger.warning("Blog template status failed: %s", e)
+        return jsonify({"installed": False})
+    if not theme_id:
+        return jsonify({"installed": False, "error": "No main theme found"})
+
+    with db.get_cursor() as cur:
+        cur.execute(
+            """SELECT
+                 COUNT(*) FILTER (WHERE COALESCE(template_suffix, '') <> %s) AS pending,
+                 COUNT(*) FILTER (WHERE COALESCE(template_suffix, '') = %s) AS applied
+               FROM synced_articles
+               WHERE store_id = %s AND article_type = 'blog'
+                 AND COALESCE(tags, '') NOT ILIKE '%%landing-page%%'""",
+            (BLOG_TEMPLATE_SUFFIX, BLOG_TEMPLATE_SUFFIX, store_id),
+        )
+        counts = cur.fetchone() or {}
+    return jsonify({
+        "installed": installed,
+        "outdated": outdated,
+        "version": BLOG_TEMPLATE_VERSION,
+        "pending_retrofit": int(counts.get("pending") or 0),
+        "applied": int(counts.get("applied") or 0),
+    })
+
+
+@blog_bp.route("/api/blog/push-template", methods=["POST"])
+def push_blog_template():
+    data = request.get_json(silent=True) or {}
+    store_id = data.get("store_id")
+    store, client = _get_store_client(store_id) if store_id else (None, None)
+    if not client:
+        return jsonify({"error": "Store not found"}), 404
+
+    theme_id = client.get_main_theme_id()
+    if not theme_id:
+        return jsonify({"error": "No main theme found"}), 404
+
+    visuals = visuals_with_warnings(get_article_visuals(store_id))
+    files = get_blog_theme_files(visuals["brand_color"], visuals["related_limit"])
+    try:
+        # Section first, then the template that references it.
+        client.upsert_theme_asset(theme_id, BLOG_SECTION_FILE, files[BLOG_SECTION_FILE])
+        client.upsert_theme_asset(theme_id, BLOG_TEMPLATE_FILE, files[BLOG_TEMPLATE_FILE])
+    except Exception as e:
+        logger.exception("Failed to push blog template: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+    return jsonify({
+        "success": True,
+        "installed": True,
+        "version": BLOG_TEMPLATE_VERSION,
+        "warnings": visuals["link_color_warnings"],
+    })
+
+
+@blog_bp.route("/api/blog/revert-template", methods=["POST"])
+def revert_blog_template():
+    data = request.get_json(silent=True) or {}
+    store_id = data.get("store_id")
+    store, client = _get_store_client(store_id) if store_id else (None, None)
+    if not client:
+        return jsonify({"error": "Store not found"}), 404
+
+    theme_id = client.get_main_theme_id()
+    if not theme_id:
+        return jsonify({"error": "No main theme found"}), 404
+
+    # Clear templateSuffix on every article using it first, so a missing
+    # template file can never break a live article.
+    with db.get_cursor() as cur:
+        cur.execute(
+            "SELECT shopify_id FROM synced_articles WHERE store_id = %s AND COALESCE(template_suffix, '') = %s",
+            (store_id, BLOG_TEMPLATE_SUFFIX),
+        )
+        ids = [r["shopify_id"] for r in cur.fetchall()]
+    cleared_ids = []
+    for sid in ids:
+        try:
+            client.update_article(sid, {"template_suffix": ""})
+            cleared_ids.append(sid)
+        except Exception as e:
+            logger.warning("Failed to clear template_suffix on %s: %s", sid, e)
+    if cleared_ids:
+        with db.get_cursor() as cur:
+            placeholders = ",".join(["%s"] * len(cleared_ids))
+            cur.execute(
+                f"UPDATE synced_articles SET template_suffix = '' WHERE store_id = %s AND shopify_id IN ({placeholders})",
+                (store_id, *cleared_ids),
+            )
+    if len(cleared_ids) < len(ids):
+        return jsonify({
+            "error": f"Cleared template on {len(cleared_ids)}/{len(ids)} articles — fix the failures and retry before removing the template files",
+        }), 502
+
+    try:
+        client.delete_theme_asset(theme_id, BLOG_TEMPLATE_FILE)
+        client.delete_theme_asset(theme_id, BLOG_SECTION_FILE)
+    except Exception as e:
+        logger.exception("Failed to delete blog template files: %s", e)
+        return jsonify({"error": str(e)}), 500
+    return jsonify({"success": True, "cleared": len(cleared_ids)})
+
+
+def _apply_template_to_article(client, article_row):
+    """Set templateSuffix='blog' on one Shopify article and mirror it locally."""
+    client.update_article(article_row["shopify_id"], {"template_suffix": BLOG_TEMPLATE_SUFFIX})
+    with db.get_cursor() as cur:
+        cur.execute(
+            "UPDATE synced_articles SET template_suffix = %s WHERE id = %s",
+            (BLOG_TEMPLATE_SUFFIX, article_row["id"]),
+        )
+
+
+@blog_bp.route("/api/blog/articles/<int:article_id>/apply-template", methods=["POST"])
+def apply_template_to_article(article_id):
+    with db.get_cursor() as cur:
+        cur.execute("SELECT id, store_id, shopify_id FROM synced_articles WHERE id = %s", (article_id,))
+        article = cur.fetchone()
+    if not article:
+        return jsonify({"error": "Article not found"}), 404
+    store, client = _get_store_client(article["store_id"])
+    if not client:
+        return jsonify({"error": "Store not found"}), 404
+    try:
+        _, installed, _ = _blog_template_state(client)
+    except Exception as e:
+        return jsonify({"error": f"Could not read theme: {e}"}), 502
+    if not installed:
+        return jsonify({"error": "Install the blog article template first"}), 409
+    try:
+        _apply_template_to_article(client, article)
+    except Exception as e:
+        logger.exception("Apply template failed for article %s: %s", article_id, e)
+        return jsonify({"error": str(e)}), 502
+    return jsonify({"success": True, "template_suffix": BLOG_TEMPLATE_SUFFIX})
+
+
+@blog_bp.route("/api/blog/retrofit-template", methods=["POST"])
+def retrofit_blog_template():
+    """Apply templateSuffix='blog' to every blog article not yet using it.
+    Content is untouched — this only switches the storefront layout."""
+    data = request.get_json(silent=True) or {}
+    store_id = data.get("store_id")
+    store, client = _get_store_client(store_id) if store_id else (None, None)
+    if not client:
+        return jsonify({"error": "Store not found"}), 404
+    try:
+        _, installed, _ = _blog_template_state(client)
+    except Exception as e:
+        return jsonify({"error": f"Could not read theme: {e}"}), 502
+    if not installed:
+        return jsonify({"error": "Install the blog article template first"}), 409
+
+    with db.get_cursor() as cur:
+        cur.execute(
+            """SELECT id, shopify_id, title FROM synced_articles
+               WHERE store_id = %s AND article_type = 'blog'
+                 AND COALESCE(template_suffix, '') <> %s
+                 AND COALESCE(tags, '') NOT ILIKE '%%landing-page%%'
+               ORDER BY id""",
+            (store_id, BLOG_TEMPLATE_SUFFIX),
+        )
+        articles = [dict(r) for r in cur.fetchall()]
+        cur.execute(
+            """INSERT INTO ai_tasks (store_id, task_type, status, input)
+               VALUES (%s, 'blog_template_retrofit', 'pending', %s) RETURNING id""",
+            (store_id, json.dumps({"total": len(articles)})),
+        )
+        task_id = cur.fetchone()["id"]
+
+    def _run():
+        with db.get_cursor() as cur:
+            cur.execute("UPDATE ai_tasks SET status = 'running' WHERE id = %s", (task_id,))
+        updated, failed = 0, []
+        for art in articles:
+            try:
+                _apply_template_to_article(client, art)
+                updated += 1
+            except Exception as e:
+                logger.warning("Retrofit failed for article %s: %s", art["id"], e)
+                failed.append({"id": art["id"], "title": art.get("title"), "error": str(e)})
+        result = {"total": len(articles), "updated": updated, "failed": failed}
+        with db.get_cursor() as cur:
+            cur.execute(
+                "UPDATE ai_tasks SET status = 'completed', result = %s, completed_at = NOW() WHERE id = %s",
+                (json.dumps(result), task_id),
+            )
+
+    from app.services.task_runner import spawn as spawn_task
+
+    spawn_task("ai_tasks", task_id, _run)
+    return jsonify({"task_id": task_id, "total": len(articles)})
+
+
+# ── Restyle an existing article into the visual format ──────────
+
+@blog_bp.route("/api/blog/articles/<int:article_id>/restyle", methods=["POST"])
+def restyle_article(article_id):
+    """Background: rewrite structure (blocks/FAQ/tokens), generate inline images,
+    compose. Nothing is written to Shopify until /restyle/apply."""
+    with db.get_cursor() as cur:
+        cur.execute("SELECT * FROM synced_articles WHERE id = %s", (article_id,))
+        article = cur.fetchone()
+    if not article:
+        return jsonify({"error": "Article not found"}), 404
+    store, client = _get_store_client(article["store_id"])
+    if not client:
+        return jsonify({"error": "Store not found"}), 404
+
+    with db.get_cursor() as cur:
+        cur.execute(
+            """INSERT INTO ai_tasks (store_id, task_type, status, input)
+               VALUES (%s, 'article_restyle', 'pending', %s) RETURNING id""",
+            (article["store_id"], json.dumps({"article_id": article_id, "title": article.get("title")})),
+        )
+        task_id = cur.fetchone()["id"]
+
+    def _run():
+        from app.ai_agent import run_task as ai_run_task
+        from app.services.ai_output_guard import restore_missing_figures, restore_missing_images, sanitize_html
+        from app.services.article_media import compose_article_body, count_figures, faq_jsonld_string
+
+        with db.get_cursor() as cur:
+            cur.execute("UPDATE ai_tasks SET status = 'running' WHERE id = %s", (task_id,))
+        result = ai_run_task("article_restyle", {"article_id": article_id}, store_id=article["store_id"])
+        if not isinstance(result, dict) or result.get("error") or not result.get("body_html"):
+            raise Exception((result or {}).get("error") or "Restyle returned no body")
+
+        visuals = get_article_visuals(article["store_id"])
+        media_plan = result.get("media_plan") or {}
+        inline_images = []
+        if media_plan.get("inline"):
+            try:
+                inline_images = _generate_article_media(
+                    article["store_id"], client, media_plan, article.get("handle") or article.get("title") or "article"
+                )
+            except Exception as e:
+                logger.warning("Restyle media generation failed for article %s: %s", article_id, e)
+
+        hero = None
+        if not article.get("image_url") and (media_plan.get("hero") or {}).get("prompt"):
+            try:
+                from app.services.article_media import upload_image_to_cdn
+                from app.services.image_generator import generate_article_hero_image
+
+                hero_spec = media_plan["hero"]
+                gen = generate_article_hero_image(article.get("title") or "", hero_spec.get("prompt"), hero_spec.get("alt"))
+                if gen:
+                    image_bytes, filename, alt_text, width, height = gen
+                    hero = {"image_url": upload_image_to_cdn(client, image_bytes, filename, alt_text), "image_alt": alt_text}
+            except Exception as e:
+                logger.warning("Restyle hero generation failed for article %s: %s", article_id, e)
+
+        original = article.get("body") or ""
+        body = compose_article_body(result["body_html"], inline_images, visuals)
+        body = restore_missing_figures(original, body)
+        body = restore_missing_images(original, body)
+        body = sanitize_html(body)
+        payload = {
+            "article_id": article_id,
+            "body_html": body,
+            "inline_images": inline_images,
+            "media_plan": media_plan,
+            "faq_jsonld": faq_jsonld_string(body),
+            "hero": hero,
+            "stats": {
+                "before_words": len(re.sub(r"<[^>]+>", " ", original).split()),
+                "after_words": len(re.sub(r"<[^>]+>", " ", body).split()),
+                "before_figures": count_figures(original),
+                "after_figures": count_figures(body),
+                "ready_images": len([i for i in inline_images if i.get("status") == "ready"]),
+            },
+            "_qa": result.get("_qa"),
+        }
+        with db.get_cursor() as cur:
+            cur.execute(
+                "UPDATE ai_tasks SET status = 'completed', result = %s, completed_at = NOW() WHERE id = %s",
+                (json.dumps(payload), task_id),
+            )
+
+    from app.services.task_runner import spawn as spawn_task
+
+    spawn_task("ai_tasks", task_id, _run)
+    return jsonify({"task_id": task_id})
+
+
+@blog_bp.route("/api/blog/articles/<int:article_id>/restyle/apply", methods=["POST"])
+def apply_restyle(article_id):
+    data = request.get_json(silent=True) or {}
+    task_id = data.get("task_id")
+    with db.get_cursor() as cur:
+        cur.execute("SELECT * FROM synced_articles WHERE id = %s", (article_id,))
+        article = cur.fetchone()
+        cur.execute("SELECT result, status FROM ai_tasks WHERE id = %s AND task_type = 'article_restyle'", (task_id,))
+        task = cur.fetchone()
+    if not article:
+        return jsonify({"error": "Article not found"}), 404
+    if not task or task.get("status") != "completed" or not task.get("result"):
+        return jsonify({"error": "Restyle result not ready"}), 409
+    payload = task["result"]
+    if isinstance(payload, str):
+        payload = json.loads(payload)
+    if payload.get("article_id") != article_id:
+        return jsonify({"error": "Restyle result belongs to a different article"}), 400
+    store, client = _get_store_client(article["store_id"])
+    if not client:
+        return jsonify({"error": "Store not found"}), 404
+
+    body = data.get("body_html") or payload.get("body_html") or ""
+    fields = {"body": body, "template_suffix": BLOG_TEMPLATE_SUFFIX}
+    hero = payload.get("hero") or {}
+    if hero.get("image_url") and not article.get("image_url"):
+        fields["image_url"] = hero["image_url"]
+        fields["image_alt"] = hero.get("image_alt") or article.get("title") or ""
+    guard_shopify_fields(fields)
+    try:
+        client.update_article(article["shopify_id"], fields)
+        faq_json = payload.get("faq_jsonld")
+        if faq_json:
+            try:
+                client.set_article_metafields(article["shopify_id"], [("global", "faq_jsonld", faq_json, "json")])
+            except Exception as e:
+                logger.warning("FAQ metafield write failed for article %s: %s", article_id, e)
+    except Exception as e:
+        logger.exception("Restyle apply failed for article %s: %s", article_id, e)
+        return jsonify({"error": str(e)}), 502
+
+    with db.get_cursor() as cur:
+        cur.execute(
+            """UPDATE synced_articles SET body = %s, template_suffix = %s,
+                   image_url = COALESCE(NULLIF(%s, ''), image_url),
+                   image_alt = CASE WHEN %s <> '' THEN %s ELSE image_alt END,
+                   last_optimized_at = NOW()
+               WHERE id = %s""",
+            (fields["body"], BLOG_TEMPLATE_SUFFIX, fields.get("image_url", ""), fields.get("image_alt", ""), fields.get("image_alt", ""), article_id),
+        )
+    return jsonify({"success": True, "template_suffix": BLOG_TEMPLATE_SUFFIX, "figures": payload.get("stats", {}).get("after_figures")})
 
 
 @blog_bp.route("/api/blog/push-seo-snippet", methods=["POST"])

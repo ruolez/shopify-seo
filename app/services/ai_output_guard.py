@@ -136,3 +136,51 @@ def validate_injected_html(original_html, new_html, expected_hrefs=None, min_len
         )
 
     return True, ""
+
+
+_FIGURE_BLOCK_RE = re.compile(r"<figure\b[^>]*>.*?</figure>", re.IGNORECASE | re.DOTALL)
+_IMG_SRC_RE = re.compile(r'<img\b[^>]*\bsrc\s*=\s*["\']([^"\']+)["\']', re.IGNORECASE)
+_H2_OPEN_RE = re.compile(r"<h2\b[^>]*>", re.IGNORECASE)
+
+
+def restore_missing_figures(original_html, new_html):
+    """Per-figure guard for article rewrites: any <figure> from the original
+    whose image src is missing from the rewrite is re-inserted just before the
+    first H2 that followed it in the original (so it stays in its section);
+    falls back to the FAQ section start, then to the end of the body.
+
+    Unlike restore_missing_images (all-or-nothing, collection heroes), this
+    tracks each inline figure individually — a rewrite that keeps the hero but
+    drops two of three inline figures still gets them back."""
+    if not original_html or not new_html:
+        return new_html
+    figures = list(_FIGURE_BLOCK_RE.finditer(original_html))
+    if not figures:
+        return new_html
+    out = new_html
+    for fig in figures:
+        block = fig.group(0)
+        src_m = _IMG_SRC_RE.search(block)
+        if not src_m:
+            continue
+        src = src_m.group(1)
+        if src in out:
+            continue
+        # Heading text of the next H2 after the figure in the original.
+        after = original_html[fig.end():]
+        h2 = re.search(r"<h2\b[^>]*>(.*?)</h2>", after, re.IGNORECASE | re.DOTALL)
+        anchor_text = re.sub(r"<[^>]+>", "", h2.group(1)).strip() if h2 else ""
+        faq = re.search(r'<section\b[^>]*class="[^"]*a2z-blog__faq', out, re.IGNORECASE)
+        faq_start = faq.start() if faq else len(out)
+        inserted = False
+        if anchor_text:
+            for m in re.finditer(r"<h2\b[^>]*>(.*?)</h2>", out, re.IGNORECASE | re.DOTALL):
+                if re.sub(r"<[^>]+>", "", m.group(1)).strip() == anchor_text:
+                    # Never land inside the FAQ section — stop at its opening tag.
+                    pos = min(m.start(), faq_start)
+                    out = out[:pos] + block + out[pos:]
+                    inserted = True
+                    break
+        if not inserted:
+            out = out[:faq_start] + block + out[faq_start:]
+    return out

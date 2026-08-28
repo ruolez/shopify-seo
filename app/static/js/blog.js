@@ -85,6 +85,8 @@ async function loadArticles() {
         loadEmptyBlogsStatus();
         loadBlogSeoCard();
         loadSeoSnippetStatus();
+        loadBlogTemplateStatus();
+        loadVisualSettings();
     } catch (err) {
         container.innerHTML = `<div class="empty-state"><p>${escapeHtml(err.message)}</p></div>`;
     }
@@ -143,17 +145,22 @@ function renderArticlesTable(container, articles) {
     html += '<th class="checkbox-col"><input type="checkbox" class="table-checkbox" id="select-all-articles" onchange="toggleSelectAllArticles(this)"></th>';
     html += '<th class="row-num-col">#</th>';
 
+    const gscWindow = (currentArticles.find((a) => a.gsc_window) || {}).gsc_window;
+    const gscLabel = gscWindow ? `${gscWindow.days}d` : "GSC";
     const columns = [
         { key: "title", label: "Title", sortable: true },
         { key: "status", label: "Status", sortable: true },
-        { key: "seo_score", label: "SEO Score", sortable: false },
+        { key: "created_at", label: "Created", sortable: true },
+        { key: "seo_score", label: "SEO Score", sortable: true },
+        { key: "gsc_clicks", label: `Clicks (${gscLabel})`, sortable: true, title: gscWindow ? `Google Search Console, ${gscWindow.from} → ${gscWindow.to}` : "Connect Google Search Console to see clicks" },
+        { key: "gsc_impressions", label: `Impressions (${gscLabel})`, sortable: true, title: gscWindow ? `Google Search Console, ${gscWindow.from} → ${gscWindow.to}` : "Connect Google Search Console to see impressions" },
         { key: "last_optimized_at", label: "Last Optimized", sortable: true },
     ];
 
     columns.forEach((col) => {
         if (col.sortable) {
             const arrow = articleSort.by === col.key ? (articleSort.dir === "asc" ? " ↑" : " ↓") : "";
-            html += `<th class="sortable" onclick="sortArticles('${col.key}')">${col.label}${arrow}</th>`;
+            html += `<th class="sortable" onclick="sortArticles('${col.key}')" ${col.title ? `title="${escapeHtml(col.title)}"` : ""}>${col.label}${arrow}</th>`;
         } else {
             html += `<th>${col.label}</th>`;
         }
@@ -173,13 +180,21 @@ function renderArticlesTable(container, articles) {
             <td class="row-num-col">${i + 1}</td>
             <td><strong>${escapeHtml(a.title)}</strong></td>
             <td>${statusBadge}</td>
+            <td style="white-space:nowrap;">${formatOptimizedDate(a.created_at_display)}</td>
             <td><span class="score-inline">${getScoreBadge(a.seo_score)}${getScoreBarMini(a.seo_score)}</span></td>
+            <td style="text-align:right;">${formatGscMetric(a.gsc_clicks)}</td>
+            <td style="text-align:right;">${formatGscMetric(a.gsc_impressions)}${a.gsc_position ? ` <span style="font-size:11px;color:var(--on-surface-secondary);" title="Average position">#${a.gsc_position}</span>` : ""}</td>
             <td>${formatOptimizedDate(a.last_optimized_at)}</td>
         </tr>`;
     });
 
     html += "</tbody></table></div>";
     container.innerHTML = html;
+}
+
+function formatGscMetric(value) {
+    if (value === null || value === undefined) return '<span style="color: var(--on-surface-secondary);">—</span>';
+    return Number(value).toLocaleString();
 }
 
 function formatOptimizedDate(dateStr) {
@@ -291,7 +306,8 @@ function renderArticleDetail(container, article) {
         word_count: "Word Count",
         headings: "Heading Structure",
         internal_links: "Internal Links",
-        image: "Featured Image",
+        image: "Images",
+        structure: "Structure (table / FAQ)",
         summary: "Summary/Excerpt",
     };
     for (const [key, label] of Object.entries(labels)) {
@@ -350,8 +366,13 @@ function renderArticleDetail(container, article) {
                             <span class="material-symbols-rounded">link</span>
                             Refresh Links
                         </button>
+                        <button class="btn btn-secondary" onclick="restyleArticle(${article.id}, this)" title="Upgrade this post to the visual format: takeaways, tables/steps, FAQ, inline AI images. Facts and links are preserved. You review before anything is applied.">
+                            <span class="material-symbols-rounded">auto_fix_high</span>
+                            Regenerate with new style
+                        </button>
                     </div>
                     <div id="refresh-links-panel-container"></div>
+                    <div id="restyle-panel-container"></div>
                 </div>
             </div>
             <div style="overflow-y: auto;">
@@ -375,6 +396,14 @@ function renderArticleDetail(container, article) {
                     <p><strong>Author:</strong> ${escapeHtml(article.author || "")}</p>
                     <p><strong>Status:</strong> ${article.is_published ? "Published" : "Draft"}</p>
                     <p><strong>Store:</strong> ${escapeHtml(article.store_name || "")}</p>
+                    <p><strong>Layout:</strong> ${article.template_suffix === "blog"
+                        ? '<span class="badge badge-success">Styled template</span>'
+                        : '<span class="badge">Theme default</span>'}</p>
+                    ${article.template_suffix !== "blog" ? `
+                    <button class="btn btn-secondary btn-sm" onclick="applyTemplateToArticle(${article.id}, this)" title="Switch this post to the styled article template (colored links, layout). Content is not changed.">
+                        <span class="material-symbols-rounded">palette</span>
+                        Apply styled template
+                    </button>` : ""}
                 </div>
                 <div id="article-ai-result" style="margin-top: 16px;"></div>
             </div>
@@ -415,6 +444,81 @@ async function regenerateArticleImage(articleId, btn) {
         showToast(`Failed to start: ${err.message}`, "error");
         btn.disabled = false;
         btn.innerHTML = idle;
+    }
+}
+
+// ── Restyle existing article (visual format) ─────────────────────
+
+async function restyleArticle(articleId, btn) {
+    const panel = document.getElementById("restyle-panel-container");
+    if (btn) btn.disabled = true;
+    panel.innerHTML = '<div class="card" style="margin-top: 12px;"><div class="loading-spinner"><div class="spinner"></div><p>Restructuring the article and generating inline images… this takes 1–3 minutes.</p></div></div>';
+    try {
+        const res = await apiRequest(`/api/blog/articles/${articleId}/restyle`, { method: "POST", body: {} });
+        const interval = setInterval(async () => {
+            try {
+                const task = await apiRequest(`/api/tasks/${res.task_id}`);
+                if (task.status === "completed") {
+                    clearInterval(interval);
+                    if (btn) btn.disabled = false;
+                    renderRestylePreview(articleId, res.task_id, task.result || {});
+                } else if (task.status === "failed") {
+                    clearInterval(interval);
+                    if (btn) btn.disabled = false;
+                    panel.innerHTML = `<div class="card" style="margin-top: 12px; border-left: 3px solid var(--error);"><p style="margin:0;">Restyle failed: ${escapeHtml(task.error || "Unknown error")}</p></div>`;
+                }
+            } catch { clearInterval(interval); if (btn) btn.disabled = false; }
+        }, 3000);
+    } catch (err) {
+        showToast(err.message, "error");
+        if (btn) btn.disabled = false;
+        panel.innerHTML = "";
+    }
+}
+
+async function renderRestylePreview(articleId, taskId, result) {
+    await ensureArticlePreviewCss();
+    const panel = document.getElementById("restyle-panel-container");
+    const st = result.stats || {};
+    const qa = (result._qa && result._qa.anchors) ? result._qa.anchors : null;
+    panel.innerHTML = `
+        <div class="card" style="margin-top: 12px;">
+            <div style="display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap;">
+                <div>
+                    <h4 style="margin: 0;">Restyled preview</h4>
+                    <p style="margin: 4px 0 0; font-size: 13px; color: var(--on-surface-secondary);">
+                        ${st.before_words || 0} → ${st.after_words || 0} words · ${st.before_figures || 0} → ${st.after_figures || 0} in-body images
+                        ${result.hero ? " · new hero image" : ""}
+                        ${qa ? ` · ${(qa.violations || []).length} anchor issue(s) fixed` : ""}
+                    </p>
+                </div>
+                <div style="display: flex; gap: 8px;">
+                    <button class="btn btn-secondary btn-sm" onclick="document.getElementById('restyle-panel-container').innerHTML=''">Discard</button>
+                    <button class="btn btn-primary btn-sm" onclick="applyRestyle(${articleId}, ${taskId}, this)">
+                        <span class="material-symbols-rounded">publish</span>
+                        Apply to Shopify
+                    </button>
+                </div>
+            </div>
+            <p style="font-size: 12px; color: var(--on-surface-secondary); margin: 8px 0;">Applying updates the body, switches the post to the styled template and writes FAQ schema. Facts and links were preserved; images that failed to generate are simply omitted.</p>
+            ${result.hero && result.hero.image_url ? `<img src="${escapeHtml(result.hero.image_url)}" alt="${escapeHtml(result.hero.image_alt || "")}" style="max-width: 320px; border-radius: 8px; margin-bottom: 8px;">` : ""}
+            <div class="a2z-blog" style="max-height: 520px; overflow-y: auto; border: 1px solid var(--outline); border-radius: 8px; padding: 16px; background: #fff; color: #1f2937;">
+                <div class="a2z-blog__body" id="restyle-preview-body"></div>
+            </div>
+        </div>`;
+    document.getElementById("restyle-preview-body").innerHTML = result.body_html || "";
+}
+
+async function applyRestyle(articleId, taskId, btn) {
+    if (btn) btn.disabled = true;
+    try {
+        const res = await apiRequest(`/api/blog/articles/${articleId}/restyle/apply`, { method: "POST", body: { task_id: taskId } });
+        showToast(`Restyled article applied (${res.figures || 0} in-body images)`, "success");
+        openArticleDetail(articleId);
+        loadArticles();
+    } catch (err) {
+        showToast(err.message, "error");
+        if (btn) btn.disabled = false;
     }
 }
 
@@ -980,9 +1084,11 @@ async function wizardStartResearch() {
     if (!storeId) { showToast("No store found", "error"); return; }
 
     try {
+        const styleEl = document.querySelector('input[name="wizard-style"]:checked');
+        const style = styleEl ? styleEl.value : undefined;
         const { session_id, keyword_warning } = await apiRequest("/api/blog/wizard/start", {
             method: "POST",
-            body: { store_id: storeId, topic, keywords },
+            body: { store_id: storeId, topic, keywords, style },
         });
         currentWizardSession = session_id;
         if (keyword_warning) showToast(keyword_warning, "warning");
@@ -1498,13 +1604,252 @@ async function renderGeneratedArticle(sessionId) {
     html += "</div>";
     container.innerHTML = html;
 
-    showWizardStep(5);
-    renderReview(sessionId);
+    if (session.style === "classic") {
+        showWizardStep(6);
+        renderReview(sessionId);
+    } else {
+        showWizardStep(5);
+        renderVisuals(sessionId);
+    }
 }
 
 async function wizardReview() {
-    showWizardStep(5);
+    showWizardStep(6);
     if (currentWizardSession) renderReview(currentWizardSession);
+}
+
+async function wizardVisuals() {
+    showWizardStep(5);
+    if (currentWizardSession) renderVisuals(currentWizardSession);
+}
+
+// ── Visuals step (hero + inline images) ──────────────────────────
+
+function _heroCardHtml(featuredImageUrl, featuredAlt) {
+    return featuredImageUrl
+        ? `<img src="${escapeHtml(featuredImageUrl)}" alt="${escapeHtml(featuredAlt || "Featured image")}" style="width: 100%; border-radius: 8px; margin-bottom: 8px;">
+           ${featuredAlt ? `<small style="display:block; color: var(--on-surface-secondary); margin-bottom: 8px;">Alt: ${escapeHtml(featuredAlt)}</small>` : ""}
+           <button class="btn btn-secondary" onclick="wizardGenerateImage()" style="width: 100%;">
+               <span class="material-symbols-rounded">refresh</span>
+               Regenerate Hero
+           </button>`
+        : `<div style="border: 2px dashed var(--outline); border-radius: 8px; padding: 24px; text-align: center;">
+               <span class="material-symbols-rounded" style="font-size: 40px; color: var(--on-surface-secondary);">image</span>
+               <p style="color: var(--on-surface-secondary); font-size: 13px; margin: 8px 0 0;">AI hero image from the media plan — no text baked in</p>
+           </div>
+           <button class="btn btn-primary" onclick="wizardGenerateImage()" style="width: 100%; margin-top: 12px;">
+               <span class="material-symbols-rounded">auto_awesome</span>
+               Generate Hero Image
+           </button>`;
+}
+
+function _inlineStatusBadge(entry) {
+    if (!entry) return '<span class="badge">Not generated</span>';
+    if (entry.status === "ready") return '<span class="badge badge-success">Ready</span>';
+    if (entry.status === "failed") return `<span class="badge badge-error" title="${escapeHtml(entry.error || "")}">Failed</span>`;
+    if (entry.status === "skipped") return `<span class="badge badge-warning" title="${escapeHtml(entry.error || "")}">Skipped</span>`;
+    return '<span class="badge">Pending</span>';
+}
+
+async function renderVisuals(sessionId) {
+    const session = await apiRequest(`/api/blog/wizard/${sessionId}`);
+    const container = document.getElementById("visuals-content");
+    const plan = session.media_plan || {};
+    const hero = plan.hero || {};
+    const inline = plan.inline || [];
+    const images = session.inline_images || [];
+    const byToken = {};
+    images.forEach((e) => { if (e && e.token) byToken[e.token] = e; });
+    const readyCount = images.filter((e) => e.status === "ready").length;
+    const isBusy = session.status === "generating_media";
+
+    let cards = "";
+    if (!inline.length) {
+        cards = `<div class="card"><p style="margin: 0; color: var(--on-surface-secondary); font-size: 13px;">No inline images were planned for this article (check "Inline images per article" in Article Design settings, then regenerate the outline).</p></div>`;
+    }
+    inline.forEach((spec, i) => {
+        const entry = byToken[spec.token];
+        const idx = i + 1;
+        cards += `
+        <div class="card" style="margin-top: 12px;" data-inline-idx="${idx}">
+            <div style="display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap;">
+                <div>
+                    <strong>Image ${idx}</strong>
+                    <span class="badge" style="margin-left: 6px;">${escapeHtml(spec.kind || "scene")}</span>
+                    ${(spec.product_handles || []).length ? `<span class="badge" style="margin-left: 4px;" title="Real product photos used as reference">${(spec.product_handles || []).length} product ref</span>` : ""}
+                    <div style="font-size: 12px; color: var(--on-surface-secondary); margin-top: 2px;">Section: ${escapeHtml(spec.section || "—")}</div>
+                </div>
+                ${_inlineStatusBadge(entry)}
+            </div>
+            <div style="display: grid; grid-template-columns: 220px 1fr; gap: 14px; margin-top: 12px; align-items: start;">
+                <div>
+                    ${entry && entry.cdn_url
+                        ? `<img src="${escapeHtml(entry.cdn_url)}" alt="${escapeHtml(entry.alt || "")}" style="width: 100%; border-radius: 8px; border: 1px solid var(--outline);">`
+                        : `<div style="border: 2px dashed var(--outline); border-radius: 8px; height: 150px; display: flex; align-items: center; justify-content: center; color: var(--on-surface-secondary);"><span class="material-symbols-rounded" style="font-size: 36px;">image</span></div>`}
+                </div>
+                <div>
+                    <div class="form-group" style="margin-bottom: 8px;">
+                        <label style="font-size: 12px;">Image brief (what to depict)</label>
+                        <textarea class="form-control" rows="2" style="font-size: 13px;" data-media-field="prompt" data-media-idx="${idx}">${escapeHtml(spec.prompt || "")}</textarea>
+                    </div>
+                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px;">
+                        <div class="form-group" style="margin-bottom: 8px;">
+                            <label style="font-size: 12px;">Alt text</label>
+                            <input type="text" class="form-control" style="font-size: 13px;" maxlength="125" data-media-field="alt" data-media-idx="${idx}" value="${escapeHtml(spec.alt || "")}">
+                        </div>
+                        <div class="form-group" style="margin-bottom: 8px;">
+                            <label style="font-size: 12px;">Caption</label>
+                            <input type="text" class="form-control" style="font-size: 13px;" data-media-field="caption" data-media-idx="${idx}" value="${escapeHtml(spec.caption || "")}">
+                        </div>
+                    </div>
+                    <button class="btn btn-secondary btn-sm" onclick="regenerateInlineImage(${idx}, this)" ${isBusy ? "disabled" : ""}>
+                        <span class="material-symbols-rounded">${entry && entry.cdn_url ? "refresh" : "auto_awesome"}</span>
+                        ${entry && entry.cdn_url ? "Regenerate" : "Generate"}
+                    </button>
+                </div>
+            </div>
+        </div>`;
+    });
+
+    const estimate = (inline.length + (session.featured_image_url ? 0 : 1)) * 0.05;
+    container.innerHTML = `
+    <div style="display: grid; grid-template-columns: 1fr 340px; gap: 24px; align-items: start;">
+        <div>
+            <div class="card">
+                <div style="display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap;">
+                    <div>
+                        <h4 style="margin: 0;">Inline images</h4>
+                        <p style="margin: 4px 0 0; font-size: 13px; color: var(--on-surface-secondary);">
+                            ${readyCount}/${inline.length} ready · placed inside the sections named below · ~$${estimate.toFixed(2)} per full run
+                        </p>
+                    </div>
+                    <div style="display: flex; gap: 8px;">
+                        <button class="btn btn-secondary btn-sm" onclick="saveMediaPlanEdits()" title="Save edited briefs, alts and captions">
+                            <span class="material-symbols-rounded">save</span>
+                            Save plan
+                        </button>
+                        <button class="btn btn-primary btn-sm" id="generate-all-media-btn" onclick="generateAllInlineImages()" ${isBusy || !inline.length ? "disabled" : ""}>
+                            <span class="material-symbols-rounded">auto_awesome</span>
+                            ${readyCount ? "Generate missing" : "Generate all"}
+                        </button>
+                    </div>
+                </div>
+                ${isBusy ? '<div class="loading-spinner" style="margin-top: 12px;"><div class="spinner"></div><p>Generating images… this takes about 30s per image.</p></div>' : ""}
+            </div>
+            ${cards}
+        </div>
+        <div>
+            <div class="card">
+                <h4>Hero image</h4>
+                ${hero.prompt ? `<p style="font-size: 12px; color: var(--on-surface-secondary); margin: 0 0 10px;">Brief: ${escapeHtml(hero.prompt)}</p>` : ""}
+                <div id="featured-image-container">${_heroCardHtml(session.featured_image_url, session.featured_image_alt)}</div>
+            </div>
+            <div class="card" style="margin-top: 16px;">
+                <h4>Next</h4>
+                <p style="font-size: 13px; color: var(--on-surface-secondary);">Images that fail are simply left out — the article never ships a broken marker. You can also come back here after review.</p>
+                <button class="btn btn-primary" onclick="wizardReview()" style="width: 100%;">
+                    <span class="material-symbols-rounded">rate_review</span>
+                    Continue to Review
+                </button>
+            </div>
+        </div>
+    </div>`;
+
+    if (isBusy) {
+        pollWizardSession(sessionId, session.shopify_article_id ? "published" : "generated", () => renderVisuals(sessionId));
+    }
+}
+
+function _collectMediaPlanEdits() {
+    const plan = {};
+    document.querySelectorAll("[data-media-field]").forEach((el) => {
+        const idx = el.dataset.mediaIdx;
+        plan[idx] = plan[idx] || {};
+        plan[idx][el.dataset.mediaField] = el.value;
+    });
+    return plan;
+}
+
+async function saveMediaPlanEdits(silent = false) {
+    if (!currentWizardSession) return null;
+    const session = await apiRequest(`/api/blog/wizard/${currentWizardSession}`);
+    const plan = session.media_plan || { hero: {}, inline: [] };
+    const edits = _collectMediaPlanEdits();
+    (plan.inline || []).forEach((spec, i) => {
+        const e = edits[String(i + 1)];
+        if (e) Object.assign(spec, e);
+    });
+    try {
+        const res = await apiRequest(`/api/blog/wizard/${currentWizardSession}/media-plan`, { method: "PUT", body: { media_plan: plan } });
+        if (!silent) showToast("Media plan saved", "success");
+        return res.media_plan;
+    } catch (err) {
+        showToast(err.message, "error");
+        return null;
+    }
+}
+
+async function generateAllInlineImages() {
+    if (!currentWizardSession) return;
+    const sessionId = currentWizardSession;
+    await saveMediaPlanEdits(true);
+    const btn = document.getElementById("generate-all-media-btn");
+    if (btn) btn.disabled = true;
+    try {
+        await apiRequest(`/api/blog/wizard/${sessionId}/generate-media`, { method: "POST" });
+        showToast("Generating inline images…", "info");
+        renderVisuals(sessionId);
+    } catch (err) {
+        showToast(err.message, "error");
+        if (btn) btn.disabled = false;
+    }
+}
+
+async function regenerateInlineImage(index, btn) {
+    if (!currentWizardSession) return;
+    const sessionId = currentWizardSession;
+    const edits = _collectMediaPlanEdits()[String(index)] || {};
+    if (btn) btn.disabled = true;
+    try {
+        await apiRequest(`/api/blog/wizard/${sessionId}/media/${index}/regenerate`, { method: "POST", body: edits });
+        showToast(`Generating image ${index}…`, "info");
+        renderVisuals(sessionId);
+    } catch (err) {
+        showToast(err.message, "error");
+        if (btn) btn.disabled = false;
+    }
+}
+
+// ── Styled preview (same CSS the theme template ships) ───────────
+
+let articleCssCache = null;
+async function ensureArticlePreviewCss() {
+    if (document.getElementById("a2z-preview-css")) return;
+    try {
+        const storeId = getSelectedStoreId() || (await getFirstStoreId());
+        const resp = await fetch(`/api/blog/article-css?store_id=${storeId}`);
+        articleCssCache = await resp.text();
+        const style = document.createElement("style");
+        style.id = "a2z-preview-css";
+        // Scope to the preview containers only.
+        style.textContent = articleCssCache;
+        document.head.appendChild(style);
+    } catch (e) {
+        console.warn("preview css unavailable", e);
+    }
+}
+
+async function renderComposedPreview(sessionId, targetEl, bodyHtml) {
+    if (!targetEl) return;
+    try {
+        const res = await apiRequest(`/api/blog/wizard/${sessionId}/compose-preview`, {
+            method: "POST",
+            body: bodyHtml === undefined ? {} : { body_html: bodyHtml },
+        });
+        targetEl.innerHTML = res.body_html || "";
+    } catch (err) {
+        targetEl.innerHTML = bodyHtml || "";
+    }
 }
 
 async function renderReview(sessionId) {
@@ -1512,6 +1857,8 @@ async function renderReview(sessionId) {
     const article = session.generated_article || {};
     const container = document.getElementById("review-content");
     const featuredImageUrl = session.featured_image_url || "";
+    const isVisual = session.style !== "classic";
+    if (isVisual) await ensureArticlePreviewCss();
 
     let html = `<div style="display: grid; grid-template-columns: 1fr 350px; gap: 24px; height: calc(100vh - 250px);">
         <div style="display: flex; flex-direction: column; gap: 16px; overflow-y: auto;">
@@ -1575,15 +1922,16 @@ async function renderReview(sessionId) {
                 </div>
             </div>
             <div class="card" style="margin-top: 16px;">
-                <h4>Preview</h4>
-                <div id="review-preview" style="max-height: 400px; overflow-y: auto; border: 1px solid var(--outline); border-radius: 8px; padding: 16px;">
-                    ${article.body_html || ""}
+                <h4>Preview ${isVisual ? '<span class="badge badge-success" style="margin-left:6px;">styled</span>' : ""}</h4>
+                ${isVisual ? `<p style="font-size: 12px; color: var(--on-surface-secondary); margin: 0 0 8px;">Rendered exactly as it will publish — inline figures, table of contents and blocks included. Keep the <code>[[INLINE_IMAGE_n]]</code> markers where images should appear. <a href="#" onclick="wizardVisuals(); return false;">Edit visuals</a></p>` : ""}
+                <div class="${isVisual ? "a2z-blog" : ""}" style="max-height: 480px; overflow-y: auto; border: 1px solid var(--outline); border-radius: 8px; padding: 16px; background: #fff; color: #1f2937;">
+                    <div id="review-preview" class="${isVisual ? "a2z-blog__body" : ""}">${isVisual ? "" : (article.body_html || "")}</div>
                 </div>
             </div>
         </div>
     </div>
     <div style="margin-top: 16px; display: flex; gap: 8px; align-items: center;">
-        <p style="font-size: 13px; color: var(--on-surface-secondary); margin: 0; flex: 1;">Publishing to <strong>News</strong> blog</p>
+        <p style="font-size: 13px; color: var(--on-surface-secondary); margin: 0; flex: 1;">Publishing to <strong>News</strong> blog${isVisual ? " · styled article template" : " · classic layout"}</p>
         <button class="btn btn-primary" onclick="wizardPublish(false)">
             <span class="material-symbols-rounded">save</span>
             Save as Draft
@@ -1596,11 +1944,18 @@ async function renderReview(sessionId) {
 
     container.innerHTML = html;
 
-    // Live preview
+    // Live preview (visual: composed server-side so figures/TOC match what ships)
     const bodyTextarea = document.getElementById("review-body");
     if (bodyTextarea) {
+        let previewTimer = null;
+        if (isVisual) {
+            renderComposedPreview(sessionId, document.getElementById("review-preview"), bodyTextarea.value);
+        }
         bodyTextarea.addEventListener("input", () => {
-            document.getElementById("review-preview").innerHTML = bodyTextarea.value;
+            const target = document.getElementById("review-preview");
+            if (!isVisual) { target.innerHTML = bodyTextarea.value; return; }
+            clearTimeout(previewTimer);
+            previewTimer = setTimeout(() => renderComposedPreview(sessionId, target, bodyTextarea.value), 500);
         });
     }
 
@@ -1723,7 +2078,7 @@ async function wizardPublish(isPublished) {
                     body: { is_published: isPublished },
                 });
 
-                showWizardStep(6);
+                showWizardStep(7);
                 const publishContent = document.getElementById("publish-content");
                 publishContent.innerHTML = `
                     <div style="max-width: 500px; margin: 40px auto; text-align: center;">
@@ -2488,6 +2843,237 @@ async function loadSeoSnippetStatus() {
     }
 }
 
+// ── Article Design (visual settings + blog template) ──────────────
+
+let blogTemplateState = { installed: false, outdated: false, pending_retrofit: 0 };
+
+async function loadBlogTemplateStatus() {
+    const chip = document.getElementById("chip-blog-template");
+    const storeId = getSelectedStoreId();
+    if (!chip) return;
+    if (!storeId) { chip.style.display = "none"; return; }
+    chip.style.display = "";
+    const dot = document.getElementById("chip-blog-template-dot");
+    const statusEl = document.getElementById("blog-template-status");
+    const installBtn = document.getElementById("install-blog-template-btn");
+    const installLabel = document.getElementById("install-blog-template-label");
+    const retrofitBtn = document.getElementById("retrofit-blog-template-btn");
+    const retrofitLabel = document.getElementById("retrofit-blog-template-label");
+    const revertBtn = document.getElementById("revert-blog-template-btn");
+
+    try {
+        const status = await apiRequest(`/api/blog/template-status?store_id=${storeId}`);
+        blogTemplateState = status;
+        chip.classList.remove("chip-installed", "chip-warning");
+        if (status.installed) {
+            chip.classList.add(status.outdated ? "chip-warning" : "chip-installed");
+            chip.title = status.outdated ? "Article template update available" : "Styled article template installed";
+            if (dot) dot.style.display = status.pending_retrofit > 0 || status.outdated ? "" : "none";
+            if (statusEl) statusEl.innerHTML = `<span class="badge badge-success">Installed ${escapeHtml(status.version || "")}</span>`
+                + (status.outdated ? ' <span class="badge badge-warning">Update available</span>' : "")
+                + ` &nbsp;${status.applied || 0} post${status.applied === 1 ? "" : "s"} styled`
+                + (status.pending_retrofit > 0 ? `, <strong>${status.pending_retrofit}</strong> on theme default` : "");
+            if (installLabel) installLabel.textContent = status.outdated ? "Update Template" : "Re-push Template";
+            if (installBtn) installBtn.classList.toggle("btn-primary", !!status.outdated), installBtn.classList.toggle("btn-secondary", !status.outdated);
+            if (retrofitBtn) {
+                retrofitBtn.style.display = status.pending_retrofit > 0 ? "" : "none";
+                if (retrofitLabel) retrofitLabel.textContent = `Apply to ${status.pending_retrofit} existing post${status.pending_retrofit === 1 ? "" : "s"}`;
+            }
+            if (revertBtn) revertBtn.style.display = "";
+        } else {
+            chip.title = "Styled article template not installed — click to install";
+            if (dot) dot.style.display = "none";
+            if (statusEl) statusEl.innerHTML = '<span class="badge">Not installed</span> — new Visual posts will fall back to the theme layout until installed.';
+            if (installLabel) installLabel.textContent = "Install Template";
+            if (installBtn) { installBtn.classList.add("btn-primary"); installBtn.classList.remove("btn-secondary"); }
+            if (retrofitBtn) retrofitBtn.style.display = "none";
+            if (revertBtn) revertBtn.style.display = "none";
+        }
+    } catch (err) {
+        chip.classList.remove("chip-installed", "chip-warning");
+        chip.title = "";
+        if (statusEl) statusEl.textContent = `Could not read theme: ${err.message}`;
+    }
+}
+
+function onBlogTemplateChipClick() {
+    if (!blogTemplateState.installed) { installBlogTemplate(); return; }
+    const panel = document.getElementById("blog-settings-panel");
+    if (panel && !panel.classList.contains("open")) toggleBlogSettings();
+    document.getElementById("blog-template-status")?.scrollIntoView({ behavior: "smooth", block: "center" });
+}
+
+async function installBlogTemplate() {
+    const storeId = getSelectedStoreId();
+    if (!storeId) return;
+    showBlogConfirmDialog(
+        blogTemplateState.installed ? "Update Article Template" : "Install Article Template",
+        "This adds <code>templates/article.blog.liquid</code> and <code>sections/seo-blog-article.liquid</code> to your live theme.<br><br>" +
+        "Posts using it get: brand-colored underlined links, styled takeaways / tables / callouts / FAQ, a hero image layout, related posts and BlogPosting + FAQPage structured data.<br><br>" +
+        "Existing posts are not changed until you apply the template to them.",
+        async () => {
+            try {
+                const res = await apiRequest("/api/blog/push-template", { method: "POST", body: { store_id: parseInt(storeId) } });
+                showToast("Article template pushed to theme", "success");
+                (res.warnings || []).forEach((w) => showToast(w, "warning"));
+                loadBlogTemplateStatus();
+            } catch (err) {
+                showToast(err.message, "error");
+            }
+        }
+    );
+}
+
+async function revertBlogTemplate() {
+    const storeId = getSelectedStoreId();
+    if (!storeId) return;
+    showBlogConfirmDialog(
+        "Remove Article Template",
+        "All posts using the styled template are switched back to the theme's default article layout first, then the two theme files are deleted. Content and images are not touched.",
+        async () => {
+            try {
+                const res = await apiRequest("/api/blog/revert-template", { method: "POST", body: { store_id: parseInt(storeId) } });
+                showToast(`Template removed (${res.cleared || 0} posts reverted)`, "success");
+                loadBlogTemplateStatus();
+                loadArticles();
+            } catch (err) {
+                showToast(err.message, "error");
+            }
+        }
+    );
+}
+
+async function retrofitBlogTemplate() {
+    const storeId = getSelectedStoreId();
+    if (!storeId) return;
+    const n = blogTemplateState.pending_retrofit || 0;
+    showBlogConfirmDialog(
+        "Apply Template to Existing Posts",
+        `Switch <strong>${n}</strong> published post${n === 1 ? "" : "s"} to the styled article template.<br><br>Only the layout changes — text, links and images stay exactly as they are. Reversible with Revert.`,
+        async () => {
+            const btn = document.getElementById("retrofit-blog-template-btn");
+            if (btn) btn.disabled = true;
+            try {
+                const res = await apiRequest("/api/blog/retrofit-template", { method: "POST", body: { store_id: parseInt(storeId) } });
+                showToast(`Applying template to ${res.total} posts…`, "info");
+                const interval = setInterval(async () => {
+                    try {
+                        const task = await apiRequest(`/api/tasks/${res.task_id}`);
+                        if (task.status === "completed") {
+                            clearInterval(interval);
+                            const r = task.result || {};
+                            const failed = (r.failed || []).length;
+                            showToast(`Template applied to ${r.updated || 0} posts${failed ? `, ${failed} failed` : ""}`, failed ? "warning" : "success");
+                            if (btn) btn.disabled = false;
+                            loadBlogTemplateStatus();
+                            loadArticles();
+                        } else if (task.status === "failed") {
+                            clearInterval(interval);
+                            showToast("Retrofit failed: " + (task.error || "Unknown error"), "error");
+                            if (btn) btn.disabled = false;
+                        }
+                    } catch { clearInterval(interval); if (btn) btn.disabled = false; }
+                }, 3000);
+            } catch (err) {
+                showToast(err.message, "error");
+                if (btn) btn.disabled = false;
+            }
+        }
+    );
+}
+
+async function applyTemplateToArticle(articleId, btn) {
+    if (btn) btn.disabled = true;
+    try {
+        await apiRequest(`/api/blog/articles/${articleId}/apply-template`, { method: "POST", body: {} });
+        showToast("Styled template applied", "success");
+        openArticleDetail(articleId);
+        loadBlogTemplateStatus();
+    } catch (err) {
+        showToast(err.message, "error");
+        if (btn) btn.disabled = false;
+    }
+}
+
+function _syncBrandColorInputs(fromHex) {
+    const picker = document.getElementById("visual-brand-color");
+    const hex = document.getElementById("visual-brand-color-hex");
+    if (!picker || !hex) return;
+    if (fromHex) {
+        const v = hex.value.trim();
+        if (/^#[0-9a-fA-F]{6}$/.test(v)) picker.value = v.toLowerCase();
+    } else {
+        hex.value = picker.value;
+    }
+}
+
+let visualSettingsBound = false;
+async function loadVisualSettings() {
+    const storeId = getSelectedStoreId();
+    const picker = document.getElementById("visual-brand-color");
+    if (!storeId || !picker) return;
+    if (!visualSettingsBound) {
+        visualSettingsBound = true;
+        picker.addEventListener("input", () => _syncBrandColorInputs(false));
+        document.getElementById("visual-brand-color-hex").addEventListener("input", () => _syncBrandColorInputs(true));
+        const styleSel = document.getElementById("visual-default-style");
+        styleSel.addEventListener("change", () => {
+            const radio = document.querySelector(`input[name="wizard-style"][value="${styleSel.value}"]`);
+            if (radio) radio.checked = true;
+        });
+    }
+    try {
+        const data = await apiRequest(`/api/blog/visual-settings?store_id=${storeId}`);
+        const v = data.effective || {};
+        picker.value = v.brand_color || "#1a73e8";
+        document.getElementById("visual-brand-color-hex").value = v.brand_color || "#1a73e8";
+        document.getElementById("visual-default-style").value = v.default_style || "visual";
+        document.getElementById("visual-inline-count").value = String(v.inline_image_count ?? 2);
+        document.getElementById("visual-product-composite").checked = !!v.product_composite;
+        document.getElementById("visual-blocks").checked = !!v.visual_blocks;
+        document.getElementById("visual-toc").checked = !!v.toc;
+        const radio = document.querySelector(`input[name="wizard-style"][value="${v.default_style || "visual"}"]`);
+        if (radio) radio.checked = true;
+        _renderColorWarnings(v.link_color_warnings || []);
+    } catch (err) {
+        console.warn("visual settings load failed", err);
+    }
+}
+
+function _renderColorWarnings(warnings) {
+    const el = document.getElementById("visual-color-warning");
+    if (!el) return;
+    if (!warnings.length) { el.style.display = "none"; el.textContent = ""; return; }
+    el.style.display = "";
+    el.innerHTML = warnings.map((w) => `<div>⚠ ${escapeHtml(w)}</div>`).join("");
+}
+
+async function saveVisualSettings() {
+    const storeId = getSelectedStoreId();
+    if (!storeId) return;
+    const hexInput = document.getElementById("visual-brand-color-hex").value.trim();
+    const body = {
+        store_id: parseInt(storeId),
+        brand_color: /^#[0-9a-fA-F]{3,6}$/.test(hexInput) ? hexInput : document.getElementById("visual-brand-color").value,
+        default_style: document.getElementById("visual-default-style").value,
+        inline_image_count: parseInt(document.getElementById("visual-inline-count").value),
+        product_composite: document.getElementById("visual-product-composite").checked,
+        visual_blocks: document.getElementById("visual-blocks").checked,
+        toc: document.getElementById("visual-toc").checked,
+    };
+    try {
+        const res = await apiRequest("/api/blog/visual-settings", { method: "POST", body });
+        const v = res.effective || {};
+        _renderColorWarnings(v.link_color_warnings || []);
+        showToast(blogTemplateState.installed
+            ? "Design settings saved — re-push the template to apply the new color to the storefront"
+            : "Design settings saved", "success");
+        loadVisualSettings();
+    } catch (err) {
+        showToast(err.message, "error");
+    }
+}
+
 async function pushSeoSnippet() {
     const storeId = getSelectedStoreId();
     if (!storeId) return;
@@ -2947,6 +3533,7 @@ let scheduledPosts = [];
 let scheduledPostsTimer = null;
 
 const SCHEDULED_STAGES = {
+    auto_media: "Generating inline images",
     auto_queued: "Queued",
     auto_researching: "Researching…",
     auto_outlining: "Outlining…",
@@ -3074,7 +3661,7 @@ async function loadScheduledPosts() {
             <button class="icon-btn" title="Save new time" onclick="rescheduleBlogPost(${i})" ${busy ? "disabled" : ""}><span class="material-symbols-rounded">save</span></button>
         </span>`;
         return `<tr>
-            <td>${escapeHtml(row.title || row.topic || "(processing…)")}</td>
+            <td>${escapeHtml(row.title || row.topic || "(processing…)")} ${row.style === "classic" ? '<span class="badge" title="Legacy text article">Classic</span>' : '<span class="badge badge-success" title="Images, blocks, styled template">Visual</span>'}</td>
             <td style="white-space:nowrap;">${whenInput}</td>
             <td>${scheduledPostChip(row)}</td>
             <td style="white-space:nowrap;">
@@ -3185,9 +3772,20 @@ async function previewScheduledPost(index) {
     if (art.meta_title) html += `<p style="font-size:13px;"><strong>Meta title:</strong> ${escapeHtml(art.meta_title)}</p>`;
     if (art.meta_description) html += `<p style="font-size:13px;"><strong>Meta description:</strong> ${escapeHtml(art.meta_description)}</p>`;
     if (s.featured_image_url) html += `<img src="${escapeAttr(s.featured_image_url)}" alt="" style="max-width:320px;border-radius:8px;margin:8px 0;">`;
-    html += art.body_html ? `<div style="margin-top:12px;">${art.body_html}</div>` : `<p style="color:var(--on-surface-secondary);">Article not generated yet.</p>`;
+    const isVisual = s.style !== "classic";
+    if (art.body_html) {
+        html += isVisual
+            ? `<div class="a2z-blog" style="background:#fff;color:#1f2937;border-radius:8px;padding:12px;"><div class="a2z-blog__body" id="scheduled-preview-body"></div></div>`
+            : `<div style="margin-top:12px;">${art.body_html}</div>`;
+    } else {
+        html += `<p style="color:var(--on-surface-secondary);">Article not generated yet.</p>`;
+    }
     document.getElementById("scheduled-preview-content").innerHTML = html;
     document.getElementById("scheduled-preview-modal").classList.add("active");
+    if (art.body_html && isVisual) {
+        await ensureArticlePreviewCss();
+        renderComposedPreview(row.id, document.getElementById("scheduled-preview-body"));
+    }
 }
 
 function closeScheduledPreview() {

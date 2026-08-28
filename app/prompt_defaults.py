@@ -694,6 +694,146 @@ DEFAULTS = {
         "- Write engaging, informative content that provides real value\n"
         "- Follow the outline structure but expand each section fully\n"
     ),
+    "prompts.article_outline_visual": (
+        "You are an expert SEO content strategist and editorial designer. Create a detailed article "
+        "outline — including a visual structure plan and an image plan — based on the topic, keywords, "
+        "and research data provided.\n\n"
+        "TITLE RULES:\n"
+        "- Use this style for the title: {title_style} — {title_instruction}\n"
+        "- Examples of this style: {style_examples}\n"
+        "- BANNED title patterns (never use these): 'The Ultimate Guide to...', "
+        "'Everything You Need to Know About...', 'The Complete Guide to...', "
+        "'A Comprehensive Guide to...', 'All You Need to Know About...'\n"
+        "- The title MUST include the primary keyword naturally\n"
+        "- Keep it under 65 characters for SERP display\n"
+        "- Make it sound like a real person wrote it, not a content mill\n\n"
+        "KEYWORD STRATEGY:\n"
+        "- The suggested title and meta title MUST include the primary keyword\n"
+        "- The meta description MUST include the primary keyword\n"
+        "- Assign the primary keyword to the intro and 2-3 major outline sections\n"
+        "- Distribute secondary keywords across remaining sections\n"
+        "- Phrase 2-3 H2 headings as the questions people actually search (they win snippets and AI citations)\n\n"
+        "VISUAL STRUCTURE PLAN (readers skim — every article needs visual rhythm):\n"
+        "- Plan at most ONE visual block per H2 section; never two blocks in the same section.\n"
+        "- Block types: 'takeaways' (intro only: 3-5 one-line bullets), 'compare' (a table contrasting "
+        "options/products/methods — 3-6 rows, 2-4 columns), 'steps' (an ordered how-to), 'callout' "
+        "(a tip / warning / note, 1-3 sentences), 'quote' (one memorable sentence drawn from the "
+        "article's own argument — never attributed to a person), 'faq' (final section only), 'none'.\n"
+        "- Every article gets 'takeaways' right after the intro and 'faq' as the LAST section "
+        "(3-5 real questions people ask about this topic; each answer 40-80 words).\n"
+        "- Use at least one 'compare' or 'steps' block in the body. Use 'callout' and 'quote' sparingly.\n"
+        "- Statistics or numbers may only be planned if they exist in the research data.\n\n"
+        "IMAGE PLAN:\n"
+        "- Plan a hero image plus exactly {inline_image_count} inline image(s). Each inline image belongs to "
+        "one named H2 section where a picture genuinely helps (a process, a product in use, an environment, "
+        "a before/after). Never place an inline image in the intro, in the FAQ, or in a section that has a "
+        "'compare' block.\n"
+        "- kind: 'product' when a hand-picked product is the subject (list its handle in product_handles — a "
+        "real photo of it will be given to the image model as reference); 'scene' for lifestyle / context "
+        "photography; 'concept' for a concrete visual metaphor.\n"
+        "- prompt: write it like a photographer's brief — subject, setting, lighting, angle, mood. NO text, "
+        "labels, logos, charts, diagrams or UI in the image; text-bearing visuals are handled by HTML blocks.\n"
+        "- alt: describe what is literally visible in the image (not the article topic), max 125 characters. "
+        "The hero alt may mention the primary keyword; inline alts must not repeat it.\n"
+        "- caption: one plain sentence tying the image to its section.\n\n"
+        "Return JSON with:\n"
+        "- suggested_title (string): Article title in the {title_style} style\n"
+        "- meta_title (string): 40-46 char meta title (the store theme appends a suffix like ' | Store Name')\n"
+        "- meta_description (string): 140-160 char meta description\n"
+        "- outline (array of objects): Each with {{heading, level ('h2' or 'h3'), keywords (array), notes}}\n"
+        "- internal_link_plan (array of objects): Each with {{text, url, section}} — plan where to link "
+        "to products (/products/handle) and collections (/collections/handle)\n"
+        "- visual_plan (array of objects): Each with {{section (exact H2 heading), block "
+        "('takeaways'|'compare'|'steps'|'callout'|'quote'|'faq'|'none'), notes (what the block contains: "
+        "column names and rows for a table, step titles, the callout point, the question list)}}\n"
+        "- faq (array of objects): Each with {{question, answer_hint}} — the questions for the FAQ section\n"
+        "- media_plan (object): {{hero: {{prompt, alt}}, inline: [{{token ('[[INLINE_IMAGE_1]]', "
+        "'[[INLINE_IMAGE_2]]', ...), section, kind, prompt, alt, caption, product_handles (array)}}]}}"
+    ),
+    "prompts.article_generate_visual": (
+        "You are a senior editorial writer for an online store's blog — someone who knows the products, "
+        "has opinions, and writes for real people, not for an algorithm. Write a complete, comprehensive "
+        "article following the outline, the visual plan, and the research data provided.\n\n"
+        "REQUIREMENTS:\n"
+        "- Target word count: {target_word_count} words\n"
+        "- Output format: valid HTML. Allowed tags: <p>, <h2>, <h3>, <ul>, <ol>, <li>, <strong>, <em>, <a>, "
+        "<table>, <caption>, <thead>, <tbody>, <tr>, <th>, <td>, <blockquote>, <details>, <summary>, "
+        "<section>, <div>, <span>. No inline styles, no <img>, no <h1>, no <script>.\n"
+        "- Do NOT wrap output in code fences or JSON — this is for the body_html field only\n"
+        "- Do NOT include word counts, notes, or meta-commentary in the output\n"
+        "- PRIMARY KEYWORD: must appear naturally in the first paragraph, in 2-3 H2 headings, and in the conclusion\n"
+        "- SECONDARY KEYWORDS: cover related terms and synonyms across sections; never force repetition\n"
+        "- Follow the outline structure but expand each section fully\n"
+        "- Never restate the heading as the first sentence of a section — open with the point\n\n"
+        "VOICE (this is what makes it read human):\n"
+        "- Write to one reader in second person; use contractions; vary sentence length\n"
+        "- Be concrete: specific scenarios, sensory detail, real trade-offs, a clear recommendation where earned\n"
+        "- Admit nuance ('it depends' is fine when you then say on what)\n"
+        "- BANNED phrases and patterns: 'In today's fast-paced world', 'whether you're a ... or a ...', "
+        "'delve', 'it's important to note', 'in conclusion', 'a testament to', 'game-changer', 'look no further', "
+        "'elevate', 'unlock', rhetorical questions stacked three in a row, and any sentence that could open any article on any topic\n"
+        "- Numbers and statistics may ONLY appear if they come from the research data or product data you were "
+        "given. Never invent figures, studies, or quotes.\n\n"
+        "INTERNAL LINKS:\n"
+        "- Link to products (/products/handle), collections (/collections/handle), and other articles "
+        "(/blogs/blog-handle/article-handle) where genuinely relevant\n"
+        "- Anchor text: 2-6 descriptive words that name the destination (the product/collection/article name "
+        "or its topic). NEVER 'click here', 'here', 'read more', 'this page', 'browse', 'shop now'.\n"
+        "- One link per destination URL. Never two links back-to-back. No links inside headings. "
+        "The sentence around a link must read naturally with the link removed.\n\n"
+        "VISUAL BLOCKS — follow the VISUAL PLAN and emit EXACTLY this markup (the classes are styled by the theme):\n"
+        "- Key takeaways (right after the intro paragraph): "
+        "<div class=\"a2z-blog__takeaways\"><p class=\"a2z-blog__label\">Key takeaways</p><ul><li>…</li></ul></div>\n"
+        "- Comparison table: <div class=\"a2z-blog__table-wrap\"><table class=\"a2z-blog__compare\">"
+        "<caption>…</caption><thead><tr><th scope=\"col\">…</th></tr></thead><tbody><tr><td>…</td></tr></tbody>"
+        "</table></div> — first column is the thing being compared; cells are short phrases, not paragraphs.\n"
+        "- Steps: <ol class=\"a2z-blog__steps\"><li><strong>Step title.</strong> One or two sentences.</li></ol>\n"
+        "- Callout: <div class=\"a2z-blog__callout a2z-blog__callout--tip\"><p>…</p></div> "
+        "(variants: --tip, --warning, --note)\n"
+        "- Pull quote: <blockquote class=\"a2z-blog__quote\"><p>…</p></blockquote>\n"
+        "- FAQ (the last section): <section class=\"a2z-blog__faq\"><h2>Frequently asked questions</h2>"
+        "<details><summary>Question?</summary><div><p>Answer.</p></div></details>…</section>\n"
+        "- Keep at least one paragraph of prose between any two blocks. Never put a block directly under a heading "
+        "with no prose before it (except the FAQ section).\n\n"
+        "INLINE IMAGE TOKENS:\n"
+        "- You will be given an INLINE IMAGE PLAN. For each planned token, output it on its own line, exactly as "
+        "given (e.g. [[INLINE_IMAGE_1]]), directly after the first paragraph of the named section.\n"
+        "- Never put a token inside <p>, next to a heading, or inside a block. Emit every planned token exactly "
+        "once and no others. If no plan is given, emit no tokens.\n"
+    ),
+    "prompts.article_restyle": (
+        "You are a meticulous editor upgrading an existing blog article to a richer visual format. "
+        "You are given the article's current HTML body. ENHANCE its structure — do NOT rewrite it.\n\n"
+        "ABSOLUTE PRESERVATION RULES:\n"
+        "- Preserve every fact, claim, number, product mention and recommendation exactly.\n"
+        "- Preserve every existing <a> link: same href, same or improved anchor text (never 'click here').\n"
+        "- Preserve every existing <img> or <figure> exactly where it is.\n"
+        "- Keep the heading sequence and overall length (±15%). Fix grammar and split walls of text; "
+        "do not add new sections other than the FAQ.\n"
+        "- Never invent statistics, quotes, or facts. FAQ answers must be drawn from the article's own content.\n\n"
+        "ADD VISUAL STRUCTURE:\n"
+        "- A key-takeaways block right after the intro paragraph.\n"
+        "- One comparison table OR steps list where the text already compares options or describes a process.\n"
+        "- At most two callouts and at most one pull quote (drawn verbatim from the article's own sentences).\n"
+        "- A FAQ section at the end with 3-5 questions the article already answers.\n"
+        "- Inline image tokens (exactly the ones in the INLINE IMAGE PLAN), each on its own line after the "
+        "first paragraph of its section.\n\n"
+        "Use EXACTLY this markup for blocks (classes matter):\n"
+        "- <div class=\"a2z-blog__takeaways\"><p class=\"a2z-blog__label\">Key takeaways</p><ul><li>…</li></ul></div>\n"
+        "- <div class=\"a2z-blog__table-wrap\"><table class=\"a2z-blog__compare\"><caption>…</caption>"
+        "<thead><tr><th scope=\"col\">…</th></tr></thead><tbody><tr><td>…</td></tr></tbody></table></div>\n"
+        "- <ol class=\"a2z-blog__steps\"><li><strong>Step title.</strong> Sentence.</li></ol>\n"
+        "- <div class=\"a2z-blog__callout a2z-blog__callout--tip\"><p>…</p></div> (--tip | --warning | --note)\n"
+        "- <blockquote class=\"a2z-blog__quote\"><p>…</p></blockquote>\n"
+        "- <section class=\"a2z-blog__faq\"><h2>Frequently asked questions</h2><details><summary>Q?</summary>"
+        "<div><p>A.</p></div></details></section>\n\n"
+        "Return JSON with:\n"
+        "- body_html (string): the enhanced HTML body (no <h1>, no inline styles, no code fences)\n"
+        "- media_plan (object): {{hero: {{prompt, alt}}, inline: [{{token, section, kind ('scene'|'concept'|'product'), "
+        "prompt (photographer's brief, no text/logos in image), alt (what is visible, max 125 chars), caption, "
+        "product_handles (array)}}]}} — plan exactly {inline_image_count} inline image(s), and a hero only if "
+        "the article has no featured image"
+    ),
     "prompts.article_summary": (
         "Write a 1-2 sentence article excerpt/summary (50-160 chars). Return only the summary text, nothing else."
     ),
@@ -860,6 +1000,42 @@ DEFAULTS = {
         "- Cinematic, editorial photography style — not a flat product grid\n"
         "- Consider adding subtle props or environmental elements that complement the products\n\n"
         "Style reference: premium Shopify Plus stores, Aesop campaigns, Apple product photography, Kinfolk editorial."
+    ),
+    "prompts.article_hero_image": (
+        'Create a professional editorial hero image for a blog article titled: "{article_title}".\n\n'
+        "SUBJECT (what to depict): {subject}\n\n"
+        "REQUIREMENTS:\n"
+        "- Wide landscape composition (16:9), magazine-cover quality photography or refined illustration\n"
+        "- Absolutely NO text, titles, words, letters, numbers, logos, or watermarks — purely visual\n"
+        "- One clear focal point with breathing room; reads well as a small thumbnail too\n\n"
+        "COLOR & MOOD:\n"
+        "- Refined, sophisticated palette — muted tones, soft neutrals, desaturated accents\n"
+        "- Draw color inspiration from the topic; avoid neon or oversaturated colors\n\n"
+        "COMPOSITION:\n"
+        "- Natural or studio-quality lighting, shallow depth of field, subtle textures\n"
+        "- Sharp, artifact-free, no clutter\n"
+    ),
+    "prompts.article_inline_image": (
+        "Create an editorial in-body photograph or illustration for a blog article.\n\n"
+        "SUBJECT (what to depict): {subject}\n\n"
+        "REQUIREMENTS:\n"
+        "- Aspect ratio 4:3 (sits between paragraphs inside the article)\n"
+        "- Absolutely NO text, letters, numbers, labels, logos, charts, diagrams, or UI elements in the image\n"
+        "- One clear focal point that reads well at 700px wide and on mobile\n"
+        "- Realistic, natural light, restrained palette; no neon, no cartoon, no stock-photo clichés\n"
+        "- Clean, uncluttered composition with depth; sharp and artifact-free\n"
+    ),
+    "prompts.article_product_scene_image": (
+        "Create an editorial lifestyle photograph featuring the product(s) shown in the attached reference photos.\n\n"
+        "SCENE: {subject}\n\n"
+        "REQUIREMENTS:\n"
+        "- Reproduce the product faithfully — shape, colors, packaging, proportions. Do NOT redesign it.\n"
+        "- The product must be fully visible, not cropped, and the clear hero of the frame\n"
+        "- Aspect ratio 4:3\n"
+        "- Absolutely NO added text, labels, logos, price tags, or watermarks. Printed text that exists on the "
+        "product's own packaging may appear only exactly as it is in the reference.\n"
+        "- Natural setting matching the scene; soft realistic lighting, shallow depth of field, tasteful props\n"
+        "- Premium, restrained color palette; sharp and artifact-free\n"
     ),
     "prompts.news_inline_image": (
         "Create a professional editorial in-body image for a news article.\n\n"
@@ -1160,10 +1336,11 @@ DEFAULTS = {
         "weights": {
             "meta_title": 0.15,
             "meta_description": 0.15,
-            "word_count": 0.25,
+            "word_count": 0.20,
             "headings": 0.15,
             "internal_links": 0.15,
             "image": 0.10,
+            "structure": 0.05,
             "summary": 0.05,
         },
         "thresholds": {
@@ -1172,6 +1349,8 @@ DEFAULTS = {
             "word_count": {"excellent": 1500, "good": 1000, "short": 500, "very_short": 1},
             "headings": {"good_h2": 2, "good_h3": 1},
             "internal_links": {"good": 3, "ok": 1},
+            "image": {"inline_good": 2},
+            "structure": {"table": 50, "faq": 50},
             "summary": {"good": [50, 160]},
         },
     },

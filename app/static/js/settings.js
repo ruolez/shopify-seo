@@ -287,14 +287,14 @@ const PROMPT_GROUPS = {
     "Product Prompts": ["prompts.product_seo", "prompts.product_description", "prompts.product_title", "prompts.product_discovery"],
     "Collection Prompts": ["prompts.collection_seo", "prompts.collection_description", "prompts.collection_title"],
     "Brand Prompts": ["prompts.brand_seo", "prompts.brand_description", "prompts.brand_logo"],
-    "Article Prompts": ["prompts.article_seo", "prompts.article_body", "prompts.topic_discovery", "prompts.article_research", "prompts.article_discovery", "prompts.article_outline", "prompts.article_generate", "prompts.article_summary", "prompts.article_refresh_links", "prompts.blog_seo_suggestions"],
+    "Article Prompts": ["prompts.article_seo", "prompts.article_body", "prompts.topic_discovery", "prompts.article_research", "prompts.article_discovery", "prompts.article_outline", "prompts.article_generate", "prompts.article_outline_visual", "prompts.article_generate_visual", "prompts.article_restyle", "prompts.article_summary", "prompts.article_refresh_links", "prompts.blog_seo_suggestions"],
     "Landing Page Prompts": ["prompts.landing_page_seo", "prompts.landing_page_generate", "prompts.landing_page_rewrite"],
     "Cannibalization Prompts": ["prompts.cannibalization_analysis", "prompts.cannibalization_fix"],
     "Content Gap Prompts": ["prompts.content_gap_analysis", "prompts.content_brief_generation", "prompts.intent_classification"],
     "Competitor Prompts": ["prompts.competitor_analysis"],
     "News Prompts": ["prompts.news_analyze", "prompts.news_links"],
     "Other Prompts": ["prompts.interlinking", "prompts.inject_interlink", "prompts.technical_seo_fix", "prompts.keyword_phase1", "prompts.keyword_phase2", "prompts.store_audit"],
-    "Image Prompts": ["prompts.blog_image", "prompts.blog_hero_image", "prompts.collection_image", "prompts.landing_hero_image", "prompts.news_inline_image"],
+    "Image Prompts": ["prompts.blog_image", "prompts.article_hero_image", "prompts.article_inline_image", "prompts.article_product_scene_image", "prompts.blog_hero_image", "prompts.collection_image", "prompts.landing_hero_image", "prompts.news_inline_image"],
 };
 
 async function loadPrompts() {

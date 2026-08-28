@@ -929,3 +929,130 @@ def generate_collection_image_ai(collection_title, product_image_bytes_list, pro
     except Exception as e:
         logger.warning("AI image generation failed for '%s': %s", collection_title, e)
         return None
+
+
+# ── Visual blog pipeline (hero + inline article images) ───────────
+
+def _slugify_for_filename(text, max_len=50):
+    safe = "".join(c if c.isalnum() or c in "-_ " else "" for c in (text or ""))[:max_len]
+    return safe.strip().replace(" ", "-").lower().strip("-") or "image"
+
+
+def _openrouter_image(prompt_text, aspect_ratio="4:3", reference_images=None, model=None):
+    """Single OpenRouter image call. Returns raw image bytes or None.
+
+    reference_images: optional list of image bytes fed as multimodal input so
+    the model can reproduce real products in the scene.
+    """
+    import requests as http_req
+    from app.ai_agent import _get_ai_config
+
+    config = _get_ai_config()
+    image_model = model or config.get("image_model") or "google/gemini-2.5-flash-image"
+
+    content_parts = [{"type": "text", "text": prompt_text}]
+    for ref in (reference_images or [])[:6]:
+        try:
+            small = _resize_for_ai(ref, max_size=512)
+            content_parts.append({
+                "type": "image_url",
+                "image_url": {"url": "data:image/png;base64," + base64.b64encode(small).decode("utf-8")},
+            })
+        except Exception:
+            continue
+
+    payload = {
+        "model": image_model,
+        "messages": [{"role": "user", "content": content_parts}],
+        "max_tokens": 4096,
+        "modalities": ["image", "text"],
+        "image_config": {"aspect_ratio": aspect_ratio},
+    }
+    logger.info("Generating AI article image (%s, %d refs) with model: %s", aspect_ratio, len(content_parts) - 1, image_model)
+    resp = http_req.post(
+        "https://openrouter.ai/api/v1/chat/completions",
+        headers={"Authorization": f"Bearer {config['api_key']}", "Content-Type": "application/json"},
+        json=payload,
+        timeout=120,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+
+    for choice in data.get("choices", []):
+        msg = choice.get("message", {})
+        for img in msg.get("images", []) or []:
+            url = img.get("image_url", {}).get("url", "")
+            if url and "base64," in url:
+                return base64.b64decode(url.split("base64,", 1)[1])
+        content = msg.get("content")
+        if isinstance(content, list):
+            for part in content:
+                if isinstance(part, dict) and part.get("type") == "image_url":
+                    url = part.get("image_url", {}).get("url", "")
+                    if url and "base64," in url:
+                        return base64.b64decode(url.split("base64,", 1)[1])
+        if isinstance(content, str) and "data:image" in content:
+            match = re.search(r"data:image/[^;]+;base64,([A-Za-z0-9+/=]+)", content)
+            if match:
+                return base64.b64decode(match.group(1))
+    logger.warning("AI image generation returned no image (model %s)", image_model)
+    return None
+
+
+def _format_prompt(key, **kwargs):
+    template = get_setting(key, DEFAULTS[key])
+    try:
+        return template.format(**kwargs)
+    except (KeyError, IndexError):
+        return DEFAULTS[key].format(**kwargs)
+
+
+def generate_article_hero_image(article_title, subject_prompt=None, alt_text=None, keywords=None):
+    """Hero (featured) image for a visual blog article: 16:9 → 1200×628 WebP.
+
+    Returns (bytes, filename, alt_text, width, height) or None. No text is
+    ever rendered into the image; the alt is LLM-authored when provided.
+    """
+    try:
+        subject = (subject_prompt or "").strip() or f"An evocative editorial scene representing: {article_title}"
+        prompt_text = _format_prompt("prompts.article_hero_image", article_title=article_title, subject=subject)
+        if keywords:
+            prompt_text += f"\nTopic context: {', '.join(str(k) for k in keywords[:4])}"
+        raw = _openrouter_image(prompt_text, aspect_ratio="16:9")
+        if not raw:
+            return None
+        compressed, width, height = compress_banner_image(raw)
+        filename = f"{_slugify_for_filename(article_title, 60)}.webp"
+        alt = (alt_text or "").strip()[:125] or f"{article_title}"[:125]
+        logger.info("Article hero image generated for '%s' (%d bytes)", article_title, len(compressed))
+        return compressed, filename, alt, width, height
+    except Exception as e:
+        logger.warning("Article hero image failed for '%s': %s", article_title, e)
+        return None
+
+
+def generate_article_inline_image(spec, article_slug, index, reference_images=None):
+    """Inline (in-body) image from a media-plan spec: 4:3 → 1024×768 WebP.
+
+    spec: {prompt, alt, caption, kind, ...}. When reference_images (real product
+    photos) are given, the product-scene prompt is used so the model reproduces
+    the actual product. Returns (bytes, filename, alt, width, height) or None.
+    """
+    try:
+        subject = (spec.get("prompt") or "").strip()
+        if not subject:
+            return None
+        refs = [r for r in (reference_images or []) if r]
+        key = "prompts.article_product_scene_image" if refs else "prompts.article_inline_image"
+        prompt_text = _format_prompt(key, subject=subject)
+        raw = _openrouter_image(prompt_text, aspect_ratio="4:3", reference_images=refs)
+        if not raw:
+            return None
+        compressed, width, height = compress_banner_image(raw, target_width=1024, target_height=768)
+        alt = (spec.get("alt") or "").strip()[:125] or subject[:125]
+        filename = f"{_slugify_for_filename(article_slug, 50)}-{int(index)}-{_slugify_for_filename(alt, 40)}.webp"
+        logger.info("Article inline image %s generated (%d bytes, %d refs)", index, len(compressed), len(refs))
+        return compressed, filename, alt, width, height
+    except Exception as e:
+        logger.warning("Article inline image %s failed: %s", index, e)
+        return None

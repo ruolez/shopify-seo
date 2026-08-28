@@ -4,6 +4,8 @@ from app.settings_manager import get_setting
 from app.prompt_defaults import DEFAULTS
 from app.services.seo_rules import score_length
 
+_ALT_RE = re.compile(r"\balt\s*=\s*(?:\"[^\"]+\"|'[^']+')", re.IGNORECASE)
+
 
 def analyze_article_seo(article):
     rules = get_setting("rules.article_seo", DEFAULTS["rules.article_seo"])
@@ -88,18 +90,34 @@ def analyze_article_seo(article):
         scores["internal_links"] = 0
         details["internal_links"] = "No internal links found"
 
-    # Image + Alt Text
+    # Images: featured image + alt (60) and inline figures with alt (40).
+    im = thresholds.get("image", {})
+    inline_good = max(1, int(im.get("inline_good", 2)))
     image_url = article.get("image_url") or ""
     image_alt = article.get("image_alt") or ""
+    inline_imgs = re.findall(r"<img\b[^>]*>", body, re.IGNORECASE)
+    inline_with_alt = [t for t in inline_imgs if _ALT_RE.search(t)]
+    inline_score = min(len(inline_with_alt), inline_good) / inline_good * 40
     if image_url and image_alt:
-        scores["image"] = 100
-        details["image"] = "Featured image with alt text"
+        featured_score, featured_detail = 60, "featured image with alt"
     elif image_url:
-        scores["image"] = 60
-        details["image"] = "Featured image present, missing alt text"
+        featured_score, featured_detail = 36, "featured image missing alt"
     else:
-        scores["image"] = 0
-        details["image"] = "No featured image"
+        featured_score, featured_detail = 0, "no featured image"
+    scores["image"] = round(featured_score + inline_score)
+    if inline_imgs:
+        inline_detail = f"{len(inline_with_alt)}/{len(inline_imgs)} in-body image(s) with alt (aim for {inline_good}+)"
+    else:
+        inline_detail = f"no in-body images (aim for {inline_good}+)"
+    details["image"] = f"{featured_detail.capitalize()}; {inline_detail}"
+
+    # Structure: comparison table + FAQ block (snippet / AI-citation signals)
+    st = thresholds.get("structure", {})
+    has_table = bool(re.search(r"<table[\s>]", body, re.IGNORECASE))
+    has_faq = bool(re.search(r"<details[\s>]|a2z-blog__faq", body, re.IGNORECASE))
+    scores["structure"] = int((st.get("table", 50) if has_table else 0) + (st.get("faq", 50) if has_faq else 0))
+    parts = [("table" if has_table else "no table"), ("FAQ" if has_faq else "no FAQ")]
+    details["structure"] = ", ".join(parts).capitalize() + (" — add a comparison table and FAQ" if scores["structure"] < 100 else "")
 
     # Summary/Excerpt
     sm = thresholds.get("summary", {})

@@ -585,6 +585,50 @@ class Database:
                 END $$
             """)
             cur.execute("""
+                DO $$ BEGIN
+                    ALTER TABLE synced_articles ADD COLUMN shopify_created_at TIMESTAMP;
+                EXCEPTION WHEN duplicate_column THEN NULL;
+                END $$
+            """)
+            cur.execute("""
+                DO $$ BEGIN
+                    ALTER TABLE article_wizard_sessions ADD COLUMN style VARCHAR(20) DEFAULT 'visual';
+                EXCEPTION WHEN duplicate_column THEN NULL;
+                END $$
+            """)
+            cur.execute("""
+                DO $$ BEGIN
+                    ALTER TABLE article_wizard_sessions ADD COLUMN media_plan JSONB;
+                EXCEPTION WHEN duplicate_column THEN NULL;
+                END $$
+            """)
+            cur.execute("""
+                DO $$ BEGIN
+                    ALTER TABLE article_wizard_sessions ADD COLUMN inline_images JSONB DEFAULT '[]';
+                EXCEPTION WHEN duplicate_column THEN NULL;
+                END $$
+            """)
+            cur.execute("""
+                DO $$ BEGIN
+                    ALTER TABLE article_wizard_sessions ADD COLUMN featured_image_alt VARCHAR(500);
+                EXCEPTION WHEN duplicate_column THEN NULL;
+                END $$
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS blog_visual_settings (
+                    store_id INTEGER PRIMARY KEY REFERENCES stores(id) ON DELETE CASCADE,
+                    default_style VARCHAR(20),
+                    brand_color VARCHAR(9),
+                    inline_image_count INTEGER,
+                    max_images_per_article INTEGER,
+                    product_composite BOOLEAN,
+                    visual_blocks BOOLEAN,
+                    toc BOOLEAN,
+                    related_limit INTEGER,
+                    updated_at TIMESTAMP DEFAULT NOW()
+                )
+            """)
+            cur.execute("""
                 CREATE TABLE IF NOT EXISTS blog_schedule_settings (
                     store_id INTEGER PRIMARY KEY REFERENCES stores(id) ON DELETE CASCADE,
                     interval_days INTEGER DEFAULT 7,

@@ -268,11 +268,9 @@ def _step_hero(session, client, permanent=False):
 
 def _upload_image_to_cdn(client, image_bytes, filename, alt_text):
     """Stage, upload, and register an image as a Shopify File; return its final CDN url."""
-    mime = "image/webp" if filename.endswith(".webp") else "image/jpeg"
-    staged = client.staged_upload_create(filename, mime, len(image_bytes), resource="IMAGE")
-    resource_url = client.upload_staged_file(staged, image_bytes, content_type=mime)
-    file_obj = client.file_create(resource_url, filename=filename, alt_text=alt_text)
-    return client.file_get_url(file_obj.get("id"))
+    from app.services.article_media import upload_image_to_cdn
+
+    return upload_image_to_cdn(client, image_bytes, filename, alt_text)
 
 
 def _step_inline(session, client):
@@ -1546,7 +1544,11 @@ def push_template():
         return jsonify({"error": "No main theme found"}), 404
 
     publisher_name, logo_url = _publisher_identity(store_id, store)
-    files = get_news_theme_files(publisher_name, logo_url=logo_url)
+    from app.services.article_visuals import get_article_visuals
+
+    files = get_news_theme_files(
+        publisher_name, logo_url=logo_url, brand_color=get_article_visuals(store_id)["brand_color"]
+    )
 
     try:
         # Section first, then the template that references it.

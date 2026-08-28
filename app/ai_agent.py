@@ -5386,6 +5386,11 @@ def run_task(task_type, task_input, store_id=None):
         body_content = re.sub(r"^```(?:html)?\s*\n?", "", body_content)
         body_content = re.sub(r"\n?```\s*$", "", body_content)
         body_content = _sanitize_description(body_content)
+        # A link-only edit must never drop the article's figures/images.
+        from app.services.ai_output_guard import restore_missing_figures, restore_missing_images
+
+        body_content = restore_missing_figures(article.get("body") or "", body_content)
+        body_content = restore_missing_images(article.get("body") or "", body_content)
 
         text_only = re.sub(r"<[^>]+>", "", body_content)
         word_count = len(text_only.split())
@@ -5720,24 +5725,35 @@ def run_task(task_type, task_input, store_id=None):
 
         title_style = random.choice(_get_article_title_styles())
         style_examples = "; ".join(f'"{e}"' for e in title_style["examples"])
-        _outline_template = get_setting("prompts.article_outline", DEFAULTS["prompts.article_outline"])
+        outline_visual = (task_input.get("style") or "visual") == "visual"
+        outline_visuals = None
+        if outline_visual:
+            from app.services.article_visuals import get_article_visuals
+
+            outline_visuals = get_article_visuals(outline_store_id)
+        outline_fmt = {
+            "title_style": title_style["style"],
+            "title_instruction": title_style["instruction"],
+            "style_examples": style_examples,
+        }
+        if outline_visual:
+            outline_fmt["inline_image_count"] = outline_visuals["inline_image_count"]
+        outline_key = "prompts.article_outline_visual" if outline_visual else "prompts.article_outline"
+        _outline_template = get_setting(outline_key, DEFAULTS[outline_key])
         try:
-            system_prompt = _outline_template.format(
-                title_style=title_style["style"],
-                title_instruction=title_style["instruction"],
-                style_examples=style_examples,
-            )
+            system_prompt = _outline_template.format(**outline_fmt)
         except (KeyError, IndexError):
-            system_prompt = DEFAULTS["prompts.article_outline"].format(
-                title_style=title_style["style"],
-                title_instruction=title_style["instruction"],
-                style_examples=style_examples,
-            )
+            system_prompt = DEFAULTS[outline_key].format(**outline_fmt)
         o_primary_kw, o_secondary_kws = _split_keywords(keywords)
         user_parts = [
             f"Topic: {topic}",
             f"Primary Keyword: {o_primary_kw}",
         ]
+        if outline_visual:
+            user_parts.append(
+                f"Inline images to plan: {outline_visuals['inline_image_count']} "
+                "(plus the hero). Products listed below have real photos available for 'product' kind images."
+            )
         if o_secondary_kws:
             user_parts.append(f"Secondary Keywords: {', '.join(o_secondary_kws)}")
         if research_data:
@@ -5781,7 +5797,15 @@ def run_task(task_type, task_input, store_id=None):
             start = content.find("{")
             end = content.rfind("}") + 1
             if start >= 0 and end > start:
-                return json.loads(content[start:end])
+                parsed = json.loads(content[start:end])
+                if outline_visual and isinstance(parsed, dict):
+                    from app.services.article_media import normalize_media_plan
+
+                    parsed["media_plan"] = normalize_media_plan(
+                        parsed.get("media_plan"), outline_visuals["inline_image_count"]
+                    )
+                    parsed["style"] = "visual"
+                return parsed
         except (json.JSONDecodeError, ValueError):
             pass
         return {"raw_response": content}
@@ -5849,11 +5873,23 @@ def run_task(task_type, task_input, store_id=None):
                 )
                 other_articles = [dict(r) for r in cur.fetchall()]
 
-        _gen_template = get_setting("prompts.article_generate", DEFAULTS["prompts.article_generate"])
+        gen_visual = (task_input.get("style") or "visual") == "visual"
+        gen_visuals = None
+        if gen_visual:
+            from app.services.article_visuals import get_article_visuals
+
+            gen_visuals = get_article_visuals(gen_store_id)
+        gen_key = "prompts.article_generate_visual" if gen_visual else "prompts.article_generate"
+        _gen_template = get_setting(gen_key, DEFAULTS[gen_key])
         try:
             system_prompt = _gen_template.format(target_word_count=target_word_count)
         except (KeyError, IndexError):
-            system_prompt = DEFAULTS["prompts.article_generate"].format(target_word_count=target_word_count)
+            system_prompt = DEFAULTS[gen_key].format(target_word_count=target_word_count)
+        if gen_visual and not gen_visuals["visual_blocks"]:
+            system_prompt += (
+                "\n\nOVERRIDE: Do not use any visual blocks (no takeaways, tables, steps, callouts, "
+                "quotes or FAQ section) — plain prose with headings only. Inline image tokens are still required."
+            )
 
         g_primary_kw, g_secondary_kws = _split_keywords(keywords)
         user_parts = [f"TOPIC: {topic}", f"PRIMARY KEYWORD: {g_primary_kw}"]
@@ -5877,6 +5913,33 @@ def run_task(task_type, task_input, store_id=None):
                     for l in outline_data["internal_link_plan"]
                 )
                 user_parts.append(f"INTERNAL LINK PLAN:\n{link_plan}")
+            if gen_visual:
+                visual_plan = [v for v in (outline_data.get("visual_plan") or []) if isinstance(v, dict)]
+                if visual_plan and gen_visuals["visual_blocks"]:
+                    plan_lines = "\n".join(
+                        f"- {v.get('section', '')}: {v.get('block', 'none')}"
+                        + (f" — {v.get('notes', '')}" if v.get("notes") else "")
+                        for v in visual_plan
+                    )
+                    user_parts.append(f"VISUAL PLAN (one block per section, exact markup from the system prompt):\n{plan_lines}")
+                faq_items = [f for f in (outline_data.get("faq") or []) if isinstance(f, dict) and f.get("question")]
+                if faq_items and gen_visuals["visual_blocks"]:
+                    faq_lines = "\n".join(
+                        f"- {f.get('question', '')}" + (f" (hint: {f.get('answer_hint', '')})" if f.get("answer_hint") else "")
+                        for f in faq_items
+                    )
+                    user_parts.append(f"FAQ QUESTIONS (for the final FAQ section):\n{faq_lines}")
+                media_plan = task_input.get("media_plan") or outline_data.get("media_plan") or {}
+                inline_specs = media_plan.get("inline") if isinstance(media_plan, dict) else None
+                if inline_specs:
+                    token_lines = "\n".join(
+                        f"- {sp.get('token')} → in section \"{sp.get('section', '')}\" ({sp.get('kind', 'scene')}: {sp.get('prompt', '')[:120]})"
+                        for sp in inline_specs
+                        if isinstance(sp, dict) and sp.get("token")
+                    )
+                    user_parts.append(f"INLINE IMAGE PLAN (emit each token once, on its own line):\n{token_lines}")
+                else:
+                    user_parts.append("INLINE IMAGE PLAN: none — emit no image tokens.")
 
         if products:
             product_lines = "\n".join(f"- {p['title']}: /products/{p['handle']}" for p in products[:20])
@@ -5917,6 +5980,27 @@ def run_task(task_type, task_input, store_id=None):
         body_content = re.sub(r"\n?```\s*$", "", body_content)
         body_content = _sanitize_description(body_content)
         body_content = _fix_internal_link_handles(body_content, gen_store_id)
+        faq_jsonld = None
+        gen_qa = {}
+        if gen_visual:
+            from app.services.article_media import build_faqpage_jsonld, extract_faq
+            from app.services.article_quality import lint_and_fix_anchors
+
+            destinations = {f"/products/{p['handle']}": p["title"] for p in products if p.get("handle")}
+            destinations.update({f"/collections/{c['handle']}": c["title"] for c in collections if c.get("handle")})
+            destinations.update({
+                f"/blogs/{a['blog_handle']}/{a['handle']}": a["title"] for a in other_articles if a.get("handle")
+            })
+            body_content, anchor_report = lint_and_fix_anchors(
+                body_content, client=client, model=config["model"], destinations=destinations
+            )
+            if anchor_report["violations"]:
+                gen_qa["anchors"] = {
+                    "fixed": [v["kind"] for v in anchor_report["violations"] if v.get("fixed")],
+                    "rewritten": anchor_report["rewritten"],
+                    "remaining": [v["text"] for v in anchor_report["remaining"]],
+                }
+            faq_jsonld = build_faqpage_jsonld(extract_faq(body_content))
 
         # Count stats
         text_only = re.sub(r"<[^>]+>", "", body_content)
@@ -5951,7 +6035,7 @@ def run_task(task_type, task_input, store_id=None):
         # Broaden to theme terms; the publish step scrubs remaining echoes.
         tags = _broad_article_tags(keywords)
 
-        return {
+        gen_result = {
             "title": article_title,
             "body_html": body_content,
             "meta_title": meta_title,
@@ -5961,6 +6045,100 @@ def run_task(task_type, task_input, store_id=None):
             "word_count": word_count,
             "internal_links_count": internal_links_count,
             "keywords_used": keywords_found,
+        }
+        if gen_visual:
+            gen_result["style"] = "visual"
+            gen_result["faq_jsonld"] = faq_jsonld
+            from app.services.article_quality import validate_article_result
+
+            media_plan = task_input.get("media_plan") or outline_data.get("media_plan") or {}
+            hero_alt = ((media_plan.get("hero") or {}).get("alt")) if isinstance(media_plan, dict) else None
+            inline_alts = [
+                sp.get("alt", "") for sp in ((media_plan.get("inline") or []) if isinstance(media_plan, dict) else [])
+                if isinstance(sp, dict)
+            ]
+            gen_result = validate_article_result(gen_result, g_primary_kw, client, config, hero_alt, inline_alts)
+            if gen_qa:
+                gen_result["_qa"] = {**(gen_result.get("_qa") or {}), **gen_qa}
+        return gen_result
+
+    elif task_type == "article_restyle":
+        article_id = task_input.get("article_id")
+        with db.get_cursor() as cur:
+            cur.execute("SELECT * FROM synced_articles WHERE id = %s", (article_id,))
+            article = cur.fetchone()
+        if not article:
+            return {"error": "Article not found"}
+        restyle_store_id = article["store_id"]
+        from app.services.article_media import build_faqpage_jsonld, extract_faq, normalize_media_plan
+        from app.services.article_quality import lint_and_fix_anchors
+        from app.services.article_visuals import get_article_visuals
+
+        visuals = get_article_visuals(restyle_store_id)
+        inline_count = visuals["inline_image_count"]
+        original_body = article.get("body") or ""
+
+        # Products already linked in the body are candidates for 'product' images.
+        linked_handles = list(dict.fromkeys(re.findall(r'href="/products/([a-z0-9\-]+)', original_body)))
+        product_lines = []
+        if linked_handles:
+            with db.get_cursor() as cur:
+                cur.execute(
+                    "SELECT title, handle, images FROM synced_products WHERE store_id = %s AND handle = ANY(%s)",
+                    (restyle_store_id, linked_handles[:10]),
+                )
+                for r in cur.fetchall():
+                    has_img = bool(r.get("images"))
+                    product_lines.append(f"- {r['title']} (handle: {r['handle']}){' — photo available' if has_img else ''}")
+
+        restyle_key = "prompts.article_restyle"
+        try:
+            system_prompt = get_setting(restyle_key, DEFAULTS[restyle_key]).format(inline_image_count=inline_count)
+        except (KeyError, IndexError):
+            system_prompt = DEFAULTS[restyle_key].format(inline_image_count=inline_count)
+        if not visuals["visual_blocks"]:
+            system_prompt += "\n\nOVERRIDE: add no visual blocks — only the inline image tokens and light formatting."
+
+        user_parts = [
+            f"ARTICLE TITLE: {article.get('title', '')}",
+            f"HAS FEATURED IMAGE: {'yes' if article.get('image_url') else 'no'}",
+        ]
+        if product_lines:
+            user_parts.append("PRODUCTS LINKED IN THIS ARTICLE (usable as 'product' image subjects):\n" + "\n".join(product_lines))
+        user_parts.append("CURRENT BODY HTML:\n" + original_body)
+        user_parts.append("Return the JSON object only.")
+
+        response = client.chat.completions.create(
+            model=config["model"],
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": "\n\n".join(user_parts)},
+            ],
+            temperature=0.3,
+        )
+        content = response.choices[0].message.content or ""
+        parsed = None
+        try:
+            start = content.find("{")
+            end = content.rfind("}") + 1
+            if start >= 0 and end > start:
+                parsed = json.loads(content[start:end])
+        except (json.JSONDecodeError, ValueError):
+            parsed = None
+        if not isinstance(parsed, dict) or not parsed.get("body_html"):
+            return {"error": "Restyle did not return a body", "raw_response": content[:2000]}
+
+        body_content = re.sub(r"^```(?:html)?\s*\n?", "", parsed["body_html"])
+        body_content = re.sub(r"\n?```\s*$", "", body_content)
+        body_content = _sanitize_description(body_content)
+        body_content = _fix_internal_link_handles(body_content, restyle_store_id)
+        body_content, anchor_report = lint_and_fix_anchors(body_content, client=client, model=config["model"])
+        media_plan = normalize_media_plan(parsed.get("media_plan"), inline_count)
+        return {
+            "body_html": body_content,
+            "media_plan": media_plan,
+            "faq_jsonld": build_faqpage_jsonld(extract_faq(body_content)),
+            "_qa": {"anchors": anchor_report} if anchor_report["violations"] else None,
         }
 
     elif task_type == "ai_seo_product":
