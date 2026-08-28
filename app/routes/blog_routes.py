@@ -3733,6 +3733,34 @@ def restyle_article(article_id):
     return jsonify({"task_id": task_id})
 
 
+@blog_bp.route("/api/blog/articles/<int:article_id>/restyle/latest", methods=["GET"])
+def latest_restyle(article_id):
+    """Most recent restyle task for this article (any status) that hasn't been applied."""
+    with db.get_cursor() as cur:
+        cur.execute(
+            """SELECT id, status, error, result, created_at, completed_at FROM ai_tasks
+               WHERE task_type = 'article_restyle' AND (input->>'article_id')::int = %s
+               ORDER BY id DESC LIMIT 1""",
+            (article_id,),
+        )
+        task = cur.fetchone()
+    if not task:
+        return jsonify({"task": None})
+    result = task.get("result")
+    if isinstance(result, str):
+        try:
+            result = json.loads(result)
+        except Exception:
+            result = None
+    if result and result.get("applied"):
+        return jsonify({"task": None})
+    return jsonify({"task": {
+        "id": task["id"], "status": task["status"], "error": task.get("error"),
+        "created_at": task["created_at"].isoformat() if task.get("created_at") else None,
+        "result": result if task["status"] == "completed" else None,
+    }})
+
+
 @blog_bp.route("/api/blog/articles/<int:article_id>/restyle/apply", methods=["POST"])
 def apply_restyle(article_id):
     data = request.get_json(silent=True) or {}
@@ -3783,6 +3811,9 @@ def apply_restyle(article_id):
                WHERE id = %s""",
             (fields["body"], BLOG_TEMPLATE_SUFFIX, fields.get("image_url", ""), fields.get("image_alt", ""), fields.get("image_alt", ""), article_id),
         )
+    payload["applied"] = True
+    with db.get_cursor() as cur:
+        cur.execute("UPDATE ai_tasks SET result = %s WHERE id = %s", (json.dumps(payload), task_id))
     return jsonify({"success": True, "template_suffix": BLOG_TEMPLATE_SUFFIX, "figures": payload.get("stats", {}).get("after_figures")})
 
 

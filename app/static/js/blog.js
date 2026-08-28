@@ -291,6 +291,7 @@ async function openArticleDetail(articleId) {
         const article = await apiRequest(`/api/blog/articles/${articleId}`);
         title.textContent = article.title;
         renderArticleDetail(content, article);
+        loadPendingRestyle(articleId);
     } catch (err) {
         content.innerHTML = `<p>${escapeHtml(err.message)}</p>`;
     }
@@ -449,26 +450,51 @@ async function regenerateArticleImage(articleId, btn) {
 
 // ── Restyle existing article (visual format) ─────────────────────
 
+const restylePolls = {};
+
+function _restyleSpinnerHtml(startedAt) {
+    const started = startedAt ? ` (started ${new Date(startedAt).toLocaleTimeString()})` : "";
+    return `<div class="card" style="margin-top: 12px; border-left: 3px solid var(--primary);" id="restyle-progress-card">
+        <div class="loading-spinner"><div class="spinner"></div>
+        <p><strong>Restyling…</strong> restructuring the article, then generating inline images. Usually 1–3 minutes${started}. You can close this window — the preview will be waiting when you reopen the article.</p></div>
+    </div>`;
+}
+
+function watchRestyleTask(articleId, taskId, btn) {
+    if (restylePolls[articleId]) clearInterval(restylePolls[articleId]);
+    restylePolls[articleId] = setInterval(async () => {
+        try {
+            const task = await apiRequest(`/api/tasks/${taskId}`);
+            if (task.status === "completed") {
+                clearInterval(restylePolls[articleId]);
+                delete restylePolls[articleId];
+                if (btn) btn.disabled = false;
+                showToast("Restyle preview is ready — review it and click Apply", "success");
+                renderRestylePreview(articleId, taskId, task.result || {});
+            } else if (task.status === "failed") {
+                clearInterval(restylePolls[articleId]);
+                delete restylePolls[articleId];
+                if (btn) btn.disabled = false;
+                showToast("Restyle failed: " + (task.error || "Unknown error"), "error");
+                const panel = document.getElementById("restyle-panel-container");
+                if (panel) panel.innerHTML = `<div class="card" style="margin-top: 12px; border-left: 3px solid var(--error);"><p style="margin:0;">Restyle failed: ${escapeHtml(task.error || "Unknown error")}</p></div>`;
+            }
+        } catch (err) {
+            console.warn("restyle poll error", err);
+        }
+    }, 3000);
+}
+
 async function restyleArticle(articleId, btn) {
     const panel = document.getElementById("restyle-panel-container");
+    if (!panel) { showToast("Open the article first", "error"); return; }
     if (btn) btn.disabled = true;
-    panel.innerHTML = '<div class="card" style="margin-top: 12px;"><div class="loading-spinner"><div class="spinner"></div><p>Restructuring the article and generating inline images… this takes 1–3 minutes.</p></div></div>';
+    panel.innerHTML = _restyleSpinnerHtml(Date.now());
+    panel.scrollIntoView({ behavior: "smooth", block: "start" });
     try {
         const res = await apiRequest(`/api/blog/articles/${articleId}/restyle`, { method: "POST", body: {} });
-        const interval = setInterval(async () => {
-            try {
-                const task = await apiRequest(`/api/tasks/${res.task_id}`);
-                if (task.status === "completed") {
-                    clearInterval(interval);
-                    if (btn) btn.disabled = false;
-                    renderRestylePreview(articleId, res.task_id, task.result || {});
-                } else if (task.status === "failed") {
-                    clearInterval(interval);
-                    if (btn) btn.disabled = false;
-                    panel.innerHTML = `<div class="card" style="margin-top: 12px; border-left: 3px solid var(--error);"><p style="margin:0;">Restyle failed: ${escapeHtml(task.error || "Unknown error")}</p></div>`;
-                }
-            } catch { clearInterval(interval); if (btn) btn.disabled = false; }
-        }, 3000);
+        showToast("Restyling started — this takes 1–3 minutes", "info");
+        watchRestyleTask(articleId, res.task_id, btn);
     } catch (err) {
         showToast(err.message, "error");
         if (btn) btn.disabled = false;
@@ -476,9 +502,27 @@ async function restyleArticle(articleId, btn) {
     }
 }
 
+async function loadPendingRestyle(articleId) {
+    // Reopening an article: surface an in-flight or finished-but-unapplied restyle.
+    try {
+        const { task } = await apiRequest(`/api/blog/articles/${articleId}/restyle/latest`);
+        const panel = document.getElementById("restyle-panel-container");
+        if (!task || !panel) return;
+        if (task.status === "completed" && task.result) {
+            renderRestylePreview(articleId, task.id, task.result);
+        } else if (task.status === "running" || task.status === "pending") {
+            panel.innerHTML = _restyleSpinnerHtml(task.created_at);
+            watchRestyleTask(articleId, task.id, null);
+        }
+    } catch (err) {
+        console.warn("pending restyle check failed", err);
+    }
+}
+
 async function renderRestylePreview(articleId, taskId, result) {
     await ensureArticlePreviewCss();
     const panel = document.getElementById("restyle-panel-container");
+    if (!panel) return;
     const st = result.stats || {};
     const qa = (result._qa && result._qa.anchors) ? result._qa.anchors : null;
     panel.innerHTML = `
@@ -507,6 +551,7 @@ async function renderRestylePreview(articleId, taskId, result) {
             </div>
         </div>`;
     document.getElementById("restyle-preview-body").innerHTML = result.body_html || "";
+    panel.scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
 async function applyRestyle(articleId, taskId, btn) {
