@@ -3781,16 +3781,11 @@ def run_task(task_type, task_input, store_id=None):
                     (sid,),
                 )
                 news_candidates = [dict(r) for r in cur.fetchall()]
-                cur.execute(
-                    "SELECT title, handle FROM synced_products WHERE store_id = %s LIMIT 40",
-                    (sid,),
-                )
-                products = [dict(r) for r in cur.fetchall()]
-                cur.execute(
-                    "SELECT title, handle FROM synced_collections WHERE store_id = %s LIMIT 25",
-                    (sid,),
-                )
-                collections = [dict(r) for r in cur.fetchall()]
+            from app.services.link_candidates import fetch_ranked_candidates
+
+            products, collections = fetch_ranked_candidates(
+                sid, source_text, product_limit=40, collection_limit=25
+            )
         except Exception as e:
             logger.warning("news_analyze context fetch failed: %s", e)
 
@@ -3887,17 +3882,12 @@ def run_task(task_type, task_input, store_id=None):
 
         products, collections, news_articles, blog_articles = [], [], [], []
         try:
+            from app.services.link_candidates import fetch_ranked_candidates
+
+            products, collections = fetch_ranked_candidates(
+                sid, f"{headline}\n{body_html}", product_limit=50, collection_limit=40
+            )
             with db.get_cursor() as cur:
-                cur.execute(
-                    "SELECT title, handle FROM synced_products WHERE store_id = %s AND handle IS NOT NULL LIMIT 50",
-                    (sid,),
-                )
-                products = [dict(r) for r in cur.fetchall()]
-                cur.execute(
-                    "SELECT title, handle FROM synced_collections WHERE store_id = %s AND handle IS NOT NULL LIMIT 40",
-                    (sid,),
-                )
-                collections = [dict(r) for r in cur.fetchall()]
                 cur.execute(
                     """SELECT sa.title, sa.handle, sb.handle AS blog_handle, sa.article_type
                        FROM synced_articles sa JOIN synced_blogs sb ON sb.id = sa.blog_id
@@ -3916,7 +3906,22 @@ def run_task(task_type, task_input, store_id=None):
 
         system_prompt = get_setting("prompts.news_links", DEFAULTS["prompts.news_links"])
 
+        # Collections before products so a bare brand mention ("Captain Black")
+        # resolves to the brand collection, not one arbitrary SKU.
+        from app.services.mention_linker import find_verbatim_mentions, link_unlinked_mentions
+
+        mention_candidates = [
+            {"title": c["title"], "url": f"/collections/{c['handle']}"} for c in collections
+        ] + [{"title": p["title"], "url": f"/products/{p['handle']}"} for p in products]
+        mentioned = find_verbatim_mentions(body_html, mention_candidates)
+
         user_parts = [f"ARTICLE HEADLINE: {headline}", f"EXISTING BODY HTML:\n{body_html}"]
+        if mentioned:
+            user_parts.append(
+                "MENTIONED IN ARTICLE — these destinations are named verbatim in the text; "
+                "link each one's first mention before considering anything else:\n"
+                + "\n".join(f"- {m['title']}: {m['url']}" for m in mentioned)
+            )
         if products:
             user_parts.append("PRODUCTS FOR LINKING:\n" + "\n".join(
                 f"- {p['title']}: /products/{p['handle']}" for p in products))
@@ -3955,11 +3960,24 @@ def run_task(task_type, task_input, store_id=None):
             if tok not in out:
                 out += f"\n{tok}"
 
+        # Guarantee pass: titles named verbatim in the text must end up linked,
+        # regardless of what the model chose to do.
+        out, guaranteed = link_unlinked_mentions(out, mention_candidates)
+        if guaranteed:
+            logger.info(
+                "news_links guarantee pass added %d link(s): %s",
+                len(guaranteed), ", ".join(g["url"] for g in guaranteed),
+            )
+
         internal_links_count = len(re.findall(r'<a\s[^>]*href\s*=\s*["\']/', out, re.IGNORECASE))
         word_count = len(re.sub(r"<[^>]+>", "", out).split())
         return {
             "body_html": out,
-            "stats": {"internal_links_count": internal_links_count, "word_count": word_count},
+            "stats": {
+                "internal_links_count": internal_links_count,
+                "word_count": word_count,
+                "guaranteed_links_added": len(guaranteed),
+            },
         }
 
     elif task_type == "collection_title_seo":
