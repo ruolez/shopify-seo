@@ -173,85 +173,95 @@ def test_brave_connection():
         return jsonify({"error": str(e)}), 400
 
 
-@settings_bp.route("/api/settings/ai/models", methods=["GET"])
-def get_ai_models():
-    """Fetch available models from OpenRouter, filtered to tool-calling models."""
+NEW_MODEL_DAYS = 30
+
+
+def _fetch_openrouter_models(force=False):
+    """OpenRouter's public model catalog. Its CDN caches for 5 minutes; a
+    forced refresh busts that with a nonce so a just-released model shows up."""
+    import time
+
     import requests
 
+    params = {"_": int(time.time())} if force else None
+    headers = {"Cache-Control": "no-cache", "Pragma": "no-cache"} if force else None
+    response = requests.get("https://openrouter.ai/api/v1/models", params=params, headers=headers, timeout=20)
+    if response.status_code != 200:
+        raise RuntimeError(f"OpenRouter API error: {response.status_code}")
+    return response.json().get("data", [])
+
+
+def _model_age_fields(model):
+    import time
+
+    created = model.get("created") or 0
+    days = max(0, int((time.time() - created) // 86400)) if created else None
+    return {"added_days_ago": days, "is_new": days is not None and days <= NEW_MODEL_DAYS,
+            "context_length": model.get("context_length")}
+
+
+def _catalog_response(models):
+    from datetime import datetime, timezone
+
+    return jsonify({
+        "models": models,
+        "total": len(models),
+        "new_count": sum(1 for m in models if m.get("is_new")),
+        "new_days": NEW_MODEL_DAYS,
+        "fetched_at": datetime.now(timezone.utc).isoformat(),
+    })
+
+
+@settings_bp.route("/api/settings/ai/models", methods=["GET"])
+def get_ai_models():
+    """Text models from OpenRouter, filtered to tool-calling ones. ?refresh=1 bypasses caches."""
     try:
-        response = requests.get("https://openrouter.ai/api/v1/models", timeout=15)
-
-        if response.status_code != 200:
-            return jsonify({"error": f"OpenRouter API error: {response.status_code}"}), 502
-
-        data = response.json()
         models = []
-
-        for model in data.get("data", []):
-            supported_params = model.get("supported_parameters", [])
-            if "tools" not in supported_params:
+        for model in _fetch_openrouter_models(force=request.args.get("refresh") == "1"):
+            if "tools" not in model.get("supported_parameters", []):
                 continue
-
             pricing = model.get("pricing", {})
-            prompt_per_million = float(pricing.get("prompt", "0")) * 1_000_000
-            completion_per_million = float(pricing.get("completion", "0")) * 1_000_000
-
-            models.append(
-                {
-                    "id": model.get("id", ""),
-                    "name": model.get("name", model.get("id", "")),
-                    "pricing": {
-                        "prompt": round(prompt_per_million, 2),
-                        "completion": round(completion_per_million, 2),
-                    },
-                }
-            )
-
+            models.append({
+                "id": model.get("id", ""),
+                "name": model.get("name", model.get("id", "")),
+                "pricing": {
+                    "prompt": round(float(pricing.get("prompt", "0")) * 1_000_000, 2),
+                    "completion": round(float(pricing.get("completion", "0")) * 1_000_000, 2),
+                },
+                **_model_age_fields(model),
+            })
         models.sort(key=lambda m: m["name"].lower())
-        return jsonify({"models": models})
+        return _catalog_response(models)
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": str(e)}), 502
 
 
 @settings_bp.route("/api/settings/ai/image-models", methods=["GET"])
 def get_image_models():
-    import requests
-
+    """Image-output models from OpenRouter. ?refresh=1 bypasses caches."""
     try:
-        response = requests.get("https://openrouter.ai/api/v1/models", timeout=15)
-        if response.status_code != 200:
-            return jsonify({"models": _fallback_image_models()})
-
-        data = response.json()
         models = []
-        for model in data.get("data", []):
-            arch = model.get("architecture", {})
-            output_mods = arch.get("output_modalities", [])
-            if "image" not in output_mods:
+        for model in _fetch_openrouter_models(force=request.args.get("refresh") == "1"):
+            if "image" not in (model.get("architecture", {}).get("output_modalities") or []):
                 continue
-            model_id = model.get("id", "")
-            if model_id == "openrouter/auto":
+            if model.get("id") == "openrouter/auto":
                 continue
-
             pricing = model.get("pricing", {})
-            prompt_per_m = float(pricing.get("prompt", "0")) * 1_000_000
-            image_per_m = float(pricing.get("image", pricing.get("completion", "0"))) * 1_000_000
-
             models.append({
-                "id": model_id,
-                "name": model.get("name", model_id),
+                "id": model.get("id", ""),
+                "name": model.get("name", model.get("id", "")),
                 "pricing": {
-                    "prompt": round(prompt_per_m, 2),
-                    "image": round(image_per_m, 2),
+                    "prompt": round(float(pricing.get("prompt", "0")) * 1_000_000, 2),
+                    "image": round(float(pricing.get("image", pricing.get("completion", "0"))) * 1_000_000, 2),
                 },
+                **_model_age_fields(model),
             })
-
         models.sort(key=lambda m: m["pricing"]["prompt"])
         if models:
-            return jsonify({"models": models})
-        return jsonify({"models": _fallback_image_models()})
+            return _catalog_response(models)
     except Exception:
-        return jsonify({"models": _fallback_image_models()})
+        pass
+    return _catalog_response(_fallback_image_models())
 
 
 def _fallback_image_models():

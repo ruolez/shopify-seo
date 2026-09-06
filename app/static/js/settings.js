@@ -38,38 +38,93 @@ document.getElementById("ai-form").addEventListener("submit", async (e) => {
 
 document.getElementById("test-ai-btn").addEventListener("click", testAIConnection);
 
-async function loadOpenRouterModels(savedModel, savedTopicModel) {
-    const select = document.getElementById("ai-model");
-    const topicSelect = document.getElementById("ai-topic-model");
-    try {
-        const data = await apiRequest("/api/settings/ai/models");
-        if (data.models && data.models.length > 0) {
-            select.innerHTML = "";
-            topicSelect.innerHTML = '<option value="">Same as Text AI Model</option>';
-            data.models.forEach((model) => {
-                const option = document.createElement("option");
-                option.value = model.id;
-                const promptPrice = model.pricing.prompt.toFixed(2);
-                const completionPrice = model.pricing.completion.toFixed(2);
-                option.textContent = `${model.name} — $${promptPrice} / $${completionPrice} per M tokens`;
-                select.appendChild(option);
-                topicSelect.appendChild(option.cloneNode(true));
-            });
-            if (savedModel) {
-                select.value = savedModel;
-                if (!select.value) select.value = data.models[0].id;
-            }
-            topicSelect.value = savedTopicModel || "";
-        } else {
-            fallbackToTextInput(select, savedModel);
+// ─── Model catalogs (live from OpenRouter; Refresh bypasses its 5-minute CDN cache) ───
+
+const modelCatalog = { text: [], image: [] };
+const NEW_MODEL_DAYS = 30;
+
+function _modelLabel(model, kind) {
+    const p = model.pricing || {};
+    const price = kind === "image"
+        ? `$${(p.prompt || 0).toFixed(2)} in / $${(p.image || 0).toFixed(2)} img per M`
+        : `$${(p.prompt || 0).toFixed(2)} / $${(p.completion || 0).toFixed(2)} per M tokens`;
+    const fresh = model.is_new ? ` · new (${model.added_days_ago}d)` : "";
+    return `${model.name} — ${price}${fresh}`;
+}
+
+function fillModelSelect(select, models, kind, saved, placeholder) {
+    const previous = select.value;
+    select.innerHTML = "";
+    if (placeholder) select.appendChild(new Option(placeholder, ""));
+    const fresh = models.filter((m) => m.is_new).sort((a, b) => (a.added_days_ago ?? 0) - (b.added_days_ago ?? 0));
+    if (fresh.length) {
+        const group = document.createElement("optgroup");
+        group.label = `New in the last ${NEW_MODEL_DAYS} days`;
+        fresh.forEach((m) => group.appendChild(new Option(_modelLabel(m, kind), m.id)));
+        select.appendChild(group);
+    }
+    const rest = document.createElement("optgroup");
+    rest.label = fresh.length ? "All models" : "Models";
+    models.filter((m) => !m.is_new).forEach((m) => rest.appendChild(new Option(_modelLabel(m, kind), m.id)));
+    select.appendChild(rest);
+    const want = saved !== undefined ? saved : previous;
+    if (want) {
+        select.value = want;
+        if (select.value !== want) {
+            // Keep a saved model that OpenRouter no longer lists rather than silently switching.
+            select.appendChild(new Option(`${want} — no longer listed on OpenRouter`, want));
+            select.value = want;
         }
-    } catch (err) {
-        console.error("Failed to load OpenRouter models:", err);
-        fallbackToTextInput(select, savedModel);
     }
 }
 
+function _setModelStatus(id, data, fallbackText) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    if (!data) { el.textContent = fallbackText; return; }
+    const when = data.fetched_at ? new Date(data.fetched_at).toLocaleTimeString() : "";
+    el.textContent = `${data.total} models · ${data.new_count} added in the last ${data.new_days} days · refreshed ${when}`;
+}
+
+function attachModelFilter(inputId, select, kind, placeholder) {
+    const input = document.getElementById(inputId);
+    if (!input || input.dataset.bound) return;
+    input.dataset.bound = "1";
+    input.addEventListener("input", () => {
+        const q = input.value.trim().toLowerCase();
+        const list = modelCatalog[kind].filter((m) => !q || m.name.toLowerCase().includes(q) || m.id.toLowerCase().includes(q));
+        const keep = select.value;
+        const inList = !keep || list.some((m) => m.id === keep);
+        fillModelSelect(select, list, kind, inList ? keep : null, placeholder);
+        if (!inList && list.length && q) select.selectedIndex = placeholder ? 1 : 0;
+    });
+}
+
+async function loadOpenRouterModels(savedModel, savedTopicModel, refresh = false) {
+    const select = document.getElementById("ai-model");
+    const topicSelect = document.getElementById("ai-topic-model");
+    try {
+        const data = await apiRequest(`/api/settings/ai/models${refresh ? "?refresh=1" : ""}`);
+        if (data.models && data.models.length > 0) {
+            modelCatalog.text = data.models;
+            fillModelSelect(select, data.models, "text", savedModel || data.models[0].id);
+            fillModelSelect(topicSelect, data.models, "text", savedTopicModel || "", "Same as Text AI Model");
+            attachModelFilter("ai-model-filter", select, "text");
+            attachModelFilter("ai-topic-model-filter", topicSelect, "text", "Same as Text AI Model");
+            _setModelStatus("ai-model-status", data);
+            return data;
+        }
+        fallbackToTextInput(select, savedModel);
+    } catch (err) {
+        console.error("Failed to load OpenRouter models:", err);
+        _setModelStatus("ai-model-status", null, "Could not reach OpenRouter — type a model id instead");
+        fallbackToTextInput(select, savedModel);
+    }
+    return null;
+}
+
 function fallbackToTextInput(select, savedModel) {
+    if (select.tagName !== "SELECT") return;
     const parent = select.parentNode;
     const input = document.createElement("input");
     input.type = "text";
@@ -80,29 +135,38 @@ function fallbackToTextInput(select, savedModel) {
     parent.replaceChild(input, select);
 }
 
-async function loadImageModels(savedModel) {
+async function loadImageModels(savedModel, refresh = false) {
     const select = document.getElementById("ai-image-model");
     try {
-        const data = await apiRequest("/api/settings/ai/image-models");
+        const data = await apiRequest(`/api/settings/ai/image-models${refresh ? "?refresh=1" : ""}`);
         if (data.models && data.models.length > 0) {
-            select.innerHTML = "";
-            data.models.forEach((model) => {
-                const option = document.createElement("option");
-                option.value = model.id;
-                const promptPrice = model.pricing.prompt.toFixed(2);
-                const imagePrice = model.pricing.image.toFixed(2);
-                option.textContent = `${model.name} — $${promptPrice} in / $${imagePrice} img per M`;
-                select.appendChild(option);
-            });
-            if (savedModel) {
-                select.value = savedModel;
-                if (!select.value) select.value = data.models[0].id;
-            }
+            modelCatalog.image = data.models;
+            fillModelSelect(select, data.models, "image", savedModel || data.models[0].id);
+            _setModelStatus("ai-image-model-status", data);
+            return data;
         }
     } catch (err) {
         console.error("Failed to load image models:", err);
+        _setModelStatus("ai-image-model-status", null, "Could not reach OpenRouter");
     }
+    return null;
 }
+
+document.querySelectorAll(".model-refresh").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+        btn.disabled = true;
+        try {
+            const kind = btn.dataset.modelList;
+            const data = kind === "image"
+                ? await loadImageModels(document.getElementById("ai-image-model").value, true)
+                : await loadOpenRouterModels(document.getElementById("ai-model").value, document.getElementById("ai-topic-model").value, true);
+            if (data) showToast(`${data.total} ${kind} models loaded · ${data.new_count} added in the last ${data.new_days} days`, "success");
+            else showToast("OpenRouter did not return a model list", "error");
+        } finally {
+            btn.disabled = false;
+        }
+    });
+});
 
 async function loadAIConfig() {
     try {

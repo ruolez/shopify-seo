@@ -26,11 +26,17 @@
                             </div>
                             <div class="form-row">
                                 <div class="form-group">
-                                    <label for="ai-model">Text AI Model</label>
+                                    <label for="ai-model" style="display: flex; justify-content: space-between; align-items: center;">
+                                        <span>Text AI Model</span>
+                                        <button type="button" class="btn btn-secondary btn-sm model-refresh" data-model-list="text" title="Re-fetch the model catalog from OpenRouter (bypasses caches)">
+                                            <span class="material-symbols-rounded">refresh</span> Refresh
+                                        </button>
+                                    </label>
+                                    <input type="search" id="ai-model-filter" class="form-control model-filter" placeholder="Type to filter models…" autocomplete="off" style="margin-bottom: 6px;">
                                     <select id="ai-model" class="form-control">
                                         <option value="">Loading models...</option>
                                     </select>
-                                    <small style="color: var(--on-surface-secondary); font-size: 12px;">Only models that support tool-calling are shown</small>
+                                    <small style="color: var(--on-surface-secondary); font-size: 12px;" id="ai-model-status">Only models that support tool-calling are shown</small>
                                 </div>
                                 <div class="form-group">
                                     <label for="ai-budget">Daily Budget ($)</label>
@@ -38,15 +44,21 @@
                                 </div>
                             </div>
                             <div class="form-group">
-                                <label for="ai-image-model">Image Generation Model</label>
+                                <label for="ai-image-model" style="display: flex; justify-content: space-between; align-items: center;">
+                                    <span>Image Generation Model</span>
+                                    <button type="button" class="btn btn-secondary btn-sm model-refresh" data-model-list="image" title="Re-fetch the image model catalog from OpenRouter (bypasses caches)">
+                                        <span class="material-symbols-rounded">refresh</span> Refresh
+                                    </button>
+                                </label>
                                 <select id="ai-image-model" class="form-control">
                                     <option value="">Loading image models...</option>
                                 </select>
-                                <small style="color: var(--on-surface-secondary); font-size: 12px;">Used for AI-powered collection image generation</small>
+                                <small style="color: var(--on-surface-secondary); font-size: 12px;" id="ai-image-model-status">Used for AI-powered collection image generation</small>
                             </div>
                             <div class="form-row">
                                 <div class="form-group">
                                     <label for="ai-topic-model">Topic Research Model</label>
+                                    <input type="search" id="ai-topic-model-filter" class="form-control model-filter" placeholder="Type to filter models…" autocomplete="off" style="margin-bottom: 6px;">
                                     <select id="ai-topic-model" class="form-control">
                                         <option value="">Same as Text AI Model</option>
                                     </select>
