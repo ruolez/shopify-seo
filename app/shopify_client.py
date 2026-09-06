@@ -1337,23 +1337,25 @@ class ShopifyClient:
         return result.get("article", {})
 
     def set_article_seo(self, article_shopify_id, meta_title=None, meta_description=None):
+        # metafieldsSet rejects blank values, so a blank means "clear": delete
+        # the metafield and let Shopify fall back to the article title/excerpt.
         metafields = []
-        if meta_title is not None:
+        blanks = []
+        for key, value in (("title_tag", meta_title), ("description_tag", meta_description)):
+            if value is None:
+                continue
+            if not str(value).strip():
+                blanks.append((article_shopify_id, "global", key))
+                continue
             metafields.append({
                 "ownerId": article_shopify_id,
                 "namespace": "global",
-                "key": "title_tag",
-                "value": meta_title,
+                "key": key,
+                "value": value,
                 "type": "single_line_text_field",
             })
-        if meta_description is not None:
-            metafields.append({
-                "ownerId": article_shopify_id,
-                "namespace": "global",
-                "key": "description_tag",
-                "value": meta_description,
-                "type": "single_line_text_field",
-            })
+        if blanks:
+            self.delete_metafields(blanks)
         if not metafields:
             return []
 
