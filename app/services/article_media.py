@@ -146,6 +146,24 @@ def insert_inline_images(body_html, images, figure_class=BLOG_FIGURE_CLASS):
     return strip_leftover_tokens(body)
 
 
+def tokenize_figures(body_html, images):
+    """Inverse of insert_inline_images: swap each uploaded image's <figure>
+    back to its [[INLINE_IMAGE_n]] token so a live (possibly hand-edited) body
+    can be recomposed with a regenerated image. Figures not owned by an entry
+    in `images` and entries without a cdn_url are left untouched."""
+    body = body_html or ""
+    for img in images or []:
+        token = (img or {}).get("token") or ""
+        src = html.escape((img or {}).get("cdn_url") or "", quote=True)
+        if not src or not TOKEN_RE.search(token):
+            continue
+        for m in _FIGURE_RE.finditer(body):
+            if src in m.group(0):
+                body = body[: m.start()] + token + body[m.end():]
+                break
+    return body
+
+
 def count_figures(body_html):
     return len(_FIGURE_RE.findall(body_html or ""))
 

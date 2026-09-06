@@ -292,6 +292,7 @@ async function openArticleDetail(articleId) {
         title.textContent = article.title;
         renderArticleDetail(content, article);
         loadPendingRestyle(articleId);
+        loadArticleMedia(articleId);
     } catch (err) {
         content.innerHTML = `<p>${escapeHtml(err.message)}</p>`;
     }
@@ -374,6 +375,7 @@ function renderArticleDetail(container, article) {
                     </div>
                     <div id="refresh-links-panel-container"></div>
                     <div id="restyle-panel-container"></div>
+                    <div id="article-media-container"></div>
                 </div>
             </div>
             <div style="overflow-y: auto;">
@@ -446,6 +448,128 @@ async function regenerateArticleImage(articleId, btn) {
         btn.disabled = false;
         btn.innerHTML = idle;
     }
+}
+
+// ── In-article images (regenerate one at a time after publish) ───
+
+const articleMediaPolls = {};
+
+async function loadArticleMedia(articleId) {
+    const panel = document.getElementById("article-media-container");
+    if (!panel) return;
+    try {
+        const data = await apiRequest(`/api/blog/articles/${articleId}/media`);
+        renderArticleMedia(articleId, data);
+        if (data.task_id) watchArticleMediaTask(articleId, data.task_id);
+    } catch (err) {
+        console.warn("article media unavailable", err);
+    }
+}
+
+function _articleMediaStatus(img) {
+    if (img.cdn_url) return '<span class="badge badge-success">Ready</span>';
+    if (img.status === "failed") return `<span class="badge badge-error" title="${escapeHtml(img.error || "")}">Failed</span>`;
+    if (img.status === "skipped") return `<span class="badge badge-warning" title="${escapeHtml(img.error || "")}">Skipped</span>`;
+    return '<span class="badge">Not generated</span>';
+}
+
+function renderArticleMedia(articleId, data) {
+    const panel = document.getElementById("article-media-container");
+    if (!panel) return;
+    const inline = data.inline || [];
+    if (!data.session_id || !inline.length) { panel.innerHTML = ""; return; }
+    const busy = data.status === "generating_media";
+    const cards = inline.map((img, i) => {
+        const idx = i + 1;
+        const canGenerate = !busy && (img.cdn_url || img.placeable);
+        return `
+        <div style="display: grid; grid-template-columns: 160px 1fr; gap: 12px; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--outline); align-items: start;">
+            <div>
+                ${img.cdn_url
+                    ? `<img src="${escapeHtml(img.cdn_url)}" alt="${escapeHtml(img.alt || "")}" style="width: 100%; border-radius: 8px; border: 1px solid var(--outline);">`
+                    : `<div style="border: 2px dashed var(--outline); border-radius: 8px; height: 110px; display: flex; align-items: center; justify-content: center; color: var(--on-surface-secondary);"><span class="material-symbols-rounded" style="font-size: 32px;">image</span></div>`}
+            </div>
+            <div>
+                <div style="display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap;">
+                    <div>
+                        <strong>Image ${idx}</strong>
+                        <span class="badge" style="margin-left: 6px;">${escapeHtml(img.kind || "scene")}</span>
+                        <div style="font-size: 12px; color: var(--on-surface-secondary); margin-top: 2px;">Section: ${escapeHtml(img.section || "—")}</div>
+                    </div>
+                    ${_articleMediaStatus(img)}
+                </div>
+                <div class="form-group" style="margin: 8px 0;">
+                    <label style="font-size: 12px;">Image brief (what to depict)</label>
+                    <textarea class="form-control" rows="2" style="font-size: 13px;" data-article-media-field="prompt" data-article-media-idx="${idx}" ${busy ? "disabled" : ""}>${escapeHtml(img.prompt || "")}</textarea>
+                </div>
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px;">
+                    <div class="form-group" style="margin-bottom: 8px;">
+                        <label style="font-size: 12px;">Alt text</label>
+                        <input type="text" class="form-control" style="font-size: 13px;" maxlength="125" data-article-media-field="alt" data-article-media-idx="${idx}" value="${escapeHtml(img.alt || "")}" ${busy ? "disabled" : ""}>
+                    </div>
+                    <div class="form-group" style="margin-bottom: 8px;">
+                        <label style="font-size: 12px;">Caption</label>
+                        <input type="text" class="form-control" style="font-size: 13px;" data-article-media-field="caption" data-article-media-idx="${idx}" value="${escapeHtml(img.caption || "")}" ${busy ? "disabled" : ""}>
+                    </div>
+                </div>
+                <button class="btn btn-secondary btn-sm" onclick="regenerateArticleInlineImage(${articleId}, ${data.session_id}, ${idx}, this)" ${canGenerate ? "" : "disabled"}
+                        title="${!img.cdn_url && !img.placeable ? "The body has no placeholder for this image any more — run Regenerate with new style to plan it again" : "Regenerates only this image and updates the live article"}">
+                    <span class="material-symbols-rounded">${img.cdn_url ? "refresh" : "auto_awesome"}</span>
+                    ${img.cdn_url ? "Regenerate" : "Generate"}
+                </button>
+            </div>
+        </div>`;
+    }).join("");
+    panel.innerHTML = `
+        <div class="card" style="margin-top: 12px;">
+            <div style="display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap;">
+                <h4 style="margin: 0;">In-article images</h4>
+                ${busy ? '<span class="badge badge-warning">Generating…</span>' : `<span style="font-size: 12px; color: var(--on-surface-secondary);">${inline.filter((i) => i.cdn_url).length}/${inline.length} ready · ~$0.05 per image</span>`}
+            </div>
+            <p style="font-size: 12px; color: var(--on-surface-secondary); margin: 6px 0 0;">Tweak the brief, alt or caption, then regenerate a single image. Only that figure is swapped in the live article; the rest of the body is left as is.</p>
+            ${cards}
+        </div>`;
+}
+
+async function regenerateArticleInlineImage(articleId, sessionId, index, btn) {
+    const edits = {};
+    document.querySelectorAll(`[data-article-media-idx="${index}"]`).forEach((el) => { edits[el.dataset.articleMediaField] = el.value; });
+    if (btn) btn.disabled = true;
+    try {
+        const res = await apiRequest(`/api/blog/wizard/${sessionId}/media/${index}/regenerate`, { method: "POST", body: edits });
+        showToast(`Generating image ${index}…`, "info");
+        await loadArticleMedia(articleId);
+        watchArticleMediaTask(articleId, res.task_id);
+    } catch (err) {
+        showToast(err.message, "error");
+        if (btn) btn.disabled = false;
+    }
+}
+
+function watchArticleMediaTask(articleId, taskId) {
+    if (articleMediaPolls[articleId]) clearInterval(articleMediaPolls[articleId]);
+    articleMediaPolls[articleId] = setInterval(async () => {
+        try {
+            const task = await apiRequest(`/api/tasks/${taskId}`);
+            if (task.status !== "completed" && task.status !== "failed") return;
+            clearInterval(articleMediaPolls[articleId]);
+            delete articleMediaPolls[articleId];
+            if (task.status === "failed") {
+                showToast("Image generation failed: " + (task.error || "Unknown error"), "error");
+            } else {
+                const r = task.result || {};
+                showToast(`Image updated in the live article (${r.ready || 0}/${r.total || 0} ready)`, "success");
+                try {
+                    const article = await apiRequest(`/api/blog/articles/${articleId}`);
+                    const bodyEl = document.getElementById("article-edit-body");
+                    if (bodyEl) bodyEl.value = article.body || "";
+                } catch (e) { console.warn("article refresh failed", e); }
+            }
+            loadArticleMedia(articleId);
+        } catch (err) {
+            console.warn("article media poll error", err);
+        }
+    }, 3000);
 }
 
 // ── Restyle existing article (visual format) ─────────────────────

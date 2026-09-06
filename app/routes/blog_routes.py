@@ -59,120 +59,157 @@ def _resolve_article_style(store_id, requested=None):
     return get_article_visuals(store_id)["default_style"]
 
 
+def _repin_landing_article(store_id, blog_id, client):
+    """Bump the existing landing article's publish date so it stays the newest
+    article. The theme's blog index renders the newest article's content as the
+    page, so from the moment a new article is published until the landing is
+    republished, /blogs/<handle> shows that article instead of the index."""
+    with db.get_cursor() as cur:
+        cur.execute(
+            "SELECT shopify_page_id FROM blog_landing_pages WHERE store_id = %s AND blog_id = %s",
+            (store_id, blog_id),
+        )
+        row = cur.fetchone()
+    if not row or not row.get("shopify_page_id"):
+        return
+    from datetime import datetime, timezone
+
+    now_date = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    client.update_article(row["shopify_page_id"], {"is_published": True, "publish_date": now_date})
+
+
 def _regen_landing_async(store_id, blog_id, client, store):
     def _run():
         try:
-            with db.get_cursor() as cur:
-                cur.execute("SELECT * FROM synced_blogs WHERE id = %s", (blog_id,))
-                blog = cur.fetchone()
-            if not blog:
-                return
+            _repin_landing_article(store_id, blog_id, client)
+        except Exception as e:
+            logger.warning("Failed to re-pin landing article for blog %s: %s", blog_id, e)
 
+        attempts = 3
+        for attempt in range(1, attempts + 1):
             try:
-                time.sleep(5)
-                fresh_articles = client.get_all_articles()
-                for fa in fresh_articles:
-                    if fa.get("image_url") and "shopify-staged-uploads" not in fa["image_url"]:
-                        with db.get_cursor() as cur:
-                            cur.execute(
-                                "UPDATE synced_articles SET image_url = %s WHERE store_id = %s AND shopify_id = %s AND (image_url IS NULL OR image_url != %s)",
-                                (fa["image_url"], store_id, fa["shopify_id"], fa["image_url"]),
-                            )
+                _regenerate()
+                return
             except Exception as e:
-                logger.warning("Failed to refresh article images: %s", e)
+                if attempt < attempts:
+                    logger.warning(
+                        "Landing regeneration attempt %d/%d failed for blog %s, retrying: %s",
+                        attempt, attempts, blog_id, e,
+                    )
+                    time.sleep(15 * attempt)
+                else:
+                    logger.exception("Failed to auto-regenerate landing page after %d attempts: %s", attempts, e)
 
-            with db.get_cursor() as cur:
-                cur.execute(
-                    "SELECT * FROM synced_articles WHERE store_id = %s AND blog_id = %s AND is_published = TRUE AND article_type = 'blog' AND COALESCE(tags, '') NOT ILIKE '%%landing-page%%' ORDER BY COALESCE(published_at, synced_at) DESC",
-                    (store_id, blog_id),
-                )
-                articles = [dict(a) for a in cur.fetchall()]
+    def _regenerate():
+        with db.get_cursor() as cur:
+            cur.execute("SELECT * FROM synced_blogs WHERE id = %s", (blog_id,))
+            blog = cur.fetchone()
+        if not blog:
+            return
 
-            news_blog_shopify_id = None
-            with db.get_cursor() as cur:
-                cur.execute("SELECT shopify_id FROM synced_blogs WHERE store_id = %s AND handle = 'news'", (store_id,))
-                news_row = cur.fetchone()
-            if news_row:
-                news_blog_shopify_id = news_row["shopify_id"]
-            if not news_blog_shopify_id:
-                return
-
-            with db.get_cursor() as cur:
-                cur.execute("SELECT * FROM blog_landing_pages WHERE store_id = %s AND blog_id = %s", (store_id, blog_id))
-                existing = cur.fetchone()
-
-            if not articles:
-                if existing and existing.get("shopify_page_id"):
-                    try:
-                        client.delete_article(existing["shopify_page_id"])
-                    except Exception as e:
-                        if not is_gone_error(e):
-                            # Keep the tracking row — dropping it would orphan a
-                            # still-live landing article with no local record.
-                            logger.warning("Landing delete failed for blog %s, keeping tracking row: %s", blog_id, e)
-                            return
+        try:
+            time.sleep(5)
+            fresh_articles = client.get_all_articles()
+            for fa in fresh_articles:
+                if fa.get("image_url") and "shopify-staged-uploads" not in fa["image_url"]:
                     with db.get_cursor() as cur:
-                        cur.execute("DELETE FROM blog_landing_pages WHERE store_id = %s AND blog_id = %s", (store_id, blog_id))
-                return
+                        cur.execute(
+                            "UPDATE synced_articles SET image_url = %s WHERE store_id = %s AND shopify_id = %s AND (image_url IS NULL OR image_url != %s)",
+                            (fa["image_url"], store_id, fa["shopify_id"], fa["image_url"]),
+                        )
+        except Exception as e:
+            logger.warning("Failed to refresh article images: %s", e)
 
-            from app.services.blog_landing_generator import generate_blog_landing_html, get_tags
-            intro_text = existing.get("intro_text") if existing else None
-            hero_image_url = existing.get("hero_image_url") if existing else None
-            hero_image_alt = existing.get("hero_image_alt") if existing else None
-            clean_title = re.sub(r'\s+', ' ', blog['title']).strip()
-            html_content = generate_blog_landing_html(articles, blog["handle"], clean_title, intro_text=intro_text, hero_image_url=hero_image_url, hero_image_alt=hero_image_alt)
-            all_tags = get_tags(articles[:50])
-            article_title = f"{clean_title} — All Articles"
-            meta_desc = (intro_text or f"Browse all {clean_title} articles, tips, and guides.")[:160]
+        with db.get_cursor() as cur:
+            cur.execute(
+                "SELECT * FROM synced_articles WHERE store_id = %s AND blog_id = %s AND is_published = TRUE AND article_type = 'blog' AND COALESCE(tags, '') NOT ILIKE '%%landing-page%%' ORDER BY COALESCE(published_at, synced_at) DESC",
+                (store_id, blog_id),
+            )
+            articles = [dict(a) for a in cur.fetchall()]
 
-            from datetime import datetime, timezone
-            now_date = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        news_blog_shopify_id = None
+        with db.get_cursor() as cur:
+            cur.execute("SELECT shopify_id FROM synced_blogs WHERE store_id = %s AND handle = 'news'", (store_id,))
+            news_row = cur.fetchone()
+        if news_row:
+            news_blog_shopify_id = news_row["shopify_id"]
+        if not news_blog_shopify_id:
+            return
 
-            landing_fields = {
-                "title": article_title, "body": html_content,
-                "tags": ["landing-page"], "is_published": True,
-                "publish_date": now_date,
-                "summary": "",
-                "image_url": "",
-                "clear_image": True,
-                "meta_title": article_title[:60],
-                "meta_description": meta_desc,
-            }
+        with db.get_cursor() as cur:
+            cur.execute("SELECT * FROM blog_landing_pages WHERE store_id = %s AND blog_id = %s", (store_id, blog_id))
+            existing = cur.fetchone()
 
-            shopify_article_id = None
+        if not articles:
             if existing and existing.get("shopify_page_id"):
                 try:
-                    client.update_article(existing["shopify_page_id"], landing_fields)
-                    shopify_article_id = existing["shopify_page_id"]
+                    client.delete_article(existing["shopify_page_id"])
                 except Exception as e:
-                    # Only recreate when the old article is confirmed gone — a
-                    # transient error must not mint a duplicate landing.
-                    if is_gone_error(e):
-                        logger.info("Landing article %s gone on Shopify — recreating", existing["shopify_page_id"])
-                    else:
-                        raise
+                    if not is_gone_error(e):
+                        # Keep the tracking row — dropping it would orphan a
+                        # still-live landing article with no local record.
+                        logger.warning("Landing delete failed for blog %s, keeping tracking row: %s", blog_id, e)
+                        return
+                with db.get_cursor() as cur:
+                    cur.execute("DELETE FROM blog_landing_pages WHERE store_id = %s AND blog_id = %s", (store_id, blog_id))
+            return
 
-            if not shopify_article_id:
-                landing_fields.pop("clear_image", None)
-                landing_fields.pop("image_url", None)
-                landing_fields["handle"] = f"{blog['handle']}-landing"
-                landing_fields["author"] = store.get("shop_name") or store["name"]
-                result = client.create_article(news_blog_shopify_id, landing_fields)
-                shopify_article_id = result["shopify_id"]
+        from app.services.blog_landing_generator import generate_blog_landing_html, get_tags
+        intro_text = existing.get("intro_text") if existing else None
+        hero_image_url = existing.get("hero_image_url") if existing else None
+        hero_image_alt = existing.get("hero_image_alt") if existing else None
+        clean_title = re.sub(r'\s+', ' ', blog['title']).strip()
+        html_content = generate_blog_landing_html(articles, blog["handle"], clean_title, intro_text=intro_text, hero_image_url=hero_image_url, hero_image_alt=hero_image_alt)
+        all_tags = get_tags(articles[:50])
+        article_title = f"{clean_title} — All Articles"
+        meta_desc = (intro_text or f"Browse all {clean_title} articles, tips, and guides.")[:160]
 
-            with db.get_cursor() as cur:
-                cur.execute(
-                    """INSERT INTO blog_landing_pages (store_id, blog_id, shopify_page_id, page_handle, page_title, articles_count, tags_count, last_generated_at)
-                    VALUES (%s, %s, %s, 'news', %s, %s, %s, NOW())
-                    ON CONFLICT (store_id, blog_id) DO UPDATE SET
-                        shopify_page_id = EXCLUDED.shopify_page_id, page_title = EXCLUDED.page_title,
-                        articles_count = EXCLUDED.articles_count, tags_count = EXCLUDED.tags_count,
-                        last_generated_at = NOW()""",
-                    (store_id, blog_id, shopify_article_id, article_title, len(articles), len(all_tags)),
-                )
-            logger.info("Auto-regenerated landing page for blog %s", blog["title"])
-        except Exception as e:
-            logger.exception("Failed to auto-regenerate landing page: %s", e)
+        from datetime import datetime, timezone
+        now_date = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        landing_fields = {
+            "title": article_title, "body": html_content,
+            "tags": ["landing-page"], "is_published": True,
+            "publish_date": now_date,
+            "summary": "",
+            "image_url": "",
+            "clear_image": True,
+            "meta_title": article_title[:60],
+            "meta_description": meta_desc,
+        }
+
+        shopify_article_id = None
+        if existing and existing.get("shopify_page_id"):
+            try:
+                client.update_article(existing["shopify_page_id"], landing_fields)
+                shopify_article_id = existing["shopify_page_id"]
+            except Exception as e:
+                # Only recreate when the old article is confirmed gone — a
+                # transient error must not mint a duplicate landing.
+                if is_gone_error(e):
+                    logger.info("Landing article %s gone on Shopify — recreating", existing["shopify_page_id"])
+                else:
+                    raise
+
+        if not shopify_article_id:
+            landing_fields.pop("clear_image", None)
+            landing_fields.pop("image_url", None)
+            landing_fields["handle"] = f"{blog['handle']}-landing"
+            landing_fields["author"] = store.get("shop_name") or store["name"]
+            result = client.create_article(news_blog_shopify_id, landing_fields)
+            shopify_article_id = result["shopify_id"]
+
+        with db.get_cursor() as cur:
+            cur.execute(
+                """INSERT INTO blog_landing_pages (store_id, blog_id, shopify_page_id, page_handle, page_title, articles_count, tags_count, last_generated_at)
+                VALUES (%s, %s, %s, 'news', %s, %s, %s, NOW())
+                ON CONFLICT (store_id, blog_id) DO UPDATE SET
+                    shopify_page_id = EXCLUDED.shopify_page_id, page_title = EXCLUDED.page_title,
+                    articles_count = EXCLUDED.articles_count, tags_count = EXCLUDED.tags_count,
+                    last_generated_at = NOW()""",
+                (store_id, blog_id, shopify_article_id, article_title, len(articles), len(all_tags)),
+            )
+        logger.info("Auto-regenerated landing page for blog %s", blog["title"])
 
     threading.Thread(target=_run, daemon=True).start()
 
@@ -2755,6 +2792,29 @@ def wizard_generate_image(session_id):
     return jsonify({"task_id": task_id})
 
 
+def _live_body_template(session, previous_images, only_index):
+    """Body to recompose a published article from. Prefer the live synced body
+    with its figures swapped back to tokens (keeps edits made after publish);
+    use the session's template when the target image has no figure live yet."""
+    from app.services.article_media import tokenize_figures
+
+    template = (session.get("generated_article") or {}).get("body_html", "")
+    with db.get_cursor() as cur:
+        cur.execute(
+            "SELECT body FROM synced_articles WHERE store_id = %s AND shopify_id = %s",
+            (session["store_id"], session["shopify_article_id"]),
+        )
+        row = cur.fetchone()
+    live = (row or {}).get("body") or ""
+    if not live:
+        return template
+    tokenized = tokenize_figures(live, previous_images)
+    targets = [e for i, e in enumerate(previous_images, start=1) if only_index is None or i == only_index]
+    if all(e.get("token") and e["token"] in tokenized for e in targets if isinstance(e, dict)) and targets:
+        return tokenized
+    return template
+
+
 def _run_session_media_task(session, client, task_type, only_index=None, resume_status="generated"):
     """Background inline-image generation for a wizard session with an ai_tasks row."""
     session_id = session["id"]
@@ -2775,14 +2835,14 @@ def _run_session_media_task(session, client, task_type, only_index=None, resume_
             with db.get_cursor() as cur:
                 cur.execute("UPDATE ai_tasks SET status = 'running' WHERE id = %s", (task_id,))
             fresh = _fetch_wizard_session(session_id)
+            previous = fresh.get("inline_images") or []
             images = _wizard_step_media(fresh, client, only_index=only_index)
             # Already-published article (restyle / regenerate after publish): push the recomposed body.
             if fresh.get("shopify_article_id") and fresh.get("generated_article"):
                 from app.services.article_media import compose_article_body
 
-                body = compose_article_body(
-                    fresh["generated_article"].get("body_html", ""), images, get_article_visuals(fresh["store_id"])
-                )
+                base = _live_body_template(fresh, previous, only_index)
+                body = compose_article_body(base, images, get_article_visuals(fresh["store_id"]))
                 client.update_article(fresh["shopify_article_id"], {"body": body})
                 with db.get_cursor() as cur:
                     cur.execute(
@@ -3701,13 +3761,16 @@ def restyle_article(article_id):
                 logger.warning("Restyle hero generation failed for article %s: %s", article_id, e)
 
         original = article.get("body") or ""
-        body = compose_article_body(result["body_html"], inline_images, visuals)
-        body = restore_missing_figures(original, body)
+        # Tokenized template (figures from the original restored, tokens kept)
+        # is what later per-image regeneration recomposes from.
+        body_template = sanitize_html(restore_missing_figures(original, result["body_html"]))
+        body = compose_article_body(body_template, inline_images, visuals)
         body = restore_missing_images(original, body)
         body = sanitize_html(body)
         payload = {
             "article_id": article_id,
             "body_html": body,
+            "body_template": body_template,
             "inline_images": inline_images,
             "media_plan": media_plan,
             "faq_jsonld": faq_jsonld_string(body),
@@ -3814,7 +3877,132 @@ def apply_restyle(article_id):
     payload["applied"] = True
     with db.get_cursor() as cur:
         cur.execute("UPDATE ai_tasks SET result = %s WHERE id = %s", (json.dumps(payload), task_id))
+    try:
+        _link_article_media_session(article, payload, body_template=payload.get("body_template"))
+    except Exception as e:
+        logger.warning("Media session link failed for article %s: %s", article_id, e)
     return jsonify({"success": True, "template_suffix": BLOG_TEMPLATE_SUFFIX, "figures": payload.get("stats", {}).get("after_figures")})
+
+
+# ── Per-image regeneration for published articles ────────────────
+
+def _find_article_media_session(article):
+    with db.get_cursor() as cur:
+        cur.execute(
+            """SELECT * FROM article_wizard_sessions
+               WHERE store_id = %s AND shopify_article_id = %s
+               ORDER BY updated_at DESC LIMIT 1""",
+            (article["store_id"], article["shopify_id"]),
+        )
+        return cur.fetchone()
+
+
+def _link_article_media_session(article, payload, body_template=None):
+    """Upsert the wizard session that owns a published article's inline images.
+
+    Restyle has no wizard session, so one is created (status published, never
+    scheduled — the calendar and queues filter on scheduled_for). A wizard
+    article that gets restyled keeps its session; its body/plan are replaced.
+    `body_template` is the tokenized body; without one the live body is
+    tokenized from the ready images (failed images then have no placeholder)."""
+    from app.services.article_media import tokenize_figures
+
+    inline_images = payload.get("inline_images") or []
+    template = body_template or tokenize_figures(article.get("body") or "", inline_images)
+    session = _find_article_media_session(article)
+    generated = dict((session or {}).get("generated_article") or {})
+    generated.update({"title": article.get("title") or generated.get("title"), "body_html": template,
+                      "handle": article.get("handle") or generated.get("handle")})
+    media_plan = payload.get("media_plan") or {}
+    with db.get_cursor() as cur:
+        if session:
+            cur.execute(
+                """UPDATE article_wizard_sessions
+                   SET generated_article = %s, media_plan = %s, inline_images = %s,
+                       status = 'published', style = %s, current_step = 7, updated_at = NOW()
+                   WHERE id = %s""",
+                (json.dumps(generated), json.dumps(media_plan), json.dumps(inline_images), STYLE_VISUAL, session["id"]),
+            )
+            return session["id"]
+        cur.execute(
+            """INSERT INTO article_wizard_sessions
+               (store_id, status, current_step, topic, blog_id, generated_article, featured_image_url,
+                shopify_article_id, style, media_plan, inline_images)
+               VALUES (%s, 'published', 7, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id""",
+            (article["store_id"], (article.get("title") or "")[:500], article.get("blog_id"), json.dumps(generated),
+             article.get("image_url"), article["shopify_id"], STYLE_VISUAL, json.dumps(media_plan), json.dumps(inline_images)),
+        )
+        return cur.fetchone()["id"]
+
+
+def _backfill_article_media_session(article):
+    """Articles restyled before sessions were linked: rebuild one from the
+    latest applied restyle task."""
+    with db.get_cursor() as cur:
+        cur.execute(
+            """SELECT result FROM ai_tasks
+               WHERE task_type = 'article_restyle' AND status = 'completed'
+                 AND (input->>'article_id')::int = %s AND result->>'applied' = 'true'
+               ORDER BY id DESC LIMIT 1""",
+            (article["id"],),
+        )
+        row = cur.fetchone()
+    if not row:
+        return None
+    payload = row["result"]
+    if isinstance(payload, str):
+        payload = json.loads(payload)
+    if not (payload.get("media_plan") or {}).get("inline"):
+        return None
+    _link_article_media_session(article, payload, body_template=payload.get("body_template"))
+    return _find_article_media_session(article)
+
+
+@blog_bp.route("/api/blog/articles/<int:article_id>/media", methods=["GET"])
+def article_media(article_id):
+    """Inline-image plan + generation state for a published article, so single
+    images can be regenerated from the article modal."""
+    from app.services.article_media import TOKEN_RE
+
+    with db.get_cursor() as cur:
+        cur.execute("SELECT * FROM synced_articles WHERE id = %s", (article_id,))
+        article = cur.fetchone()
+    if not article:
+        return jsonify({"error": "Article not found"}), 404
+    session = _find_article_media_session(article)
+    if not session or not ((session.get("media_plan") or {}).get("inline")):
+        # Restyled before sessions were linked, or a pre-visual wizard session
+        # that a later restyle replaced: rebuild from the applied restyle task.
+        session = _backfill_article_media_session(article)
+    if not session or not ((session.get("media_plan") or {}).get("inline")):
+        return jsonify({"session_id": None, "inline": []})
+
+    template = (session.get("generated_article") or {}).get("body_html") or ""
+    tokens_in_template = {f"[[INLINE_IMAGE_{n}]]" for n in TOKEN_RE.findall(template)}
+    by_token = {e.get("token"): e for e in (session.get("inline_images") or []) if isinstance(e, dict)}
+    inline = []
+    for spec in session["media_plan"]["inline"]:
+        entry = by_token.get(spec.get("token")) or {}
+        inline.append({
+            **spec,
+            "cdn_url": entry.get("cdn_url") or "",
+            "status": entry.get("status") or "pending",
+            "error": entry.get("error"),
+            "placeable": bool(entry.get("cdn_url")) or spec.get("token") in tokens_in_template,
+        })
+    task_id = None
+    if session.get("status") == "generating_media":
+        with db.get_cursor() as cur:
+            cur.execute(
+                """SELECT id FROM ai_tasks
+                   WHERE task_type = 'article_media_regen' AND status IN ('pending', 'running')
+                     AND (input->>'session_id')::int = %s
+                   ORDER BY id DESC LIMIT 1""",
+                (session["id"],),
+            )
+            row = cur.fetchone()
+            task_id = row["id"] if row else None
+    return jsonify({"session_id": session["id"], "status": session.get("status"), "task_id": task_id, "inline": inline})
 
 
 @blog_bp.route("/api/blog/push-seo-snippet", methods=["POST"])
