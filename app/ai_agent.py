@@ -6124,34 +6124,55 @@ def run_task(task_type, task_input, store_id=None):
         if product_lines:
             user_parts.append("PRODUCTS LINKED IN THIS ARTICLE (usable as 'product' image subjects):\n" + "\n".join(product_lines))
         user_parts.append("CURRENT BODY HTML:\n" + original_body)
-        user_parts.append("Return the JSON object only.")
+        user_parts.append("Return the HTML body, then the ===MEDIA_PLAN=== line and the JSON object. Nothing else.")
 
-        response = client.chat.completions.create(
-            model=config["model"],
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": "\n\n".join(user_parts)},
-            ],
-            temperature=0.3,
-        )
-        content = response.choices[0].message.content or ""
-        parsed = None
-        try:
-            start = content.find("{")
-            end = content.rfind("}") + 1
-            if start >= 0 and end > start:
-                parsed = json.loads(content[start:end])
-        except (json.JSONDecodeError, ValueError):
-            parsed = None
-        if not isinstance(parsed, dict) or not parsed.get("body_html"):
-            return {"error": "Restyle did not return a body", "raw_response": content[:2000]}
+        from app.services.article_media import RESTYLE_PLAN_DELIM, parse_restyle_response
 
-        body_content = re.sub(r"^```(?:html)?\s*\n?", "", parsed["body_html"])
-        body_content = re.sub(r"\n?```\s*$", "", body_content)
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": "\n\n".join(user_parts)},
+        ]
+        body_content, plan_raw, content, finish = "", {}, "", None
+        for attempt in range(2):
+            response = client.chat.completions.create(model=config["model"], messages=messages, temperature=0.3)
+            choice = response.choices[0]
+            content = choice.message.content or ""
+            finish = getattr(choice, "finish_reason", None)
+            body_content, plan_raw = parse_restyle_response(content)
+            if body_content:
+                break
+            logger.warning(
+                "Restyle attempt %s for article %s returned no body (finish_reason=%s, %s chars): %s",
+                attempt + 1, article_id, finish, len(content), content[:1500],
+            )
+        if not body_content:
+            return {
+                "error": f"Restyle did not return a body (finish_reason={finish}); reply started: {content[:300]!r}",
+                "raw_response": content[:2000],
+            }
+        if not plan_raw.get("inline") and inline_count:
+            # Body came back without a usable plan (legacy prompt, truncated JSON): ask for just the plan.
+            try:
+                plan_response = client.chat.completions.create(
+                    model=config["model"],
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": "ARTICLE TITLE: " + article.get("title", "") + "\n\nENHANCED BODY HTML:\n"
+                         + body_content + "\n\nReturn ONLY the media plan JSON object for the tokens present in this body "
+                         "(placeholders [[INLINE_IMAGE_n]]). Start with the line " + RESTYLE_PLAN_DELIM},
+                    ],
+                    temperature=0.3,
+                )
+                _, plan_raw = parse_restyle_response(
+                    RESTYLE_PLAN_DELIM + (plan_response.choices[0].message.content or "").split(RESTYLE_PLAN_DELIM)[-1]
+                )
+            except Exception as e:
+                logger.warning("Restyle media-plan fallback failed for article %s: %s", article_id, e)
+
         body_content = _sanitize_description(body_content)
         body_content = _fix_internal_link_handles(body_content, restyle_store_id)
         body_content, anchor_report = lint_and_fix_anchors(body_content, client=client, model=config["model"])
-        media_plan = normalize_media_plan(parsed.get("media_plan"), inline_count)
+        media_plan = normalize_media_plan(plan_raw, inline_count)
         return {
             "body_html": body_content,
             "media_plan": media_plan,

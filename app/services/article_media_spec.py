@@ -23,3 +23,29 @@ class TestTokenizeFigures:
 
     def test_body_without_the_figure_is_unchanged(self):
         assert tokenize_figures("<p>only text</p>", [READY]) == "<p>only text</p>"
+
+
+from app.services.article_media import parse_restyle_response
+
+BODY = "<p>Intro</p>\n[[INLINE_IMAGE_1]]\n<h2>More</h2><p>Text with \"quotes\" and a\nnewline.</p>"
+PLAN = {"hero": {"prompt": "", "alt": ""}, "inline": [{"token": "[[INLINE_IMAGE_1]]", "prompt": "A scene"}]}
+
+
+class TestParseRestyleResponse:
+    def test_splits_delimited_html_and_media_plan(self):
+        content = f"```html\n{BODY}\n```\n===MEDIA_PLAN===\n```json\n{__import__('json').dumps(PLAN)}\n```"
+        assert parse_restyle_response(content) == (BODY, PLAN)
+
+    def test_accepts_legacy_json_object_output(self):
+        content = "Here you go:\n" + __import__("json").dumps({"body_html": BODY, "media_plan": PLAN})
+        assert parse_restyle_response(content) == (BODY, PLAN)
+
+    def test_bare_html_without_a_plan_yields_empty_plan(self):
+        assert parse_restyle_response(f"\n{BODY}\n") == (BODY, {})
+
+    def test_broken_json_around_html_still_recovers_the_body(self):
+        content = '{"body_html": "' + BODY + '", "media_plan": {"inline": [}}'
+        assert parse_restyle_response(content) == (BODY, {})
+
+    def test_non_html_text_returns_no_body(self):
+        assert parse_restyle_response("I cannot help with that request.") == ("", {})

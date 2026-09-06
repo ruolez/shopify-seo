@@ -164,6 +164,60 @@ def tokenize_figures(body_html, images):
     return body
 
 
+# ── Restyle response parsing ──────────────────────────────────────
+
+RESTYLE_PLAN_DELIM = "===MEDIA_PLAN==="
+_HTML_HINT_RE = re.compile(r"<(p|h2|h3|ul|ol|div|section|table)\b", re.IGNORECASE)
+
+
+def _strip_fences(text):
+    text = re.sub(r"^\s*```(?:html|json)?\s*\n?", "", text or "", flags=re.IGNORECASE)
+    return re.sub(r"\n?```\s*$", "", text).strip()
+
+
+def _parse_json_object(text):
+    start, end = text.find("{"), text.rfind("}") + 1
+    if start < 0 or end <= start:
+        return None
+    try:
+        data = json.loads(text[start:end])
+    except ValueError:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def parse_restyle_response(content):
+    """Return (body_html, media_plan) from a restyle model reply.
+
+    Preferred format is raw HTML, then a RESTYLE_PLAN_DELIM line, then the
+    media-plan JSON — a 20K-character body inside a JSON string breaks on
+    the first unescaped quote. Legacy single-JSON replies still parse, a
+    JSON reply whose body string is malformed is recovered by regex, and a
+    bare HTML reply is accepted with an empty plan. Body is "" when nothing
+    HTML-like was found (refusals, prose)."""
+    text = content or ""
+    if RESTYLE_PLAN_DELIM in text:
+        body_part, plan_part = text.split(RESTYLE_PLAN_DELIM, 1)
+        body = _strip_fences(body_part)
+        return (body if _HTML_HINT_RE.search(body) else "", _parse_json_object(_strip_fences(plan_part)) or {})
+    obj = _parse_json_object(text)
+    if obj and obj.get("body_html"):
+        body = _strip_fences(str(obj["body_html"]))
+        plan = obj.get("media_plan") if isinstance(obj.get("media_plan"), dict) else {}
+        return (body if _HTML_HINT_RE.search(body) else "", plan)
+    m = re.search(r'"body_html"\s*:\s*"(.*?)"\s*,\s*"media_plan"', text, re.DOTALL)
+    if m:
+        raw = m.group(1)
+        try:
+            body = json.loads('"' + raw + '"')
+        except ValueError:
+            body = raw
+        body = _strip_fences(body)
+        return (body if _HTML_HINT_RE.search(body) else "", {})
+    body = _strip_fences(text)
+    return (body if _HTML_HINT_RE.search(body) else "", {})
+
+
 def count_figures(body_html):
     return len(_FIGURE_RE.findall(body_html or ""))
 
