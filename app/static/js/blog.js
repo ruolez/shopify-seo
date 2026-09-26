@@ -38,6 +38,7 @@ function initBlogTabs() {
             if (tab.dataset.tab === "articles") loadArticles();
             if (tab.dataset.tab === "create") initWizard();
             if (tab.dataset.tab === "scheduled") initScheduledTab();
+            if (tab.dataset.tab === "intro-links") initIntroLinksTab();
         });
     });
 

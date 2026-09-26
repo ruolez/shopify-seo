@@ -5216,3 +5216,39 @@ tbody tr:hover .row-actions,
     vertical-align: middle;
 }
 .kw-src-chips { display: inline-flex; gap: 3px; }
+
+/* ─── Blog › Intro Links ─── */
+.intro-links-head { margin-bottom: 16px; }
+.intro-links-lede { margin: 4px 0 16px; font-size: 13px; color: var(--on-surface-secondary); max-width: 760px; }
+.intro-links-stats { margin-bottom: 0; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; }
+.intro-links-stats .stat-card { padding: 16px; }
+.intro-links-stats .stat-value { font-size: 28px; }
+.intro-links-stats .stat-of { font-size: 16px; font-weight: 600; color: var(--on-surface-secondary); }
+.intro-links-stats .stat-sub { font-size: 12px; color: var(--on-surface-secondary); margin-top: 2px; }
+.intro-links-toolbar, .intro-drafts-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
+.intro-links-filter { display: flex; gap: 16px; font-size: 13px; }
+.intro-links-filter label { display: inline-flex; gap: 6px; align-items: center; cursor: pointer; }
+.intro-links-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.intro-links-table .num { text-align: right; white-space: nowrap; }
+.intro-links-table .muted, .intro-draft .muted, .intro-drafts-head .muted { font-size: 12px; color: var(--on-surface-secondary); }
+.intro-title { font-weight: 600; }
+.intro-title-cell { max-width: 420px; }
+.intro-target code, .intro-draft code { font-size: 12px; }
+.intro-target-kw { margin-top: 2px; }
+.intro-draft-list { display: flex; flex-direction: column; gap: 16px; }
+.intro-draft { border: 1px solid var(--outline); border-radius: var(--radius-sm); padding: 14px 16px; background: var(--surface); }
+.intro-draft.is-applied { opacity: 0.7; }
+.intro-draft-top { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; }
+.intro-draft-title { display: inline-flex; gap: 8px; align-items: flex-start; font-weight: 600; cursor: pointer; }
+.intro-draft-title input { margin-top: 3px; }
+.intro-draft .comparison-grid { margin-top: 10px; }
+.intro-draft .comparison-pane { max-height: 280px; }
+.intro-violations { margin: 8px 0 0; padding-left: 18px; font-size: 13px; color: var(--warning); }
+.intro-redraft { display: flex; gap: 8px; margin-top: 10px; align-items: center; }
+.intro-redraft select { max-width: 360px; font-size: 13px; }
+@media (max-width: 768px) {
+    .intro-links-table th:nth-child(4), .intro-links-table td:nth-child(4),
+    .intro-links-table th:nth-child(5), .intro-links-table td:nth-child(5) { display: none; }
+    .intro-redraft { flex-wrap: wrap; }
+    .intro-redraft select { max-width: 100%; }
+}

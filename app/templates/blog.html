@@ -9,6 +9,7 @@
                     <button class="tab active" data-tab="articles">Articles</button>
                     <button class="tab" data-tab="create">Create Post</button>
                     <button class="tab" data-tab="scheduled">Scheduled</button>
+                    <button class="tab" data-tab="intro-links">Intro Links</button>
                 </div>
 
                 <div class="tab-panel active" id="tab-articles">
@@ -349,6 +350,35 @@
                     <div id="blog-scheduled-container"></div>
                 </div>
 
+                <div class="tab-panel" id="tab-intro-links">
+                    <div class="card intro-links-head">
+                        <h3 style="margin: 0;">Collection link in the opening paragraph</h3>
+                        <p class="intro-links-lede">
+                            Moves each post's best-matching collection link into sentence 2 or 3 of its intro, with the
+                            collection's keyword as anchor text, and unwraps its later copies so the link count stays flat.
+                            Blog guides and Product News only — industry and company news is skipped.
+                        </p>
+                        <div class="stats-grid intro-links-stats" id="intro-links-summary"></div>
+                    </div>
+                    <div id="intro-links-drafts"></div>
+                    <div class="card">
+                        <div class="intro-links-toolbar">
+                            <div class="intro-links-filter">
+                                <label><input type="radio" name="intro-links-filter" value="fixable" checked onchange="setIntroLinksFilter(this.value)"> Needs fix</label>
+                                <label><input type="radio" name="intro-links-filter" value="all" onchange="setIntroLinksFilter(this.value)"> All posts</label>
+                            </div>
+                            <div class="intro-links-actions">
+                                <button class="btn btn-secondary btn-sm" onclick="selectTopIntroLinks(10)">Top 10 by clicks</button>
+                                <button class="btn btn-primary btn-sm" id="intro-links-draft-btn" onclick="draftIntroLinks(this)" disabled>
+                                    <span class="material-symbols-rounded">edit_note</span>
+                                    <span id="intro-links-draft-label">Draft intros</span>
+                                </button>
+                            </div>
+                        </div>
+                        <div id="intro-links-table"></div>
+                    </div>
+                </div>
+
                 <!-- Scheduled Post Preview Modal -->
                 <div class="modal-overlay" id="scheduled-preview-modal">
                     <div class="modal modal-fullscreen">
@@ -401,4 +431,5 @@
 
 {% block scripts %}
     <script src="/static/js/blog.js"></script>
+    <script src="/static/js/intro_links.js"></script>
 {% endblock %}

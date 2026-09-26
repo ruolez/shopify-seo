@@ -3969,6 +3969,17 @@ def run_task(task_type, task_input, store_id=None):
                 len(guaranteed), ", ".join(g["url"] for g in guaranteed),
             )
 
+        intro_qa = None
+        from app.services.intro_link_service import PRODUCT_NEWS_CATEGORY
+
+        if task_input.get("category") == PRODUCT_NEWS_CATEGORY:
+            try:
+                from app.services.intro_link_service import enforce_product_news_intro
+
+                out, intro_qa = enforce_product_news_intro(client, config["model"], sid, out, headline)
+            except Exception:
+                logger.exception("Product News intro link failed — body passed through")
+
         internal_links_count = len(re.findall(r'<a\s[^>]*href\s*=\s*["\']/', out, re.IGNORECASE))
         word_count = len(re.sub(r"<[^>]+>", "", out).split())
         return {
@@ -3978,6 +3989,7 @@ def run_task(task_type, task_input, store_id=None):
                 "word_count": word_count,
                 "guaranteed_links_added": len(guaranteed),
             },
+            "_qa": {"intro_link": intro_qa} if intro_qa else None,
         }
 
     elif task_type == "collection_title_seo":
@@ -5721,25 +5733,22 @@ def run_task(task_type, task_input, store_id=None):
                         (target_product_ids,),
                     )
                     products = [dict(r) for r in cur.fetchall()]
-                else:
-                    cur.execute(
-                        "SELECT title, handle FROM synced_products WHERE store_id = %s AND status = 'ACTIVE' ORDER BY title LIMIT 30",
-                        (outline_store_id,),
-                    )
-                    products = [dict(r) for r in cur.fetchall()]
-
                 if target_collection_ids:
                     cur.execute(
                         "SELECT id, title, handle FROM synced_collections WHERE id = ANY(%s)",
                         (target_collection_ids,),
                     )
                     collections = [dict(r) for r in cur.fetchall()]
-                else:
-                    cur.execute(
-                        "SELECT title, handle FROM synced_collections WHERE store_id = %s AND handle IS NOT NULL AND handle != '' ORDER BY title LIMIT 30",
-                        (outline_store_id,),
-                    )
-                    collections = [dict(r) for r in cur.fetchall()]
+            if not target_product_ids or not target_collection_ids:
+                from app.services.intro_link_service import fallback_link_candidates
+
+                ranked_products, ranked_collections = fallback_link_candidates(
+                    outline_store_id, f"{topic} {' '.join(map(str, keywords))}", research_data
+                )
+                if not target_product_ids:
+                    products = ranked_products
+                if not target_collection_ids:
+                    collections = ranked_collections
 
         title_style = random.choice(_get_article_title_styles())
         style_examples = "; ".join(f'"{e}"' for e in title_style["examples"])
@@ -5801,6 +5810,22 @@ def run_task(task_type, task_input, store_id=None):
             else:
                 user_parts.append("Collections Available for Linking:\n" + collection_lines)
 
+        intro_collection = None
+        if outline_store_id:
+            try:
+                from app.services.intro_link_service import choose_intro_collection, intro_link_prompt_block
+
+                intro_collection = choose_intro_collection(
+                    outline_store_id, o_primary_kw, topic, [c.get("handle") for c in collections]
+                )
+                if intro_collection:
+                    user_parts.append(
+                        intro_link_prompt_block(intro_collection, o_primary_kw)
+                        + "\n- Make it the first entry of internal_link_plan, section \"Introduction\"."
+                    )
+            except Exception:
+                logger.exception("Intro collection choice failed — outline continues without it")
+
         response = client.chat.completions.create(
             model=config["model"],
             messages=[
@@ -5823,6 +5848,8 @@ def run_task(task_type, task_input, store_id=None):
                         parsed.get("media_plan"), outline_visuals["inline_image_count"]
                     )
                     parsed["style"] = "visual"
+                if isinstance(parsed, dict) and intro_collection:
+                    parsed["intro_collection"] = intro_collection
                 return parsed
         except (json.JSONDecodeError, ValueError):
             pass
@@ -5863,23 +5890,10 @@ def run_task(task_type, task_input, store_id=None):
                         (target_product_ids,),
                     )
                     products = [dict(r) for r in cur.fetchall()]
-                else:
-                    cur.execute(
-                        "SELECT title, handle FROM synced_products WHERE store_id = %s AND status = 'ACTIVE' ORDER BY title LIMIT 30",
-                        (gen_store_id,),
-                    )
-                    products = [dict(r) for r in cur.fetchall()]
-
                 if target_collection_ids:
                     cur.execute(
                         "SELECT id, title, handle FROM synced_collections WHERE id = ANY(%s)",
                         (target_collection_ids,),
-                    )
-                    collections = [dict(r) for r in cur.fetchall()]
-                else:
-                    cur.execute(
-                        "SELECT title, handle FROM synced_collections WHERE store_id = %s AND handle IS NOT NULL AND handle != '' ORDER BY title LIMIT 30",
-                        (gen_store_id,),
                     )
                     collections = [dict(r) for r in cur.fetchall()]
 
@@ -5890,6 +5904,16 @@ def run_task(task_type, task_input, store_id=None):
                     (gen_store_id,),
                 )
                 other_articles = [dict(r) for r in cur.fetchall()]
+            if not target_product_ids or not target_collection_ids:
+                from app.services.intro_link_service import fallback_link_candidates
+
+                ranked_products, ranked_collections = fallback_link_candidates(
+                    gen_store_id, f"{topic} {' '.join(map(str, keywords))}", research_data
+                )
+                if not target_product_ids:
+                    products = ranked_products
+                if not target_collection_ids:
+                    collections = ranked_collections
 
         gen_visual = (task_input.get("style") or "visual") == "visual"
         gen_visuals = None
@@ -5982,6 +6006,24 @@ def run_task(task_type, task_input, store_id=None):
                 f"- {a['title']}: /blogs/{a['blog_handle']}/{a['handle']}" for a in other_articles[:10]
             ))
 
+        intro_collection = (outline_data or {}).get("intro_collection")
+        if not intro_collection and gen_store_id:
+            try:
+                from app.services.intro_link_service import choose_intro_collection
+
+                intro_collection = choose_intro_collection(
+                    gen_store_id, g_primary_kw, (outline_data or {}).get("suggested_title") or topic,
+                    [c.get("handle") for c in collections],
+                )
+            except Exception:
+                logger.exception("Intro collection choice failed — generation continues without it")
+        if intro_collection:
+            from app.services.intro_link_service import intro_link_prompt_block
+
+            if not any(c.get("handle") == intro_collection["handle"] for c in collections):
+                collections.append({"title": intro_collection["title"], "handle": intro_collection["handle"]})
+            user_parts.append(intro_link_prompt_block(intro_collection, g_primary_kw))
+
         user_parts.append(f"Write the full article body targeting ~{target_word_count} words. Return raw HTML only.")
 
         body_response = client.chat.completions.create(
@@ -6000,24 +6042,35 @@ def run_task(task_type, task_input, store_id=None):
         body_content = _fix_internal_link_handles(body_content, gen_store_id)
         faq_jsonld = None
         gen_qa = {}
+        if intro_collection:
+            try:
+                from app.services.intro_link_service import enforce_intro_link
+
+                body_content, gen_qa["intro_link"] = enforce_intro_link(
+                    client, config["model"], gen_store_id, body_content, intro_collection, g_primary_kw,
+                    (outline_data or {}).get("suggested_title") or topic,
+                )
+            except Exception:
+                logger.exception("Intro link enforcement failed — body passed through")
+        from app.services.article_quality import lint_and_fix_anchors
+
+        destinations = {f"/products/{p['handle']}": p["title"] for p in products if p.get("handle")}
+        destinations.update({f"/collections/{c['handle']}": c["title"] for c in collections if c.get("handle")})
+        destinations.update({
+            f"/blogs/{a['blog_handle']}/{a['handle']}": a["title"] for a in other_articles if a.get("handle")
+        })
+        body_content, anchor_report = lint_and_fix_anchors(
+            body_content, client=client, model=config["model"], destinations=destinations
+        )
+        if anchor_report["violations"]:
+            gen_qa["anchors"] = {
+                "fixed": [v["kind"] for v in anchor_report["violations"] if v.get("fixed")],
+                "rewritten": anchor_report["rewritten"],
+                "remaining": [v["text"] for v in anchor_report["remaining"]],
+            }
         if gen_visual:
             from app.services.article_media import build_faqpage_jsonld, extract_faq
-            from app.services.article_quality import lint_and_fix_anchors
 
-            destinations = {f"/products/{p['handle']}": p["title"] for p in products if p.get("handle")}
-            destinations.update({f"/collections/{c['handle']}": c["title"] for c in collections if c.get("handle")})
-            destinations.update({
-                f"/blogs/{a['blog_handle']}/{a['handle']}": a["title"] for a in other_articles if a.get("handle")
-            })
-            body_content, anchor_report = lint_and_fix_anchors(
-                body_content, client=client, model=config["model"], destinations=destinations
-            )
-            if anchor_report["violations"]:
-                gen_qa["anchors"] = {
-                    "fixed": [v["kind"] for v in anchor_report["violations"] if v.get("fixed")],
-                    "rewritten": anchor_report["rewritten"],
-                    "remaining": [v["text"] for v in anchor_report["remaining"]],
-                }
             faq_jsonld = build_faqpage_jsonld(extract_faq(body_content))
 
         # Count stats
@@ -6076,8 +6129,10 @@ def run_task(task_type, task_input, store_id=None):
                 if isinstance(sp, dict)
             ]
             gen_result = validate_article_result(gen_result, g_primary_kw, client, config, hero_alt, inline_alts)
-            if gen_qa:
-                gen_result["_qa"] = {**(gen_result.get("_qa") or {}), **gen_qa}
+        if gen_qa:
+            gen_result["_qa"] = {**(gen_result.get("_qa") or {}), **gen_qa}
+        if intro_collection:
+            gen_result["intro_collection"] = intro_collection
         return gen_result
 
     elif task_type == "article_restyle":

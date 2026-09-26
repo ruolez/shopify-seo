@@ -26,6 +26,7 @@ from app.routes.task_routes import task_bp
 from app.routes.technical_seo_routes import technical_seo_bp
 from app.routes.image_routes import image_bp
 from app.routes.blog_routes import blog_bp
+from app.routes.intro_link_routes import intro_link_bp
 from app.routes.brand_routes import brand_bp
 from app.routes.landing_routes import landing_bp
 from app.routes.gsc_routes import gsc_bp
@@ -57,6 +58,7 @@ app.register_blueprint(interlinking_bp)
 app.register_blueprint(technical_seo_bp)
 app.register_blueprint(image_bp)
 app.register_blueprint(blog_bp)
+app.register_blueprint(intro_link_bp)
 app.register_blueprint(brand_bp)
 app.register_blueprint(landing_bp)
 app.register_blueprint(gsc_bp)

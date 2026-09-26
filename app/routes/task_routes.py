@@ -1206,6 +1206,8 @@ AI_TASK_META = {
     "article_media": ("Article Inline Images", "/blog"),
     "article_media_regen": ("Article Inline Image Regeneration", "/blog"),
     "article_restyle": ("Article Restyle", "/blog"),
+    "article_intro_link_plan": ("Intro Link Drafts", "/blog?tab=intro-links"),
+    "article_intro_link_apply": ("Intro Link Apply", "/blog?tab=intro-links"),
     "brand_seo": ("Brand SEO", "/brands"),
     "home_page_generate": ("Home Page Generation", "/home-page"),
     "home_carousel_image": ("Home Carousel Image", "/home-page"),

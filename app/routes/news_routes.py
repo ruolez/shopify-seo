@@ -319,7 +319,8 @@ def _step_links(session, store_id):
         return None
     result = ai_run_task(
         "news_links",
-        {"body_html": body_html, "headline": edited.get("headline") or "", "store_id": store_id},
+        {"body_html": body_html, "headline": edited.get("headline") or "", "store_id": store_id,
+         "category": edited.get("category") or ""},
         store_id=store_id,
     )
     if result.get("error"):

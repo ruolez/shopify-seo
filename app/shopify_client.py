@@ -1233,6 +1233,16 @@ class ShopifyClient:
             cursor = result["cursor"]
         return all_articles
 
+    def get_article(self, shopify_id):
+        """Live {id, handle, body} of one article, or None if it no longer exists."""
+        query = """
+        query ($id: ID!) {
+          article(id: $id) { id handle body }
+        }
+        """
+        data = self._graphql(query, {"id": shopify_id})
+        return data.get("article")
+
     def create_article(self, blog_shopify_id, fields):
         query = """
         mutation ($article: ArticleCreateInput!) {
