@@ -351,7 +351,7 @@ const PROMPT_GROUPS = {
     "Product Prompts": ["prompts.product_seo", "prompts.product_description", "prompts.product_title", "prompts.product_discovery"],
     "Collection Prompts": ["prompts.collection_seo", "prompts.collection_description", "prompts.collection_title"],
     "Brand Prompts": ["prompts.brand_seo", "prompts.brand_description", "prompts.brand_logo"],
-    "Article Prompts": ["prompts.article_seo", "prompts.article_body", "prompts.topic_discovery", "prompts.article_research", "prompts.article_discovery", "prompts.article_outline", "prompts.article_generate", "prompts.article_outline_visual", "prompts.article_generate_visual", "prompts.article_restyle", "prompts.article_summary", "prompts.article_refresh_links", "prompts.article_intro_link", "prompts.blog_seo_suggestions"],
+    "Article Prompts": ["prompts.article_seo", "prompts.article_body", "prompts.topic_discovery", "prompts.article_research", "prompts.article_discovery", "prompts.article_outline", "prompts.article_generate", "prompts.article_outline_visual", "prompts.article_generate_visual", "prompts.article_restyle", "prompts.article_refresh", "prompts.article_summary", "prompts.article_refresh_links", "prompts.article_intro_link", "prompts.blog_seo_suggestions"],
     "Landing Page Prompts": ["prompts.landing_page_seo", "prompts.landing_page_generate", "prompts.landing_page_rewrite"],
     "Cannibalization Prompts": ["prompts.cannibalization_analysis", "prompts.cannibalization_fix"],
     "Content Gap Prompts": ["prompts.content_gap_analysis", "prompts.content_brief_generation", "prompts.intent_classification"],

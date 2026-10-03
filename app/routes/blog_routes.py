@@ -553,7 +553,9 @@ def apply_article(article_id):
             article["store_id"], "article", article_id, fields,
             source=data.get("source") or "blog", change_type=data.get("change_type") or "article_edit",
             client=client, extra_fields={"tags": tags} if tags is not None else None,
-            allow_dropped_blocks=bool(data.get("force")), restore_media=False,
+            allow_dropped_blocks=bool(data.get("force")),
+            # A hand edit may remove an image on purpose; an AI refresh may not.
+            restore_media=data.get("change_type") == "article_refresh",
         )
     except ApplyRefused as refused:
         return refusal_response(refused)
@@ -739,6 +741,61 @@ def analyze_article_ai(article_id):
     thread = threading.Thread(target=run_task, daemon=True)
     thread.start()
     return jsonify({"task_id": task_id})
+
+
+# ── Refresh (rewrite in place around real searches) ──────────────
+
+@blog_bp.route("/api/blog/articles/<int:article_id>/refresh", methods=["POST"])
+def refresh_article(article_id):
+    """Start a refresh proposal for one article. Nothing is written to Shopify
+    until the person applies the preview."""
+    with db.get_cursor() as cur:
+        cur.execute("SELECT store_id FROM synced_articles WHERE id = %s", (article_id,))
+        article = cur.fetchone()
+    if not article:
+        return jsonify({"error": "Article not found"}), 404
+
+    with db.get_cursor() as cur:
+        cur.execute(
+            """INSERT INTO ai_tasks (store_id, task_type, status, input)
+               VALUES (%s, 'article_refresh', 'pending', %s) RETURNING id""",
+            (article["store_id"], json.dumps({"article_id": article_id})),
+        )
+        task_id = cur.fetchone()["id"]
+
+    def _run():
+        from app.services.article_refresh import run_article_refresh
+
+        try:
+            with db.get_cursor() as cur:
+                cur.execute("UPDATE ai_tasks SET status = 'running' WHERE id = %s", (task_id,))
+            result = run_article_refresh(article_id)
+            with db.get_cursor() as cur:
+                cur.execute(
+                    "UPDATE ai_tasks SET status = 'completed', result = %s, completed_at = NOW() WHERE id = %s",
+                    (json.dumps(result), task_id),
+                )
+        except Exception as e:
+            logger.exception("Article refresh failed for %s: %s", article_id, e)
+            with db.get_cursor() as cur:
+                cur.execute(
+                    "UPDATE ai_tasks SET status = 'failed', error = %s, completed_at = NOW() WHERE id = %s",
+                    (str(e), task_id),
+                )
+
+    threading.Thread(target=_run, daemon=True).start()
+    return jsonify({"task_id": task_id})
+
+
+@blog_bp.route("/api/blog/refresh-candidates", methods=["GET"])
+def refresh_candidates():
+    """Articles Google shows but few click, ranked by the clicks a refresh could add."""
+    store_id = request.args.get("store_id", type=int)
+    if not store_id:
+        return jsonify({"error": "store_id is required"}), 400
+    from app.services.dashboard_service import get_article_refresh_candidates
+
+    return jsonify({"candidates": get_article_refresh_candidates(store_id, limit=20)})
 
 
 # ── Refresh Links ────────────────────────────────────────────────

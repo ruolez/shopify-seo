@@ -70,7 +70,33 @@ function initBlogTabs() {
 
 // ── Articles Tab ─────────────────────────────────────────────────
 
+// Posts Google already shows but few people click — the cheapest traffic to win.
+async function loadRefreshCandidates() {
+    const card = document.getElementById("refresh-candidates-card");
+    if (!card) return;
+    try {
+        const storeId = await getFirstStoreId();
+        if (!storeId) return;
+        const { candidates } = await apiRequest(`/api/blog/refresh-candidates?store_id=${storeId}`);
+        if (!candidates || !candidates.length) { card.innerHTML = ""; return; }
+        const total = candidates.reduce((sum, c) => sum + c.est_clicks_gain, 0);
+        card.innerHTML = `<details class="card" style="margin-bottom:16px;" ${candidates.length <= 5 ? "open" : ""}>
+            <summary style="cursor:pointer;font-weight:600;">Worth refreshing — ${candidates.length} post${candidates.length === 1 ? "" : "s"}, about +${total} clicks a month
+                <span style="font-weight:400;font-size:13px;color:var(--on-surface-secondary);"> · Google shows these, but few people click. A refresh rewrites the post around those searches. Same URL.</span></summary>
+            <div class="table-container" style="margin-top:12px;"><table class="data-table"><thead><tr><th>Post</th><th>Impressions (28d)</th><th>Clicks</th><th>Position</th><th>Could add</th><th></th></tr></thead><tbody>
+            ${candidates.map((c) => `<tr>
+                <td>${escapeHtml(c.title)}${c.keyword ? `<div style="font-size:12px;color:var(--on-surface-secondary);">${escapeHtml(c.keyword)}</div>` : ""}</td>
+                <td>${c.impressions.toLocaleString()}</td><td>${c.clicks}</td><td>${c.position}</td>
+                <td style="color:var(--success);font-weight:600;">+${c.est_clicks_gain}/mo</td>
+                <td style="text-align:right;"><button class="btn btn-secondary btn-sm" onclick="openArticleDetail(${c.id})"><span class="material-symbols-rounded">autorenew</span> Open</button></td>
+            </tr>`).join("")}</tbody></table></div></details>`;
+    } catch (e) {
+        card.innerHTML = "";
+    }
+}
+
 async function loadArticles() {
+    loadRefreshCandidates();
     const container = document.getElementById("articles-container");
     try {
         let url = `/api/blog/articles?sort_by=${articleSort.by}&sort_dir=${articleSort.dir}`;
@@ -371,6 +397,10 @@ function renderArticleDetail(container, article) {
                             <span class="material-symbols-rounded">auto_awesome</span>
                             AI Analyze
                         </button>
+                        <button class="btn btn-secondary" onclick="refreshArticle(${article.id}, this)" title="Rewrites this post in place around the searches Google already shows it for and the collections you sell. Same URL, same images, existing links kept. You review a before/after before anything changes.">
+                            <span class="material-symbols-rounded">autorenew</span>
+                            Refresh for search
+                        </button>
                         <button class="btn btn-secondary" onclick="openRefreshLinksPanel(${article.id}, ${article.store_id})">
                             <span class="material-symbols-rounded">link</span>
                             Refresh Links
@@ -380,6 +410,7 @@ function renderArticleDetail(container, article) {
                             Regenerate with new style
                         </button>
                     </div>
+                    <div id="article-refresh-container"></div>
                     <div id="refresh-links-panel-container"></div>
                     <div id="restyle-panel-container"></div>
                     <div id="article-media-container"></div>
@@ -717,6 +748,77 @@ async function applyArticleChanges(articleId) {
         loadArticles();
     } catch (err) {
         showToast(err.message, "error");
+    }
+}
+
+// ── Refresh for search ───────────────────────────────────────────
+let lastArticleRefresh = null;
+
+async function refreshArticle(articleId, btn) {
+    const box = document.getElementById("article-refresh-container");
+    if (btn) btn.disabled = true;
+    box.innerHTML = '<div class="card" style="margin-top:16px;"><div class="loading-spinner"><div class="spinner"></div><p>Reading the searches this post appears for and drafting a refresh… (about a minute)</p></div></div>';
+    try {
+        const { task_id } = await apiRequest(`/api/blog/articles/${articleId}/refresh`, { method: "POST" });
+        const task = await pollTaskUntilDone(`/api/tasks/${task_id}`, { intervalMs: 2500 });
+        lastArticleRefresh = task.result;
+        renderArticleRefresh(box, task.result);
+    } catch (e) {
+        box.innerHTML = `<div class="card" style="margin-top:16px;"><p style="color:var(--error);">Refresh failed: ${escapeHtml(e.message)}</p></div>`;
+    } finally {
+        if (btn) btn.disabled = false;
+    }
+}
+
+function renderArticleRefresh(box, r) {
+    const metaRow = (label, before, after) => after && after !== before
+        ? `<tr><td style="white-space:nowrap;font-weight:500;">${label}</td><td style="color:var(--on-surface-secondary);">${escapeHtml(before || "(none)")}</td><td>${escapeHtml(after)}</td></tr>`
+        : "";
+    const queries = (r.queries || []).slice(0, 8).map((q) =>
+        `<span class="badge" style="margin:2px;" title="${q.impressions} impressions, ${q.clicks} clicks in 90 days">${escapeHtml(q.query)}</span>`).join("");
+    const removed = (r.would_remove || []).length
+        ? `<p style="color:var(--error);font-size:13px;"><strong>Heads up:</strong> this draft drops ${escapeHtml(r.would_remove.join(", "))}. Applying will ask you to confirm.</p>`
+        : "";
+    box.innerHTML = `<div class="card" style="margin-top:16px;">
+        <h3 style="margin:0 0 4px;">Refresh preview</h3>
+        <p style="font-size:13px;color:var(--on-surface-secondary);margin:0 0 12px;">Nothing has changed yet. The URL and images stay the same.</p>
+        ${queries ? `<div style="margin-bottom:12px;"><div style="font-size:12px;font-weight:500;margin-bottom:4px;">Written around these searches</div>${queries}</div>`
+            : '<p style="font-size:13px;">Google has not shown this post for any searches yet, so the refresh tightens it around its topic and what you sell.</p>'}
+        <div style="font-size:12px;font-weight:500;margin-bottom:4px;">What changes</div>
+        <ul style="font-size:13px;margin:0 0 12px 18px;">${(r.changes || []).map((c) => `<li>${escapeHtml(c)}</li>`).join("") || "<li>Wording tightened.</li>"}</ul>
+        <div class="table-container"><table class="data-table" style="font-size:13px;"><thead><tr><th></th><th>Now</th><th>After refresh</th></tr></thead><tbody>
+            ${metaRow("Meta title", r.before.meta_title, r.meta_title)}
+            ${metaRow("Meta description", r.before.meta_description, r.meta_description)}
+            <tr><td style="font-weight:500;">Words</td><td>${r.before.words}</td><td>${r.after.words}</td></tr>
+            <tr><td style="font-weight:500;">Links to your store</td><td>${r.before.internal_links}</td><td>${r.after.internal_links}</td></tr>
+        </tbody></table></div>
+        ${removed}
+        <details style="margin:12px 0;"><summary style="cursor:pointer;font-size:13px;">Read the refreshed article</summary>
+            <div style="margin-top:8px;padding:12px;border:1px solid var(--outline);border-radius:8px;max-height:420px;overflow:auto;">${r.body}</div></details>
+        <div style="display:flex;gap:8px;">
+            <button class="btn btn-primary" onclick="applyArticleRefresh(this)"><span class="material-symbols-rounded">cloud_upload</span> Apply to Shopify</button>
+            <button class="btn btn-secondary" onclick="document.getElementById('article-refresh-container').innerHTML=''">Discard</button>
+        </div>
+    </div>`;
+}
+
+async function applyArticleRefresh(btn) {
+    const r = lastArticleRefresh;
+    if (!r) return;
+    btn.disabled = true;
+    const body = { body: r.body, source: "blog", change_type: "article_refresh" };
+    if (r.meta_title) body.meta_title = r.meta_title;
+    if (r.meta_description) body.meta_description = r.meta_description;
+    if (r.summary) body.summary = r.summary;
+    try {
+        await apiRequest(`/api/blog/articles/${r.article_id}/apply`, { method: "POST", body });
+        showToast("Refresh applied. You can undo it from the article's history.", "success");
+        lastArticleRefresh = null;
+        openArticleDetail(r.article_id);
+        loadArticles();
+    } catch (e) {
+        showToast(`Could not apply: ${e.message}`, "error");
+        btn.disabled = false;
     }
 }
 
