@@ -25,7 +25,33 @@ docker-compose logs -f flask-app
 python app/main.py
 ```
 
-**No test suite exists.** No linter or formatter configured. Verify changes via Docker logs and manual testing through the web UI at `http://localhost:8080` (nginx) or `http://localhost:5000` (direct Flask).
+**Tests:** pure-logic specs live beside the code as `app/services/*_spec.py` and run inside the container:
+
+```bash
+docker compose exec -T flask-app python -m pytest app/services/*_spec.py -q
+```
+
+They are named `_spec.py`, so pytest only collects them when passed by path. No linter or formatter is configured. Python changes need `docker compose restart flask-app`; verify through the web UI at `http://localhost:8080` (nginx) or `http://localhost:5000` (direct Flask).
+
+## Writing to Shopify — the apply pipeline
+
+Every change to a page's title, body or meta tags goes through `app/services/apply_pipeline.py`:
+
+```python
+apply_item_changes(store_id, item_type, item_id, fields, source=..., change_type=..., client=...)
+```
+
+- `item_type`: `product | collection | article | page`. `fields` uses canonical keys for all types: `title`, `body`, `meta_title`, `meta_description`, `summary` (articles). Tags and other extras go in `extra_fields`.
+- It reads the live item first, refuses when Shopify holds edits the mirror has not seen, refuses rewrites that drop spec tables, verdict/FAQ sections, internal links or the resolved primary keyword, mirrors what Shopify stored, re-scores, and records full before/after values in `seo_change_events`.
+- A refusal raises `ApplyRefused` (a `ValueError`); routes return it with `refusal_response()` (HTTP 409). `force: true` in the request body means "apply anyway"; `apiRequest` in `app.js` asks the user centrally.
+- Undo: `revert_change(event_id)` / `POST /api/changes/<id>/revert`. History per item: `GET /api/changes`.
+- Pass `restore_media=False` for hand edits and restyles (a person may remove an image on purpose).
+- New code that writes content must use this function — do not call `update_product` / `update_collection` / `update_article` / `update_page` directly for content fields.
+- The product/collection FAQ schema metafield has one writer: `apply_pipeline.set_faq_schema` (publishes only questions visible on the page).
+
+## Publishing articles
+
+Blog posts and Product News share one calendar and one review gate (`app/services/publish_gate.py`). New drafts take `next_open_slot(store_id)`; the schedulers publish only sessions with `reviewed_at` set (the Approve button in each Scheduled tab). Nothing publishes unattended without approval.
 
 ## Architecture
 
@@ -54,6 +80,10 @@ python app/main.py
 ### Frontend (`app/static/`, `app/templates/`)
 
 Vanilla JavaScript with no build step. `app.js` provides shared utilities (`apiRequest`, toasts, theme toggle). Page-specific JS files correspond to each route. Templates are Jinja2 with Material Design 3 styling.
+
+## Scores
+
+`seo_score` is the **on-page** score (content + keyword alignment) — what an edit can change. Search performance is reported beside it as `search_score`, never blended into the headline. `unified_score` keeps the three-pillar blend for ranking opportunities and before/after comparisons. One colour scale everywhere: 80 / 50 (`scoreColor` in `app.js`). Queue rows are ranked in one unit, estimated monthly clicks (`ctr_benchmarks.estimate_click_gain`).
 
 ## Database
 

@@ -1286,7 +1286,7 @@ async function startBulkBrandSeo() {
     const okBtn = document.getElementById("brand-confirm-dialog-ok");
 
     titleEl.textContent = "Bulk Optimize SEO";
-    msgEl.innerHTML = `This will run AI SEO optimization on <strong>${gcIds.length}</strong> brand collection${gcIds.length !== 1 ? "s" : ""} and automatically apply the results to Shopify.`;
+    msgEl.innerHTML = `This will write new descriptions and meta tags for <strong>${gcIds.length}</strong> brand collection${gcIds.length !== 1 ? "s" : ""} and automatically apply the results to Shopify.`;
     okBtn.textContent = "Start Optimization";
     okBtn.onclick = async () => {
         closeBrandConfirmDialog();

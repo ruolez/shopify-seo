@@ -274,7 +274,7 @@ decay, and similarity between generated articles.
   the ten keyword families we are trying to win, and here is progress."
 - [ ] **H2 — No answer to "what did the app do for me".** No monthly summary, no win rate by
   type of change, no digest.
-- [ ] **H3 — No page explains itself.** No template has an intro. Cannibalization, striking
+- [x] **H3 — No page explains itself.** *(Every page opens with a one-line explainer (dismissible; a help button brings it back). 'AI Search' is the one name.)* No template has an intro. Cannibalization, striking
   distance, AEO/GEO, IndexNow and llms.txt appear unexplained; "AI SEO" and "AI Search" are
   both used.
 - [ ] **H4 — Too many verbs for one action.** Apply / Push / Publish to Shopify; AI Optimize /
@@ -282,7 +282,7 @@ decay, and similarity between generated articles.
 - [x] **H5 — Live writes without a confirmation step** *(Done for writes with no per-row preview: content-gap publish, bulk cannibalization fix, apply-all steps. Single applies of a visible, editable value keep their one-click button.)* in Duplicates, Content Gaps, GSC
   cannibalization (including bulk) and Keyword Strategy "apply all".
 - [ ] **H6 — Two store selectors on eight pages**; GSC ignores the global one.
-- [ ] **H7 — Navigation does not match tasks.** Keyword Strategy and Content Gaps are action
+- [x] **H7 — Navigation does not match tasks.** *(Sidebar regrouped by task: Fix pages / Create content / Understand.)* Keyword Strategy and Content Gaps are action
   tools filed under Insights; "Image Manager" only handles missing images; "Home" and
   "Home Page" are different things.
 - [ ] **H8 — Overlapping screens.** Five keyword views, three "close to ranking" lists, three
@@ -371,3 +371,30 @@ and collection schema; llms.txt treated as informational; no hardcoded models.
   https://www.found.co.uk/blog/seo-landscape-and-google-algorithm-updates/
 - Shopify agentic commerce overview:
   https://ecommercefastlane.com/agentic-commerce-for-shopify-2026/
+
+
+---
+
+## Remediation status (3 Oct 2026)
+
+Done and committed: Phase 0 (stop the harm), Phase 1 (one apply pipeline with history and
+undo), most of Phase 2 (one vocabulary), Phase 3 core (articles first-class), Phase 4 (one
+queue, one unit), and from Phases 5–6: article Refresh, index coverage, task-based sidebar,
+page explainers.
+
+Still open:
+
+- **Phase 1:** C9 — move the remaining hardcoded prompts (Keyword Strategy steps, content-gap
+  prompts, targeted-fix description rules) into Settings.
+- **Phase 2:** D3, D6, D7 (one rules table for lengths and structure per page type); S6 deeper
+  rework of the AI-readiness score; S7 (rating source check); S8 (author setting, sources on
+  blog posts).
+- **Phase 3:** History and Performance tabs inside the article window.
+- **Phase 4:** release queue items on the impact verdict instead of a fixed 28 days.
+- **Phase 5:** page-two plan view; page-speed check; per-device CTR (desktop CTR is about a
+  third of mobile at the same position, and desktop holds most deep-position impressions);
+  near-duplicate detection; backlink import.
+- **Phase 6:** merge overlapping screens (H8), one verb set (H4), global store selector on the
+  remaining eight pages (H6), weekly plan and monthly report (H2), store goals (H1), actions
+  on the Semrush / Competitors / GSC tables (X4).
+- **Wrap-up:** full resync and re-analysis, then re-check the issue count.

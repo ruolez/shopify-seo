@@ -94,6 +94,66 @@ const UIConfirm = {
     },
 };
 
+/* ── Page intros ─────────────────────────────────────────────────────── */
+/* One plain-language line at the top of each page: what it is for and what
+ * to do there. Dismissible per page; "?" in the title brings it back. */
+const PAGE_INTROS = {
+    "/": "Your to-do list. Each row is one job, ranked by the extra clicks a month it could bring. Start at the top.",
+    "/seo": "Every product and collection with its on-page score — how well the page's own text is set up. Fix what is flagged here; how Google responds shows beside it as the search result.",
+    "/interlinking": "Links between your own pages. Pages nobody links to are hard for Google and shoppers to find; fix orphans and broken links here.",
+    "/duplicates": "Pages sharing the same title or description in Google's results. Give each its own so they stop competing.",
+    "/images": "Products with no image. Generate or upload a placeholder so the page is not bare.",
+    "/blog": "Write, schedule and improve blog posts. “Worth refreshing” lists posts Google already shows but few people click.",
+    "/news": "Turn supplier and industry news into Product News posts. Drafts wait in Scheduled until you approve them.",
+    "/content/calendar": "Everything scheduled to publish, blog and news together, on one shared posting rhythm.",
+    "/content-gaps": "Searches your competitors rank for and you do not. Each one is an idea for a new collection or article.",
+    "/landing-pages": "Standalone pages for a campaign or topic, and SEO for your store's existing pages.",
+    "/brands": "One collection page per brand you carry, each with its own description.",
+    "/home-page": "The image carousel at the top of your store's home page.",
+    "/gsc": "What Google reports about your store: searches, clicks, positions, and which pages it has indexed.",
+    "/keyword-strategy": "Which page targets which search term. One page per term, so your own pages do not compete (competing is called cannibalization).",
+    "/competitors": "Where competitors rank against you on the terms you track, checked weekly.",
+    "/semrush": "Keyword data imported from your Semrush exports. It feeds the keyword and priority tools; upload a fresh export monthly.",
+    "/ai-seo": "How ready your pages are to be quoted by AI assistants like ChatGPT and Google's AI answers, and whether they mention you.",
+    "/settings": "Connections, AI model, prompts and scoring rules.",
+};
+
+function initPageIntro() {
+    const path = window.location.pathname.replace(/\/$/, "") || "/";
+    const text = PAGE_INTROS[path];
+    const host = document.querySelector(".page-content");
+    if (!text || !host) return;
+    const key = "pageIntroDismissed:" + path;
+    const show = () => {
+        if (document.getElementById("page-intro")) return;
+        const el = document.createElement("div");
+        el.id = "page-intro";
+        el.style.cssText = "display:flex;gap:10px;align-items:flex-start;padding:10px 14px;margin-bottom:16px;border-radius:10px;background:var(--primary-light, rgba(26,115,232,.08));font-size:13px;line-height:1.5;";
+        el.innerHTML = `<span class="material-symbols-rounded" style="font-size:18px;color:var(--primary);">info</span>
+            <span style="flex:1;">${escapeHtml(text)}</span>
+            <button class="icon-btn" title="Hide" style="margin:-4px -6px 0 0;"><span class="material-symbols-rounded" style="font-size:18px;">close</span></button>`;
+        el.querySelector("button").addEventListener("click", () => {
+            el.remove();
+            try { localStorage.setItem(key, "1"); } catch (e) {}
+        });
+        host.prepend(el);
+    };
+    let dismissed = false;
+    try { dismissed = localStorage.getItem(key) === "1"; } catch (e) {}
+    if (!dismissed) show();
+    const title = document.querySelector(".topbar h2, .top-bar h2, header h2");
+    if (title && !title.querySelector(".page-intro-help")) {
+        const help = document.createElement("button");
+        help.className = "icon-btn page-intro-help";
+        help.title = "What is this page for?";
+        help.style.cssText = "margin-left:6px;vertical-align:middle;";
+        help.innerHTML = '<span class="material-symbols-rounded" style="font-size:18px;">help</span>';
+        help.addEventListener("click", show);
+        title.appendChild(help);
+    }
+}
+document.addEventListener("DOMContentLoaded", initPageIntro);
+
 /* ── UISkeleton ──────────────────────────────────────────────────────── */
 const UISkeleton = {
     /** type: table | cards | stats | detail */
@@ -301,9 +361,9 @@ const CommandPalette = (() => {
         { label: "Duplicates", icon: "difference", href: "/duplicates" },
         { label: "SEO Issues", icon: "speed", href: "/seo?tab=issues" },
         { label: "AI Search", icon: "smart_toy", href: "/ai-seo" },
-        { label: "Interlinking", icon: "link", href: "/interlinking" },
+        { label: "Internal links (Interlinking)", icon: "link", href: "/interlinking" },
         { label: "Interlinking Issues", icon: "link_off", href: "/interlinking?tab=issues" },
-        { label: "Image Manager", icon: "image", href: "/images" },
+        { label: "Missing images (Image Manager)", icon: "image", href: "/images" },
         { label: "Content Calendar", icon: "calendar_month", href: "/content/calendar" },
         { label: "Blog Posts", icon: "edit_note", href: "/blog" },
         { label: "News", icon: "newspaper", href: "/news" },
@@ -311,8 +371,9 @@ const CommandPalette = (() => {
         { label: "Home Page Carousel", icon: "home", href: "/home-page" },
         { label: "Brands", icon: "loyalty", href: "/brands" },
         { label: "Search Console", icon: "monitoring", href: "/gsc" },
-        { label: "Keyword Strategy", icon: "hub", href: "/keyword-strategy" },
-        { label: "Content Gaps", icon: "target", href: "/content-gaps" },
+        { label: "Keywords (Keyword Strategy)", icon: "hub", href: "/keyword-strategy" },
+        { label: "Content ideas (Content Gaps)", icon: "target", href: "/content-gaps" },
+        { label: "Indexing — pages Google has not indexed", icon: "travel_explore", href: "/gsc?tab=indexing" },
         { label: "Competitors", icon: "groups", href: "/competitors" },
         { label: "Semrush Data", icon: "query_stats", href: "/semrush" },
         { label: "Stores", icon: "store", href: "/stores" },
