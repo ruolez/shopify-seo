@@ -318,6 +318,16 @@ function showBrief(gapId, brief) {
 async function wizardGenerateContent() {
     const selectedTitle = document.querySelector('input[name="wiz-title"]:checked')?.value || "";
     const contentType = document.querySelector('input[name="wiz-type"]:checked')?.value || "collection";
+    if (contentType === "blog") {
+        // Articles are written in one place — the Blog wizard — so they get
+        // research, images, the intro link, quality checks and scheduling.
+        const brief = currentWizardBrief || {};
+        const keywords = [brief.primary_keyword, ...(brief.secondary_keywords || [])].filter(Boolean).join("\n");
+        const params = new URLSearchParams({ tab: "create", topic: selectedTitle || brief.primary_keyword || "" });
+        if (keywords) params.set("keywords", keywords);
+        window.location.href = `/blog?${params.toString()}`;
+        return;
+    }
     const btn = document.getElementById("wiz-generate-btn");
     btn.disabled = true;
     btn.innerHTML = '<span class="spinner" style="width:14px;height:14px;border-width:2px;"></span> Generating content...';

@@ -714,9 +714,11 @@ function ksOpenPage(itemType, itemId) {
     if (typeof _cachedStoreId !== "undefined") _cachedStoreId = ksStoreId;
     if (itemType === "product") viewProduct(itemId);
     else if (itemType === "collection") viewCollection(itemId);
+    else if (itemType === "article") window.location.href = `/blog?article=${itemId}`;
 }
 
 async function ksOptimizePage(itemType, itemId, keyword, volume) {
+    if (itemType === "article") { window.location.href = `/blog?article=${itemId}`; return; }
     if (itemType !== "product" && itemType !== "collection") return;
     if (typeof _cachedStoreId !== "undefined") _cachedStoreId = ksStoreId;
     const opts = keyword ? { targetKeyword: keyword, volume: volume || null } : undefined;

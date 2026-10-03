@@ -165,7 +165,7 @@ Interlinking apply. There is no ordering rule and no "last changed by" marker.
   values to 200 characters, so it cannot restore anything. The only undo is in Keyword
   Strategy, and it does not check the field still holds what it wrote
   (`keyword_strategy_service.py:2342-2396`).
-- [ ] ✔ **X2 — Articles are second-class everywhere except creation.** They have no keyword
+- [x] ✔ **X2 — Articles are second-class everywhere except creation.** *(Articles record their keyword and feed coverage to the topic, gap and keyword tools; they have history, undo and impact tracking; Keyword Strategy opens them. Still to do: articles in the Home queue (Phase 4).)* They have no keyword
   column, so a published post never claims its keyword and the gap tools keep recommending
   it. They are absent from the priority queue, the impact tracker and the shared item modal.
   Keyword Strategy's open/optimize buttons do nothing for articles
@@ -176,7 +176,7 @@ Interlinking apply. There is no ordering rule and no "last changed by" marker.
 - [ ] ✔ **X4 — Insight pages stop at the data.** Semrush tables, Competitors, and GSC Top
   Pages/Queries have no action. Interlinking, AI Search and Duplicates cannot open the item
   they are about.
-- [ ] ✔ **X5 — Four content backlogs, four generators.** Topic suggestions, content gaps, the
+- [x] ✔ **X5 — Four content backlogs, four generators.** *(Content Gaps hands articles to the Blog wizard; its own article publisher is retired. Backlogs are still separate lists.)* Topic suggestions, content gaps, the
   gap matrix and AI-visibility ideas are separate lists. Blog wizard, Content Gaps wizard,
   Keyword Actions and Landing Pages each generate and publish. The Content Gaps article path
   skips research, validation, template, scheduling and IndexNow, and its insert omits

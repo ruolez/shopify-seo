@@ -884,64 +884,10 @@ def publish_content(store_id, gap_id, content_data):
         })
 
     elif content_type == "blog":
-        with db.get_cursor() as cur:
-            cur.execute(
-                """SELECT id, shopify_id, handle FROM synced_blogs WHERE store_id = %s
-                   ORDER BY (handle = 'news') DESC, id DESC LIMIT 1""",
-                (store_id,),
-            )
-            blog = cur.fetchone()
-
-        if not blog:
-            raise ValueError("No blog found. Sync your store first.")
-
-        image_url = None
-        if generate_image:
-            try:
-                from app.services.image_generator import generate_collection_image_ai
-                img_bytes, filename, alt_text, w, h = generate_collection_image_ai(title, [], keywords=[gap.get("keyword", "")])
-                if img_bytes:
-                    image_url = _upload_image_to_cdn(client, img_bytes, filename, alt_text)
-            except Exception as e:
-                logger.warning("Article image generation failed: %s", str(e))
-
-        fields = {
-            "title": title,
-            "body": body_html,
-            "tags": tags if isinstance(tags, list) else [t.strip() for t in tags.split(",")],
-            "is_published": True,
-        }
-        if image_url:
-            fields["image_url"] = image_url
-            fields["image_alt"] = title
-
-        shopify_result = client.create_article(blog["shopify_id"], fields)
-        shopify_id = shopify_result["shopify_id"]
-        handle = shopify_result["handle"]
-
-        # create_article carries no SEO fields — without this the metadata
-        # exists only in our DB and never reaches the live store. Non-fatal:
-        # a metafield hiccup must not roll back a successfully created article.
-        if meta_title or meta_description:
-            from app.services.ai_output_guard import clamp_meta_title, clamp_meta_description
-            try:
-                client.set_article_seo(
-                    shopify_id,
-                    clamp_meta_title(meta_title or ""),
-                    clamp_meta_description(meta_description or ""),
-                )
-            except Exception as e:
-                logger.warning("Failed to set article SEO metafields for gap %s: %s", gap_id, e)
-
-        with db.get_cursor() as cur:
-            cur.execute(
-                """INSERT INTO synced_articles (store_id, blog_id, shopify_id, shopify_blog_id, title, handle, body, tags, meta_title, meta_description, is_published, synced_at)
-                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, TRUE, NOW())
-                   ON CONFLICT (store_id, shopify_id) DO UPDATE SET title = EXCLUDED.title, body = EXCLUDED.body, synced_at = NOW()""",
-                (store_id, blog["id"], shopify_id, blog["shopify_id"], title, handle, body_html, ",".join(tags) if isinstance(tags, list) else tags, meta_title, meta_description),
-            )
-        blog_handle = blog.get("handle") or "news"
-        result = {"shopify_id": shopify_id, "handle": handle, "url": f"https://{store['domain']}/blogs/{blog_handle}/{handle}"}
+        # Articles are published only by the Blog wizard, which runs research,
+        # quality checks, the intro link, scheduling and review. This branch
+        # skipped all of them and left the post out of the Blog list.
+        raise ValueError("Blog posts are created in Blog › Create Post. Use “Write an article” from this gap.")
 
     elif content_type == "page":
         shopify_result = client.create_page(title, body_html, slug or None, True, meta_title, meta_description)

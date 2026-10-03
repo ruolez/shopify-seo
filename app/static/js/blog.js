@@ -49,6 +49,10 @@ function initBlogTabs() {
         loadArticles();
     }
 
+    // /blog?article=<id> opens that article (Keyword Strategy, Home queue)
+    const articleId = parseInt(params.get("article"), 10);
+    if (articleId) setTimeout(() => openArticleDetail(articleId), 500);
+
     // /blog?tab=create&topic=<q>[&keywords=<newline-separated>] deep link
     // (AI Search visibility → Draft post; Keyword Strategy → Write an article)
     const topic = params.get("topic");
