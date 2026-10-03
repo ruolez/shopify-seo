@@ -340,7 +340,7 @@ function showActionPreviewModal(actionType, preview, applyBody, recIndex) {
                 </div>`;
             }
             _pendingPreviewData = { item_shopify_id: preview.item_shopify_id, item_type: preview.item_type };
-            html += `<button class="btn btn-primary" onclick="confirmApplyAction('faq_schema', ${recIndex})"><span class="material-symbols-rounded" style="font-size:16px;">check</span> Confirm & Push to Shopify</button>`;
+            html += `<button class="btn btn-primary" onclick="confirmApplyAction('faq_schema', ${recIndex})"><span class="material-symbols-rounded" style="font-size:16px;">check</span> Confirm & Apply to Shopify</button>`;
         }
     }
 
@@ -1986,7 +1986,7 @@ const MODAL_TABS = [
     { id: "keywords", label: "Keywords" },
     { id: "checks", label: "Checks" },
     { id: "performance", label: "Performance" },
-    { id: "ai", label: "AI Optimize" },
+    { id: "ai", label: "Optimize with AI" },
     { id: "history", label: "History" },
 ];
 
@@ -2186,17 +2186,17 @@ async function viewProduct(id, opts = {}) {
 
         html += '</div>'; // end performance panel
 
-        // ── AI Optimize tab ──
+        // ── Optimize with AI tab ──
         html += `<div class="modal-tab-panel${initialTab === "ai" ? " active" : ""}" data-mpanel="ai"><div id="ai-results-container">
             <div class="modal-tab-empty"><span class="material-symbols-rounded">smart_toy</span>
-            <p>No AI analysis yet. Run "Get AI Recommendations" below to get optimization suggestions.</p></div>
+            <p>No AI analysis yet. Run "Optimize with AI" below to get optimization suggestions.</p></div>
         </div></div>`;
 
         // Sticky footer with action buttons
         html += `<div class="modal-sticky-footer">
             <button class="btn btn-primary" onclick="analyzeProduct(${p.id})">
                 <span class="material-symbols-rounded">smart_toy</span>
-                Get AI Recommendations
+                Optimize with AI
             </button>
             <button class="btn btn-secondary" onclick="optimizeProductTitle(${p.id})">
                 <span class="material-symbols-rounded">title</span>
@@ -2688,17 +2688,17 @@ async function viewCollection(id, opts = {}) {
 
         html += '</div>'; // end performance panel
 
-        // ── AI Optimize tab ──
+        // ── Optimize with AI tab ──
         html += `<div class="modal-tab-panel${initialTab === "ai" ? " active" : ""}" data-mpanel="ai"><div id="ai-collection-results-container">
             <div class="modal-tab-empty"><span class="material-symbols-rounded">smart_toy</span>
-            <p>No AI analysis yet. Run "Get AI Recommendations" below to get optimization suggestions.</p></div>
+            <p>No AI analysis yet. Run "Optimize with AI" below to get optimization suggestions.</p></div>
         </div></div>`;
 
         // Sticky footer — parity with the product modal
         html += `<div class="modal-sticky-footer">
             <button class="btn btn-primary" onclick="analyzeCollection(${c.id})">
                 <span class="material-symbols-rounded">smart_toy</span>
-                Get AI Recommendations
+                Optimize with AI
             </button>
             <button class="btn btn-secondary" onclick="optimizeCollectionTitle(${c.id})">
                 <span class="material-symbols-rounded">title</span>
@@ -3421,7 +3421,7 @@ function renderSchemaTab(container, stats, products, settings) {
                 <div class="actions-cell">
                     <button class="action-icon action-icon-primary" title="Generate schema" onclick="generateSchema(${p.id})"><span class="material-symbols-rounded">code</span></button>
                     <button class="action-icon" title="View schema" onclick="viewSchema(${p.id})" ${!p.schema_generated ? "disabled style=\"opacity:0.4;pointer-events:none;\"" : ""}><span class="material-symbols-rounded">visibility</span></button>
-                    <button class="action-icon" title="Push to Shopify" onclick="pushSchema(${p.id})" ${!p.schema_generated ? "disabled style=\"opacity:0.4;pointer-events:none;\"" : ""}><span class="material-symbols-rounded">cloud_upload</span></button>
+                    <button class="action-icon" title="Apply to Shopify" onclick="pushSchema(${p.id})" ${!p.schema_generated ? "disabled style=\"opacity:0.4;pointer-events:none;\"" : ""}><span class="material-symbols-rounded">cloud_upload</span></button>
                 </div>
             </td>
         </tr>`;
@@ -3512,7 +3512,7 @@ async function viewSchema(productId) {
         html += `<div class="modal-footer">
             <button class="btn btn-secondary" onclick="closeSchemaModal()">Close</button>
             <button class="btn btn-primary" onclick="pushSchema(${productId}); closeSchemaModal();">
-                <span class="material-symbols-rounded">cloud_upload</span> Push to Shopify
+                <span class="material-symbols-rounded">cloud_upload</span> Apply to Shopify
             </button>
         </div>`;
 
@@ -4537,7 +4537,7 @@ async function loadProductSchemaPreview(productId) {
             <span class="material-symbols-rounded">content_copy</span> Copy JSON
         </button>`;
         html += `<button class="btn btn-sm btn-primary" onclick="pushSchema(${productId})">
-            <span class="material-symbols-rounded">cloud_upload</span> Push to Shopify
+            <span class="material-symbols-rounded">cloud_upload</span> Apply to Shopify
         </button>`;
         html += "</div>";
 

@@ -182,7 +182,7 @@
                         <button class="btn btn-secondary btn-sm" onclick="LandingPages.openSeoAnalysis(${page.id}, 'synced')" title="SEO Analysis">
                             <span class="material-symbols-rounded" style="font-size: 16px;">search</span>
                         </button>
-                        <button class="btn btn-secondary btn-sm" onclick="LandingPages.aiOptimizeSynced(${page.id})" title="AI Optimize">
+                        <button class="btn btn-secondary btn-sm" onclick="LandingPages.aiOptimizeSynced(${page.id})" title="Optimize with AI">
                             <span class="material-symbols-rounded" style="font-size: 16px;">auto_awesome</span>
                         </button>
                         <button class="btn btn-secondary btn-sm" onclick="LandingPages.importToBuilder(${page.id}, this)" title="Open in Builder">
@@ -295,7 +295,7 @@
             showToast('AI optimization failed: ' + e.message, 'error');
         } finally {
             btn.disabled = false;
-            btn.innerHTML = '<span class="material-symbols-rounded">auto_awesome</span> AI Optimize';
+            btn.innerHTML = '<span class="material-symbols-rounded">auto_awesome</span> Optimize with AI';
         }
     }
 

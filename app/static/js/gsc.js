@@ -885,7 +885,7 @@ function renderCannibalizationList(container, data) {
                     </button>
                     <button class="btn btn-sm" style="background:var(--warning);color:#000;font-size:12px;" onclick="bulkFixCannibalization(${gi})" id="cannibal-bulk-btn-${gi}">
                         <span class="material-symbols-rounded" style="font-size: 14px; vertical-align: middle;">bolt</span>
-                        Fix All
+                        Fix all
                     </button>
                 </div>
                 <table class="data-table" style="margin: 0;">
@@ -1153,7 +1153,7 @@ async function bulkFixCannibalization(groupIndex) {
 
     const analysis = cannibalizationAnalysis[groupIndex];
     if (!analysis || !analysis.recommendations) {
-        showToast("Run AI Analysis first before using Fix All", "error");
+        showToast("Run AI Analysis first before using Fix all", "error");
         return;
     }
 
@@ -1212,7 +1212,7 @@ async function bulkFixCannibalization(groupIndex) {
         showToast("Bulk fix failed: " + err.message, "error");
     } finally {
         btn.disabled = false;
-        btn.innerHTML = '<span class="material-symbols-rounded" style="font-size: 14px; vertical-align: middle;">bolt</span> Fix All';
+        btn.innerHTML = '<span class="material-symbols-rounded" style="font-size: 14px; vertical-align: middle;">bolt</span> Fix all';
     }
 }
 

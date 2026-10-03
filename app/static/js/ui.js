@@ -100,13 +100,13 @@ const UIConfirm = {
 const UIHistory = (() => {
     // Plain-language names for the tools that write to an item.
     const SOURCES = {
-        seo_optimize: "AI Optimize", bulk_optimize: "Bulk optimize", bulk_title: "Bulk titles",
+        seo_optimize: "Optimize with AI", bulk_optimize: "Bulk optimize", bulk_title: "Bulk titles",
         issue_fix: "Issue fix", ai_search: "AI Search", cannibalization: "Cannibalization fix",
         content_gap: "Content gap", keyword_strategy: "Keyword Strategy", brands: "Brands",
         interlinking: "Interlinking", intro_links: "Intro links", blog: "Blog",
         landing_pages: "Landing pages", undo: "Undo",
         // change types recorded before tools were named
-        ai_optimization: "AI Optimize", technical_fix: "Issue fix", image_alt_text: "Image alt text",
+        ai_optimization: "Optimize with AI", technical_fix: "Issue fix", image_alt_text: "Image alt text",
         duplicate_fix: "Duplicates", faq_schema: "FAQ schema",
     };
     const CHANGE_TYPES = { article_refresh: "Refresh for search", restyle: "Restyle", intro_link: "Intro link", article_edit: "Manual edit", revert: "Undo" };
