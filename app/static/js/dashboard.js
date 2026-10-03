@@ -20,6 +20,7 @@ function loadDashboard() {
         // Widgets below depend on the resolved store id from the overview.
         loadSetupChecklist();
         loadActionQueue();
+        loadMonthlyReport();
         loadChanges();
         loadTrends();
         loadCtrOpportunities();
@@ -228,6 +229,35 @@ const QUEUE_SOURCE_LABELS = {
     gaps: "Gaps", competitor: "Competitor", links: "Links",
     review_draft: "Draft", regression: "Declined", refresh: "Refresh", indexing: "Indexing",
 };
+
+// "Is this working?" — 28 days against the 28 before, and what the app did.
+async function loadMonthlyReport() {
+    const card = document.getElementById("report-card");
+    if (!card) return;
+    try {
+        const r = await apiRequest(`/api/dashboard/monthly-report?store_id=${dashStoreId}`);
+        document.getElementById("report-headline").textContent = r.headline;
+        const pct = (v) => v == null ? "—" : `<span class="${v >= 0 ? "delta-up" : "delta-down"}">${v >= 0 ? "▲" : "▼"} ${Math.abs(v).toFixed(0)}%</span>`;
+        const tool = (t) => (typeof UIHistory !== "undefined" && UIHistory.toolLabel ? UIHistory.toolLabel(t) : t);
+        const kinds = r.by_kind.map((k) => `<tr><td>${escapeHtml(k.kind)}</td><td>${k.clicks.toLocaleString()}</td><td>${k.clicks_prev.toLocaleString()}</td><td>${pct(k.clicks_change_pct)}</td><td>${k.impressions.toLocaleString()}</td></tr>`).join("");
+        const changes = r.changes.length
+            ? r.changes.map((c) => `${escapeHtml(tool(c.tool))} × ${c.n}`).join(" · ")
+            : "none in this period";
+        const o = r.outcomes;
+        const wins = r.win_rates.map((w) => `<tr><td>${escapeHtml(tool(w.change_type))}</td><td>${w.measured}</td><td>${w.improved}</td><td>${w.declined}</td></tr>`).join("");
+        document.getElementById("dash-report").innerHTML = `
+            <div class="table-container"><table class="data-table"><thead><tr><th>Clicks from Google</th><th>Last 28 days</th><th>28 days before</th><th>Change</th><th>Impressions</th></tr></thead><tbody>${kinds}</tbody></table></div>
+            <p style="margin:12px 0 4px;"><strong>By device:</strong> ${(r.by_device || []).map((d) => `${escapeHtml(d.device)} ${d.clicks.toLocaleString()} clicks from ${d.impressions.toLocaleString()} impressions (avg position ${d.position})`).join(" · ")}</p>
+            <p style="margin:4px 0;"><strong>Orders from search:</strong> ${r.totals.orders} ($${Math.round(r.totals.revenue).toLocaleString()}) — before: ${r.totals.orders_prev} ($${Math.round(r.totals.revenue_prev).toLocaleString()})</p>
+            <p style="margin:4px 0;"><strong>What the app changed:</strong> ${changes}${r.articles_published ? ` · ${r.articles_published} article${r.articles_published === 1 ? "" : "s"} published` : ""}</p>
+            <p style="margin:4px 0;"><strong>How changes turned out:</strong> ${o.improved} improved · ${o.declined} declined · ${o.collecting} still being measured</p>
+            ${wins ? `<div class="table-container" style="margin-top:8px;"><table class="data-table"><thead><tr><th>Kind of change</th><th>Measured</th><th>Improved</th><th>Declined</th></tr></thead><tbody>${wins}</tbody></table></div>` : ""}
+            ${r.indexing.checked ? `<p style="margin:8px 0 0;"><strong>Indexing:</strong> ${r.indexing.not_indexed} of ${r.indexing.checked} checked pages are not indexed by Google. <a href="/gsc?tab=indexing">See which</a></p>` : ""}`;
+        card.style.display = "";
+    } catch (e) {
+        card.style.display = "none";
+    }
+}
 
 async function loadActionQueue() {
     try {

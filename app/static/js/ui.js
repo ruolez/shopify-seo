@@ -161,7 +161,9 @@ const UIHistory = (() => {
         onDone();
     }
 
-    return { render };
+    const toolLabel = (t) => CHANGE_TYPES[t] || SOURCES[t] || t;
+
+    return { render, toolLabel };
 })();
 
 /* ── Page intros ─────────────────────────────────────────────────────── */

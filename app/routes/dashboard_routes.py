@@ -117,6 +117,16 @@ def dashboard_ctr_opportunities():
     return jsonify({"items": dashboard_service.get_ctr_opportunities(store_id, limit)})
 
 
+@dashboard_bp.route("/api/dashboard/monthly-report")
+def monthly_report():
+    store_id = request.args.get("store_id", type=int)
+    if not store_id:
+        return jsonify({"error": "store_id is required"}), 400
+    from app.services.monthly_report import build_report
+
+    return jsonify(build_report(store_id))
+
+
 @dashboard_bp.route("/api/dashboard/impact")
 def dashboard_impact():
     store_id = _resolve_store_id()

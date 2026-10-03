@@ -59,6 +59,13 @@
                 </div>
 
                 <!-- THE lead card: unified action queue, grouped into work bands -->
+                <details id="report-card" class="card" style="display:none;margin-bottom:24px;">
+                    <summary style="cursor:pointer;padding:14px 16px;">
+                        <strong><span class="material-symbols-rounded" style="vertical-align:middle;font-size:20px;">insights</span> Last 28 days</strong>
+                        <span id="report-headline" style="font-size:13px;margin-left:6px;"></span>
+                    </summary>
+                    <div id="dash-report" style="padding:0 16px 14px;font-size:13px;"></div>
+                </details>
                 <div id="queue-card" class="card" style="display:none;margin-bottom:24px;">
                     <div class="card-header" style="display:flex;align-items:center;justify-content:space-between;">
                         <h3><span class="material-symbols-rounded" style="vertical-align:middle;font-size:20px;">checklist</span> What to do next <span id="queue-note" style="font-weight:400;font-size:12px;color:var(--on-surface-secondary);"></span></h3>
