@@ -1177,6 +1177,15 @@ class Database:
                     created_at TIMESTAMP DEFAULT NOW()
                 )
             """)
+            # Full before/after values make a change undoable; source names the
+            # tool that made it.
+            for _ddl in [
+                "ALTER TABLE seo_change_events ADD COLUMN source VARCHAR(50)",
+                "ALTER TABLE seo_change_events ADD COLUMN old_values JSONB",
+                "ALTER TABLE seo_change_events ADD COLUMN new_values JSONB",
+                "ALTER TABLE seo_change_events ADD COLUMN reverted_at TIMESTAMP",
+            ]:
+                cur.execute(f"DO $$ BEGIN {_ddl}; EXCEPTION WHEN duplicate_column THEN NULL; END $$")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_seo_change_events_item ON seo_change_events(store_id, item_type, item_id)")
             # ── Phase 2: Semrush CSV Import ──
             cur.execute("""

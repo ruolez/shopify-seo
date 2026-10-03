@@ -9,6 +9,7 @@ import time
 import requests as http_requests
 from flask import Blueprint, jsonify, render_template, request
 
+from app.services.apply_pipeline import ApplyRefused, apply_item_changes, record_side_change, refusal_response
 from app.auth import decrypt_value
 from app.database import db
 from app.routes.schema_routes import generate_and_push_product_schema
@@ -113,6 +114,10 @@ def _attach_unified_scores(item, seo, search_perf, kw):
         seo["breakdown"], kw["checks"] if kw else None
     )
     item["keyword_analysis"] = kw
+
+
+# Response keys the item modal expects for pipeline field names.
+_LEGACY_FIELD_NAMES = {"body": "description_html"}
 
 
 def _guard_ai_content_fields(data):
@@ -1215,25 +1220,14 @@ def apply_product_changes(product_id):
             kw_before = _fetch_keyword_analysis(product["store_id"], "product", product_id)
             unified_before = compute_unified_score(seo_before, kw_before["score"] if kw_before else None, search_before)
 
-            changes_map = {}
-            for field in ("title", "description_html", "meta_title", "meta_description"):
-                if data.get(field):
-                    old_key = "description" if field == "description_html" else field
-                    changes_map[field] = {"old": (product.get(old_key) or "")[:200], "new": data[field][:200]}
-
-            # Recorded only after the Shopify push succeeds — an event for a
-            # failed push shows up as a phantom "optimization" in impact views.
-            _event_params = (
-                product["store_id"], product_id,
-                data.get("change_type", "ai_optimization"),
-                json.dumps(changes_map) if changes_map else None,
-                unified_before["content_score"],
-                unified_before.get("search_score"),
-                unified_before["seo_score"],
-            )
+            scores_before = {
+                "seo": unified_before["content_score"],
+                "search": unified_before.get("search_score"),
+                "composite": unified_before["seo_score"],
+            }
         except Exception:
-            _event_params = None
-            logger.warning("Failed to compute SEO change event for product %s", product_id)
+            scores_before = None
+            logger.warning("Failed to compute before-scores for product %s", product_id)
 
         client = ShopifyClient(
             product["domain"],
@@ -1241,29 +1235,25 @@ def apply_product_changes(product_id):
             product["api_version"],
         )
 
-        updated_fields = []
+        change_type = data.get("change_type", "ai_optimization")
+        has_tags = "tags" in data and isinstance(data["tags"], list)
+        try:
+            applied = apply_item_changes(
+                product["store_id"], "product", product_id,
+                {"title": data.get("title") or None, "body": data.get("description_html") or None,
+                 "meta_title": data.get("meta_title") or None,
+                 "meta_description": data.get("meta_description") or None},
+                source=data.get("source") or "seo_optimize", change_type=change_type, client=client,
+                extra_fields={"tags": data["tags"]} if has_tags else None,
+                allow_dropped_blocks=bool(data.get("force")), allow_dropped_primary=bool(data.get("force")),
+                scores_before=scores_before,
+            )
+        except ApplyRefused as refused:
+            return refusal_response(refused)
 
-        product_fields = {}
-        if data.get("title"):
-            product_fields["title"] = data["title"]
-            updated_fields.append("title")
-        if data.get("description_html"):
-            from app.services.ai_output_guard import restore_missing_images
-            product_fields["description_html"] = restore_missing_images(
-                product.get("description"), data["description_html"])
-            updated_fields.append("description_html")
-        if data.get("meta_title"):
-            product_fields["meta_title"] = data["meta_title"]
-            updated_fields.append("meta_title")
-        if data.get("meta_description"):
-            product_fields["meta_description"] = data["meta_description"]
-            updated_fields.append("meta_description")
-        if "tags" in data and isinstance(data["tags"], list):
-            product_fields["tags"] = data["tags"]
+        updated_fields = [_LEGACY_FIELD_NAMES.get(k, k) for k in applied["pushed"]]
+        if has_tags:
             updated_fields.append("tags")
-
-        if product_fields:
-            client.update_product(product["shopify_id"], product_fields)
 
         if data.get("image_alts") and isinstance(data["image_alts"], list):
             try:
@@ -1284,26 +1274,13 @@ def apply_product_changes(product_id):
             logger.info("Alt text apply result: %s", result)
             updated_fields.append("image_alts")
 
-        if _event_params:
-            with db.get_cursor() as cur:
-                cur.execute(
-                    """INSERT INTO seo_change_events
-                       (store_id, item_type, item_id, change_type, changes_applied,
-                        seo_score_before, search_score_before, composite_score_before)
-                       VALUES (%s, 'product', %s, %s, %s, %s, %s, %s)""",
-                    _event_params,
-                )
+        side_changes = [f for f in ("tags", "image_alts") if f in updated_fields]
+        if side_changes and not applied["event_id"]:
+            record_side_change(product["store_id"], "product", product_id,
+                               data.get("source") or "seo_optimize", change_type, side_changes, scores_before)
 
         with db.get_cursor() as cur:
-            if data.get("title"):
-                cur.execute("UPDATE synced_products SET title = %s WHERE id = %s", (data["title"], product_id))
-            if data.get("description_html"):
-                cur.execute("UPDATE synced_products SET description = %s WHERE id = %s", (product_fields["description_html"], product_id))
-            if data.get("meta_title"):
-                cur.execute("UPDATE synced_products SET meta_title = %s WHERE id = %s", (data["meta_title"], product_id))
-            if data.get("meta_description"):
-                cur.execute("UPDATE synced_products SET meta_description = %s WHERE id = %s", (data["meta_description"], product_id))
-            if "tags" in data and isinstance(data["tags"], list):
+            if has_tags:
                 cur.execute("UPDATE synced_products SET tags = %s WHERE id = %s", (", ".join(data["tags"]), product_id))
             if data.get("image_alts"):
                 images = product["images"] or []
@@ -1314,7 +1291,11 @@ def apply_product_changes(product_id):
                     if img.get("media_id") in alt_map:
                         img["alt"] = alt_map[img["media_id"]]
                 cur.execute("UPDATE synced_products SET images = %s WHERE id = %s", (json.dumps(images), product_id))
-            cur.execute("UPDATE synced_products SET last_optimized_at = NOW() WHERE id = %s", (product_id,))
+            if updated_fields:
+                cur.execute("UPDATE synced_products SET last_optimized_at = NOW() WHERE id = %s", (product_id,))
+
+        if not updated_fields:
+            return jsonify({"ok": True, "updated_fields": [], "message": "Already up to date — nothing changed"})
 
         try:
             generate_and_push_product_schema(product_id, client)
@@ -1329,6 +1310,39 @@ def apply_product_changes(product_id):
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+@seo_bp.route("/api/changes", methods=["GET"])
+def list_item_changes():
+    """Change history for one item, newest first — every tool's writes."""
+    item_type = request.args.get("item_type")
+    item_id = request.args.get("item_id", type=int)
+    if not item_type or not item_id:
+        return jsonify({"error": "item_type and item_id are required"}), 400
+    with db.get_cursor() as cur:
+        cur.execute(
+            """SELECT id, change_type, source, changes_applied, created_at, reverted_at,
+                      (old_values IS NOT NULL AND reverted_at IS NULL) AS can_undo
+               FROM seo_change_events
+               WHERE item_type = %s AND item_id = %s
+               ORDER BY created_at DESC LIMIT 50""",
+            (item_type, item_id),
+        )
+        rows = [dict(r) for r in cur.fetchall()]
+    return jsonify({"changes": rows})
+
+
+@seo_bp.route("/api/changes/<int:event_id>/revert", methods=["POST"])
+def revert_item_change(event_id):
+    from app.services.apply_pipeline import revert_change
+
+    try:
+        result = revert_change(event_id)
+    except ApplyRefused as refused:
+        return refusal_response(refused)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 409
+    return jsonify({"ok": True, "restored_fields": list(result["pushed"].keys())})
 
 
 @seo_bp.route("/api/seo/products/<int:product_id>", methods=["GET"])
@@ -1563,23 +1577,14 @@ def apply_collection_changes(collection_id):
             kw_before = _fetch_keyword_analysis(collection["store_id"], "collection", collection_id)
             unified_before = compute_unified_score(seo_before, kw_before["score"] if kw_before else None, search_before)
 
-            changes_map = {}
-            for field in ("title", "description_html", "meta_title", "meta_description"):
-                if data.get(field):
-                    old_key = "description" if field == "description_html" else field
-                    changes_map[field] = {"old": (collection.get(old_key) or "")[:200], "new": data[field][:200]}
-
-            _event_params = (
-                collection["store_id"], collection_id,
-                data.get("change_type", "ai_optimization"),
-                json.dumps(changes_map) if changes_map else None,
-                unified_before["content_score"],
-                unified_before.get("search_score"),
-                unified_before["seo_score"],
-            )
+            scores_before = {
+                "seo": unified_before["content_score"],
+                "search": unified_before.get("search_score"),
+                "composite": unified_before["seo_score"],
+            }
         except Exception:
-            _event_params = None
-            logger.warning("Failed to compute SEO change event for collection %s", collection_id)
+            scores_before = None
+            logger.warning("Failed to compute before-scores for collection %s", collection_id)
 
         client = ShopifyClient(
             collection["domain"],
@@ -1587,47 +1592,23 @@ def apply_collection_changes(collection_id):
             collection["api_version"],
         )
 
-        updated_fields = []
+        try:
+            applied = apply_item_changes(
+                collection["store_id"], "collection", collection_id,
+                {"title": data.get("title") or None, "body": data.get("description_html") or None,
+                 "meta_title": data.get("meta_title") or None,
+                 "meta_description": data.get("meta_description") or None},
+                source=data.get("source") or "seo_optimize",
+                change_type=data.get("change_type", "ai_optimization"), client=client,
+                allow_dropped_blocks=bool(data.get("force")), allow_dropped_primary=bool(data.get("force")),
+                scores_before=scores_before,
+            )
+        except ApplyRefused as refused:
+            return refusal_response(refused)
 
-        fields = {}
-        if data.get("title"):
-            fields["title"] = data["title"]
-            updated_fields.append("title")
-        if data.get("description_html"):
-            from app.services.ai_output_guard import restore_missing_images
-            fields["description_html"] = restore_missing_images(
-                collection.get("description"), data["description_html"])
-            updated_fields.append("description_html")
-        if data.get("meta_title"):
-            fields["meta_title"] = data["meta_title"]
-            updated_fields.append("meta_title")
-        if data.get("meta_description"):
-            fields["meta_description"] = data["meta_description"]
-            updated_fields.append("meta_description")
-
-        if fields:
-            client.update_collection(collection["shopify_id"], fields)
-
-        if _event_params:
-            with db.get_cursor() as cur:
-                cur.execute(
-                    """INSERT INTO seo_change_events
-                       (store_id, item_type, item_id, change_type, changes_applied,
-                        seo_score_before, search_score_before, composite_score_before)
-                       VALUES (%s, 'collection', %s, %s, %s, %s, %s, %s)""",
-                    _event_params,
-                )
-
-        with db.get_cursor() as cur:
-            if data.get("title"):
-                cur.execute("UPDATE synced_collections SET title = %s WHERE id = %s", (data["title"], collection_id))
-            if data.get("description_html"):
-                cur.execute("UPDATE synced_collections SET description = %s WHERE id = %s", (fields["description_html"], collection_id))
-            if data.get("meta_title"):
-                cur.execute("UPDATE synced_collections SET meta_title = %s WHERE id = %s", (data["meta_title"], collection_id))
-            if data.get("meta_description"):
-                cur.execute("UPDATE synced_collections SET meta_description = %s WHERE id = %s", (data["meta_description"], collection_id))
-            cur.execute("UPDATE synced_collections SET last_optimized_at = NOW() WHERE id = %s", (collection_id,))
+        updated_fields = [_LEGACY_FIELD_NAMES.get(k, k) for k in applied["pushed"]]
+        if not updated_fields:
+            return jsonify({"ok": True, "updated_fields": [], "message": "Already up to date — nothing changed"})
 
         from app.services.analysis_refresh import refresh_item_analysis
         refresh_item_analysis(collection["store_id"], "collection", collection_id)

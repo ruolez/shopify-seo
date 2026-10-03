@@ -18,6 +18,25 @@ async function apiRequest(url, options = {}) {
     }
 
     const data = await response.json();
+    // A write the server refused because it would remove protected content
+    // (spec tables, internal links, the page's keyword). One place to ask
+    // "apply anyway?" for every apply endpoint; the retry carries force:true.
+    if (response.status === 409 && data.can_force && !options._forced && typeof UIConfirm !== "undefined") {
+        const confirmed = await UIConfirm.ask({
+            title: "This change removes existing content",
+            message: data.error,
+            confirmLabel: "Apply anyway",
+        });
+        if (confirmed) {
+            let body = options.body;
+            if (typeof body === "string") {
+                try { body = JSON.parse(body); } catch (e) { body = null; }
+            }
+            if (body && typeof body === "object") {
+                return apiRequest(url, { ...options, body: { ...body, force: true }, _forced: true });
+            }
+        }
+    }
     if (!response.ok) {
         throw new Error(data.error || `Request failed (${response.status})`);
     }

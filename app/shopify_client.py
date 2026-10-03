@@ -1285,6 +1285,48 @@ class ShopifyClient:
         data = self._graphql(query, {"id": shopify_id})
         return data.get("article")
 
+    _ITEM_CONTENT_QUERIES = {
+        "product": "product(id: $id) { title body: descriptionHtml updatedAt seo { title description } }",
+        "collection": "collection(id: $id) { title body: descriptionHtml updatedAt seo { title description } }",
+        "article": (
+            "article(id: $id) { title body summary updatedAt "
+            'metafields(first: 10, namespace: "global") { edges { node { key value } } } }'
+        ),
+        "page": (
+            "page(id: $id) { title body updatedAt "
+            'metafields(first: 10, namespace: "global") { edges { node { key value } } } }'
+        ),
+    }
+
+    def get_item_content(self, item_type, shopify_id):
+        """Live content of one item under canonical keys (title, body,
+        meta_title, meta_description, summary for articles, updated_at), or
+        None if it no longer exists. Read before every write so an edit made
+        in Shopify admin is never overwritten unseen."""
+        query = "query ($id: ID!) { " + self._ITEM_CONTENT_QUERIES[item_type] + " }"
+        node = self._graphql(query, {"id": shopify_id}).get(item_type)
+        if not node:
+            return None
+        content = {
+            "title": node.get("title") or "",
+            "body": node.get("body") or "",
+            "updated_at": node.get("updatedAt"),
+        }
+        if "seo" in node:
+            seo = node.get("seo") or {}
+            content["meta_title"] = seo.get("title") or ""
+            content["meta_description"] = seo.get("description") or ""
+        else:
+            metas = {
+                e["node"]["key"]: e["node"].get("value") or ""
+                for e in (node.get("metafields") or {}).get("edges", [])
+            }
+            content["meta_title"] = metas.get("title_tag", "")
+            content["meta_description"] = metas.get("description_tag", "")
+        if item_type == "article":
+            content["summary"] = node.get("summary") or ""
+        return content
+
     def create_article(self, blog_shopify_id, fields):
         query = """
         mutation ($article: ArticleCreateInput!) {

@@ -46,3 +46,47 @@ class TestExistingDescriptionBlock:
         block = existing_description_block(huge, PRESERVE_RULE)
         html_part = block.split("\n", 1)[1].rsplit("\n\n", 1)[0]
         assert len(html_part) == MAX_EXISTING_CHARS
+
+
+from app.services.content_preservation import missing_preserved  # noqa: E402
+
+OLD_BODY = (
+    "<h2>What is a Backwoods cigar?</h2><p>Intro copy.</p>"
+    "<h2>Specifications</h2><table><tr><td>Count</td><td>5</td></tr></table>"
+    "<h2>Expert Verdict</h2><p>Solid.</p>"
+    '<p>Browse <a href="/collections/backwoods">Backwoods</a> and '
+    '<a href="https://a2ztobacco.com/products/honey-berry?ref=x">Honey Berry</a>.</p>'
+    '<p><a href="https://example.com/study">a study</a></p>'
+)
+
+
+class TestMissingPreserved:
+    def test_identical_body_loses_nothing(self):
+        assert missing_preserved(OLD_BODY, OLD_BODY) == []
+
+    def test_empty_old_body_has_nothing_to_lose(self):
+        assert missing_preserved("", "<p>New.</p>") == []
+
+    def test_reports_a_dropped_table(self):
+        new = OLD_BODY.replace("<table><tr><td>Count</td><td>5</td></tr></table>", "<p>Count: 5</p>")
+        assert missing_preserved(OLD_BODY, new) == ["1 table"]
+
+    def test_reports_dropped_internal_links_by_path(self):
+        new = OLD_BODY.replace('<a href="/collections/backwoods">Backwoods</a>', "Backwoods")
+        assert missing_preserved(OLD_BODY, new) == ["internal link /collections/backwoods"]
+
+    def test_internal_link_survives_a_change_of_host_or_query(self):
+        new = OLD_BODY.replace("https://a2ztobacco.com/products/honey-berry?ref=x", "/products/honey-berry")
+        assert missing_preserved(OLD_BODY, new) == []
+
+    def test_external_links_are_not_protected(self):
+        new = OLD_BODY.replace('<p><a href="https://example.com/study">a study</a></p>', "")
+        assert missing_preserved(OLD_BODY, new) == []
+
+    def test_reports_dropped_verdict_and_specifications_sections(self):
+        new = (
+            "<h2>About</h2><p>Intro copy.</p><table><tr><td>Count</td><td>5</td></tr></table>"
+            '<p><a href="/collections/backwoods">Backwoods</a> '
+            '<a href="/products/honey-berry">Honey Berry</a></p>'
+        )
+        assert missing_preserved(OLD_BODY, new) == ["Specifications section", "Expert Verdict section"]
