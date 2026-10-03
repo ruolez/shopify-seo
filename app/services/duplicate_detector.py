@@ -67,3 +67,69 @@ def find_duplicate_groups(items, field):
 
     groups.sort(key=lambda g: (-g["count"], g["value"].casefold()))
     return groups
+
+
+MIN_BODY_WORDS = 60
+SIMILAR_BODY_THRESHOLD = 0.7
+_SHINGLE = 4
+_TAGS = re.compile(r"<[^>]+>")
+_WORDS = re.compile(r"[a-z0-9']+")
+
+
+def _shingles(body_html):
+    words = _WORDS.findall(_TAGS.sub(" ", body_html or "").lower())
+    if len(words) < MIN_BODY_WORDS:
+        return None
+    return {" ".join(words[i:i + _SHINGLE]) for i in range(len(words) - _SHINGLE + 1)}
+
+
+def find_similar_bodies(items, threshold=SIMILAR_BODY_THRESHOLD):
+    """Groups of same-type items whose body text is nearly the same (Jaccard
+    over 4-word runs). Templated or manufacturer-copied descriptions are the
+    usual reason Google reads a page and declines to index it. Items need
+    "type" and "body"; the body is dropped from the result. Largest group
+    first; similarity is the lowest pairwise match that joined the group, 0-100.
+    """
+    by_type = {}
+    for item in items:
+        sh = _shingles(item.get("body"))
+        if sh:
+            by_type.setdefault(item["type"], []).append((item, sh))
+
+    groups = []
+    for members in by_type.values():
+        parent = list(range(len(members)))
+        weakest = {}
+
+        def find(i):
+            while parent[i] != i:
+                parent[i] = parent[parent[i]]
+                i = parent[i]
+            return i
+
+        for i in range(len(members)):
+            for j in range(i + 1, len(members)):
+                a, b = members[i][1], members[j][1]
+                # Sets this different in size cannot reach the threshold.
+                if min(len(a), len(b)) / max(len(a), len(b)) < threshold:
+                    continue
+                score = len(a & b) / len(a | b)
+                if score >= threshold:
+                    ri, rj = find(i), find(j)
+                    low = min(score, weakest.pop(ri, 1.0), weakest.pop(rj, 1.0))
+                    parent[rj] = ri
+                    weakest[find(i)] = low
+
+        clusters = {}
+        for idx in range(len(members)):
+            clusters.setdefault(find(idx), []).append(idx)
+        for root, idxs in clusters.items():
+            if len(idxs) < 2:
+                continue
+            groups.append({
+                "count": len(idxs),
+                "similarity": round(weakest.get(root, 1.0) * 100),
+                "items": [{k: v for k, v in members[i][0].items() if k != "body"} for i in idxs],
+            })
+    groups.sort(key=lambda g: (-g["count"], -g["similarity"]))
+    return groups

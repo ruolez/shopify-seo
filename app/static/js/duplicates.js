@@ -58,7 +58,7 @@ async function loadDuplicates() {
 
     try {
         const data = await apiRequest(`/api/duplicates?store_id=${storeId}`);
-        duplicateData = { seo_title: data.seo_title || [], meta_description: data.meta_description || [], scanned: data.scanned || {} };
+        duplicateData = { seo_title: data.seo_title || [], meta_description: data.meta_description || [], scanned: data.scanned || {}, similar_bodies: data.similar_bodies || [] };
         renderDuplicates(container);
     } catch (err) {
         container.innerHTML = `<div class="empty-state"><p>${escapeHtml(err.message)}</p></div>`;
@@ -73,6 +73,30 @@ function setDupTypeFilter(type) {
 function dupGroupMatchesFilter(group) {
     if (dupTypeFilter === "all") return true;
     return group.items.some((it) => it.type === dupTypeFilter);
+}
+
+const SIMILAR_OPEN = {
+    product: (id) => `/seo?optimize=product&id=${id}`,
+    collection: (id) => `/seo?optimize=collection&id=${id}`,
+    article: (id) => `/blog?article=${id}`,
+};
+
+// Near-identical description text across pages of one type.
+function renderSimilarBodies(groups) {
+    if (!groups.length) {
+        return `<div class="card" style="margin-top:12px;font-size:13px;"><span class="material-symbols-rounded" style="vertical-align:middle;color:var(--success);font-size:18px;">verified</span>
+            <strong>Description text:</strong> no two pages share near-identical descriptions. Each page says something of its own.</div>`;
+    }
+    return `<details class="card" style="margin-top:12px;" open>
+        <summary style="cursor:pointer;font-weight:600;">Near-identical descriptions — ${groups.length} group${groups.length === 1 ? "" : "s"}
+            <span style="font-weight:400;font-size:13px;color:var(--on-surface-secondary);"> · Pages whose text is almost the same. Google often indexes only one of them. Rewrite each to say what is specific to it.</span></summary>
+        ${groups.map((g) => `<div style="margin-top:10px;padding-top:10px;border-top:1px solid var(--outline);">
+            <div style="font-size:12px;color:var(--on-surface-secondary);margin-bottom:4px;">${g.count} ${escapeHtml(g.items[0].type)}s · ${g.similarity}% the same</div>
+            ${g.items.map((it) => `<div style="display:flex;justify-content:space-between;gap:8px;padding:3px 0;font-size:13px;">
+                <span>${escapeHtml(it.title)}</span>
+                ${it.id && SIMILAR_OPEN[it.type] ? `<a class="btn btn-secondary btn-sm" href="${SIMILAR_OPEN[it.type](it.id)}">Open</a>` : ""}</div>`).join("")}
+        </div>`).join("")}
+    </details>`;
 }
 
 function renderDuplicates(container) {
@@ -102,7 +126,7 @@ function renderDuplicates(container) {
             <span class="material-symbols-rounded" style="font-size:16px;">refresh</span> Rescan
         </button>
     </div>
-    <div class="status-filter-bar" style="margin-top:12px;">${filterChips}</div>`;
+    <div class="status-filter-bar" style="margin-top:12px;">${filterChips}</div>` + renderSimilarBodies(data.similar_bodies || []);
 
     if (totalGroups === 0) {
         container.innerHTML =

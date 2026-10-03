@@ -163,4 +163,24 @@ def list_duplicates():
         result[field] = groups
         result["counts"][field] = sum(g["count"] for g in groups)
 
+    # Near-identical description text — the usual reason Google reads a page
+    # and declines to index it. Compared within each page type.
+    from app.services.duplicate_detector import find_similar_bodies
+
+    bodies = []
+    for rows, item_type, id_key in ((products, "product", "product"), (collections, "collection", "collection"),
+                                    (articles, "article", "article")):
+        for row in rows:
+            bodies.append({
+                "id": local_ids[id_key].get(row["shopify_id"]), "type": item_type,
+                "title": row.get("title") or "", "handle": row.get("handle") or "",
+                "body": row.get("description") or row.get("body") or "",
+            })
+    try:
+        result["similar_bodies"] = find_similar_bodies(bodies)
+    except Exception:
+        logger.exception("Similar-body scan failed for store %s", store_id)
+        result["similar_bodies"] = []
+    result["counts"]["similar_bodies"] = sum(g["count"] for g in result["similar_bodies"])
+
     return jsonify(result)
