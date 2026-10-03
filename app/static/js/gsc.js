@@ -1319,7 +1319,14 @@ async function showPageDetail(idx) {
     if (!row) return;
     const pageUrl = row.page;
     const modal = document.getElementById("gsc-detail-modal");
-    document.getElementById("gsc-detail-title").textContent = "Queries for: " + shortenUrl(pageUrl);
+    document.getElementById("gsc-detail-title").innerHTML = "Queries for: " + escapeHtml(shortenUrl(pageUrl)) + ' <span id="gsc-detail-actions"></span>';
+    apiRequest(`/api/gsc/resolve-page?store_id=${currentStoreId}&url=${encodeURIComponent(pageUrl)}`).then((res) => {
+        const item = res && res.item;
+        const slot = document.getElementById("gsc-detail-actions");
+        if (!item || !slot) return;
+        const href = item.item_type === "article" ? `/blog?article=${item.id}` : `/seo?optimize=${item.item_type}&id=${item.id}&store_id=${currentStoreId}`;
+        slot.innerHTML = `<a class="btn btn-secondary btn-sm" style="margin-left:8px;" href="${href}">Open this ${item.item_type}</a>`;
+    }).catch(() => {});
     document.getElementById("gsc-detail-thead").innerHTML = "<th>Query</th><th>Clicks</th><th>Impressions</th><th>CTR</th><th>Position</th>";
     const tbody = document.getElementById("gsc-detail-tbody");
     tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;"><div class="spinner" style="margin:20px auto;"></div></td></tr>';
@@ -1347,7 +1354,9 @@ async function showQueryDetail(idx) {
     if (!row) return;
     const query = row.query;
     const modal = document.getElementById("gsc-detail-modal");
-    document.getElementById("gsc-detail-title").textContent = 'Pages ranking for: "' + query + '"';
+    const writeParams = new URLSearchParams({ tab: "create", topic: query, keywords: query });
+    document.getElementById("gsc-detail-title").innerHTML = 'Pages ranking for: "' + escapeHtml(query) + '"'
+        + ` <a class="btn btn-secondary btn-sm" style="margin-left:8px;" href="/blog?${writeParams.toString()}" title="Start a blog post on this search">Write an article</a>`;
     document.getElementById("gsc-detail-thead").innerHTML = "<th>Page</th><th>Clicks</th><th>Impressions</th><th>CTR</th><th>Position</th>";
     const tbody = document.getElementById("gsc-detail-tbody");
     tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;"><div class="spinner" style="margin:20px auto;"></div></td></tr>';

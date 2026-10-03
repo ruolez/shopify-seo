@@ -312,7 +312,7 @@ function renderSrKeywords() {
 
     document.getElementById("sr-kw-tbody").innerHTML = page.map(r => `
         <tr>
-            <td><strong>${escapeHtml(r.keyword)}</strong></td>
+            <td><strong>${escapeHtml(r.keyword)}</strong><div>${writeArticleLink(r.keyword)}</div></td>
             <td>${r.position != null ? positionBadge(r.position) : '—'}</td>
             <td>${renderChange(r.change)}</td>
             <td>${r.search_volume != null ? r.search_volume.toLocaleString() : '—'}</td>
@@ -444,7 +444,7 @@ function renderSrStriking() {
 
     document.getElementById("sr-striking-tbody").innerHTML = page.map(r => `
         <tr>
-            <td><strong>${escapeHtml(r.keyword)}</strong></td>
+            <td><strong>${escapeHtml(r.keyword)}</strong><div>${writeArticleLink(r.keyword)}</div></td>
             <td>${r.position != null ? positionBadge(r.position) : '—'}</td>
             <td>${renderChange(r.change)}</td>
             <td><strong>${r.search_volume != null ? r.search_volume.toLocaleString() : '—'}</strong></td>

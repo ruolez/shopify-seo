@@ -320,6 +320,19 @@ def opportunities():
     return jsonify(data)
 
 
+@gsc_bp.route("/api/gsc/resolve-page", methods=["GET"])
+def resolve_page():
+    """Which app item a Search Console URL belongs to, so tables can link to it."""
+    store_id = request.args.get("store_id", type=int)
+    url = request.args.get("url", "")
+    if not store_id or not url:
+        return jsonify({"error": "store_id and url are required"}), 400
+    from app.services.page_two_plan import _known_pages
+    from app.services.url_utils import url_path_key
+
+    return jsonify({"item": _known_pages(store_id).get(url_path_key(url).lower())})
+
+
 @gsc_bp.route("/api/gsc/page-two-plan", methods=["GET"])
 def page_two_plan():
     store_id = request.args.get("store_id", type=int)

@@ -236,7 +236,7 @@ function renderCompRankings() {
         html += `<tr${group.unchallenged ? ' style="opacity:0.55;"' : ''}>`;
 
         const vol = group.search_volume;
-        html += `<td style="position:sticky;left:0;z-index:1;background:var(--surface);"><strong style="font-size:13px;">${escapeHtml(group.keyword)}</strong></td>`;
+        html += `<td style="position:sticky;left:0;z-index:1;background:var(--surface);"><strong style="font-size:13px;">${escapeHtml(group.keyword)}</strong>${!ourPos || ourPos > 20 ? `<div>${writeArticleLink(group.keyword, "You are not ranking — write an article")}</div>` : ""}</td>`;
         html += `<td style="text-align:center;font-size:12px;color:var(--on-surface-secondary);">${vol ? vol.toLocaleString() : '—'}</td>`;
 
         // Our position column (from GSC)

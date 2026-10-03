@@ -184,6 +184,13 @@ function formatDate(isoStr) {
     });
 }
 
+/* Small "write about this search" link for keyword tables — opens the blog
+ * wizard with the topic and keyword filled in. */
+function writeArticleLink(keyword, label = "Write an article") {
+    const params = new URLSearchParams({ tab: "create", topic: keyword, keywords: keyword });
+    return `<a href="/blog?${params.toString()}" style="font-size:11px;white-space:nowrap;" title="Start a blog post on this search">${label}</a>`;
+}
+
 function getScoreBadge(score) {
     let cls = "badge-error";
     if (score >= 80) cls = "badge-success";
