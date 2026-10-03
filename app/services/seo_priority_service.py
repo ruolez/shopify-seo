@@ -200,6 +200,8 @@ def get_priority_ranked_items(store_id, item_type="product", limit=50, measuring
     gsc_metrics = _get_gsc_metrics_for_store(store_id)
     semrush_metrics = _get_semrush_metrics_for_store(store_id)
     ctr_curve = get_expected_ctr_curve(store_id)
+    from app.services.impact_service import measured_items
+    measured = measured_items(store_id)
 
     with db.get_cursor() as cur:
         cur.execute("SELECT gsc_property FROM gsc_credentials WHERE store_id = %s", (store_id,))
@@ -273,7 +275,12 @@ def get_priority_ranked_items(store_id, item_type="product", limit=50, measuring
         # Freshly optimized items are demoted while Google re-measures —
         # re-flagging them off pre-change data is noise. Demoted, not hidden:
         # a catalog-wide bulk optimize must not blank the whole queue.
-        recently_optimized = _within_measuring_window(item.get("last_optimized_at"), measuring_days)
+        # ...unless the impact tracker already has a verdict for the change:
+        # then Google has re-measured and the hold has done its job.
+        recently_optimized = (
+            _within_measuring_window(item.get("last_optimized_at"), measuring_days)
+            and (item_type, item["id"]) not in measured
+        )
         open_issues = issue_counts.get((item_type, item["id"]), 0)
         # Still broken -> stays actionable, but the recommendation below is
         # rewritten to the on-page work, never a keyword play off stale data.

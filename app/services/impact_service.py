@@ -184,3 +184,16 @@ def get_optimization_impact(store_id, days=60, limit=10):
     items.sort(key=lambda i: (order[i["status"]], i["changed_at"]), reverse=False)
     summary["superseded"] = superseded
     return {"items": items[:limit], "summary": summary}
+
+
+_VERDICTS = ("improved", "flat", "declined")
+
+
+def measured_items(store_id):
+    """{(item_type, item_id)} whose latest change already has a verdict. Google
+    has re-measured these, so they need not wait out the full hold period."""
+    try:
+        items = get_optimization_impact(store_id, days=45, limit=5000)["items"]
+    except Exception:
+        return set()
+    return {(i["item_type"], i["item_id"]) for i in items if i["status"] in _VERDICTS}

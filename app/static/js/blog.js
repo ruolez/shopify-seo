@@ -411,6 +411,10 @@ function renderArticleDetail(container, article) {
                         </button>
                     </div>
                     <div id="article-refresh-container"></div>
+                    <details style="margin-top:16px;" ontoggle="if (this.open) UIHistory.render(this.querySelector('.article-history'), 'article', ${article.id})">
+                        <summary style="cursor:pointer;font-weight:500;">History — what the app changed on this post, with undo</summary>
+                        <div class="article-history"></div>
+                    </details>
                     <div id="refresh-links-panel-container"></div>
                     <div id="restyle-panel-container"></div>
                     <div id="article-media-container"></div>

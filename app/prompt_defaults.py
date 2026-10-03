@@ -1452,6 +1452,9 @@ DEFAULTS = {
     # AI shopping channels do not accept tobacco, so the score measures
     # eligibility for a channel this catalogue cannot use.
     "features.feed_readiness": False,
+    # Byline on every article the app publishes. A named person with real
+    # experience of the products is a stronger trust signal than a store name.
+    "content.author_name": "A2Z",
     "rules.feed_readiness": {
         "weights": {
             "gtin": 0.18,

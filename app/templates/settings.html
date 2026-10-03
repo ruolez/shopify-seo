@@ -183,6 +183,19 @@
                     <p style="color: var(--on-surface-secondary); font-size: 13px; margin: 0 0 16px;">
                         Adjust SEO scoring weights and thresholds. Weights within each category must sum to 1.0.
                     </p>
+                    <div class="card" style="margin-bottom:16px;">
+                        <h3 style="margin:0 0 4px;">Publishing</h3>
+                        <div class="form-group" style="max-width:420px;">
+                            <label>Author shown on articles</label>
+                            <input type="text" class="form-control" id="content-author-name" maxlength="80">
+                            <small style="color:var(--on-surface-secondary);">Used for new blog posts and news. A real person's name reads as more trustworthy than a store name.</small>
+                        </div>
+                        <label style="display:flex;gap:8px;align-items:center;font-size:14px;margin:8px 0 12px;">
+                            <input type="checkbox" id="feature-feed-readiness">
+                            Show the shopping-feed audit in AI Search <span style="color:var(--on-surface-secondary);">(off: tobacco is not accepted by Google Merchant or Shopify's AI shopping channels)</span>
+                        </label>
+                        <button class="btn btn-primary btn-sm" onclick="savePublishingSettings()">Save</button>
+                    </div>
                     <div id="rules-container"></div>
                 </div>
 

@@ -1990,65 +1990,8 @@ const MODAL_TABS = [
     { id: "history", label: "History" },
 ];
 
-// Plain-language names for the tools that write to an item.
-const CHANGE_SOURCE_LABELS = {
-    seo_optimize: "AI Optimize", bulk_optimize: "Bulk optimize", bulk_title: "Bulk titles",
-    issue_fix: "Issue fix", ai_search: "AI Search", cannibalization: "Cannibalization fix",
-    content_gap: "Content gap", keyword_strategy: "Keyword Strategy", brands: "Brands",
-    interlinking: "Interlinking", intro_links: "Intro links", blog: "Blog",
-    landing_pages: "Landing pages", undo: "Undo",
-    // change types recorded before tools were named
-    ai_optimization: "AI Optimize", technical_fix: "Issue fix", image_alt_text: "Image alt text",
-    duplicate_fix: "Duplicates", faq_schema: "FAQ schema",
-};
-const CHANGE_FIELD_LABELS = {
-    title: "title", description_html: "description", body: "description", meta_title: "meta title",
-    meta_description: "meta description", tags: "tags", image_alts: "image alt text", summary: "summary",
-    image_alt: "image alt text", description: "description", faq_schema: "FAQ schema",
-};
-
 async function loadItemHistory(panel) {
-    panel.innerHTML = '<div class="loading-spinner"><div class="spinner"></div></div>';
-    try {
-        const res = await apiRequest(`/api/changes?item_type=${currentItemType}&item_id=${currentProductId}`);
-        const rows = res.changes || [];
-        if (!rows.length) {
-            panel.innerHTML = '<p style="color:var(--on-surface-secondary);padding:16px 0;">No changes recorded for this item yet. Every change the app makes will be listed here, with an undo.</p>';
-            return;
-        }
-        panel.innerHTML = `<p style="font-size:13px;color:var(--on-surface-secondary);margin:8px 0 12px;">Everything the app changed on this item, newest first. Undo restores the previous value on Shopify.</p>
-            <div class="table-container"><table class="data-table"><thead><tr><th>When</th><th>Tool</th><th>Changed</th><th></th></tr></thead><tbody>${rows.map((r) => {
-                const fields = Object.keys(r.changes_applied || {}).map((f) => CHANGE_FIELD_LABELS[f] || f).join(", ") || "—";
-                const state = r.reverted_at
-                    ? '<span class="badge">Undone</span>'
-                    : r.can_undo
-                        ? `<button class="btn btn-secondary btn-sm" onclick="undoItemChange(${r.id}, this)"><span class="material-symbols-rounded">undo</span> Undo</button>`
-                        : '<span style="font-size:12px;color:var(--on-surface-secondary);" title="Recorded before undo was available, or not a content field">No undo</span>';
-                return `<tr><td style="white-space:nowrap;">${formatDate(r.created_at)}</td>
-                    <td>${escapeHtml(CHANGE_SOURCE_LABELS[r.source] || CHANGE_SOURCE_LABELS[r.change_type] || r.source || r.change_type || "—")}</td>
-                    <td>${escapeHtml(fields)}</td><td style="text-align:right;">${state}</td></tr>`;
-            }).join("")}</tbody></table></div>`;
-    } catch (e) {
-        panel.innerHTML = `<p style="color:var(--error);">${escapeHtml(e.message)}</p>`;
-    }
-}
-
-async function undoItemChange(eventId, btn) {
-    const confirmed = await UIConfirm.ask({
-        title: "Undo this change?",
-        message: "The previous value will be written back to your live store.",
-        confirmLabel: "Undo change",
-    });
-    if (!confirmed) return;
-    btn.disabled = true;
-    try {
-        await apiRequest(`/api/changes/${eventId}/revert`, { method: "POST" });
-        showToast("Change undone — previous value restored on Shopify.", "success");
-    } catch (e) {
-        showToast(e.message, "error");
-    }
-    const panel = document.querySelector('#product-detail-content [data-mpanel="history"]');
-    if (panel) loadItemHistory(panel);
+    return UIHistory.render(panel, currentItemType, currentProductId);
 }
 
 function renderModalTabBar(active = "overview") {

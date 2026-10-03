@@ -738,6 +738,8 @@ def build_action_queue(store_id, limit=15):
     # One meta title serves every query variant of a page — group the
     # underperforming queries by target so one Fix clears them all.
     from app.services.seo_priority_service import _within_measuring_window
+    from app.services.impact_service import measured_items
+    ctr_measured = measured_items(store_id)
     from app.services.url_utils import url_path_key
 
     ctr_groups = {}
@@ -746,7 +748,8 @@ def build_action_queue(store_id, limit=15):
         if f"ctr:{c['query']}" in dismissed:
             continue  # legacy per-query dismissals still honored, per variant
         matched = c.get("matched_item")
-        if matched and _within_measuring_window(matched.get("last_optimized_at"), 28):
+        if (matched and _within_measuring_window(matched.get("last_optimized_at"), 28)
+                and (matched["item_type"], matched["id"]) not in ctr_measured):
             continue  # freshly optimized — GSC hasn't re-measured yet
         if matched:
             gkey = f"ctr:{matched['item_type']}:{matched['id']}"

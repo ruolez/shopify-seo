@@ -30,6 +30,12 @@ mutation ($metafields: [MetafieldsSetInput!]!) {
 """
 
 
+def _default_author():
+    from app.settings_manager import get_setting
+
+    return get_setting("content.author_name", "A2Z")
+
+
 class ShopifyClient:
     def __init__(self, domain, access_token, api_version=DEFAULT_API_VERSION):
         self.domain = domain.rstrip("/")
@@ -1343,7 +1349,7 @@ class ShopifyClient:
         """
         article_input = {
             "blogId": blog_shopify_id,
-            "author": {"name": fields.get("author", "A2Z")},
+            "author": {"name": fields.get("author") or _default_author()},
         }
         if "title" in fields:
             article_input["title"] = fields["title"]

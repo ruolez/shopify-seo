@@ -443,7 +443,31 @@ const RULE_KEYS = [
     { key: "rules.interlinking", label: "Interlinking Scoring" },
 ];
 
+async function loadPublishingSettings() {
+    try {
+        const author = await apiRequest("/api/settings/custom/content.author_name");
+        document.getElementById("content-author-name").value = author.value || "";
+        const feed = await apiRequest("/api/settings/custom/features.feed_readiness");
+        document.getElementById("feature-feed-readiness").checked = !!feed.value;
+    } catch (e) { /* card stays empty; saving still works */ }
+}
+
+window.savePublishingSettings = async function () {
+    const author = document.getElementById("content-author-name").value.trim();
+    if (!author) return showToast("Enter an author name", "error");
+    try {
+        await apiRequest("/api/settings/custom/content.author_name", { method: "POST", body: { value: author } });
+        await apiRequest("/api/settings/custom/features.feed_readiness", {
+            method: "POST", body: { value: document.getElementById("feature-feed-readiness").checked },
+        });
+        showToast("Publishing settings saved", "success");
+    } catch (e) {
+        showToast(`Failed to save: ${e.message}`, "error");
+    }
+};
+
 async function loadRules() {
+    loadPublishingSettings();
     const container = document.getElementById("rules-container");
     container.innerHTML = '<p style="color:var(--on-surface-secondary)">Loading rules...</p>';
 

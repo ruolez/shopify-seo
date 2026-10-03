@@ -9,6 +9,7 @@ from flask import Blueprint, jsonify, render_template, request
 from app.database import db
 from app.routes.blog_routes import _get_store_client
 from app.services import publish_gate
+from app.settings_manager import get_setting
 from app.services import url_utils
 from app.shopify_client import is_gone_error
 from app.services.ai_output_guard import clamp_meta_description, clamp_meta_title, sanitize_html
@@ -432,7 +433,7 @@ def _step_publish(session, store, client, is_published=True, regen_hub=True):
         "is_published": is_published,
         "publish_date": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
         "template_suffix": NEWS_TEMPLATE_SUFFIX,
-        "author": "A2Z",
+        "author": get_setting("content.author_name", "A2Z"),
     }
     if session.get("hero_image_url"):
         fields["image_url"] = session["hero_image_url"]
@@ -497,7 +498,7 @@ def _step_publish(session, store, client, is_published=True, regen_hub=True):
                  body, summary, tags, author, meta_title, meta_description,
                  image_url, image_alt, is_published, published_at,
                  article_type, template_suffix, category, date_modified, synced_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'A2Z', %s, %s, %s, %s, %s, %s,
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                     'news', %s, %s, %s, NOW())
             ON CONFLICT (store_id, shopify_id) DO UPDATE SET
                 title = EXCLUDED.title, handle = EXCLUDED.handle, body = EXCLUDED.body,
@@ -512,7 +513,7 @@ def _step_publish(session, store, client, is_published=True, regen_hub=True):
                 store_id, blog_id, shopify_id, blog["shopify_id"],
                 headline, result.get("handle", ""),
                 body_html, fields["summary"],
-                ", ".join(tags),
+                ", ".join(tags), fields["author"],
                 meta_title, meta_description,
                 cdn_image_url, fields.get("image_alt", ""),
                 is_published, now if is_published else None,
