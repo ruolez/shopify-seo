@@ -865,7 +865,7 @@ function kaResearchOutcome(run) {
         ${rows}
         ${ruledOut}
         <div style="margin-top:10px;">
-            <a href="/blog?tab=topics" class="btn btn-sm btn-outline" style="font-size:11px;text-decoration:none;">
+            <a href="/blog?tab=create" class="btn btn-sm btn-outline" style="font-size:11px;text-decoration:none;">
                 Open Research Topics</a></div>
     </div>`;
 }

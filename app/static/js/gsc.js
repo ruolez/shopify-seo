@@ -759,7 +759,7 @@ function renderCannibalizationList(container, data) {
             }
 
             const rowStyle = p.is_winner ? "background: var(--success-light);" : fix?.status === "needs_attention" ? "background: var(--error-light);" : fix?.status === "pending" ? "background: var(--warning-light);" : fix?.status === "verified" ? "background: var(--success-light); opacity: 0.7;" : "";
-            const viewLink = match.type === "product" || match.type === "collection" ? `<a href="/seo" title="View in SEO" style="color:var(--primary);"><span class="material-symbols-rounded" style="font-size:16px;">open_in_new</span></a>` : "";
+            const viewLink = match.type === "product" || match.type === "collection" ? `<a href="/seo?optimize=${match.type}&id=${match.id}&store_id=${currentStoreId || ""}" title="Open this page in SEO" style="color:var(--primary);"><span class="material-symbols-rounded" style="font-size:16px;">open_in_new</span></a>` : "";
             const setWinnerBtn = !p.is_winner ? `<button class="action-icon" title="Set as winner" onclick="event.stopPropagation();setCannibalWinner(${gi},${group.pages.indexOf(p)})"><span class="material-symbols-rounded" style="font-size:16px;color:var(--success);">emoji_events</span></button>` : "";
 
             return `<tr style="${rowStyle}">

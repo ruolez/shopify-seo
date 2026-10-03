@@ -143,11 +143,11 @@ Interlinking apply. There is no ordering rule and no "last changed by" marker.
   description good band: 120–160 for products, 140–160 for landing. Landing word count: 300
   scores 100, the prompt demands 500. Body `<h1>`: required on landing pages, flagged and
   stripped on products. Headings: two of any level on products; two H2 plus an H3 on articles.
-- [ ] ✔ **D8 — The Home queue sorts on mixed units.** Priority rows carry Semrush monthly
+- [x] ✔ **D8 — The Home queue sorts on mixed units.** *(Every row carries estimated monthly clicks from one estimator on the store's CTR curve; one row per page.)* Priority rows carry Semrush monthly
   volume × a flat rate; CTR rows carry a 28-day click gap; summary rows carry nothing. All are
   sorted together (`dashboard_service.py:672`). A page can appear twice
   (`priority:` and `ctr:` keys are not deduplicated).
-- [ ] ✔ **D9 — Two lifecycle clocks.** The impact verdict lands after 9–16 days
+- [x] ✔ **D9 — Two lifecycle clocks.** *(Partly: a page whose clicks fell after a change now returns as a pinned 'review or undo' row. The 28-day hold itself is unchanged.)* The impact verdict lands after 9–16 days
   (`impact_service.py:18-23`); the queue hides the item for 28 days regardless and never
   reads the verdict. A page that got worse stays locked, then returns with the same advice.
 - [ ] ✔ **D10 — Five outcome trackers that do not talk.** `impact_service`, the "optimized"
@@ -170,7 +170,7 @@ Interlinking apply. There is no ordering rule and no "last changed by" marker.
   it. They are absent from the priority queue, the impact tracker and the shared item modal.
   Keyword Strategy's open/optimize buttons do nothing for articles
   (`keyword_strategy.js:715-720`). Yet articles bring most of the traffic.
-- [ ] ✔ **X3 — Only two engines put actionable rows on Home.** Coverage gaps, the assignment
+- [x] ✔ **X3 — Only two engines put actionable rows on Home.** *(Home now also carries drafts awaiting approval, declined pages and articles worth refreshing as item rows. Coverage gaps, AI readiness and off-site findings still live on their own pages.)* Coverage gaps, the assignment
   plan, AI readiness, off-site visibility, feed readiness and anomalies never appear; the
   rest appear as "N things, go to page X" rows that always sort last.
 - [ ] ✔ **X4 — Insight pages stop at the data.** Semrush tables, Competitors, and GSC Top
@@ -184,7 +184,7 @@ Interlinking apply. There is no ordering rule and no "last changed by" marker.
   from the Blog list until a restart.
 - [ ] ✔ **X6 — Revenue is display-only.** No engine weights by it, and most order rows have
   no landing page.
-- [ ] ✔ **X7 — Drops are detected but never queued.** Anomalies go to a feed; they are not
+- [x] ✔ **X7 — Drops are detected but never queued.** *(Declines after a recorded change are queued; unexplained drops still go to the changes feed only.)* Anomalies go to a feed; they are not
   matched to a recent change on the same page.
 - [ ] ✔ **X8 — AI readiness goes stale.** Its score is written only by AI Search flows, so it
   stays high after another tool wipes the GEO sections. AI visibility prompts are invented by
@@ -193,11 +193,11 @@ Interlinking apply. There is no ordering rule and no "last changed by" marker.
 - [ ] ✔ **X9 — Recommendations depend on buttons.** Content-gap discovery, the content audit,
   the assignment plan and Semrush import are manual. Striking-distance advice is only as
   fresh as the last Semrush CSV (last import 28 Aug).
-- [ ] ✔ **X10 — Dead links and counters.** "Open Research Topics" points at a blog tab that
+- [x] ✔ **X10 — Dead links and counters.** "Open Research Topics" points at a blog tab that
   does not exist (`keyword_actions.js:867`); the GSC cannibalization "View in SEO" link is a
   bare `/seo` (`gsc.js:760`); Home's "Schema pushed" bar links to neither schema screen; a
   dashboard counter reads a topic status that is never set (`dashboard_service.py:964`).
-- [ ] ✔ **X11 — The empty queue is a dead end.** It always says everything is being
+- [x] ✔ **X11 — The empty queue is a dead end.** It always says everything is being
   re-measured, even when nothing is (`dashboard.js:260-264`).
 
 ---

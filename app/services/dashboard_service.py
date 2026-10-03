@@ -438,6 +438,21 @@ def get_ctr_opportunities(store_id, limit=10, min_impressions=200):
                         "last_optimized_at": row["last_optimized_at"],
                     }
 
+    article_handles = {
+        c["path_key"].split("/")[2] for c in candidates
+        if c["path_key"].startswith("blogs/") and c["path_key"].count("/") == 2
+    }
+    articles = {}
+    if article_handles:
+        with db.get_cursor() as cur:
+            cur.execute(
+                """SELECT sa.id, sa.title, sa.last_optimized_at, sb.handle || '/' || sa.handle AS path
+                   FROM synced_articles sa JOIN synced_blogs sb ON sb.id = sa.blog_id
+                   WHERE sa.store_id = %s AND sa.handle = ANY(%s)""",
+                (store_id, list(article_handles)),
+            )
+            articles = {f"blogs/{r['path']}".lower(): r for r in cur.fetchall()}
+
     for c in candidates:
         parts = c["path_key"].split("/")
         c["matched_item"] = None
@@ -446,6 +461,10 @@ def get_ctr_opportunities(store_id, limit=10, min_impressions=200):
             match = handles[item_type].get(parts[1])
             if match:
                 c["matched_item"] = {"item_type": item_type, **match}
+        elif c["path_key"].lower() in articles:
+            a = articles[c["path_key"].lower()]
+            c["matched_item"] = {"item_type": "article", "id": a["id"], "title": a["title"],
+                                 "last_optimized_at": a["last_optimized_at"]}
         del c["path_key"]
     return candidates
 
@@ -473,6 +492,162 @@ def dismiss_action(store_id, action_key, snooze_days=None):
                DO UPDATE SET snoozed_until = EXCLUDED.snoozed_until, dismissed_at = NOW()""",
             (store_id, action_key, snoozed_until),
         )
+
+
+def _queue_row(source, severity, title, detail, href, action_key, gain=None, item_type=None,
+               item_id=None, pinned=False):
+    return {
+        "source": source, "severity": severity, "title": title, "detail": detail, "href": href,
+        "est_clicks_gain": gain, "item_type": item_type, "item_id": item_id,
+        "action_key": action_key, "pinned": pinned,
+    }
+
+
+def _draft_review_rows(store_id):
+    """Prepared articles that will not publish until a person approves them."""
+    rows = []
+    with db.get_cursor() as cur:
+        for kind, table, title_sql, href in (
+            ("blog", "article_wizard_sessions", "COALESCE(generated_article->>'title', topic)", "/blog?tab=scheduled"),
+            ("news", "news_sessions",
+             "COALESCE(edited_result->>'headline', analyze_result->>'headline', 'News article')", "/news?tab=scheduled"),
+        ):
+            cur.execute(
+                f"""SELECT id, {title_sql} AS title, scheduled_for,
+                           scheduled_for <= (NOW() AT TIME ZONE 'utc') AS overdue
+                    FROM {table}
+                    WHERE store_id = %s AND status = 'scheduled' AND reviewed_at IS NULL
+                      AND scheduled_for <= (NOW() AT TIME ZONE 'utc') + INTERVAL '7 days'
+                    ORDER BY scheduled_for LIMIT 5""",
+                (store_id,),
+            )
+            for r in cur.fetchall():
+                when = "was due " if r["overdue"] else "due "
+                rows.append(_queue_row(
+                    "review_draft", "high" if r["overdue"] else "med",
+                    r["title"] or "Untitled draft",
+                    f"Draft {when}{r['scheduled_for']:%b %d} — it will not publish until you approve it",
+                    href, f"review_draft:{kind}:{r['id']}", pinned=True,
+                ))
+    return rows
+
+
+_ITEM_HREF = {
+    "product": "/seo?optimize=product&id={id}",
+    "collection": "/seo?optimize=collection&id={id}",
+    "article": "/blog?article={id}",
+}
+
+
+def _regression_rows(store_id):
+    """Pages whose clicks fell after a recorded change — review or undo it."""
+    from app.services.impact_service import get_optimization_impact
+
+    rows = []
+    for item in get_optimization_impact(store_id, days=45, limit=200)["items"]:
+        if item["status"] != "declined" or item["item_type"] not in _ITEM_HREF:
+            continue
+        lost = round((item["pre"]["clicks_per_day"] - item["post"]["clicks_per_day"]) * 30)
+        if lost < 1:
+            continue
+        rows.append(_queue_row(
+            "regression", "high", item["title"],
+            f"Clicks fell {abs(item['clicks_change_pct']):.0f}% after a change on "
+            f"{item['changed_at'][:10]} — review it, or undo from the History tab",
+            _ITEM_HREF[item["item_type"]].format(id=item["item_id"]) + f"&store_id={store_id}",
+            f"regression:{item['event_id']}", gain=lost,
+            item_type=item["item_type"], item_id=item["item_id"], pinned=True,
+        ))
+    return rows[:5]
+
+
+REFRESH_MIN_IMPRESSIONS = 200
+REFRESH_MAX_POSITION = 20
+
+
+def get_article_refresh_candidates(store_id, limit=20):
+    """Articles Google already shows but few people click: enough impressions
+    to matter, ranking within reach, not touched in the last 28 days. Ranked
+    by the monthly clicks a refresh could add."""
+    from app.services.ctr_benchmarks import estimate_click_gain, get_expected_ctr_curve
+    from app.services.url_utils import url_path_key
+
+    end = gsc_data_end_date()
+    start = end - timedelta(days=27)
+    with db.get_cursor() as cur:
+        cur.execute(
+            """SELECT page, SUM(clicks) AS clicks, SUM(impressions) AS impressions,
+                      SUM(position * impressions) / NULLIF(SUM(impressions), 0) AS position
+               FROM gsc_daily_metrics
+               WHERE store_id = %s AND date BETWEEN %s AND %s AND page LIKE '%%/blogs/%%'
+               GROUP BY page HAVING SUM(impressions) >= %s""",
+            (store_id, start, end, REFRESH_MIN_IMPRESSIONS),
+        )
+        pages = {url_path_key(r["page"]): r for r in cur.fetchall()}
+        cur.execute(
+            """SELECT sa.id, sa.title, sa.primary_keyword, sb.handle || '/' || sa.handle AS path
+               FROM synced_articles sa JOIN synced_blogs sb ON sb.id = sa.blog_id
+               WHERE sa.store_id = %s AND sa.is_published
+                 AND (sa.last_optimized_at IS NULL OR sa.last_optimized_at < NOW() - INTERVAL '28 days')""",
+            (store_id,),
+        )
+        articles = cur.fetchall()
+    curve = get_expected_ctr_curve(store_id)
+    candidates = []
+    for a in articles:
+        m = pages.get(f"blogs/{a['path']}".lower())
+        if not m:
+            continue
+        impressions, clicks = float(m["impressions"] or 0), float(m["clicks"] or 0)
+        position = float(m["position"] or 0)
+        if not position or position > REFRESH_MAX_POSITION:
+            continue
+        gain = estimate_click_gain(impressions, position, curve, actual_ctr=clicks / impressions)
+        if gain < 1:
+            continue
+        candidates.append({
+            "id": a["id"], "title": a["title"], "keyword": a["primary_keyword"],
+            "impressions": round(impressions), "clicks": round(clicks),
+            "position": round(position, 1), "est_clicks_gain": gain,
+        })
+    candidates.sort(key=lambda c: -c["est_clicks_gain"])
+    return candidates[:limit]
+
+
+def _article_refresh_rows(store_id):
+    return [
+        _queue_row(
+            "refresh", "med", c["title"],
+            f"{c['impressions']:,} impressions, {c['clicks']} clicks at position {c['position']} — "
+            "refresh it around the searches it appears for",
+            f"/blog?article={c['id']}", f"refresh:article:{c['id']}",
+            gain=c["est_clicks_gain"], item_type="article", item_id=c["id"],
+        )
+        for c in get_article_refresh_candidates(store_id, limit=5)
+    ]
+
+
+def _one_row_per_page(items):
+    """A page flagged by two engines (priority + CTR) is one job: keep the row
+    with the larger estimated gain and note the other reason on it."""
+    best = {}
+    out = []
+    for row in items:
+        if not row.get("item_id") or row.get("pinned"):
+            out.append(row)
+            continue
+        key = (row["item_type"], row["item_id"])
+        kept = best.get(key)
+        if kept is None:
+            best[key] = row
+            out.append(row)
+        elif (row["est_clicks_gain"] or 0) > (kept["est_clicks_gain"] or 0):
+            row["detail"] = f"{row['detail']} · also: {kept['detail']}"
+            out[out.index(kept)] = row
+            best[key] = row
+        else:
+            kept["detail"] = f"{kept['detail']} · also: {row['detail']}"
+    return out
 
 
 def build_action_queue(store_id, limit=15):
@@ -586,7 +761,9 @@ def build_action_queue(store_id, limit=15):
             "actual_ctr": top["actual_ctr"],
             "expected_ctr": top["expected_ctr"],
         }
-        if matched:
+        if matched and matched["item_type"] == "article":
+            href = f"/blog?article={matched['id']}"
+        elif matched:
             href = "/seo?" + urlencode(
                 {
                     "fix": "ctr",
@@ -668,8 +845,22 @@ def build_action_queue(store_id, limit=15):
         summary_row("links", "low", f"{orphans} orphan pages · {il.get('broken_links', 0)} broken links",
                     f"{il.get('under_linked', 0)} under-linked", il_href)
 
+    for provider in (_draft_review_rows, _regression_rows, _article_refresh_rows):
+        try:
+            rows = [r for r in provider(store_id) if r["action_key"] not in dismissed]
+        except Exception:
+            logger.exception("Action queue: %s failed", provider.__name__)
+            rows = []
+        items.extend(rows)
+        if rows:
+            counts[rows[0]["source"]] = len(rows)
+
+    items = _one_row_per_page(items)
+
+    # Time-critical rows (a draft waiting to publish, a page that got worse)
+    # lead; everything else ranks by estimated monthly clicks.
     severity_rank = {"high": 0, "med": 1, "low": 2}
-    items.sort(key=lambda i: (-(i["est_clicks_gain"] or 0), severity_rank[i["severity"]]))
+    items.sort(key=lambda i: (not i.get("pinned"), -(i["est_clicks_gain"] or 0), severity_rank[i["severity"]]))
 
     now = datetime.now(timezone.utc)
     measuring_rows = []
@@ -961,7 +1152,7 @@ def get_ops(store_id):
         )
         news = cur.fetchone()
         cur.execute(
-            "SELECT COUNT(*) AS cnt FROM topic_suggestions WHERE store_id = %s AND status = 'accepted'",
+            "SELECT COUNT(*) AS cnt FROM topic_suggestions WHERE store_id = %s AND status = 'suggested'",
             (store_id,),
         )
         topics_accepted = int(cur.fetchone()["cnt"] or 0)

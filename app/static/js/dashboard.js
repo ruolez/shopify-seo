@@ -226,6 +226,7 @@ function renderDelta(el, pct, invert = false) {
 const QUEUE_SOURCE_LABELS = {
     priority: "SEO", ctr: "CTR", cannibalization: "Cannibal", technical: "Technical",
     gaps: "Gaps", competitor: "Competitor", links: "Links",
+    review_draft: "Draft", regression: "Declined", refresh: "Refresh",
 };
 
 async function loadActionQueue() {
@@ -261,7 +262,9 @@ async function loadActionQueue() {
         if (!data.items.length) {
             container.innerHTML = `<div style="padding:16px 0;color:var(--on-surface-secondary);font-size:13px;">
                 <span class="material-symbols-rounded" style="vertical-align:middle;color:var(--success);">check_circle</span>
-                Nothing actionable right now — everything applied is being re-measured.</div>`
+                ${(data.measuring || []).length
+                    ? "Nothing to act on right now — recent changes are still being re-measured by Google."
+                    : "Nothing in the queue. Next steps that add traffic: review <a href=\"/content-gaps\">content gaps</a>, check <a href=\"/keyword-strategy\">keyword coverage</a>, or <a href=\"/blog?tab=create\">write a post</a>."}</div>`
                 + measuringNote + renderMeasuringBand(data.measuring || []);
             card.style.display = "";
             return;
@@ -270,13 +273,16 @@ async function loadActionQueue() {
         // Work bands: concrete per-item fixes lead, aggregate reviews follow,
         // content creation last. Quick wins expand by default.
         const BANDS = [
-            { key: "quick", label: "Quick wins", verb: "Fix", sources: ["priority", "ctr"], open: true },
+            { key: "attention", label: "Needs you now", verb: "Review", sources: ["review_draft", "regression"], open: true },
+            { key: "quick", label: "Quick wins", verb: "Fix", sources: ["priority", "ctr", "refresh"], open: true },
             { key: "review", label: "Needs review", verb: "Review", sources: ["cannibalization", "technical", "competitor", "links"], open: false },
             { key: "create", label: "Create content", verb: "Draft", sources: ["gaps"], open: false },
         ];
         const sevBadge = { high: "badge-error", med: "badge-warning", low: "badge-info" };
         const row = (item, verb) => {
             const fix = item.fix || null;
+            if (item.source === "refresh") verb = "Refresh";
+            else if (item.source === "review_draft") verb = "Review & approve";
             if (fix) {
                 if (fix.kind === "ctr_rewrite") verb = item.item_id ? "Fix title" : "Review";
                 else if (fix.kind === "striking_distance") verb = "Optimize";
@@ -541,7 +547,7 @@ async function loadOps() {
         document.getElementById("dash-pipeline").innerHTML =
             pipelineRow("Scheduled news", p.news_scheduled ?? 0, "/news") +
             pipelineRow("Drafts in progress", p.news_drafts ?? 0, "/news") +
-            pipelineRow("Accepted topics waiting", p.topics_accepted ?? 0, "/blog") +
+            pipelineRow("Topic ideas waiting", p.topics_accepted ?? 0, "/blog?tab=create") +
             pipelineRow("Published this month", p.published_this_month ?? 0, "/blog") +
             pipelineRow("Gaps closed this month", p.gaps_closed_this_month ?? 0, "/content-gaps");
 
@@ -562,7 +568,7 @@ async function loadOps() {
             bar("Meta titles", c.meta_title_pct, "/seo") +
             bar("Meta descriptions", c.meta_desc_pct, "/seo") +
             bar("Image alt text", c.alt_text_pct, "/seo") +
-            bar("Schema pushed", c.schema_pushed_pct, "/ai-seo?tab=score") +
+            bar("Schema pushed", c.schema_pushed_pct, "/seo?tab=schema") +
             bar("Keywords mapped", c.keyword_mapped_pct, "/keyword-strategy") +
             `<div style="padding:5px 0;font-size:12px;display:flex;justify-content:space-between;"><a href="/ai-seo?tab=assets" style="color:inherit;">AEO assets</a><span>${aeo.published ?? 0}/${aeo.total ?? 0} published</span></div>`;
 

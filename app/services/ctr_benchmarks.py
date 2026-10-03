@@ -37,6 +37,27 @@ def expected_ctr_for_position(position, curve=None):
     return DEFAULT_CTR_CURVE[999]
 
 
+PAGE_ONE_TARGET = 8
+TOP_THREE_TARGET = 3
+
+
+def target_position(position):
+    """Where a page can realistically move next: page-one pages to the top
+    three, everything else onto page one."""
+    return TOP_THREE_TARGET if position and 0 < position <= 10 else PAGE_ONE_TARGET
+
+
+def estimate_click_gain(monthly_impressions, position, curve=None, actual_ctr=None):
+    """Extra clicks a month if the page reached its target position — the one
+    unit every recommendation is ranked in. Uses the page's actual CTR when
+    known, else the expected CTR for where it ranks now."""
+    if not monthly_impressions:
+        return 0
+    current = actual_ctr if actual_ctr is not None else expected_ctr_for_position(position, curve)
+    gain = expected_ctr_for_position(target_position(position), curve) - current
+    return max(0, round(monthly_impressions * gain))
+
+
 # The single app-wide rule for "this page's CTR underperforms its position".
 # Top-10 only: past page one, CTR is dominated by position, not snippet quality.
 CTR_UNDERPERFORMER_MIN_IMPRESSIONS = 200

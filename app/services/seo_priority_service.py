@@ -2,7 +2,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 
 from app.database import db
-from app.services.ctr_benchmarks import get_expected_ctr_curve, is_ctr_underperformer
+from app.services.ctr_benchmarks import estimate_click_gain, get_expected_ctr_curve, is_ctr_underperformer
 from app.services.keyword_resolver import get_owned_primary_keywords, variant_key
 from app.services.seo_analyzer import (
     _expected_ctr,
@@ -449,15 +449,13 @@ def get_priority_ranked_items(store_id, item_type="product", limit=50, measuring
             # substitute a label the engine never produced.
             action_kind = "unspecified"
 
-        potential_clicks = 0
-        if striking:
-            for k in striking[:5]:
-                vol = int(k.get("search_volume") or 0)
-                pos = float(k.get("position") or 0)
-                if pos <= 10:
-                    potential_clicks += int(vol * 0.05)
-                else:
-                    potential_clicks += int(vol * 0.02)
+        # Same unit as every other queue row: extra clicks a month if each
+        # striking keyword reached its target position, on the store's own
+        # CTR curve (was a flat 5% / 2% of search volume).
+        potential_clicks = sum(
+            estimate_click_gain(int(k.get("search_volume") or 0), float(k.get("position") or 0), ctr_curve)
+            for k in (striking or [])[:5]
+        )
 
         result_entry = {
             "id": item["id"],
