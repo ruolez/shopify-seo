@@ -1233,22 +1233,15 @@ def apply_gap_optimization(store_id, gap_id, item_type, item_id, changes):
     if not fields:
         raise ValueError("Nothing to apply — no title or meta changes were provided")
 
-    if item_type == "product":
-        client.update_product(item["shopify_id"], fields)
-    else:
-        client.update_collection(item["shopify_id"], fields)
+    from app.services.apply_pipeline import apply_item_changes
+
+    applied = apply_item_changes(
+        store_id, item_type, item_id, fields,
+        source="content_gap", change_type="gap_optimize", client=client,
+        allow_dropped_primary=bool(changes.get("force")),
+    )
 
     with db.get_cursor() as cur:
-        if fields.get("title"):
-            cur.execute(f"UPDATE {table} SET title = %s WHERE id = %s", (fields["title"], item_id))
-        if fields.get("meta_title"):
-            cur.execute(f"UPDATE {table} SET meta_title = %s WHERE id = %s", (fields["meta_title"], item_id))
-        if fields.get("meta_description"):
-            cur.execute(f"UPDATE {table} SET meta_description = %s WHERE id = %s", (fields["meta_description"], item_id))
-        cur.execute(f"UPDATE {table} SET last_optimized_at = NOW() WHERE id = %s", (item_id,))
         cur.execute("UPDATE content_gaps SET status = 'published', updated_at = NOW() WHERE id = %s AND store_id = %s", (gap_id, store_id))
 
-    from app.services.analysis_refresh import refresh_item_analysis
-    refresh_item_analysis(store_id, item_type, item_id)
-
-    return {"ok": True, "updated_fields": list(fields.keys())}
+    return {"ok": True, "updated_fields": list(applied["pushed"].keys())}

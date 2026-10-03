@@ -15,6 +15,7 @@ from app.services.ai_output_guard import (
     clamp_title,
     sanitize_html,
 )
+from app.services.apply_pipeline import apply_item_changes, record_side_change
 from app.services.task_runner import is_failed_result, spawn as spawn_task, sweep_stale_jobs
 from app.shopify_client import ShopifyClient
 
@@ -553,24 +554,16 @@ def _execute_bulk_collection_task(bulk_task_id):
                     _drop_duplicate_metas(collection_fields, applied_meta_tokens,
                                           f"collection {collection_id}")
 
-                    if collection_fields:
-                        client.update_collection(item["shopify_id"], collection_fields)
-
-                    with db.get_cursor() as cur:
-                        if collection_fields.get("title"):
-                            cur.execute("UPDATE synced_collections SET title = %s WHERE id = %s", (collection_fields["title"], collection_id))
-                        if collection_fields.get("description_html"):
-                            cur.execute("UPDATE synced_collections SET description = %s WHERE id = %s", (collection_fields["description_html"], collection_id))
-                        if collection_fields.get("meta_title"):
-                            cur.execute("UPDATE synced_collections SET meta_title = %s WHERE id = %s", (collection_fields["meta_title"], collection_id))
-                        if collection_fields.get("meta_description"):
-                            cur.execute("UPDATE synced_collections SET meta_description = %s WHERE id = %s", (collection_fields["meta_description"], collection_id))
-                        cur.execute("UPDATE synced_collections SET last_optimized_at = NOW() WHERE id = %s", (collection_id,))
-                    _record_bulk_change_event(item["store_id"], "collection", collection_id,
-                                              "bulk_optimize", collection_fields)
-
-                    from app.services.analysis_refresh import refresh_item_analysis
-                    refresh_item_analysis(item["store_id"], "collection", collection_id)
+                    # Raises when the live page changed since sync or the
+                    # rewrite drops protected content — the item fails with
+                    # that reason instead of overwriting.
+                    apply_item_changes(
+                        item["store_id"], "collection", collection_id,
+                        {"title": collection_fields.get("title"), "body": collection_fields.get("description_html"),
+                         "meta_title": collection_fields.get("meta_title"),
+                         "meta_description": collection_fields.get("meta_description")},
+                        source="bulk_optimize", change_type="bulk_optimize", client=client,
+                    )
                     _claim_applied_primary(ownership, item["store_id"], "collection", collection_id)
                     _record_applied_metas(collection_fields, applied_meta_tokens)
 
@@ -724,8 +717,15 @@ def _execute_bulk_task(bulk_task_id):
                     _drop_duplicate_metas(product_fields, applied_meta_tokens,
                                           f"product {product_id}")
 
-                    if product_fields:
-                        client.update_product(item["shopify_id"], product_fields)
+                    _tags = product_fields.get("tags")
+                    _applied = apply_item_changes(
+                        item["store_id"], "product", product_id,
+                        {"title": product_fields.get("title"), "body": product_fields.get("description_html"),
+                         "meta_title": product_fields.get("meta_title"),
+                         "meta_description": product_fields.get("meta_description")},
+                        source="bulk_optimize", change_type="bulk_optimize", client=client,
+                        extra_fields={"tags": _tags} if _tags else None,
+                    )
 
                     media_updates = []
                     if ai_result.get("image_alt_suggestions"):
@@ -763,14 +763,6 @@ def _execute_bulk_task(bulk_task_id):
                             logger.info("Alt text bulk apply result: %s", media_result)
 
                     with db.get_cursor() as cur:
-                        if product_fields.get("title"):
-                            cur.execute("UPDATE synced_products SET title = %s WHERE id = %s", (product_fields["title"], product_id))
-                        if product_fields.get("description_html"):
-                            cur.execute("UPDATE synced_products SET description = %s WHERE id = %s", (product_fields["description_html"], product_id))
-                        if product_fields.get("meta_title"):
-                            cur.execute("UPDATE synced_products SET meta_title = %s WHERE id = %s", (product_fields["meta_title"], product_id))
-                        if product_fields.get("meta_description"):
-                            cur.execute("UPDATE synced_products SET meta_description = %s WHERE id = %s", (product_fields["meta_description"], product_id))
                         if product_fields.get("tags"):
                             cur.execute("UPDATE synced_products SET tags = %s WHERE id = %s", (", ".join(product_fields["tags"]), product_id))
                         if media_updates:
@@ -788,11 +780,10 @@ def _execute_bulk_task(bulk_task_id):
                                     img["alt"] = alt_map[img["media_id"]]
                             cur.execute("UPDATE synced_products SET images = %s WHERE id = %s", (json.dumps(images), product_id))
                         cur.execute("UPDATE synced_products SET last_optimized_at = NOW() WHERE id = %s", (product_id,))
-                    _event_fields = dict(product_fields)
-                    if media_updates:
-                        _event_fields["image_alt"] = f"{len(media_updates)} image(s) updated"
-                    _record_bulk_change_event(item["store_id"], "product", product_id,
-                                              "bulk_optimize", _event_fields)
+                    _side = [n for n, changed in (("tags", _tags), ("image_alts", media_updates)) if changed]
+                    if _side and not _applied["event_id"]:
+                        record_side_change(item["store_id"], "product", product_id,
+                                           "bulk_optimize", "bulk_optimize", _side)
 
                     try:
                         generate_and_push_product_schema(product_id, client)
@@ -946,21 +937,15 @@ def _execute_bulk_title_task(bulk_task_id):
                             decrypt_value(item["access_token_enc"]),
                             item["api_version"],
                         )
-                        client.update_product(item["shopify_id"], {"title": new_title})
-
+                        apply_item_changes(
+                            item["store_id"], "product", product_id, {"title": new_title},
+                            source="bulk_title", change_type="bulk_title", client=client,
+                        )
                         with db.get_cursor() as cur:
-                            cur.execute(
-                                "UPDATE synced_products SET title = %s, last_optimized_at = NOW() WHERE id = %s",
-                                (new_title, product_id),
-                            )
                             cur.execute(
                                 "UPDATE bulk_task_items SET apply_result = %s WHERE id = %s",
                                 (json.dumps({"applied": True}), item_id),
                             )
-                        _record_bulk_change_event(item["store_id"], "product", product_id,
-                                                  "bulk_title", {"title": new_title})
-                        from app.services.analysis_refresh import refresh_item_analysis
-                        refresh_item_analysis(item["store_id"], "product", product_id)
                     except Exception as apply_err:
                         item_error = f"Apply to Shopify failed: {apply_err}"
                         with db.get_cursor() as cur:
@@ -1097,21 +1082,15 @@ def _execute_bulk_collection_title_task(bulk_task_id):
                             decrypt_value(item["access_token_enc"]),
                             item["api_version"],
                         )
-                        client.update_collection(item["shopify_id"], {"title": new_title})
-
+                        apply_item_changes(
+                            item["store_id"], "collection", collection_id, {"title": new_title},
+                            source="bulk_title", change_type="bulk_title", client=client,
+                        )
                         with db.get_cursor() as cur:
-                            cur.execute(
-                                "UPDATE synced_collections SET title = %s, last_optimized_at = NOW() WHERE id = %s",
-                                (new_title, collection_id),
-                            )
                             cur.execute(
                                 "UPDATE bulk_task_items SET apply_result = %s WHERE id = %s",
                                 (json.dumps({"applied": True}), item_id),
                             )
-                        _record_bulk_change_event(item["store_id"], "collection", collection_id,
-                                                  "bulk_title", {"title": new_title})
-                        from app.services.analysis_refresh import refresh_item_analysis
-                        refresh_item_analysis(item["store_id"], "collection", collection_id)
                     except Exception as apply_err:
                         item_error = f"Apply to Shopify failed: {apply_err}"
                         with db.get_cursor() as cur:

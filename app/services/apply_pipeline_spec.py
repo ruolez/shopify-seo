@@ -61,6 +61,11 @@ class TestPlanApply:
         new_body = BODY.replace(IMG, "") + "<p>More.</p>"
         assert plan_apply(LIVE, LIVE, {"body": new_body})["pushed"]["body"] == IMG + new_body
 
+    def test_manual_edits_may_remove_an_image(self):
+        new_body = BODY.replace(IMG, "") + "<p>More.</p>"
+        plan = plan_apply(LIVE, LIVE, {"body": new_body}, restore_media=False)
+        assert plan["pushed"]["body"] == new_body
+
     def test_body_is_sanitized_and_metas_clamped(self):
         plan = plan_apply(LIVE, LIVE, {"body": BODY + "<p>More.</p><script>x()</script>", "meta_title": "word " * 30})
         assert "<script" not in plan["pushed"]["body"]

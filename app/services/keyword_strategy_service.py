@@ -2020,25 +2020,7 @@ def apply_single_step(store_id, assignment_id, step_index):
         assignment["domain"], access_token, assignment["api_version"] or DEFAULT_API_VERSION
     )
 
-    if s_item_type == "product":
-        client.update_product(shopify_id, update_fields)
-    elif s_item_type == "collection":
-        client.update_collection(shopify_id, update_fields)
-    elif s_item_type == "article":
-        if field in ("meta_title", "meta_description"):
-            client.set_article_seo(
-                shopify_id,
-                update_fields.get("meta_title"),
-                update_fields.get("meta_description"),
-            )
-        else:
-            client.update_article(shopify_id, update_fields)
-    elif s_item_type == "page":
-        if field == "meta_title":
-            update_fields = {"seo_title": new_value}
-        elif field == "meta_description":
-            update_fields = {"seo_description": new_value}
-        client.update_page(shopify_id, update_fields)
+    _apply_strategy_fields(store_id, s_item_type, s_item_id, update_fields, client)
 
     # Record in audit trail
     with db.get_cursor() as cur:
@@ -2221,19 +2203,7 @@ def apply_fix(store_id, assignment_id):
         proposed["description"] = update_fields["description_html"]
 
     if update_fields:
-        if item_type == "product":
-            client.update_product(shopify_id, update_fields)
-        elif item_type == "collection":
-            client.update_collection(shopify_id, update_fields)
-        elif item_type == "article":
-            client.update_article(shopify_id, update_fields)
-        elif item_type == "page":
-            page_fields = dict(update_fields)
-            if "meta_title" in page_fields:
-                page_fields["seo_title"] = page_fields.pop("meta_title")
-            if "meta_description" in page_fields:
-                page_fields["seo_description"] = page_fields.pop("meta_description")
-            client.update_page(shopify_id, page_fields)
+        _apply_strategy_fields(store_id, item_type, item_id, update_fields, client)
 
     # Record the audit trail only now that the Shopify push succeeded — rows
     # for changes that never happened would make revert overwrite live values.
@@ -2339,6 +2309,23 @@ def bulk_apply_fixes(store_id, assignment_ids):
     return {"run_id": run_id}
 
 
+def _apply_strategy_fields(store_id, item_type, item_id, update_fields, client, is_revert=False):
+    """Push a strategy change through the shared apply pipeline. Tags ride
+    along for products and articles; everything else is pipeline content."""
+    from app.services.apply_pipeline import apply_item_changes
+
+    names = {"title": "title", "description_html": "body", "meta_title": "meta_title",
+                     "meta_description": "meta_description"}
+    content = {names[k]: v for k, v in update_fields.items() if k in names}
+    tags = update_fields.get("tags") if item_type in ("product", "article") else None
+    return apply_item_changes(
+        store_id, item_type, item_id, content,
+        source="keyword_strategy", change_type="revert" if is_revert else "keyword_fix",
+        client=client, extra_fields={"tags": tags} if tags is not None else None,
+        allow_dropped_blocks=is_revert, allow_dropped_primary=is_revert, stamp=not is_revert,
+    )
+
+
 def revert_fix(store_id, change_id):
     """Revert a previously applied change."""
     from app.shopify_client import DEFAULT_API_VERSION, ShopifyClient
@@ -2381,19 +2368,18 @@ def revert_fix(store_id, change_id):
         update_fields["description_html"] = old_value
 
     if update_fields:
-        if change["item_type"] == "product":
-            client.update_product(shopify_id, update_fields)
-        elif change["item_type"] == "collection":
-            client.update_collection(shopify_id, update_fields)
-        elif change["item_type"] == "article":
-            client.update_article(shopify_id, update_fields)
-        elif change["item_type"] == "page":
-            page_fields = dict(update_fields)
-            if "meta_title" in page_fields:
-                page_fields["seo_title"] = page_fields.pop("meta_title")
-            if "meta_description" in page_fields:
-                page_fields["seo_description"] = page_fields.pop("meta_description")
-            client.update_page(shopify_id, page_fields)
+        from app.services.apply_pipeline import can_revert
+
+        live = client.get_item_content(change["item_type"], shopify_id)
+        if live is None:
+            raise ValueError("This item no longer exists in Shopify")
+        canonical = "body" if field == "description" else field
+        if can_revert({canonical: change["new_value"]}, live):
+            raise ValueError(
+                f"Cannot revert — the {field.replace('_', ' ')} changed again after this edit."
+            )
+        _apply_strategy_fields(
+            store_id, change["item_type"], change["item_id"], update_fields, client, is_revert=True)
 
         table_map = {
             "product": "synced_products",

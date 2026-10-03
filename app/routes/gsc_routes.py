@@ -6,6 +6,7 @@ from urllib.parse import quote
 
 from flask import Blueprint, jsonify, redirect, render_template, request, session, url_for
 
+from app.services.apply_pipeline import ApplyRefused, apply_item_changes, refusal_response
 from app.services import gsc_service
 from app.services.keyword_resolver import keyword_ownership_guard
 from app.services.task_runner import is_failed_result
@@ -652,10 +653,15 @@ def apply_cannibalization_fix():
         new_meta_description = fields.get("meta_description", new_meta_description)
 
         if fields:
-            if item_type == "product":
-                client.update_product(item["shopify_id"], fields)
-            else:
-                client.update_collection(item["shopify_id"], fields)
+            try:
+                applied = apply_item_changes(
+                    item.get("store_id"), item_type, item_id, fields,
+                    source="cannibalization", change_type="cannibalization_fix", client=client,
+                    allow_dropped_primary=bool(data.get("force")),
+                )
+            except ApplyRefused as refused:
+                return refusal_response(refused)
+            updated_fields = [f for f in updated_fields if f in applied["pushed"]]
 
         if image_alts and item_type == "product":
             valid_alts = [a for a in image_alts if a.get("media_id") and a.get("alt")]
@@ -935,10 +941,14 @@ def _run_bulk_cannibalization_fix(task_id, items):
                 continue
 
             if fields:
-                if item_type == "product":
-                    shopify_client.update_product(item["shopify_id"], fields)
-                else:
-                    shopify_client.update_collection(item["shopify_id"], fields)
+                # Raises when the live page changed since sync or the change
+                # drops the page's own primary keyword — the item is reported
+                # as failed instead of being overwritten.
+                applied = apply_item_changes(
+                    item.get("store_id"), item_type, item_id, fields,
+                    source="cannibalization", change_type="cannibalization_fix", client=shopify_client,
+                )
+                updated = [f for f in updated if f in applied["pushed"]]
 
             image_alts_changed = 0
             alt_by_media = {}

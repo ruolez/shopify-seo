@@ -6,6 +6,7 @@ import time
 
 from flask import Blueprint, jsonify, render_template, request
 
+from app.services.apply_pipeline import ApplyRefused, apply_item_changes, refusal_response
 from app.auth import decrypt_value
 from app.database import db
 from app.services.ai_output_guard import guard_shopify_fields
@@ -1268,23 +1269,20 @@ def apply_brand_seo(gc_id):
 
         guard_shopify_fields(fields)
 
-        if fields:
-            client.update_collection(row["shopify_id"], fields)
-
         collection_id = row["collection_id"]
-        with db.get_cursor() as cur:
-            if fields.get("description_html"):
-                cur.execute("UPDATE synced_collections SET description = %s WHERE id = %s", (fields["description_html"], collection_id))
-            if fields.get("meta_title"):
-                cur.execute("UPDATE synced_collections SET meta_title = %s WHERE id = %s", (fields["meta_title"], collection_id))
-            if fields.get("meta_description"):
-                cur.execute("UPDATE synced_collections SET meta_description = %s WHERE id = %s", (fields["meta_description"], collection_id))
-            cur.execute("UPDATE synced_collections SET last_optimized_at = NOW() WHERE id = %s", (collection_id,))
+        try:
+            applied = apply_item_changes(
+                row["store_id"], "collection", collection_id,
+                {"body": fields.get("description_html"), "meta_title": fields.get("meta_title"),
+             "meta_description": fields.get("meta_description")},
+                source="brands", change_type="brand_optimize", client=client,
+                allow_dropped_blocks=bool(data.get("force")), allow_dropped_primary=bool(data.get("force")),
+            )
+        except ApplyRefused as refused:
+            return refusal_response(refused)
 
-        from app.services.analysis_refresh import refresh_item_analysis
-        refresh_item_analysis(row["store_id"], "collection", collection_id)
-
-        return jsonify({"ok": True, "updated_fields": updated_fields})
+        names = {"body": "description_html"}
+        return jsonify({"ok": True, "updated_fields": [names.get(k, k) for k in applied["pushed"]]})
 
     except Exception as e:
         logger.exception("Failed to apply brand SEO changes")
@@ -1394,17 +1392,12 @@ def _execute_bulk_brand_optimize(bulk_task_id, store_id, gc_ids, auto_apply):
 
                 if fields:
                     try:
-                        client.update_collection(row["shopify_id"], fields)
-                        with db.get_cursor() as cur:
-                            if fields.get("description_html"):
-                                cur.execute("UPDATE synced_collections SET description = %s WHERE id = %s", (fields["description_html"], collection_id))
-                            if fields.get("meta_title"):
-                                cur.execute("UPDATE synced_collections SET meta_title = %s WHERE id = %s", (fields["meta_title"], collection_id))
-                            if fields.get("meta_description"):
-                                cur.execute("UPDATE synced_collections SET meta_description = %s WHERE id = %s", (fields["meta_description"], collection_id))
-                            cur.execute("UPDATE synced_collections SET last_optimized_at = NOW() WHERE id = %s", (collection_id,))
-                        from app.services.analysis_refresh import refresh_item_analysis
-                        refresh_item_analysis(store_id, "collection", collection_id)
+                        apply_item_changes(
+                            store_id, "collection", collection_id,
+                            {"body": fields.get("description_html"), "meta_title": fields.get("meta_title"),
+                             "meta_description": fields.get("meta_description")},
+                            source="brands", change_type="brand_optimize", client=client,
+                        )
                     except Exception as apply_err:
                         item_error = f"Apply to Shopify failed: {apply_err}"
                         logger.exception("Failed to auto-apply brand SEO for '%s'", vendor_name)

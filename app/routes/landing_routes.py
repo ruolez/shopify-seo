@@ -280,7 +280,19 @@ def ai_apply_synced(page_id):
             update_id = page.get("shopify_page_id") or page["shopify_id"]
             if not update_id.startswith("gid://shopify/Page/"):
                 return jsonify({"error": "Cannot update this page type on Shopify (homepage content is theme-controlled)"}), 400
-            client.update_page(update_id, fields)
+            from app.services.apply_pipeline import ApplyRefused, apply_item_changes, refusal_response
+
+            try:
+                apply_item_changes(
+                    page["store_id"], "page", page_id,
+                    {"title": data.get("title") or None, "body": data.get("body_html") or None,
+                     "meta_title": data.get("meta_title") or None,
+                     "meta_description": data.get("meta_description") or None},
+                    source="landing_pages", change_type=data.get("change_type") or "page_optimize",
+                    client=client, allow_dropped_blocks=bool(data.get("force")),
+                )
+            except ApplyRefused as refused:
+                return refusal_response(refused)
 
         with db.get_cursor() as cur:
             if data.get("meta_title"):

@@ -326,12 +326,18 @@ def apply_item(shopify_client, article, item, hosts):
     # back untouched (sanitizing it would strip embeds some posts carry).
     new_intro = sanitize_html(item["after_intro"])
     new_body, unwrapped = splice_intro(live_body, span, new_intro, item["target"]["handle"], hosts)
-    shopify_client.update_article(article["shopify_id"], {"body": new_body})
+    # The intro check above is this flow's stale guard, and the splice unwraps
+    # later copies of the link on purpose — so sync the mirror to the live body
+    # and let the pipeline handle the write, mirror and history.
+    from app.services.apply_pipeline import apply_item_changes
+
     with db.get_cursor() as cur:
-        cur.execute(
-            "UPDATE synced_articles SET body = %s, last_optimized_at = NOW() WHERE id = %s",
-            (new_body, article["id"]),
-        )
+        cur.execute("UPDATE synced_articles SET body = %s WHERE id = %s", (live_body, article["id"]))
+    apply_item_changes(
+        article["store_id"], "article", article["id"], {"body": new_body},
+        source="intro_links", change_type="intro_link", client=shopify_client,
+        allow_dropped_blocks=True, restore_media=False,
+    )
     _patch_interlinking(article, item)
     return {"status": "applied", "unwrapped": unwrapped}
 

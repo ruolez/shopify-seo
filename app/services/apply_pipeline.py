@@ -88,7 +88,8 @@ def _visible_text(content):
     ])
 
 
-def plan_apply(mirror, live, fields, *, allow_dropped_blocks=False, primary_keyword=None):
+def plan_apply(mirror, live, fields, *, allow_dropped_blocks=False, primary_keyword=None,
+               restore_media=True):
     """Decide what, if anything, may be pushed. Pure.
 
     mirror: what the app last saw; live: what Shopify holds now; fields: the
@@ -102,9 +103,13 @@ def plan_apply(mirror, live, fields, *, allow_dropped_blocks=False, primary_keyw
 
     guard_shopify_fields(requested)
     if "body" in requested:
-        body = restore_missing_images(live.get("body"), requested["body"])
-        body = restore_missing_figures(live.get("body"), body)
-        requested["body"] = body
+        body = requested["body"]
+        # A person editing by hand may remove an image on purpose; only AI
+        # rewrites get their dropped media put back.
+        if restore_media:
+            body = restore_missing_images(live.get("body"), body)
+            body = restore_missing_figures(live.get("body"), body)
+            requested["body"] = body
         if not allow_dropped_blocks:
             missing = missing_preserved(live.get("body"), body)
             if missing:
@@ -138,13 +143,14 @@ def blocked_message(plan):
 
 
 STALE_MESSAGE = (
-    "This page changed in Shopify after the suggestion was made. "
-    "The app has picked up the current version — generate a fresh suggestion."
+    "This page changed in Shopify since the app last saw it. The app has now picked up "
+    "the current version — reload it and redo the change (regenerate any AI suggestion)."
 )
 
 
-class ApplyRefused(Exception):
-    """A plan that must not be pushed. status/code/payload mirror plan_apply."""
+class ApplyRefused(ValueError):
+    """A plan that must not be pushed. status/code/payload mirror plan_apply.
+    A ValueError so callers that only report bad input surface the reason."""
 
     def __init__(self, plan, message):
         super().__init__(message)
@@ -256,7 +262,8 @@ def record_side_change(store_id, item_type, item_id, source, change_type, change
 
 def apply_item_changes(store_id, item_type, item_id, fields, *, source, change_type,
                        client=None, extra_fields=None, allow_dropped_blocks=False,
-                       allow_dropped_primary=False, scores_before=None, stamp=True):
+                       allow_dropped_primary=False, scores_before=None, stamp=True,
+                       restore_media=True):
     """Push content changes for one item. Returns
     {status: "ok"|"noop", pushed, old, event_id}; raises ApplyRefused for a
     stale or blocked plan and ValueError when the item no longer exists.
@@ -273,7 +280,8 @@ def apply_item_changes(store_id, item_type, item_id, fields, *, source, change_t
         raise ValueError(f"This {item_type} no longer exists in Shopify — sync the store")
 
     primary = None if allow_dropped_primary else _resolved_primary(store_id, item_type, item_id)
-    plan = plan_apply(mirror, live, fields, allow_dropped_blocks=allow_dropped_blocks, primary_keyword=primary)
+    plan = plan_apply(mirror, live, fields, allow_dropped_blocks=allow_dropped_blocks,
+                      primary_keyword=primary, restore_media=restore_media)
 
     if plan["status"] == "stale":
         _write_mirror(item_type, item_id, {k: live.get(k) or "" for k in plan["fields"]}, stamp=False)

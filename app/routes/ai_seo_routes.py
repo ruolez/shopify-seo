@@ -20,6 +20,7 @@ from flask import Blueprint, jsonify, render_template, request
 
 from app.auth import decrypt_value
 from app.database import db
+from app.services.apply_pipeline import ApplyRefused, refusal_response
 from app.services.task_runner import spawn as spawn_task, sweep_stale_jobs
 from app.services import ai_seo_analyzer
 from app.services import indexnow_service
@@ -1050,73 +1051,28 @@ def _push_and_rescore(store, resource_type, item, description_html, meta_title, 
     """Push GEO content to Shopify, persist locally, and rescore the item.
 
     Shared by single-item apply and batch optimize. Raises on Shopify errors,
-    and refuses (ValueError) a rewrite that drops the item's resolved primary
-    keyword — the preview's dropped_keywords list is informational, this is
-    the enforcement. `allow_dropped_primary=True` is the deliberate override.
+    and ApplyRefused when the rewrite drops the item's resolved primary
+    keyword or protected content — the preview's dropped_keywords list is
+    informational, this is the enforcement. `allow_dropped_primary=True` is
+    the deliberate override.
     """
-    from app.services.ai_output_guard import (
-        clamp_meta_description,
-        clamp_meta_title,
-        sanitize_html,
-    )
+    from app.services.apply_pipeline import apply_item_changes
 
     store_id = store["id"]
     resource_id = item["id"]
     shopify_id = item["shopify_id"]
 
-    if description_html:
-        from app.services.ai_output_guard import restore_missing_images
-        description_html = sanitize_html(
-            restore_missing_images(item.get("description"), description_html))
-    meta_title = clamp_meta_title(meta_title) if meta_title else meta_title
-    meta_description = clamp_meta_description(meta_description) if meta_description else meta_description
+    # Raises ApplyRefused when the live page changed since sync, or when the
+    # rewrite drops protected content or the resolved primary keyword.
+    applied = apply_item_changes(
+        store_id, resource_type, resource_id,
+        {"body": description_html or None, "meta_title": meta_title or None,
+         "meta_description": meta_description or None},
+        source="ai_search", change_type="geo_optimize", client=client,
+        allow_dropped_blocks=allow_dropped_primary, allow_dropped_primary=allow_dropped_primary,
+    )
+    pushed = applied["pushed"]
 
-    if not allow_dropped_primary and (description_html or meta_title or meta_description):
-        primary = None
-        try:
-            with db.get_cursor() as cur:
-                cur.execute(
-                    """SELECT keyword_resolution->'primary'->>'keyword' AS kw
-                       FROM technical_seo_analyses
-                       WHERE store_id = %s AND item_type = %s AND item_id = %s""",
-                    (store_id, resource_type, resource_id),
-                )
-                row = cur.fetchone()
-            primary = (row or {}).get("kw")
-        except Exception:
-            logger.warning("Primary lookup failed for %s %s", resource_type, resource_id)
-        if primary:
-            from app.services.technical_seo_analyzer import _keyword_in_text
-            old_text = " ".join([
-                re.sub(r"<[^>]+>", " ", item.get("description") or ""),
-                item.get("meta_title") or "", item.get("meta_description") or "",
-            ])
-            # Fields not being pushed keep their current value (mirrors the
-            # UPDATE below), so judge the post-apply effective content.
-            new_text = " ".join([
-                re.sub(r"<[^>]+>", " ", description_html or (item.get("description") or "")),
-                meta_title or (item.get("meta_title") or ""),
-                meta_description or (item.get("meta_description") or ""),
-            ])
-            if _keyword_in_text(primary, old_text) and not _keyword_in_text(primary, new_text):
-                raise ValueError(
-                    f'Rewrite drops the resolved primary keyword "{primary}" from the page — '
-                    "regenerate the content, or apply with allow_dropped_primary to override."
-                )
-
-    fields = {}
-    if description_html:
-        fields["description_html"] = description_html
-    if meta_title:
-        fields["meta_title"] = meta_title
-    if meta_description:
-        fields["meta_description"] = meta_description
-
-    if fields:
-        if resource_type == "collection":
-            client.update_collection(shopify_id, fields)
-        else:
-            client.update_product(shopify_id, fields)
     if faqpage:
         # Anchor the FAQPage into the page's entity graph — the metafield is
         # replayed verbatim by the theme snippet, so @id must be set here.
@@ -1136,27 +1092,16 @@ def _push_and_rescore(store, resource_type, item, description_html, meta_title, 
                 (store_id, str(shopify_id), resource_type, json.dumps(faqpage)),
             )
 
-    with db.get_cursor() as cur:
-        if resource_type == "collection":
-            cur.execute(
-                "UPDATE synced_collections SET description = %s, meta_title = %s, meta_description = %s, last_optimized_at = NOW() WHERE id = %s",
-                (description_html or item.get("description"), meta_title or item.get("meta_title"), meta_description or item.get("meta_description"), resource_id),
-            )
-        else:
-            cur.execute(
-                "UPDATE synced_products SET description = %s, meta_title = %s, meta_description = %s, last_optimized_at = NOW() WHERE id = %s",
-                (description_html or item.get("description"), meta_title or item.get("meta_title"), meta_description or item.get("meta_description"), resource_id),
-            )
-
-    from app.services.analysis_refresh import refresh_item_analysis
-    refresh_item_analysis(store_id, resource_type, resource_id)
+    if faqpage and not pushed:
+        from app.services.analysis_refresh import refresh_item_analysis
+        refresh_item_analysis(store_id, resource_type, resource_id)
 
     stored = _stored_score(store_id, resource_type, resource_id)
     updated_item = {
         **item,
-        "description": description_html or item.get("description"),
-        "meta_title": meta_title,
-        "meta_description": meta_description,
+        "description": pushed.get("body", item.get("description")),
+        "meta_title": pushed.get("meta_title", item.get("meta_title")),
+        "meta_description": pushed.get("meta_description", item.get("meta_description")),
         "last_optimized_at": datetime.now(timezone.utc),
     }
 
@@ -1220,8 +1165,10 @@ def optimize_apply():
             store, resource_type, item,
             data.get("description_html", ""), data.get("meta_title", ""),
             data.get("meta_description", ""), data.get("faqpage_jsonld"), client,
-            allow_dropped_primary=bool(data.get("allow_dropped_primary")),
+            allow_dropped_primary=bool(data.get("allow_dropped_primary") or data.get("force")),
         )
+    except ApplyRefused as refused:
+        return refusal_response(refused)
     except Exception as e:
         logger.exception("GEO apply failed: %s", e)
         return jsonify({"error": str(e)}), 502

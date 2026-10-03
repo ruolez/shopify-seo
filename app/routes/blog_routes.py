@@ -10,6 +10,7 @@ from flask import Blueprint, jsonify, render_template, request
 from app.auth import decrypt_value
 from app.database import db
 from app.services import publish_gate
+from app.services.apply_pipeline import ApplyRefused, apply_item_changes, refusal_response
 from app.services.ai_output_guard import guard_shopify_fields
 from app.services.blog_seo_analyzer import analyze_article_seo
 from app.services.article_visuals import (
@@ -546,39 +547,23 @@ def apply_article(article_id):
     if not fields:
         return jsonify({"error": "No recognized fields to apply"}), 400
 
-    guard_shopify_fields(fields)
-    client.update_article(article["shopify_id"], fields)
+    tags = fields.pop("tags", None)
+    try:
+        applied = apply_item_changes(
+            article["store_id"], "article", article_id, fields,
+            source=data.get("source") or "blog", change_type=data.get("change_type") or "article_edit",
+            client=client, extra_fields={"tags": tags} if tags is not None else None,
+            allow_dropped_blocks=bool(data.get("force")), restore_media=False,
+        )
+    except ApplyRefused as refused:
+        return refusal_response(refused)
 
-    update_parts = []
-    update_params = []
-    if "title" in fields:
-        update_parts.append("title = %s")
-        update_params.append(fields["title"])
-    if "body" in fields:
-        update_parts.append("body = %s")
-        update_params.append(fields["body"])
-    if "meta_title" in fields:
-        update_parts.append("meta_title = %s")
-        update_params.append(fields["meta_title"])
-    if "meta_description" in fields:
-        update_parts.append("meta_description = %s")
-        update_params.append(fields["meta_description"])
-    if "summary" in fields:
-        update_parts.append("summary = %s")
-        update_params.append(fields["summary"])
-    if "tags" in fields:
-        update_parts.append("tags = %s")
-        update_params.append(fields["tags"])
-
-    update_parts.append("last_optimized_at = NOW()")
-    update_params.append(article_id)
-
-    if update_parts:
+    if tags is not None:
         with db.get_cursor() as cur:
-            cur.execute(
-                f"UPDATE synced_articles SET {', '.join(update_parts)} WHERE id = %s",
-                update_params,
-            )
+            cur.execute("UPDATE synced_articles SET tags = %s WHERE id = %s", (tags, article_id))
+
+    if applied["status"] == "noop" and tags is None:
+        return jsonify({"ok": True, "success": True, "message": "Already up to date — nothing changed"})
 
     return jsonify({"ok": True, "success": True})
 
@@ -906,42 +891,19 @@ def bulk_optimize_articles():
                                 if result.get("optimized_meta_description"):
                                     fields["meta_description"] = result["optimized_meta_description"]
                                 if result.get("optimized_body"):
-                                    from app.services.ai_output_guard import restore_missing_figures, restore_missing_images
-
-                                    with db.get_cursor() as cur:
-                                        cur.execute("SELECT body FROM synced_articles WHERE id = %s", (item["article_id"],))
-                                        current_row = cur.fetchone() or {}
-                                    current_body = current_row.get("body") or ""
-                                    new_body = restore_missing_figures(current_body, result["optimized_body"])
-                                    fields["body"] = restore_missing_images(current_body, new_body)
+                                    fields["body"] = result["optimized_body"]
                                 if result.get("optimized_summary"):
                                     fields["summary"] = result["optimized_summary"]
                                 if fields:
-                                    guard_shopify_fields(fields)
-                                    client.update_article(item["article_shopify_id"], fields)
-                                    apply_result = {"applied_fields": list(fields.keys())}
-
-                                    update_parts = []
-                                    update_params = []
-                                    if "meta_title" in fields:
-                                        update_parts.append("meta_title = %s")
-                                        update_params.append(fields["meta_title"])
-                                    if "meta_description" in fields:
-                                        update_parts.append("meta_description = %s")
-                                        update_params.append(fields["meta_description"])
-                                    if "body" in fields:
-                                        update_parts.append("body = %s")
-                                        update_params.append(fields["body"])
-                                    if "summary" in fields:
-                                        update_parts.append("summary = %s")
-                                        update_params.append(fields["summary"])
-                                    update_parts.append("last_optimized_at = NOW()")
-                                    update_params.append(item["article_id"])
-                                    with db.get_cursor() as cur:
-                                        cur.execute(
-                                            f"UPDATE synced_articles SET {', '.join(update_parts)} WHERE id = %s",
-                                            update_params,
-                                        )
+                                    # Reads the live article, restores dropped
+                                    # figures, and raises instead of writing when
+                                    # the post changed in Shopify or the rewrite
+                                    # drops protected content.
+                                    applied = apply_item_changes(
+                                        item["store_id"], "article", item["article_id"], fields,
+                                        source="blog", change_type="bulk_optimize", client=client,
+                                    )
+                                    apply_result = {"applied_fields": list(applied["pushed"].keys())}
                         except Exception as e:
                             logger.warning("Failed to apply article changes: %s", e)
                             apply_result = {"error": str(e)}
@@ -4042,15 +4004,24 @@ def apply_restyle(article_id):
     if hero.get("image_url") and not article.get("image_url"):
         fields["image_url"] = hero["image_url"]
         fields["image_alt"] = hero.get("image_alt") or article.get("title") or ""
-    guard_shopify_fields(fields)
+    extras = {k: v for k, v in fields.items() if k != "body"}
     try:
-        client.update_article(article["shopify_id"], fields)
+        # Media is settled when the restyle is generated; putting "missing"
+        # figures back here would undo deliberate layout changes.
+        applied = apply_item_changes(
+            article["store_id"], "article", article_id, {"body": body},
+            source="blog", change_type="restyle", client=client, extra_fields=extras,
+            allow_dropped_blocks=bool(data.get("force")), restore_media=False,
+        )
+        fields["body"] = applied["pushed"].get("body", article.get("body") or body)
         faq_json = payload.get("faq_jsonld")
         if faq_json:
             try:
                 client.set_article_metafields(article["shopify_id"], [("global", "faq_jsonld", faq_json, "json")])
             except Exception as e:
                 logger.warning("FAQ metafield write failed for article %s: %s", article_id, e)
+    except ApplyRefused as refused:
+        return refusal_response(refused)
     except Exception as e:
         logger.exception("Restyle apply failed for article %s: %s", article_id, e)
         return jsonify({"error": str(e)}), 502

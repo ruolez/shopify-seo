@@ -4,6 +4,7 @@ import threading
 
 from flask import Blueprint, jsonify, redirect, request
 
+from app.services.apply_pipeline import ApplyRefused, apply_item_changes, record_side_change, refusal_response
 from app.auth import decrypt_value
 from app.database import db
 from app.services.ai_output_guard import sanitize_html
@@ -695,6 +696,51 @@ def _execute_fix_task(task_id, analysis_id):
             )
 
 
+def _canonical_content(shopify_fields):
+    """Legacy apply field names → the pipeline's canonical ones. Presence, not
+    truthiness: an explicit "" clears the field."""
+    names = {"title": "title", "description_html": "body", "meta_title": "meta_title",
+             "meta_description": "meta_description"}
+    return {names[k]: v for k, v in shopify_fields.items() if k in names}
+
+
+def _scores_before(item_type, item):
+    """Unified score of an item as it stands, for the history row of a change
+    about to be applied. None when it cannot be computed — never blocks a fix."""
+    try:
+        from app.routes.seo_routes import (
+            _fetch_keyword_analysis,
+            _get_gsc_metrics_for_store,
+            _get_semrush_metrics_for_store,
+            _get_store_baselines,
+        )
+        from app.services.seo_analyzer import (
+            analyze_collection_seo,
+            analyze_product_seo,
+            analyze_search_performance,
+            compute_unified_score,
+        )
+
+        store_id = item["store_id"]
+        analyze_fn = analyze_product_seo if item_type == "product" else analyze_collection_seo
+        prefix = "products" if item_type == "product" else "collections"
+        path = f"{prefix}/{item.get('handle') or ''}"
+        gsc = _get_gsc_metrics_for_store(store_id).get(path, {})
+        sr = _get_semrush_metrics_for_store(store_id).get(path, {})
+        search_before = analyze_search_performance(
+            {k: gsc.get(k) for k in ("gsc_clicks", "gsc_impressions", "gsc_ctr", "gsc_position")},
+            {k: sr.get(k) for k in ("semrush_volume", "semrush_position", "semrush_keyword_count")},
+            _get_store_baselines(store_id),
+        )
+        kw = _fetch_keyword_analysis(store_id, item_type, item["id"])
+        unified = compute_unified_score(analyze_fn(dict(item)), kw["score"] if kw else None, search_before)
+        return {"seo": unified["content_score"], "search": unified.get("search_score"),
+                "composite": unified["seo_score"]}
+    except Exception:
+        logger.exception("Before-score computation failed for %s %s", item_type, item.get("id"))
+        return None
+
+
 def _record_change_event(item_type, item, fixes, change_type):
     """Best-effort optimization-history event so View Impact has data for
     fixes applied outside the main SEO apply endpoints. Never blocks the fix."""
@@ -844,20 +890,18 @@ def apply_fixes():
         if not shopify_fields and not media_updates:
             return jsonify({"error": "No applicable fixes — nothing was resolvable to a Shopify update"}), 400
 
-        _enforce_meta_limits(shopify_fields)
-        if shopify_fields.get("description_html"):
-            from app.services.ai_output_guard import restore_missing_images
-            shopify_fields["description_html"] = sanitize_html(restore_missing_images(
-                item.get("description"), shopify_fields["description_html"]))
-
-        # Snapshot before-state so View Impact has history for targeted fixes
-        _record_change_event(item_type, item, fixes, "technical_fix")
-
-        if shopify_fields:
-            if item_type == "product":
-                client.update_product(item["shopify_id"], shopify_fields)
-            else:
-                client.update_collection(item["shopify_id"], shopify_fields)
+        tags = shopify_fields.pop("tags", None) if item_type == "product" else None
+        shopify_fields.pop("tags", None)
+        try:
+            applied = apply_item_changes(
+                item["store_id"], item_type, item_id, _canonical_content(shopify_fields),
+                source="issue_fix", change_type="technical_fix", client=client,
+                extra_fields={"tags": tags} if tags is not None else None,
+                allow_dropped_blocks=bool(data.get("force")), allow_dropped_primary=bool(data.get("force")),
+                scores_before=_scores_before(item_type, item),
+            )
+        except ApplyRefused as refused:
+            return refusal_response(refused)
 
         if media_updates and item_type == "product":
             # Write-time balance guard. The generation gate already ran, but
@@ -866,20 +910,10 @@ def apply_fixes():
             media_updates = _balanced_media_updates(item, media_updates)
             client.update_product_media(item["shopify_id"], media_updates)
 
-        with db.get_cursor() as cur:
-            if item_type == "product":
-                # Presence checks, not truthiness — a blanked field pushed to
-                # Shopify must also blank the local mirror.
-                if "title" in shopify_fields:
-                    cur.execute("UPDATE synced_products SET title = %s WHERE id = %s", (shopify_fields["title"], item_id))
-                if "meta_title" in shopify_fields:
-                    cur.execute("UPDATE synced_products SET meta_title = %s WHERE id = %s", (shopify_fields["meta_title"], item_id))
-                if "meta_description" in shopify_fields:
-                    cur.execute("UPDATE synced_products SET meta_description = %s WHERE id = %s", (shopify_fields["meta_description"], item_id))
-                if "description_html" in shopify_fields:
-                    cur.execute("UPDATE synced_products SET description = %s WHERE id = %s", (shopify_fields["description_html"], item_id))
-                if "tags" in shopify_fields:
-                    cur.execute("UPDATE synced_products SET tags = %s WHERE id = %s", (", ".join(shopify_fields["tags"]), item_id))
+        if item_type == "product":
+            with db.get_cursor() as cur:
+                if tags is not None:
+                    cur.execute("UPDATE synced_products SET tags = %s WHERE id = %s", (", ".join(tags), item_id))
                 if media_updates:
                     images = item.get("images") or []
                     if isinstance(images, str):
@@ -889,17 +923,11 @@ def apply_fixes():
                         if img.get("media_id") in alt_map:
                             img["alt"] = alt_map[img["media_id"]]
                     cur.execute("UPDATE synced_products SET images = %s WHERE id = %s", (json.dumps(images), item_id))
-                cur.execute("UPDATE synced_products SET last_optimized_at = NOW() WHERE id = %s", (item_id,))
-            else:
-                if "title" in shopify_fields:
-                    cur.execute("UPDATE synced_collections SET title = %s WHERE id = %s", (shopify_fields["title"], item_id))
-                if "meta_title" in shopify_fields:
-                    cur.execute("UPDATE synced_collections SET meta_title = %s WHERE id = %s", (shopify_fields["meta_title"], item_id))
-                if "meta_description" in shopify_fields:
-                    cur.execute("UPDATE synced_collections SET meta_description = %s WHERE id = %s", (shopify_fields["meta_description"], item_id))
-                if "description_html" in shopify_fields:
-                    cur.execute("UPDATE synced_collections SET description = %s WHERE id = %s", (shopify_fields["description_html"], item_id))
-                cur.execute("UPDATE synced_collections SET last_optimized_at = NOW() WHERE id = %s", (item_id,))
+                if tags is not None or media_updates:
+                    cur.execute("UPDATE synced_products SET last_optimized_at = NOW() WHERE id = %s", (item_id,))
+            side = [n for n, changed in (("tags", tags is not None), ("image_alts", media_updates)) if changed]
+            if side and not applied["event_id"]:
+                record_side_change(item["store_id"], "product", item_id, "issue_fix", "technical_fix", side)
 
         # Re-analyze after applying
         with db.get_cursor() as cur:
@@ -1198,41 +1226,28 @@ def _execute_bulk_fix_apply(bulk_task_id, item_type, only_fields=None, only_chec
                                 (json.dumps({"applied": False, "error": item_error}), bti_id),
                             )
                     else:
-                        _enforce_meta_limits(shopify_fields)
-                        if shopify_fields.get("description_html"):
-                            from app.services.ai_output_guard import restore_missing_images
-                            shopify_fields["description_html"] = sanitize_html(restore_missing_images(
-                                full_item.get("description"), shopify_fields["description_html"]))
-
-                        # Snapshot before-state so View Impact has history
-                        _record_change_event(
-                            item_type, full_item, ai_fixes,
-                            "issue_fix" if only_fields else "technical_fix",
+                        change_type = "issue_fix" if only_fields else "technical_fix"
+                        tags = shopify_fields.pop("tags", None)
+                        if item_type != "product" or not isinstance(tags, list):
+                            tags = None
+                        # Raises when the live page changed since sync or the
+                        # rewrite drops protected content — the item fails with
+                        # that reason instead of overwriting.
+                        applied = apply_item_changes(
+                            store_id, item_type, ref_id, _canonical_content(shopify_fields),
+                            source="issue_fix", change_type=change_type, client=client,
+                            extra_fields={"tags": tags} if tags is not None else None,
+                            scores_before=_scores_before(item_type, full_item),
                         )
-
-                        if shopify_fields:
-                            if item_type == "product":
-                                client.update_product(item["shopify_id"], shopify_fields)
-                            else:
-                                client.update_collection(item["shopify_id"], shopify_fields)
 
                         if media_updates and item_type == "product":
                             media_updates = _balanced_media_updates(full_item, media_updates)
                             client.update_product_media(item["shopify_id"], media_updates)
 
-                        with db.get_cursor() as cur:
-                            if item_type == "product":
-                                for f, v in shopify_fields.items():
-                                    if f == "tags" and isinstance(v, list):
-                                        cur.execute("UPDATE synced_products SET tags = %s WHERE id = %s", (", ".join(v), ref_id))
-                                    elif f == "title":
-                                        cur.execute("UPDATE synced_products SET title = %s WHERE id = %s", (v, ref_id))
-                                    elif f == "meta_title":
-                                        cur.execute("UPDATE synced_products SET meta_title = %s WHERE id = %s", (v, ref_id))
-                                    elif f == "meta_description":
-                                        cur.execute("UPDATE synced_products SET meta_description = %s WHERE id = %s", (v, ref_id))
-                                    elif f == "description_html":
-                                        cur.execute("UPDATE synced_products SET description = %s WHERE id = %s", (v, ref_id))
+                        if item_type == "product":
+                            with db.get_cursor() as cur:
+                                if tags is not None:
+                                    cur.execute("UPDATE synced_products SET tags = %s WHERE id = %s", (", ".join(tags), ref_id))
                                 if media_updates:
                                     images = full_item.get("images") or []
                                     if isinstance(images, str):
@@ -1242,18 +1257,11 @@ def _execute_bulk_fix_apply(bulk_task_id, item_type, only_fields=None, only_chec
                                         if img.get("media_id") in alt_map:
                                             img["alt"] = alt_map[img["media_id"]]
                                     cur.execute("UPDATE synced_products SET images = %s WHERE id = %s", (json.dumps(images), ref_id))
-                                cur.execute("UPDATE synced_products SET last_optimized_at = NOW() WHERE id = %s", (ref_id,))
-                            else:
-                                for f, v in shopify_fields.items():
-                                    if f == "title":
-                                        cur.execute("UPDATE synced_collections SET title = %s WHERE id = %s", (v, ref_id))
-                                    elif f == "meta_title":
-                                        cur.execute("UPDATE synced_collections SET meta_title = %s WHERE id = %s", (v, ref_id))
-                                    elif f == "meta_description":
-                                        cur.execute("UPDATE synced_collections SET meta_description = %s WHERE id = %s", (v, ref_id))
-                                    elif f == "description_html":
-                                        cur.execute("UPDATE synced_collections SET description = %s WHERE id = %s", (v, ref_id))
-                                cur.execute("UPDATE synced_collections SET last_optimized_at = NOW() WHERE id = %s", (ref_id,))
+                                if tags is not None or media_updates:
+                                    cur.execute("UPDATE synced_products SET last_optimized_at = NOW() WHERE id = %s", (ref_id,))
+                            side = [n for n, changed in (("tags", tags is not None), ("image_alts", media_updates)) if changed]
+                            if side and not applied["event_id"]:
+                                record_side_change(store_id, "product", ref_id, "issue_fix", change_type, side)
 
                         with db.get_cursor() as cur:
                             cur.execute(

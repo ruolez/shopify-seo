@@ -675,7 +675,7 @@ def _preview_internal_linking(data, store_id):
 def _apply_internal_linking(data, store_id, client):
     """Apply user-confirmed internal links."""
     from app.ai_agent import _get_ai_config
-    from app.routes.interlinking_routes import _inject_link_via_ai, _push_html_to_shopify, _update_local_db
+    from app.routes.interlinking_routes import _apply_body, _inject_link_via_ai
 
     items = data.get("items", [])
     if not items:
@@ -705,8 +705,7 @@ def _apply_internal_linking(data, store_id, client):
                 continue
             new_html = sanitize_html(new_html)
             if new_html != art["body"]:
-                _push_html_to_shopify(client, "article", article_shopify_id, new_html)
-                _update_local_db("article", art["id"], new_html)
+                _apply_body(client, "article", art["id"], new_html, "link_added")
                 results.append({"article_id": article_id, "status": "applied"})
             else:
                 results.append({"article_id": article_id, "status": "skipped", "reason": "No change"})

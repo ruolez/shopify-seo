@@ -814,24 +814,21 @@ def _inject_link_via_ai(current_html, links_to_add, config):
     return result.strip()
 
 
-def _push_html_to_shopify(client, item_type, shopify_id, new_html):
-    if item_type == "product":
-        client.update_product(shopify_id, {"description_html": new_html})
-    elif item_type == "collection":
-        client.update_collection(shopify_id, {"description_html": new_html})
-    elif item_type == "article":
-        client.update_article(shopify_id, {"body": new_html})
+def _apply_body(client, item_type, item_id, new_html, change_type, replaces_link=False):
+    """Write a link edit through the shared apply pipeline: live read, stale
+    refusal, mirror and history. A link *injection* must leave every existing
+    table, section and internal link in place (the model re-emits the whole
+    body); a broken-link *replacement* removes one link by design."""
+    from app.services.apply_pipeline import ITEM_CONFIG, apply_item_changes
 
-
-def _update_local_db(item_type, item_id, new_html):
-    table_map = {
-        "product": ("synced_products", "description"),
-        "collection": ("synced_collections", "description"),
-        "article": ("synced_articles", "body"),
-    }
-    table, col = table_map[item_type]
     with db.get_cursor() as cur:
-        cur.execute(f"UPDATE {table} SET {col} = %s WHERE id = %s", (new_html, item_id))
+        cur.execute(f"SELECT store_id FROM {ITEM_CONFIG[item_type]['table']} WHERE id = %s", (item_id,))
+        store_id = cur.fetchone()["store_id"]
+    return apply_item_changes(
+        store_id, item_type, item_id, {"body": new_html},
+        source="interlinking", change_type=change_type, client=client,
+        allow_dropped_blocks=replaces_link, allow_dropped_primary=True, stamp=False,
+    )
 
 
 def _current_summary(store_id):
@@ -932,14 +929,9 @@ def _apply_link_fixes_to_source(store_id, shopify_client, config, source_ref, fi
         if not ok:
             raise ValueError(f"AI output rejected: {reason}")
 
-        _push_html_to_shopify(shopify_client, source["item_type"], source["shopify_id"], new_html)
+        _apply_body(shopify_client, source["item_type"], source["id"], new_html, "link_added")
         pushed = True
         warning = None
-        try:
-            _update_local_db(source["item_type"], source["id"], new_html)
-        except Exception:
-            logger.exception("Local cache update failed for %s '%s'", from_type, from_handle)
-            warning = "Applied to Shopify, but the local cache update failed — re-sync recommended"
 
         for l in links_to_add:
             fix = l["_fix"]
@@ -1289,13 +1281,9 @@ def _apply_broken_fix(store_id, shopify_client, item, noncanonical=False):
         if new_html == source["html"]:
             return {"status": "skipped", "reason": "Link not found in the page content"}
 
-        _push_html_to_shopify(shopify_client, source["item_type"], source["shopify_id"], new_html)
+        _apply_body(shopify_client, source["item_type"], source["id"], new_html, "link_fixed",
+                    replaces_link=True)
         warning = None
-        try:
-            _update_local_db(source["item_type"], source["id"], new_html)
-        except Exception:
-            logger.exception("Local cache update failed for %s '%s'", from_type, from_handle)
-            warning = "Applied to Shopify, but the local cache update failed — re-sync recommended"
 
         recorder = record_noncanonical_fixed if noncanonical else record_broken_fixed
         recorder(store_id, broken_href, source["item_type"], from_handle, source.get("blog_handle") or from_blog)

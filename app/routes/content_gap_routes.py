@@ -3,6 +3,7 @@ import threading
 
 from flask import Blueprint, jsonify, render_template, request, session
 
+from app.services.apply_pipeline import ApplyRefused, refusal_response
 from app.services import content_gap_service
 
 logger = logging.getLogger(__name__)
@@ -221,6 +222,8 @@ def apply_optimization(gap_id):
     try:
         result = content_gap_service.apply_gap_optimization(store_id, gap_id, item_type, item_id, data)
         return jsonify(result)
+    except ApplyRefused as refused:
+        return refusal_response(refused)
     except Exception as e:
         logger.error("Apply optimization failed: %s", str(e))
         return jsonify({"error": str(e)}), 500
