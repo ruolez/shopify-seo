@@ -64,6 +64,14 @@ DEFAULTS = {
         "  * 'questions' (array of strings, only for faq_schema): FAQ questions to add as schema\n"
         "- summary (string): Brief summary of all changes made and why"
     ),
+    "prompts.preserve_existing": (
+        "- PRESERVE EXISTING CONTENT: The current description is the starting point, not a reference. "
+        "If it contains a Specifications/At-a-glance table, an 'Expert Verdict' section, question-style "
+        "H2 headings, an FAQ block, statistics, quotations or cited sources, you MUST keep them intact "
+        "(verbatim or minimally adjusted). Keep every existing internal link (<a href> to /collections/, "
+        "/products/, /blogs/ or /pages/) with its href unchanged, and keep every <img> and <figure>. "
+        "Enhance around these elements; never delete, flatten or merge them. Keep existing keywords."
+    ),
     "prompts.product_description": (
         "You are an expert e-commerce SEO copywriter. Your ONLY task is to write a "
         "comprehensive, SEO-optimized product description in valid HTML.\n\n"
@@ -72,6 +80,7 @@ DEFAULTS = {
         "- Output format: valid HTML using <p>, <h2>, <h3>, <ul>, <li>, <strong>, <em>, <a> tags\n"
         "- Do NOT include <h1> tags (Shopify uses the product title as H1)\n"
         "- Do NOT wrap output in ```html code fences or JSON — return raw HTML only\n"
+        "- If a CURRENT DESCRIPTION is provided, its preservation rule overrides the structure guidance below\n"
         "- Do NOT include word counts, notes, disclaimers, or any meta-commentary in the output\n"
         "- Naturally incorporate the provided keywords throughout the content\n"
         "- Structure: opening overview paragraph → features/benefits → specifications/details → closing paragraph\n"
@@ -139,6 +148,7 @@ DEFAULTS = {
         "- Output format: valid HTML using <p>, <h2>, <h3>, <ul>, <li>, <strong>, <em>, <a> tags\n"
         "- Do NOT include <h1> tags (Shopify uses the collection title as H1)\n"
         "- Do NOT wrap output in ```html code fences or JSON — return raw HTML only\n"
+        "- If a CURRENT DESCRIPTION is provided, its preservation rule overrides the structure guidance below\n"
         "- Do NOT include word counts, notes, disclaimers, or any meta-commentary in the output\n"
         "- Naturally incorporate the provided keywords throughout the content\n"
         "- Structure: category overview → product highlights (no product links — they're already on the page) → benefits → closing\n"
@@ -428,10 +438,7 @@ DEFAULTS = {
         "- Meta description: aim for about 150 chars, HARD LIMIT 160 — never exceed it; put the primary message and keyword in the first 120 characters (mobile truncation), be action-oriented\n"
         "{tags_rules}"
         "{description_rules}"
-        "- GEO PRESERVATION: If the existing description contains GEO elements — a Specifications/"
-        "At-a-glance table, an 'Expert Verdict' section, question-style H2 headings, statistics, "
-        "quotations or cited sources — you MUST keep them intact (verbatim or minimally adjusted). "
-        "Enhance around them; never delete or flatten them. Keep existing keywords.\n"
+        "{preserve_existing}\n"
         "- Do NOT use puffery words: premium, best, ultimate, top, finest, exclusive, luxury\n"
         "- Be specific and practical\n\n"
         "Return ONLY valid JSON with these keys:\n"
@@ -981,6 +988,7 @@ DEFAULTS = {
         "- Output format: valid HTML using <p>, <h2>, <h3>, <ul>, <li>, <strong>, <em>, <a> tags\n"
         "- Do NOT include <h1> tags (Shopify uses the collection title as H1)\n"
         "- Do NOT wrap output in ```html code fences or JSON — return raw HTML only\n"
+        "- If a CURRENT DESCRIPTION is provided, its preservation rule overrides the structure guidance below\n"
         "- Do NOT include word counts, notes, disclaimers, or any meta-commentary in the output\n"
         "- Naturally incorporate the provided keywords throughout the content\n"
         "- Mention the brand name naturally where it helps the reader — never force repetition to hit a count\n"
@@ -1411,6 +1419,10 @@ DEFAULTS = {
             },
         },
     },
+    # Shopping-feed audit. Off by default: Google Merchant Center and Shopify's
+    # AI shopping channels do not accept tobacco, so the score measures
+    # eligibility for a channel this catalogue cannot use.
+    "features.feed_readiness": False,
     "rules.feed_readiness": {
         "weights": {
             "gtin": 0.18,
@@ -1620,14 +1632,14 @@ DEFAULTS = {
         "- MUST include at least one cta_banner section (ideally one mid-page and one at the bottom)\n"
         "- Generate 5-8 sections for a comprehensive page\n"
         "- Recommended order: hero → features/trust_badges → rich_text (main content) → "
-        "product_showcase → testimonials → faq → cta_banner\n\n"
+        "product_showcase → faq → cta_banner\n\n"
         "CONTENT RULES:\n"
         "- Hero: headline should include the primary keyword, subheadline supports it with a benefit\n"
         "- Rich text sections: minimum 150 words each, use proper heading hierarchy\n"
         "- FAQ: include 4-6 questions that target long-tail keyword variations\n"
         "- Features/Trust badges: minimum 3 items each\n"
-        "- Testimonials: include 3 realistic, detailed testimonials with roles\n"
-        "- Statistics: use specific, credible numbers\n\n"
+        "- NEVER invent testimonials, customer quotes, reviews, ratings, statistics, counts or "
+        "any other number. Use only facts present in the product and store data you were given.\n\n"
         "SEO RULES:\n"
         "- meta_title: 50-60 characters, primary keyword front-loaded\n"
         "- meta_description: 140-160 characters, include CTA language\n"
@@ -1643,17 +1655,15 @@ DEFAULTS = {
         "- meta_title (string): SEO meta title, 50-60 chars\n"
         "- meta_description (string): SEO meta description, 140-160 chars\n"
         "- sections (array): Each section has {type, order, data}. Available types:\n"
-        "  hero, features, product_showcase, testimonials, faq, cta_banner, trust_badges, rich_text, image_gallery, statistics\n"
+        "  hero, features, product_showcase, faq, cta_banner, trust_badges, rich_text, image_gallery\n"
         "  Data shape per type:\n"
         "  - hero: {headline, subheadline, cta_text, cta_url, image_url, image_alt}\n"
         "  - features: {heading, items: [{icon, title, description}]}\n"
         "  - product_showcase: {heading, products: [{title, handle, image_url, price}]}\n"
-        "  - testimonials: {heading, items: [{quote, author, role}]}\n"
         "  - faq: {heading, items: [{question, answer}]}\n"
         "  - cta_banner: {heading, subtext, cta_text, cta_url}\n"
         "  - trust_badges: {heading, items: [{icon, text}]}\n"
-        "  - rich_text: {heading, content} — content is HTML with proper h2/h3/p tags\n"
-        "  - statistics: {heading, items: [{value, label}]}"
+        "  - rich_text: {heading, content} — content is HTML with proper h2/h3/p tags"
     ),
     "prompts.home_page_generate": (
         "You are an expert Shopify SEO strategist building the STORE HOME PAGE hero carousel. "

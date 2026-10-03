@@ -13,6 +13,7 @@ from app.database import db
 from app.prompt_defaults import DEFAULTS
 from app.services.seo_analyzer import analyze_collection_seo, analyze_product_seo, DEFAULT_CTR_BENCHMARKS, _expected_ctr
 from app.services.blog_seo_analyzer import analyze_article_seo
+from app.services.content_preservation import existing_description_block
 from app.services.landing_page_seo_analyzer import analyze_synced_page, analyze_landing_page
 from app.settings_manager import get_setting
 
@@ -1691,6 +1692,24 @@ def _get_ai_config():
 DEFAULT_TARGET_WORD_COUNT = 500
 
 
+def _existing_description_part(current_html):
+    return existing_description_block(
+        current_html, get_setting("prompts.preserve_existing", DEFAULTS["prompts.preserve_existing"]))
+
+
+def _description_instruction(kind, target_word_count, has_existing):
+    if has_existing:
+        return (
+            f"Revise the current {kind} description for SEO. Keep everything the preservation rule protects, "
+            f"and extend toward ~{target_word_count} words only where you add real information. "
+            "Return raw HTML only."
+        )
+    return (
+        f"Write an SEO-optimized {kind} description targeting ~{target_word_count} words. "
+        "Return raw HTML only."
+    )
+
+
 def _sanitize_description(html: str) -> str:
     """Strip AI meta-artifacts (word counts, notes, disclaimers) from generated HTML."""
     html = re.sub(
@@ -2490,6 +2509,9 @@ def _generate_description(client, config, main_result, serp_context, serp_benchm
                 f"- Current Tags: {product.get('tags', 'N/A')}\n"
                 f"- Current Description Word Count: {desc_word_count}\n"
             )
+            existing_part = _existing_description_part(current_desc)
+            if existing_part:
+                user_parts.append(existing_part)
 
         seo_parts = []
         if main_result.get("h1_tag"):
@@ -2545,10 +2567,8 @@ def _generate_description(client, config, main_result, serp_context, serp_benchm
                 "OTHER STORE COLLECTIONS (link to 2-4 related ones):\n" + other_text
             )
 
-        user_parts.append(
-            f"Write an SEO-optimized product description targeting ~{target_word_count} words (aim to be more comprehensive than competitors). "
-            "Return raw HTML only."
-        )
+        user_parts.append(_description_instruction(
+            "product", target_word_count, bool(product and _existing_description_part(product.get("description")))))
 
         desc_response = client.chat.completions.create(
             model=config["model"],
@@ -2670,6 +2690,9 @@ def _generate_collection_description(client, config, main_result, serp_context, 
                 f"- Products Count: {collection.get('products_count', 0)}\n"
                 f"- Current Description Word Count: {desc_word_count}\n"
             )
+            existing_part = _existing_description_part(current_desc)
+            if existing_part:
+                user_parts.append(existing_part)
 
         if related_collections:
             coll_links_text = "\n".join(f"- {c['title']}: /collections/{c['handle']}" for c in related_collections[:30])
@@ -2717,10 +2740,9 @@ def _generate_collection_description(client, config, main_result, serp_context, 
         except Exception:
             logger.warning("Search context for collection description generation failed for %s", collection_id)
 
-        user_parts.append(
-            f"Write an SEO-optimized collection description targeting ~{target_word_count} words (aim to be more comprehensive than competitors). "
-            "Return raw HTML only."
-        )
+        user_parts.append(_description_instruction(
+            "collection", target_word_count,
+            bool(collection and _existing_description_part(collection.get("description")))))
 
         desc_response = client.chat.completions.create(
             model=config["model"],
@@ -2836,6 +2858,9 @@ def _generate_brand_collection_description(client, config, main_result, serp_con
                 f"- Products Count: {collection.get('products_count', 0)}\n"
                 f"- Current Description Word Count: {desc_word_count}\n"
             )
+            existing_part = _existing_description_part(cur_desc)
+            if existing_part:
+                brand_context_parts.append(existing_part)
 
         if vendor_name:
             try:
@@ -2897,10 +2922,9 @@ def _generate_brand_collection_description(client, config, main_result, serp_con
         except Exception:
             logger.warning("Search context for brand description generation failed for %s", collection_id)
 
-        brand_context_parts.append(
-            f"Write an SEO-optimized brand collection description for '{vendor_name}' targeting ~{target_word_count} words. "
-            "Return raw HTML only."
-        )
+        brand_context_parts.append(_description_instruction(
+            f"brand collection ('{vendor_name}')", target_word_count,
+            bool(collection and _existing_description_part(collection.get("description")))))
 
         desc_response = client.chat.completions.create(
             model=config["model"],
@@ -2918,7 +2942,7 @@ def _generate_brand_collection_description(client, config, main_result, serp_con
 
         if desc_content:
             image_url = collection.get("image_url", "") if collection else ""
-            if image_url:
+            if image_url and image_url not in desc_content:
                 alt_parts = [vendor_name] if vendor_name else []
                 if user_keywords:
                     alt_parts.extend(user_keywords[:2])
@@ -2953,17 +2977,18 @@ def _generate_brand_collection_description(client, config, main_result, serp_con
     return main_result
 
 
-ALLOWED_SECTION_TYPES = {"hero", "features", "product_showcase", "testimonials", "faq", "cta_banner", "trust_badges", "rich_text", "image_gallery", "statistics"}
+# Section types the model may generate. Testimonials and statistics are
+# deliberately absent: a model can only invent them. They stay available in the
+# manual editor, where a person enters real ones.
+ALLOWED_SECTION_TYPES = {"hero", "features", "product_showcase", "faq", "cta_banner", "trust_badges", "rich_text", "image_gallery"}
 
 REQUIRED_SECTION_DATA = {
     "hero": ["headline"],
     "features": ["items"],
     "faq": ["items"],
     "cta_banner": ["heading", "cta_text"],
-    "testimonials": ["items"],
     "trust_badges": ["items"],
     "rich_text": ["content"],
-    "statistics": ["items"],
 }
 
 def _validate_landing_page_generate(result):
@@ -4867,10 +4892,11 @@ def run_task(task_type, task_input, store_id=None):
             )
 
         _tech_fix_template = get_setting("prompts.technical_seo_fix", DEFAULTS["prompts.technical_seo_fix"])
+        _preserve_rule = get_setting("prompts.preserve_existing", DEFAULTS["prompts.preserve_existing"])
         try:
-            system_prompt = _tech_fix_template.format(tags_rules=tags_rules, description_rules=description_rules)
+            system_prompt = _tech_fix_template.format(tags_rules=tags_rules, description_rules=description_rules, preserve_existing=_preserve_rule)
         except (KeyError, IndexError):
-            system_prompt = DEFAULTS["prompts.technical_seo_fix"].format(tags_rules=tags_rules, description_rules=description_rules)
+            system_prompt = DEFAULTS["prompts.technical_seo_fix"].format(tags_rules=tags_rules, description_rules=description_rules, preserve_existing=_preserve_rule)
         user_prompt = (
             f"Here is the technical SEO analysis for this {item_type}. "
             "Propose specific fixes for the failing checks:\n\n"

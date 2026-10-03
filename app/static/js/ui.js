@@ -70,6 +70,30 @@ const UIModal = (() => {
     };
 })();
 
+/* ── UIConfirm ───────────────────────────────────────────────────────── */
+const UIConfirm = {
+    /** Ask before a write the user cannot preview row by row (bulk applies,
+     *  new live pages). Resolves true only on the confirm button. */
+    ask({ title = "Are you sure?", message = "", confirmLabel = "Apply to Shopify" } = {}) {
+        return new Promise((resolve) => {
+            let confirmed = false;
+            const modal = UIModal.open({
+                title: escapeHtml(title),
+                bodyHtml: `<p style="font-size:14px;line-height:1.5;margin:0;">${escapeHtml(message)}</p>`,
+                footerHtml: `<button class="btn btn-secondary" data-ui-cancel>Cancel</button>
+                    <button class="btn btn-primary" data-ui-confirm>${escapeHtml(confirmLabel)}</button>`,
+                onClose: () => resolve(confirmed),
+            });
+            modal.el.style.zIndex = 350;
+            modal.el.querySelector("[data-ui-cancel]").addEventListener("click", () => modal.close());
+            modal.el.querySelector("[data-ui-confirm]").addEventListener("click", () => {
+                confirmed = true;
+                modal.close();
+            });
+        });
+    },
+};
+
 /* ── UISkeleton ──────────────────────────────────────────────────────── */
 const UISkeleton = {
     /** type: table | cards | stats | detail */

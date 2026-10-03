@@ -709,7 +709,7 @@ function ovAge(iso) {
 function renderSectionOverview(d) {
     const p = d.pillars;
     document.getElementById("ov-freshness").textContent =
-        `Readiness ${ovAge(p.readiness.last_run)} · Feed ${ovAge(p.feed.last_run)} · ` +
+        `Readiness ${ovAge(p.readiness.last_run)} · ${window.FEED_READINESS_ENABLED ? `Feed ${ovAge(p.feed.last_run)} · ` : ""}` +
         `Off-site ${ovAge(p.offsite.last_run)} · Visibility ${ovAge(p.visibility.last_run)}`;
 
     const sc = p.offsite.scorecard || {};
@@ -721,9 +721,9 @@ function renderSectionOverview(d) {
         card("score", `${renderScoreRing(p.readiness.avg_score || 0, 52)}
             <div class="stat-label" style="margin-top:6px;">AI Readiness</div>
             <div class="stat-label" style="color:var(--on-surface-secondary);">${p.readiness.count || 0} items scored</div>`) +
-        card("feed", `${renderScoreRing(p.feed.avg_score || 0, 52)}
+        (window.FEED_READINESS_ENABLED ? card("feed", `${renderScoreRing(p.feed.avg_score || 0, 52)}
             <div class="stat-label" style="margin-top:6px;">Feed</div>
-            <div class="stat-label" style="color:var(--on-surface-secondary);">${p.feed.count || 0} products audited</div>`) +
+            <div class="stat-label" style="color:var(--on-surface-secondary);">${p.feed.count || 0} products audited</div>`) : "") +
         card("visibility", `${renderScoreRing(Math.round(sov || 0), 52)}
             <div class="stat-label" style="margin-top:6px;">Share of voice</div>
             <div class="stat-label" style="color:var(--on-surface-secondary);">${p.visibility.brand_hits ?? "—"} of ${p.visibility.total_answers ?? "—"} AI answers</div>`) +
@@ -804,8 +804,8 @@ async function ovDirectAction(index, btn) {
 const ALL_AUDITS = [
     { label: "AI readiness scan", detail: "Scores every product and collection for answer-engine readiness.", cost: "free",
       endpoint: "/api/ai-seo/scan", extra: { type: "all" } },
-    { label: "Feed audit", detail: "Checks product feed completeness (GTIN, images, category, availability).", cost: "free",
-      endpoint: "/api/ai-seo/feed/scan", extra: {} },
+    ...(window.FEED_READINESS_ENABLED ? [{ label: "Feed audit", detail: "Checks product feed completeness (GTIN, images, category, availability).", cost: "free",
+      endpoint: "/api/ai-seo/feed/scan", extra: {} }] : []),
     { label: "Off-site audit", detail: "Looks for your brand on Reddit, review sites and roundup listicles.", cost: "free",
       endpoint: "/api/ai-seo/offsite/run", extra: {} },
     { label: "Visibility tracking", detail: "Asks AI engines your tracked prompts and records brand mentions.",

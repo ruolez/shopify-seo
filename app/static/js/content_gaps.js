@@ -433,6 +433,13 @@ async function wizardPublish(contentType) {
 
     if (!title || !bodyHtml) { showToast("Title and body content are required", "error"); return; }
 
+    const confirmed = await UIConfirm.ask({
+        title: `Publish this ${contentType}?`,
+        message: `“${title}” will be created on your live store and visible to customers and search engines.`,
+        confirmLabel: "Publish to Shopify",
+    });
+    if (!confirmed) return;
+
     document.getElementById("wiz-step-badge").textContent = "Step 4: Publishing...";
     showToast("Publishing to Shopify...", "info");
 
@@ -612,11 +619,6 @@ function renderOptimizationView(data) {
             <input type="text" class="form-control" id="opt-title" style="font-size:12px;" value="${escapeHtml(optimization.new_title)}"></div>`;
     }
 
-    if (optimization.new_description_html) {
-        h += `<div class="form-group" style="margin-top:8px;"><label style="font-size:12px;">New Description (HTML)</label>
-            <textarea class="form-control" id="opt-desc" style="font-size:12px;font-family:var(--font-mono);min-height:200px;">${escapeHtml(optimization.new_description_html)}</textarea></div>`;
-    }
-
     h += '</div>';
 
     // Apply button
@@ -652,7 +654,6 @@ async function applyGapOptimization(gapId, itemType, itemId) {
         new_meta_title: document.getElementById("opt-meta-title")?.value?.trim(),
         new_meta_description: document.getElementById("opt-meta-desc")?.value?.trim(),
         new_title: document.getElementById("opt-title")?.value?.trim() || null,
-        new_description_html: document.getElementById("opt-desc")?.value || null,
     };
 
     showToast("Applying optimization to Shopify...", "info");

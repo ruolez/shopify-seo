@@ -58,7 +58,7 @@
                                 SEO, images, tags, and internal links. Published to <strong>/blogs/news/</strong>.
                             </p>
                             <div class="form-group">
-                                <label>Import from file <span style="color: var(--on-surface-secondary); font-weight: normal;">(optional — upload one .md to fill the form, or several to batch auto-publish)</span></label>
+                                <label>Import from file <span style="color: var(--on-surface-secondary); font-weight: normal;">(optional — upload one .md to fill the form, or several to prepare a batch)</span></label>
                                 <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
                                     <input type="file" id="news-md-file" accept=".md,.markdown,text/markdown,text/plain" multiple style="display:none;" onchange="importNewsMarkdownFiles(event)">
                                     <button type="button" class="btn btn-secondary btn-sm" onclick="document.getElementById('news-md-file').click()">
@@ -70,11 +70,11 @@
 
                             <!-- Batch auto-publish (shown when multiple files are selected) -->
                             <div id="news-batch" class="form-group" style="display:none;">
-                                <label>Batch auto-publish <span style="color: var(--on-surface-secondary); font-weight: normal;">— each article is analyzed, illustrated, linked, and published automatically. Or schedule: articles are prepared now and published at each date/time.</span></label>
+                                <label>Batch prepare <span style="color: var(--on-surface-secondary); font-weight: normal;">— each article is analyzed, illustrated and linked now, then waits in the Scheduled tab for your approval. Queue at cadence takes the next open slots on the shared blog + news calendar; or pick each date yourself.</span></label>
                                 <div id="news-batch-list" style="margin: 6px 0;"></div>
                                 <div style="display:flex; gap:8px; flex-wrap:wrap;">
                                     <button class="btn btn-primary" id="news-batch-btn" onclick="startBatch()">
-                                        <span class="material-symbols-rounded">auto_awesome</span> <span id="news-batch-label">Auto-Publish</span>
+                                        <span class="material-symbols-rounded">auto_awesome</span> <span id="news-batch-label">Queue at cadence</span>
                                     </button>
                                     <button class="btn btn-secondary" id="news-schedule-btn" onclick="startScheduledBatch()">
                                         <span class="material-symbols-rounded">schedule_send</span> <span id="news-schedule-label">Schedule</span>
@@ -95,7 +95,7 @@
                             </div>
                             <label style="display:flex; align-items:center; gap:8px; margin: 4px 0 12px; font-size: 14px; cursor:pointer;">
                                 <input type="checkbox" id="news-auto" onchange="updateStartButton()">
-                                <span><strong>Auto mode</strong> — generate hero + inline images and internal links, then publish automatically.</span>
+                                <span><strong>Auto mode</strong> — generate hero + inline images and internal links, then queue the draft for your review.</span>
                             </label>
                             <button class="btn btn-primary" id="news-start-btn" onclick="startNews()">
                                 <span class="material-symbols-rounded">auto_awesome</span> <span id="news-start-label">Analyze &amp; Enhance</span>

@@ -9,6 +9,7 @@ from flask import Blueprint, jsonify, render_template, request
 
 from app.auth import decrypt_value
 from app.database import db
+from app.services import publish_gate
 from app.services.ai_output_guard import guard_shopify_fields
 from app.services.blog_seo_analyzer import analyze_article_seo
 from app.services.article_visuals import (
@@ -1888,6 +1889,11 @@ def _wizard_step_publish(session, store, client, is_published=True):
             "UPDATE article_wizard_sessions SET status = 'published', current_step = 7, shopify_article_id = %s, updated_at = NOW() WHERE id = %s",
             (result["shopify_id"], session_id),
         )
+        cur.execute(
+            "UPDATE topic_suggestions SET status = 'used', updated_at = NOW() "
+            "WHERE wizard_session_id = %s AND status = 'scheduled'",
+            (session_id,),
+        )
 
     # Auto-regenerate landing page for this blog
     if is_published:
@@ -2454,38 +2460,12 @@ def _iso_utc(dt):
 
 
 def _get_schedule_settings(store_id):
-    with db.get_cursor() as cur:
-        cur.execute(
-            "SELECT interval_days, publish_time FROM blog_schedule_settings WHERE store_id = %s",
-            (store_id,),
-        )
-        row = cur.fetchone()
-    interval_days = int(row["interval_days"]) if row and row["interval_days"] else 7
-    publish_time = row["publish_time"] if row and row["publish_time"] else dt_time(9, 0)
-    return interval_days, publish_time
+    return publish_gate.get_cadence(store_id)
 
 
 def _next_open_slot(store_id):
-    """Next publish slot from the store's cadence: last upcoming slot + interval,
-    or the first upcoming cadence time if the queue is empty. Naive UTC. Failed
-    sessions keep holding their slot so a retry doesn't shift the queue."""
-    interval_days, publish_time = _get_schedule_settings(store_id)
-    with db.get_cursor() as cur:
-        cur.execute(
-            """SELECT MAX(scheduled_for) AS last_slot FROM article_wizard_sessions
-               WHERE store_id = %s AND scheduled_for IS NOT NULL
-                 AND scheduled_for >= (NOW() AT TIME ZONE 'utc') AND status != 'published'""",
-            (store_id,),
-        )
-        row = cur.fetchone()
-    last_slot = row["last_slot"] if row else None
-    if last_slot:
-        return datetime.combine((last_slot + timedelta(days=interval_days)).date(), publish_time)
-    now = datetime.now(timezone.utc).replace(tzinfo=None)
-    candidate = datetime.combine(now.date(), publish_time)
-    if candidate <= now:
-        candidate += timedelta(days=1)
-    return candidate
+    """Next publish slot on the store's shared blog + news calendar. Naive UTC."""
+    return publish_gate.next_open_slot(store_id)
 
 
 def _flatten_topic_keywords(kw):
@@ -2702,7 +2682,7 @@ def list_scheduled_posts():
         return jsonify({"error": "store_id is required"}), 400
     with db.get_cursor() as cur:
         cur.execute(
-            """SELECT id, status, scheduled_for, error, created_at, updated_at, topic, style,
+            """SELECT id, status, scheduled_for, reviewed_at, error, created_at, updated_at, topic, style,
                       COALESCE(generated_article->>'title', topic) AS title,
                       (featured_image_url IS NOT NULL) AS has_image
                FROM article_wizard_sessions
@@ -2746,12 +2726,15 @@ def publish_blog_now(session_id):
 
     ready = bool(session.get("generated_article"))
     # Atomic claim — same guard as the scheduler tick, so the two can never
-    # double-publish the same session.
+    # double-publish the same session. Publishing a ready post by hand is the
+    # review; resuming an unfinished one is not.
     with db.get_cursor() as cur:
         cur.execute(
-            """UPDATE article_wizard_sessions SET status = %s, error = NULL, updated_at = NOW()
+            """UPDATE article_wizard_sessions
+               SET status = %s, error = NULL, updated_at = NOW(),
+                   reviewed_at = CASE WHEN %s THEN NOW() ELSE reviewed_at END
                WHERE id = %s AND status IN ('scheduled', 'failed') RETURNING store_id""",
-            ("auto_publishing" if ready else "auto_queued", session_id),
+            ("auto_publishing" if ready else "auto_queued", ready, session_id),
         )
         row = cur.fetchone()
     if not row:
@@ -2784,6 +2767,20 @@ def publish_blog_now(session_id):
         # overdue slot publishes on the next scheduler tick (≤60s later).
         _spawn_blog_auto_pipeline(session_id, store, client)
     return jsonify({"success": True, "resumed": not ready})
+
+
+@blog_bp.route("/api/blog/scheduled/<int:session_id>/approve", methods=["POST"])
+def approve_scheduled_post(session_id):
+    """Mark a prepared post as reviewed so the scheduler may publish it."""
+    data = request.get_json(silent=True) or {}
+    if data.get("approved") is False:
+        if not publish_gate.unapprove_session("blog", session_id):
+            return jsonify({"error": "Session is not waiting to publish"}), 409
+        return jsonify({"success": True, "approved": False})
+    slot = publish_gate.approve_session("blog", session_id)
+    if not slot:
+        return jsonify({"error": "Only a prepared, scheduled post can be approved"}), 409
+    return jsonify({"success": True, "approved": True, "scheduled_for": _iso_utc(slot)})
 
 
 @blog_bp.route("/api/blog/scheduled/<int:session_id>", methods=["DELETE"])
@@ -2831,7 +2828,7 @@ def save_schedule_settings():
     if not store_id:
         return jsonify({"error": "store_id is required"}), 400
     try:
-        interval_days = max(1, int(data.get("interval_days") or 7))
+        interval_days = max(1, int(data.get("interval_days") or publish_gate.DEFAULT_GAP_DAYS))
         hours, minutes = str(data.get("publish_time") or "09:00").split(":")
         publish_time = dt_time(int(hours), int(minutes))
     except (ValueError, TypeError):

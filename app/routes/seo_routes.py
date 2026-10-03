@@ -1298,7 +1298,7 @@ def apply_product_changes(product_id):
             if data.get("title"):
                 cur.execute("UPDATE synced_products SET title = %s WHERE id = %s", (data["title"], product_id))
             if data.get("description_html"):
-                cur.execute("UPDATE synced_products SET description = %s WHERE id = %s", (data["description_html"], product_id))
+                cur.execute("UPDATE synced_products SET description = %s WHERE id = %s", (product_fields["description_html"], product_id))
             if data.get("meta_title"):
                 cur.execute("UPDATE synced_products SET meta_title = %s WHERE id = %s", (data["meta_title"], product_id))
             if data.get("meta_description"):
@@ -1622,7 +1622,7 @@ def apply_collection_changes(collection_id):
             if data.get("title"):
                 cur.execute("UPDATE synced_collections SET title = %s WHERE id = %s", (data["title"], collection_id))
             if data.get("description_html"):
-                cur.execute("UPDATE synced_collections SET description = %s WHERE id = %s", (data["description_html"], collection_id))
+                cur.execute("UPDATE synced_collections SET description = %s WHERE id = %s", (fields["description_html"], collection_id))
             if data.get("meta_title"):
                 cur.execute("UPDATE synced_collections SET meta_title = %s WHERE id = %s", (data["meta_title"], collection_id))
             if data.get("meta_description"):

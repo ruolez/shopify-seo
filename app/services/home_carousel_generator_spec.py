@@ -79,9 +79,9 @@ class TestRenderHomeCarouselSection:
         assert 'fetchpriority="high"' in out
         assert 'loading="lazy"' in out
 
-    def test_wrapped_in_raw_and_has_schema(self):
+    def test_wrapped_in_raw_with_section_schema_and_no_json_ld(self):
         out = render_home_carousel_section({"slides": []}, {"name": "Shop", "domain": "shop.com"})
         assert out.startswith("{% raw %}")
         assert "{% endraw %}" in out
         assert "{% schema %}" in out
-        assert '"@type": "WebSite"' in out or '"@type":"WebSite"' in out
+        assert "application/ld+json" not in out

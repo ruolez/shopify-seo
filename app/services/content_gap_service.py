@@ -1128,8 +1128,13 @@ def optimize_existing_page(store_id, gap_id, override_keyword=None, override_vol
     api_key = decrypt_value(config["api_key_enc"])
     model = config.get("model") or "anthropic/claude-sonnet-4"
 
-    prompt_key = "prompts.product_seo" if item_type == "product" else "prompts.collection_seo"
-    base_prompt = get_setting(prompt_key, DEFAULTS.get(prompt_key, ""))
+    # Title and metas only. The page body is never sent here, so asking for a
+    # new description would mean replacing it with one written blind.
+    base_prompt = (
+        "You are an expert Shopify SEO consultant. You adjust a page's title and meta tags "
+        "so it also targets one additional keyword, without changing what the page is about. "
+        "Return JSON only."
+    )
 
     optimization_prompt = (
         f"You are optimizing an existing {item_type} page to ALSO rank for a new keyword.\n\n"
@@ -1149,18 +1154,18 @@ def optimize_existing_page(store_id, gap_id, override_keyword=None, override_vol
         f"- Search Intent: {gap.get('intent', 'commercial')}\n"
         f"- Competition: {gap.get('competition', 'unknown')}\n\n"
         f"OPTIMIZATION INSTRUCTIONS:\n"
-        f"- Incorporate \"{gap['keyword']}\" into the meta title, meta description, and description\n"
+        f"- Incorporate \"{gap['keyword']}\" into the meta title and meta description\n"
         f"- DO NOT remove or weaken targeting for protected keywords\n"
         f"- Keep the meta title under 60 characters\n"
         f"- Keep the meta description between 145-160 characters\n"
-        f"- Mention the new keyword naturally at least once early in the description — never force repetition to hit a count\n"
+        f"- Mention the new keyword naturally once in each — never force repetition\n"
+        f"- Do NOT write or rewrite the page description\n"
         f"- Do NOT use puffery words (premium, best, top, ultimate, finest)\n\n"
         f"Return JSON only:\n"
         f'{{"strategy": "2-3 sentence explanation of what changes you made and why",'
         f' "new_title": "optimized page title or null if no change needed",'
         f' "new_meta_title": "optimized meta title (50-60 chars)",'
         f' "new_meta_description": "optimized meta description (145-160 chars)",'
-        f' "new_description_html": "optimized HTML description with new keyword incorporated",'
         f' "keywords_targeted": ["list of all keywords this page now targets"]}}'
     )
 
@@ -1181,6 +1186,7 @@ def optimize_existing_page(store_id, gap_id, override_keyword=None, override_vol
         ai_result = json.loads(text[start:end])
     else:
         ai_result = {"strategy": text}
+    ai_result.pop("new_description_html", None)
 
     return {
         "gap": {"id": gap_id, "keyword": gap["keyword"], "volume": gap.get("search_volume"), "intent": gap.get("intent")},
@@ -1221,16 +1227,16 @@ def apply_gap_optimization(store_id, gap_id, item_type, item_id, changes):
         fields["meta_title"] = changes["new_meta_title"]
     if changes.get("new_meta_description"):
         fields["meta_description"] = changes["new_meta_description"]
-    if changes.get("new_description_html"):
-        fields["description_html"] = changes["new_description_html"]
 
     guard_shopify_fields(fields)
 
-    if fields:
-        if item_type == "product":
-            client.update_product(item["shopify_id"], fields)
-        else:
-            client.update_collection(item["shopify_id"], fields)
+    if not fields:
+        raise ValueError("Nothing to apply — no title or meta changes were provided")
+
+    if item_type == "product":
+        client.update_product(item["shopify_id"], fields)
+    else:
+        client.update_collection(item["shopify_id"], fields)
 
     with db.get_cursor() as cur:
         if fields.get("title"):
@@ -1239,8 +1245,6 @@ def apply_gap_optimization(store_id, gap_id, item_type, item_id, changes):
             cur.execute(f"UPDATE {table} SET meta_title = %s WHERE id = %s", (fields["meta_title"], item_id))
         if fields.get("meta_description"):
             cur.execute(f"UPDATE {table} SET meta_description = %s WHERE id = %s", (fields["meta_description"], item_id))
-        if fields.get("description_html"):
-            cur.execute(f"UPDATE {table} SET description = %s WHERE id = %s", (fields["description_html"], item_id))
         cur.execute(f"UPDATE {table} SET last_optimized_at = NOW() WHERE id = %s", (item_id,))
         cur.execute("UPDATE content_gaps SET status = 'published', updated_at = NOW() WHERE id = %s AND store_id = %s", (gap_id, store_id))
 

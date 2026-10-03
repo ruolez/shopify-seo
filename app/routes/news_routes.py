@@ -8,6 +8,7 @@ from flask import Blueprint, jsonify, render_template, request
 
 from app.database import db
 from app.routes.blog_routes import _get_store_client
+from app.services import publish_gate
 from app.services import url_utils
 from app.shopify_client import is_gone_error
 from app.services.ai_output_guard import clamp_meta_description, clamp_meta_title, sanitize_html
@@ -1234,9 +1235,10 @@ def publish_news(session_id):
 
 @news_bp.route("/api/news/auto", methods=["POST"])
 def news_auto():
-    """Run the full pipeline (analyze → hero → inline → links → publish) in one
-    background thread. Image/link steps are best-effort; analyze and publish are
-    fatal. The session 'status' column reports the current stage for the UI."""
+    """Prepare one article unattended (analyze → hero → inline → links) and park
+    it in the next open slot of the store's publish calendar. It goes live only
+    after a person approves it. The session 'status' column reports the current
+    stage for the UI."""
     data = request.get_json(silent=True) or {}
     store_id = data.get("store_id")
     source_text = (data.get("source_text") or "").strip()
@@ -1248,11 +1250,12 @@ def news_auto():
     if not client:
         return jsonify({"error": "Store not found"}), 404
 
+    scheduled_for = publish_gate.next_open_slot(store_id)
     with db.get_cursor() as cur:
         cur.execute(
-            """INSERT INTO news_sessions (store_id, status, source_text, source_url, source_urls)
-               VALUES (%s, 'auto_queued', %s, %s, %s) RETURNING id""",
-            (store_id, source_text, sources[0]["url"] if sources else "", json.dumps(sources)),
+            """INSERT INTO news_sessions (store_id, status, source_text, source_url, source_urls, scheduled_for)
+               VALUES (%s, 'auto_queued', %s, %s, %s, %s) RETURNING id""",
+            (store_id, source_text, sources[0]["url"] if sources else "", json.dumps(sources), scheduled_for),
         )
         session_id = cur.fetchone()["id"]
 
@@ -1268,7 +1271,8 @@ def news_auto():
         try:
             with db.get_cursor() as cur:
                 cur.execute("UPDATE ai_tasks SET status = 'running' WHERE id = %s", (task_id,))
-            result = _run_auto_pipeline(session_id, store_id, store, client)
+            _run_auto_pipeline(session_id, store_id, store, client, regen_hub=False, publish=False)
+            result = {"session_id": session_id, "scheduled_for": scheduled_for.isoformat()}
             with db.get_cursor() as cur:
                 cur.execute(
                     "UPDATE ai_tasks SET status = 'completed', result = %s, completed_at = NOW() WHERE id = %s",
@@ -1292,9 +1296,10 @@ def news_auto():
 
 @news_bp.route("/api/news/auto-batch", methods=["POST"])
 def news_auto_batch():
-    """Auto-publish multiple articles. Creates one session per article and processes them
-    sequentially in a single background thread (rate-limit friendly, survives browser close).
-    A failed article is isolated; the rest continue. The hub is regenerated once at the end."""
+    """Prepare multiple articles unattended. Creates one session per article, gives each
+    the next open slot on the store's publish calendar, and processes them sequentially in
+    a single background thread (rate-limit friendly, survives browser close). A failed
+    article is isolated; the rest continue. Nothing goes live until a person approves it."""
     data = request.get_json(silent=True) or {}
     store_id = data.get("store_id")
     articles = data.get("articles")
@@ -1305,29 +1310,29 @@ def news_auto_batch():
     if not client:
         return jsonify({"error": "Store not found"}), 404
 
+    valid = [
+        art for art in articles
+        if isinstance(art, dict) and (art.get("source_text") or "").strip()
+    ]
+    if not valid:
+        return jsonify({"error": "No articles with source_text"}), 400
+
     session_ids = []
-    for art in articles:
-        source_text = (art.get("source_text") or "").strip() if isinstance(art, dict) else ""
-        if not source_text:
-            continue
+    for art, scheduled_for in zip(valid, publish_gate.next_open_slots(store_id, len(valid))):
         sources = _normalize_sources(art)
         with db.get_cursor() as cur:
             cur.execute(
-                """INSERT INTO news_sessions (store_id, status, source_text, source_url, source_urls)
-                   VALUES (%s, 'auto_queued', %s, %s, %s) RETURNING id""",
-                (store_id, source_text, sources[0]["url"] if sources else "", json.dumps(sources)),
+                """INSERT INTO news_sessions (store_id, status, source_text, source_url, source_urls, scheduled_for)
+                   VALUES (%s, 'auto_queued', %s, %s, %s, %s) RETURNING id""",
+                (store_id, art["source_text"].strip(), sources[0]["url"] if sources else "",
+                 json.dumps(sources), scheduled_for),
             )
             session_ids.append(cur.fetchone()["id"])
 
-    if not session_ids:
-        return jsonify({"error": "No articles with source_text"}), 400
-
     def _run():
-        published_any = False
         for sid in session_ids:
             try:
-                _run_auto_pipeline(sid, store_id, store, client, regen_hub=False)
-                published_any = True
+                _run_auto_pipeline(sid, store_id, store, client, regen_hub=False, publish=False)
             except Exception as e:
                 logger.exception("news_auto_batch: session %s failed: %s", sid, e)
                 with db.get_cursor() as cur:
@@ -1335,9 +1340,6 @@ def news_auto_batch():
                         "UPDATE news_sessions SET status = 'failed', error = %s, updated_at = NOW() WHERE id = %s",
                         (str(e), sid),
                     )
-        if published_any:
-            _regen_news_hub_async(store_id, client, store)
-            _regen_blog_landings_async(store_id, client, store)
 
     threading.Thread(target=_run, daemon=True).start()
     return jsonify({"sessions": session_ids})
@@ -1441,7 +1443,7 @@ def list_scheduled_sessions():
         return jsonify({"error": "store_id is required"}), 400
     with db.get_cursor() as cur:
         cur.execute(
-            """SELECT id, status, scheduled_for, error, created_at, updated_at, article_handle,
+            """SELECT id, status, scheduled_for, reviewed_at, error, created_at, updated_at, article_handle,
                       COALESCE(edited_result->>'headline', analyze_result->>'headline') AS headline,
                       LEFT(source_text, 200) AS source_preview
                FROM news_sessions
@@ -1482,7 +1484,7 @@ def publish_scheduled_now(session_id):
     # never double-publish the same session.
     with db.get_cursor() as cur:
         cur.execute(
-            """UPDATE news_sessions SET status = 'auto_publishing', updated_at = NOW()
+            """UPDATE news_sessions SET status = 'auto_publishing', reviewed_at = NOW(), updated_at = NOW()
                WHERE id = %s AND scheduled_for IS NOT NULL AND status IN ('scheduled', 'failed')
                RETURNING store_id""",
             (session_id,),
@@ -1513,6 +1515,23 @@ def publish_scheduled_now(session_id):
 
     threading.Thread(target=_run, daemon=True).start()
     return jsonify({"success": True})
+
+
+@news_bp.route("/api/news/scheduled/<int:session_id>/approve", methods=["POST"])
+def approve_scheduled_session(session_id):
+    """Mark a prepared article as reviewed so the scheduler may publish it."""
+    data = request.get_json(silent=True) or {}
+    if data.get("approved") is False:
+        if not publish_gate.unapprove_session("news", session_id):
+            return jsonify({"error": "Session is not waiting to publish"}), 409
+        return jsonify({"success": True, "approved": False})
+    slot = publish_gate.approve_session("news", session_id)
+    if not slot:
+        return jsonify({"error": "Only a prepared, scheduled article can be approved"}), 409
+    return jsonify({
+        "success": True, "approved": True,
+        "scheduled_for": slot.replace(tzinfo=timezone.utc).isoformat(),
+    })
 
 
 @news_bp.route("/api/news/scheduled/<int:session_id>", methods=["DELETE"])

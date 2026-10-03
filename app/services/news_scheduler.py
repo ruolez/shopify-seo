@@ -56,6 +56,7 @@ class NewsPublishScheduler:
             cur.execute(
                 """SELECT id, store_id FROM news_sessions
                    WHERE status = 'scheduled' AND scheduled_for IS NOT NULL
+                     AND reviewed_at IS NOT NULL
                      AND scheduled_for <= (NOW() AT TIME ZONE 'utc')
                    ORDER BY store_id, scheduled_for"""
             )

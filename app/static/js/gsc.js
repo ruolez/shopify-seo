@@ -1080,6 +1080,13 @@ async function bulkFixCannibalization(groupIndex) {
         return;
     }
 
+    const confirmed = await UIConfirm.ask({
+        title: `Rewrite ${actionableItems.length} page${actionableItems.length === 1 ? "" : "s"}?`,
+        message: `New titles and meta tags will be generated and written to your live store for ${actionableItems.length} page${actionableItems.length === 1 ? "" : "s"} competing for “${group.query}”, without a preview of each one.`,
+        confirmLabel: "Fix all",
+    });
+    if (!confirmed) return;
+
     const btn = document.getElementById(`cannibal-bulk-btn-${groupIndex}`);
     btn.disabled = true;
     btn.innerHTML = `<span class="spinner" style="width:14px;height:14px;border-width:2px;"></span> Fixing ${actionableItems.length} items...`;

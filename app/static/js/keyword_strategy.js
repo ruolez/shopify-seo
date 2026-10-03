@@ -1558,6 +1558,13 @@ async function applyAllSteps(assignmentId) {
     const a = window._ksPlanItems[assignmentId];
     if (!a) return;
     const steps = (a.proposed_changes || {}).steps || [];
+    const pending = steps.filter((s) => !s.applied).length;
+    if (!pending) return;
+    const confirmed = await UIConfirm.ask({
+        title: `Apply ${pending} change${pending === 1 ? "" : "s"}?`,
+        message: `All ${pending} remaining step${pending === 1 ? "" : "s"} in this plan will be written to your live store, one after another.`,
+    });
+    if (!confirmed) return;
     let applied = 0;
     for (let i = 0; i < steps.length; i++) {
         if (steps[i].applied) continue;

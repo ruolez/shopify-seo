@@ -328,6 +328,8 @@ def _render_testimonials(section, products_by_id=None):
         quote = _escape(item.get("quote", ""))
         author = _escape(item.get("author", ""))
         role = _escape(item.get("role", ""))
+        if not quote.strip():
+            continue
         quotes += (
             f'<blockquote class="lp__testimonial">\n'
             f'  <p class="lp__testimonial-text">&ldquo;{quote}&rdquo;</p>\n'
@@ -337,6 +339,9 @@ def _render_testimonials(section, products_by_id=None):
             f'</footer>\n'
             f'</blockquote>\n'
         )
+
+    if not quotes:
+        return ""
 
     return (
         f'<section class="lp__testimonials">\n'
@@ -472,12 +477,17 @@ def _render_statistics(section, products_by_id=None):
     for item in items:
         value = _escape(item.get("value", ""))
         label = _escape(item.get("label", ""))
+        if not value.strip():
+            continue
         stats += (
             f'<div class="lp__stat-card">\n'
             f'  <div class="lp__stat-value">{value}</div>\n'
             f'  <div class="lp__stat-label">{label}</div>\n'
             f'</div>\n'
         )
+
+    if not stats:
+        return ""
 
     heading_html = f'<h2 class="lp__section-heading">{heading}</h2>' if heading else ""
 

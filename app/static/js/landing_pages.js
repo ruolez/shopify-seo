@@ -482,13 +482,13 @@
             hero: { slides: [{ headline: 'Welcome', subheadline: '', cta_text: 'Shop Now', cta_url: '/collections/all', image_url: '', image_alt: '' }], categories: [] },
             features: { heading: 'Features', items: [{ icon: '⭐', title: 'Feature 1', description: 'Description here' }] },
             product_showcase: { heading: 'Featured Products', products: [] },
-            testimonials: { heading: 'What Our Customers Say', items: [{ quote: 'Great product!', author: 'Customer', role: '' }] },
+            testimonials: { heading: 'What Our Customers Say', items: [{ quote: '', author: '', role: '' }] },
             faq: { heading: 'Frequently Asked Questions', items: [{ question: 'Question here?', answer: 'Answer here.' }] },
             cta_banner: { heading: 'Ready to Get Started?', subtext: '', cta_text: 'Shop Now', cta_url: '/collections/all' },
             trust_badges: { heading: 'Why Choose Us', items: [{ icon: '✓', text: 'Free Shipping' }] },
             rich_text: { heading: '', content: '<p>Enter your content here...</p>' },
             image_gallery: { heading: 'Gallery', images: [] },
-            statistics: { heading: '', items: [{ value: '100+', label: 'Products' }] },
+            statistics: { heading: '', items: [{ value: '', label: '' }] },
         };
         return defaults[type] || {};
     }

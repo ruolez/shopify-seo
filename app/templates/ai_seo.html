@@ -14,7 +14,7 @@
                 <div class="tabs">
                     <button class="tab active" data-tab="overview">Overview</button>
                     <button class="tab" data-tab="score">AI Readiness</button>
-                    <button class="tab" data-tab="feed">Feed</button>
+                    {% if feed_enabled %}<button class="tab" data-tab="feed">Feed</button>{% endif %}
                     <button class="tab" data-tab="offsite">Off-site</button>
                     <button class="tab" data-tab="visibility">Visibility</button>
                     <button class="tab" data-tab="assets">AEO Assets</button>
@@ -231,5 +231,6 @@
 {% endblock %}
 
 {% block scripts %}
+    <script>window.FEED_READINESS_ENABLED = {{ 'true' if feed_enabled else 'false' }};</script>
     <script src="/static/js/ai_seo.js"></script>
 {% endblock %}

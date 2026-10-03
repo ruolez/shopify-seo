@@ -337,9 +337,14 @@ def _execute_scan(task_id, store_id, resource_type):
             )
 
 
+def _feed_enabled():
+    from app.settings_manager import get_setting
+    return bool(get_setting("features.feed_readiness", False))
+
+
 @ai_seo_bp.route("/ai-seo")
 def ai_seo_page():
-    return render_template("ai_seo.html")
+    return render_template("ai_seo.html", feed_enabled=_feed_enabled())
 
 
 @ai_seo_bp.route("/api/ai-seo/scan", methods=["POST"])
@@ -504,8 +509,9 @@ def _section_actions(store_id, pillars):
         logger.warning("overview actions: failed batches block failed: %s", e)
 
     review_covered = None
+    feed_enabled = _feed_enabled()
     try:  # 3+7. feed coverage: review signals (high) + weak components (med)
-        if pillars["feed"]["count"]:
+        if feed_enabled and pillars["feed"]["count"]:
             with db.get_cursor() as cur:
                 comps = {}
                 for c in ("review_signals", "gtin", "images", "product_type", "brand", "description"):
@@ -638,6 +644,8 @@ def _section_actions(store_id, pillars):
             ("visibility", "visibility tracking", "/api/ai-seo/tracking/run", {}),
         ]
         for pillar_key, label, endpoint, extra in nudges:
+            if pillar_key == "feed" and not feed_enabled:
+                continue
             last = pillars[pillar_key].get("last_run")
             stale = last is None
             if last:

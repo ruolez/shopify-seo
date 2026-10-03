@@ -56,6 +56,7 @@ class BlogPublishScheduler:
             cur.execute(
                 """SELECT id, store_id FROM article_wizard_sessions
                    WHERE status = 'scheduled' AND scheduled_for IS NOT NULL
+                     AND reviewed_at IS NOT NULL
                      AND scheduled_for <= (NOW() AT TIME ZONE 'utc')
                    ORDER BY store_id, scheduled_for"""
             )
@@ -85,9 +86,9 @@ class BlogPublishScheduler:
                 try:
                     sess = _fetch_wizard_session(sid)
                     # Re-check the money-page guard at publish time — the
-                    # approval-time check may be weeks old and ownership can
-                    # have changed. Advisory (approval was the human decision
-                    # point), but the conflict must be surfaced, not silent.
+                    # approval may be weeks old and ownership can have changed.
+                    # Nobody is watching an unattended publish, so a conflict
+                    # holds the post; "Publish now" is the person's override.
                     kws = sess.get("target_keywords") or []
                     if isinstance(kws, str):
                         try:
@@ -95,15 +96,10 @@ class BlogPublishScheduler:
                         except (ValueError, TypeError):
                             kws = []
                     warning = _money_page_keyword_warning(store_id, kws)
+                    if warning:
+                        raise ValueError(f"Held — keyword conflict: {warning} Use Publish now to publish anyway.")
                     _wizard_step_publish(sess, store, client, True)
                     logger.info("Scheduled blog session %s published", sid)
-                    if warning:
-                        logger.warning("Blog session %s published with keyword conflict: %s", sid, warning)
-                        with db.get_cursor() as cur:
-                            cur.execute(
-                                "UPDATE article_wizard_sessions SET error = %s, updated_at = NOW() WHERE id = %s",
-                                (f"Published with warning: {warning}", sid),
-                            )
                 except Exception as e:
                     logger.exception("Scheduled blog publish failed for session %s: %s", sid, e)
                     with db.get_cursor() as cur:

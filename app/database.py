@@ -765,6 +765,12 @@ class Database:
                 EXCEPTION WHEN duplicate_column THEN NULL;
                 END $$
             """)
+            # A scheduled session publishes only after a person approves it.
+            for _ddl in [
+                "ALTER TABLE news_sessions ADD COLUMN reviewed_at TIMESTAMP",
+                "ALTER TABLE article_wizard_sessions ADD COLUMN reviewed_at TIMESTAMP",
+            ]:
+                cur.execute(f"DO $$ BEGIN {_ddl}; EXCEPTION WHEN duplicate_column THEN NULL; END $$")
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS store_daily_snapshot (
                     id SERIAL PRIMARY KEY,
@@ -905,7 +911,7 @@ class Database:
                     "UPDATE article_wizard_sessions SET status = 'failed', "
                     "error = COALESCE(error, 'Interrupted — server restarted'), updated_at = NOW() "
                     "WHERE scheduled_for IS NOT NULL AND status IN ('auto_queued', 'auto_researching', "
-                    "'auto_outlining', 'auto_generating', 'auto_image', 'auto_publishing')"
+                    "'auto_outlining', 'auto_generating', 'auto_image', 'auto_media', 'auto_publishing')"
                 )
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS news_hub_pages (

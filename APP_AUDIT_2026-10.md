@@ -78,7 +78,7 @@ AI", AI Search optimize, Duplicates apply, GSC "Rewrite title/meta", GSC canniba
 Content Gaps "Optimize Existing", Keyword Strategy steps, Keyword Actions "Optimize now", and
 Interlinking apply. There is no ordering rule and no "last changed by" marker.
 
-- [ ] ✔ **C1 — Full optimize rewrites blind.** `_generate_description` gives the model only
+- [x] ✔ **C1 — Full optimize rewrites blind.** `_generate_description` gives the model only
   the current description's word count, never its text (`ai_agent.py:2481-2491`; collection
   `:2671`, brand `:2837`), and `prompts.product_description` has no preservation clause
   (`prompt_defaults.py:67-82`). Running it after a GEO pass, an interlinking apply or a
@@ -90,12 +90,12 @@ Interlinking apply. There is no ordering rule and no "last changed by" marker.
   tables and question headings (`prompt_defaults.py:1282-1310`). Targeted fix: keep structure,
   output limited to `p, h2, h3, ul, li` (`ai_agent.py:4858-4864`) while also told to preserve
   GEO tables. Each button undoes the previous one's structure.
-- [ ] ✔ **C3 — Content-gap "Optimize Existing" contradicts its own prompt.** Its system prompt
+- [x] ✔ **C3 — Content-gap "Optimize Existing" contradicts its own prompt.** Its system prompt
   says "Do NOT generate a product description" while the user prompt demands a new one and
   supplies only title and metas (`content_gap_service.py:1131-1165`). Adding one secondary
   keyword can replace the whole description, with no image restore and no primary-keyword
   guard (`:1196-1248`).
-- [ ] ✔ **C4 — The local copy diverges from Shopify.** Shopify receives the image-restored
+- [x] ✔ **C4 — The local copy diverges from Shopify.** Shopify receives the image-restored
   HTML (`seo_routes.py:1251-1253`); the local mirror stores the raw version (`:1301`). The
   next rewrite works from a copy that has lost the image.
 - [ ] ✔ **C5 — No check against live content.** Only intro links read the live body before
@@ -219,12 +219,12 @@ What changed this year, from Google's own documentation and reporting on it:
 
 ### Rules to change
 
-- [ ] ✔ **S1 — Remove fabricated testimonials and statistics.** The landing prompt asks for
+- [x] ✔ **S1 — Remove fabricated testimonials and statistics.** The landing prompt asks for
   "3 realistic, detailed testimonials with roles" and "specific, credible numbers"
   (`prompt_defaults.py:1629-1630`) and renders them as attributed quotes. This is invented
   review content on a live page — a trust and legal exposure, and against every other prompt
   in the app. Highest-priority single fix.
-- [ ] ✔ **S2 — Unattended publishing with no budget.** "Schedule" writes and publishes a post
+- [x] ✔ **S2 — Unattended publishing with no budget.** "Schedule" writes and publishes a post
   nobody has to read; the publish-time keyword conflict is only logged
   (`blog_scheduler.py:88-104`). News auto-batch publishes any number at once. With 105
   articles in July and half of all articles earning no impressions, this is the store's main
@@ -254,7 +254,7 @@ What changed this year, from Google's own documentation and reporting on it:
   then falls to about 68 when it earns its first ones. The UI never explains the weights.
 - [ ] ~ **S11 — Internal-link counters only match relative links** (`blog_seo_analyzer.py:82`),
   so absolute links to your own domain count as zero.
-- [ ] ~ **S12 — Feed readiness may not apply to this store.** Google Shopping does not accept
+- [x] ~ **S12 — Feed readiness may not apply to this store.** *(Confirmed by owner; hidden behind `features.feed_readiness`, default off.)* Google Shopping does not accept
   tobacco products, and AI shopping channels are likely to follow. Confirm eligibility before
   investing further in the feed score.
 
@@ -279,7 +279,7 @@ decay, and similarity between generated articles.
   both used.
 - [ ] **H4 — Too many verbs for one action.** Apply / Push / Publish to Shopify; AI Optimize /
   Optimize with AI / Get AI Recommendations; Fix / Enhance / Rewrite / Generate Fix.
-- [ ] **H5 — Live writes without a confirmation step** in Duplicates, Content Gaps, GSC
+- [x] **H5 — Live writes without a confirmation step** *(Done for writes with no per-row preview: content-gap publish, bulk cannibalization fix, apply-all steps. Single applies of a visible, editable value keep their one-click button.)* in Duplicates, Content Gaps, GSC
   cannibalization (including bulk) and Keyword Strategy "apply all".
 - [ ] **H6 — Two store selectors on eight pages**; GSC ignores the global one.
 - [ ] **H7 — Navigation does not match tasks.** Keyword Strategy and Content Gaps are action

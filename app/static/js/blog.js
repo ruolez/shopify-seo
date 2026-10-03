@@ -3794,7 +3794,7 @@ async function scheduleTopicSuggestion(id) {
         });
         s.status = "scheduled";
         renderTopicRuns();
-        showToast(`Scheduled for ${new Date(res.scheduled_for).toLocaleString()} — writing the article now`, "success");
+        showToast(`Queued for ${new Date(res.scheduled_for).toLocaleString()} — writing the draft now. Approve it in the Scheduled tab before it publishes.`, "success");
         // Show the work happening: the Scheduled tab live-refreshes the row
         // through Researching… → Outlining… → Writing… → Image… → Ready.
         const schedTab = document.querySelector('.tab[data-tab="scheduled"]');
@@ -3806,7 +3806,8 @@ async function scheduleTopicSuggestion(id) {
 
 function scheduledPostChip(row) {
     const s = row.status;
-    if (s === "scheduled") return `<span class="badge" style="background: var(--success); color: #fff;">Ready</span>`;
+    if (s === "scheduled" && !row.reviewed_at) return `<span class="badge" style="background: var(--warning); color: #000;" title="Preview it, then approve. It will not publish until you do.">Needs review</span>`;
+    if (s === "scheduled") return `<span class="badge" style="background: var(--success); color: #fff;">Approved</span>`;
     if (s === "failed") return `<span class="badge" style="background: var(--error); color: #fff;" title="${escapeAttr(row.error || "")}">Failed</span> <span style="font-size:12px;color:var(--error);">${escapeHtml(row.error || "")}</span>`;
     return `<span class="badge" style="background: var(--primary); color: #fff;">${escapeHtml(SCHEDULED_STAGES[s] || "Working…")}</span>`;
 }
@@ -3825,7 +3826,7 @@ async function loadScheduledPosts() {
     }
     scheduledPosts = rows;
     if (!rows.length) {
-        container.innerHTML = `<div class="card"><p style="color:var(--on-surface-secondary);">Nothing scheduled. Approve a topic with “Schedule” in the Create Post tab and it will be written and queued automatically.</p></div>`;
+        container.innerHTML = `<div class="card"><p style="color:var(--on-surface-secondary);">Nothing queued. Use “Schedule” on a topic in the Create Post tab — the draft is written and lands here for your review before it publishes.</p></div>`;
         return;
     }
     const body = rows.map((row, i) => {
@@ -3843,6 +3844,9 @@ async function loadScheduledPosts() {
                 <button class="btn btn-secondary btn-sm" onclick="previewScheduledPost(${i})" ${canAct ? "" : "disabled"}>
                     <span class="material-symbols-rounded">visibility</span> Preview
                 </button>
+                ${row.status === "scheduled" ? (row.reviewed_at
+                    ? `<button class="btn btn-secondary btn-sm" style="margin-left:6px;" title="Put back on hold" onclick="approveScheduledPost(${i}, false, this)"><span class="material-symbols-rounded">undo</span> Unapprove</button>`
+                    : `<button class="btn btn-primary btn-sm" style="margin-left:6px;" title="Allow this post to publish at its scheduled time" onclick="approveScheduledPost(${i}, true, this)"><span class="material-symbols-rounded">check</span> Approve</button>`) : ""}
                 <button class="btn btn-secondary btn-sm" style="margin-left:6px;" onclick="publishBlogNow(${i}, this)" ${canAct ? "" : "disabled"}>
                     <span class="material-symbols-rounded">publish</span> ${row.status === "failed" ? "Retry now" : "Publish now"}
                 </button>
@@ -3863,6 +3867,21 @@ async function loadScheduledPosts() {
     if (transient && panel && panel.classList.contains("active")) {
         scheduledPostsTimer = setTimeout(loadScheduledPosts, 5000);
     }
+}
+
+async function approveScheduledPost(index, approved, btn) {
+    const row = scheduledPosts[index];
+    if (!row) return;
+    if (btn) btn.disabled = true;
+    try {
+        const res = await apiRequest(`/api/blog/scheduled/${row.id}/approve`, { method: "POST", body: { approved } });
+        showToast(approved
+            ? `Approved — publishes ${new Date(res.scheduled_for).toLocaleString()}.`
+            : "Back on hold — it will not publish until approved.", "success");
+    } catch (e) {
+        showToast(`Could not update approval: ${e.message}`, "error");
+    }
+    loadScheduledPosts();
 }
 
 async function rescheduleBlogPost(index) {

@@ -276,10 +276,10 @@ function renderBatchList() {
     const ready = batchItems.filter((i) => i.ok).length;
     const btn = document.getElementById("news-batch-btn");
     btn.disabled = ready === 0;
-    btn.querySelector("#news-batch-label").textContent = `Auto-Publish ${ready} article${ready === 1 ? "" : "s"}`;
+    btn.querySelector("#news-batch-label").textContent = `Queue ${ready} article${ready === 1 ? "" : "s"} at cadence`;
     const schedBtn = document.getElementById("news-schedule-btn");
     schedBtn.disabled = ready === 0;
-    schedBtn.querySelector("#news-schedule-label").textContent = `Schedule ${ready} article${ready === 1 ? "" : "s"}`;
+    schedBtn.querySelector("#news-schedule-label").textContent = `Schedule ${ready} at chosen dates`;
 }
 
 async function startBatch() {
@@ -397,7 +397,7 @@ function pollBatch() {
         if (done >= tracked.length) {
             const parts = [];
             if (published) parts.push(`${published} published`);
-            if (scheduled) parts.push(`${scheduled} scheduled`);
+            if (scheduled) parts.push(`${scheduled} queued for review (Scheduled tab)`);
             const failed = tracked.length - published - scheduled;
             if (failed) parts.push(`${failed} failed`);
             status.innerHTML = `<p style="color: var(--success);">Done — ${parts.join(", ")}.</p>`;
@@ -532,7 +532,7 @@ function startNews() {
 function updateStartButton() {
     const auto = document.getElementById("news-auto");
     const label = document.getElementById("news-start-label");
-    if (label) label.textContent = auto && auto.checked ? "Auto-Publish" : "Analyze & Enhance";
+    if (label) label.textContent = auto && auto.checked ? "Prepare & Queue" : "Analyze & Enhance";
 }
 
 // ── Auto mode (analyze → images → links → publish) ───────────────
@@ -555,7 +555,7 @@ async function autoPublish() {
 
     const btn = typeof event !== "undefined" && event && event.target instanceof Element ? event.target.closest("button") : null;
     return guardButton(btn, async () => {
-        status.innerHTML = `<div class="spinner" style="width:20px;height:20px;border-width:2px;"></div> Starting auto-publish…`;
+        status.innerHTML = `<div class="spinner" style="width:20px;height:20px;border-width:2px;"></div> Preparing draft…`;
         try {
             const res = await apiRequest("/api/news/auto", {
                 method: "POST",
@@ -599,8 +599,14 @@ function pollAutoSession(sessionId, status) {
             loadNewsArticles();
             return;
         }
+        if (session.status === "scheduled") {
+            const when = session.scheduled_for ? new Date(session.scheduled_for).toLocaleString() : "the next open slot";
+            status.innerHTML = `<p style="color: var(--success);">Draft prepared and queued for ${escapeHtml(when)}. Review and approve it in the Scheduled tab — it will not publish until you do.</p>`;
+            showToast("Draft prepared — waiting for your review.", "success");
+            return;
+        }
         if (session.status === "failed") {
-            status.innerHTML = `<p style="color: var(--error);">Auto-publish failed: ${escapeHtml(session.error || "Unknown error")}</p>`;
+            status.innerHTML = `<p style="color: var(--error);">Preparing the draft failed: ${escapeHtml(session.error || "Unknown error")}</p>`;
             return;
         }
         const label = AUTO_STAGES[session.status] || "Working…";
@@ -889,7 +895,8 @@ function scheduledTitle(row) {
 
 function scheduledChip(row) {
     const s = row.status;
-    if (s === "scheduled") return `<span class="news-badge news-badge--ok">Ready</span>`;
+    if (s === "scheduled" && !row.reviewed_at) return `<span class="news-badge news-badge--pending" title="Preview it, then approve. It will not publish until you do.">Needs review</span>`;
+    if (s === "scheduled") return `<span class="news-badge news-badge--ok">Approved</span>`;
     if (s === "failed") return `<span class="news-badge news-badge--fail" title="${escapeAttr(row.error || "")}">Failed</span> <span style="font-size:12px;color:var(--error);">${escapeHtml(row.error || "")}</span>`;
     if (s === "auto_publishing") return `<span class="news-badge news-badge--pending">Publishing…</span>`;
     return `<span class="news-badge news-badge--pending">${escapeHtml(AUTO_STAGES[s] || "Preparing…")}</span>`;
@@ -908,7 +915,7 @@ async function loadScheduledSessions() {
     }
     scheduledSessions = rows;
     if (!rows.length) {
-        container.innerHTML = `<div class="card"><p style="color:var(--on-surface-secondary);">Nothing scheduled. Upload several .md files in the “Create News” tab and pick a date/time for each.</p></div>`;
+        container.innerHTML = `<div class="card"><p style="color:var(--on-surface-secondary);">Nothing queued. Prepare an article in the “Create News” tab — it lands here for your review before it publishes.</p></div>`;
         return;
     }
     const body = rows.map((row, i) => {
@@ -922,7 +929,13 @@ async function loadScheduledSessions() {
             <td style="white-space:nowrap;">${whenInput}</td>
             <td>${scheduledChip(row)}</td>
             <td style="white-space:nowrap;">
-                <button class="btn btn-secondary btn-sm" onclick="publishScheduledNow(${i}, this)" ${canAct ? "" : "disabled"}>
+                <button class="btn btn-secondary btn-sm" onclick="previewScheduledSession(${i})" ${canAct ? "" : "disabled"}>
+                    <span class="material-symbols-rounded">visibility</span> Preview
+                </button>
+                ${row.status === "scheduled" ? (row.reviewed_at
+                    ? `<button class="btn btn-secondary btn-sm" style="margin-left:6px;" title="Put back on hold" onclick="approveScheduledSession(${i}, false, this)"><span class="material-symbols-rounded">undo</span> Unapprove</button>`
+                    : `<button class="btn btn-primary btn-sm" style="margin-left:6px;" title="Allow this article to publish at its scheduled time" onclick="approveScheduledSession(${i}, true, this)"><span class="material-symbols-rounded">check</span> Approve</button>`) : ""}
+                <button class="btn btn-secondary btn-sm" style="margin-left:6px;" onclick="publishScheduledNow(${i}, this)" ${canAct ? "" : "disabled"}>
                     <span class="material-symbols-rounded">publish</span> ${row.status === "failed" ? "Retry now" : "Publish now"}
                 </button>
                 <button class="btn btn-secondary btn-sm" style="margin-left:6px;color:var(--error);" title="Cancel scheduled article" onclick="cancelScheduled(${i}, this)" ${canAct || row.status === "auto_queued" ? "" : "disabled"}>
@@ -960,6 +973,42 @@ async function rescheduleSession(index) {
     } catch (e) {
         showToast(`Reschedule failed: ${e.message}`, "error");
     }
+}
+
+async function approveScheduledSession(index, approved, btn) {
+    const row = scheduledSessions[index];
+    if (!row) return;
+    if (btn) btn.disabled = true;
+    try {
+        const res = await apiRequest(`/api/news/scheduled/${row.id}/approve`, { method: "POST", body: { approved } });
+        showToast(approved
+            ? `Approved — publishes ${new Date(res.scheduled_for).toLocaleString()}.`
+            : "Back on hold — it will not publish until approved.", "success");
+    } catch (e) {
+        showToast(`Could not update approval: ${e.message}`, "error");
+    }
+    loadScheduledSessions();
+}
+
+async function previewScheduledSession(index) {
+    const row = scheduledSessions[index];
+    if (!row) return;
+    let s;
+    try {
+        s = await apiRequest(`/api/news/session/${row.id}`);
+    } catch (e) {
+        return showToast(e.message, "error");
+    }
+    const art = s.edited_result || s.analyze_result || {};
+    let html = "";
+    if (art.meta_title) html += `<p style="font-size:13px;"><strong>Meta title:</strong> ${escapeHtml(art.meta_title)}</p>`;
+    if (art.meta_description) html += `<p style="font-size:13px;"><strong>Meta description:</strong> ${escapeHtml(art.meta_description)}</p>`;
+    if (art.summary) html += `<p style="font-size:13px;"><strong>Summary:</strong> ${escapeHtml(art.summary)}</p>`;
+    if (s.hero_image_url) html += `<img src="${escapeAttr(s.hero_image_url)}" alt="" style="max-width:320px;border-radius:8px;margin:8px 0;">`;
+    html += art.body_html
+        ? `<div style="margin-top:12px;">${art.body_html}</div>`
+        : `<p style="color:var(--on-surface-secondary);">Article not prepared yet.</p>`;
+    UIModal.open({ title: escapeHtml(art.headline || scheduledTitle(row)), bodyHtml: html, size: "lg" });
 }
 
 async function publishScheduledNow(index, btn) {
