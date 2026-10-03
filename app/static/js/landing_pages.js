@@ -154,7 +154,7 @@
 
         let rows = '';
         for (const page of pages) {
-            const scoreColor = page.seo_score >= 70 ? 'var(--success)' : page.seo_score >= 40 ? 'var(--warning)' : 'var(--error)';
+            const pageScoreColor = scoreColor(page.seo_score);
             const badge = page.is_homepage ? '<span class="badge badge-primary" style="margin-left: 8px;">Homepage</span>' : '';
             const statusBadge = page.is_published
                 ? '<span class="badge badge-success">Published</span>'
@@ -166,10 +166,10 @@
                     <div style="font-size: 12px; color: var(--on-surface-secondary);">/${escapeHtml(page.handle || '')}</div>
                 </td>
                 <td>
-                    <div class="seo-score-mini" style="--color: ${scoreColor};">
+                    <div class="seo-score-mini" style="--color: ${pageScoreColor};">
                         <svg width="36" height="36" viewBox="0 0 36 36">
                             <circle cx="18" cy="18" r="15.9" fill="none" stroke="var(--outline)" stroke-width="3"/>
-                            <circle cx="18" cy="18" r="15.9" fill="none" stroke="${scoreColor}" stroke-width="3"
+                            <circle cx="18" cy="18" r="15.9" fill="none" stroke="${pageScoreColor}" stroke-width="3"
                                 stroke-dasharray="${page.seo_score} ${100 - page.seo_score}"
                                 stroke-dashoffset="25" stroke-linecap="round"/>
                         </svg>
@@ -245,7 +245,7 @@
         const scoreEl = document.getElementById('seo-score-value');
         const ringEl = document.getElementById('seo-score-ring');
         scoreEl.textContent = result.score;
-        const color = result.score >= 70 ? '#16a34a' : result.score >= 40 ? '#d97706' : '#dc2626';
+        const color = scoreColor(result.score);
         ringEl.style.setProperty('--score', result.score);
         ringEl.style.setProperty('--color', color);
 

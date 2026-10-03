@@ -1692,6 +1692,16 @@ def _get_ai_config():
 DEFAULT_TARGET_WORD_COUNT = 500
 
 
+MAX_TARGET_WORD_COUNT = 700
+
+
+def _target_word_count(competitor_avg):
+    """Length to aim for: roughly what ranking pages use, within sane bounds.
+    Not "more than competitors" — length is not a ranking factor, and asking
+    for more words gets padding."""
+    return max(DEFAULT_TARGET_WORD_COUNT, min(int(competitor_avg), MAX_TARGET_WORD_COUNT))
+
+
 def _existing_description_part(current_html):
     return existing_description_block(
         current_html, get_setting("prompts.preserve_existing", DEFAULTS["prompts.preserve_existing"]))
@@ -2429,8 +2439,7 @@ def _generate_description(client, config, main_result, serp_context, serp_benchm
         target_word_count = DEFAULT_TARGET_WORD_COUNT
         if serp_benchmark and serp_benchmark.get("avg_word_count"):
             competitor_avg = serp_benchmark["avg_word_count"]
-            # Always aim to exceed competitors by ~20%, never go below our default
-            target_word_count = max(int(competitor_avg * 1.2), DEFAULT_TARGET_WORD_COUNT)
+            target_word_count = _target_word_count(competitor_avg)
 
         logger.info(
             "Description generation starting — target: %d words, has_serp: %s",
@@ -2603,7 +2612,7 @@ def _generate_collection_description(client, config, main_result, serp_context, 
         target_word_count = DEFAULT_TARGET_WORD_COUNT
         if serp_benchmark and serp_benchmark.get("avg_word_count"):
             competitor_avg = serp_benchmark["avg_word_count"]
-            target_word_count = max(int(competitor_avg * 1.2), DEFAULT_TARGET_WORD_COUNT)
+            target_word_count = _target_word_count(competitor_avg)
 
         logger.info(
             "Collection description generation starting — target: %d words",
@@ -2777,7 +2786,7 @@ def _generate_brand_collection_description(client, config, main_result, serp_con
         target_word_count = DEFAULT_TARGET_WORD_COUNT
         if serp_benchmark and serp_benchmark.get("avg_word_count"):
             competitor_avg = serp_benchmark["avg_word_count"]
-            target_word_count = max(int(competitor_avg * 1.2), DEFAULT_TARGET_WORD_COUNT)
+            target_word_count = _target_word_count(competitor_avg)
 
         logger.info(
             "Brand collection description generation starting — target: %d words",

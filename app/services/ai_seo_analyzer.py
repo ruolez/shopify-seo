@@ -21,17 +21,15 @@ from app.settings_manager import get_setting
 from app.prompt_defaults import DEFAULTS
 
 
-# AI crawler user-agents that answer engines use to fetch source content.
+# Crawlers that fetch pages to answer questions. Training-only tokens
+# (Google-Extended, CCBot, Applebot-Extended, anthropic-ai) are left out:
+# blocking them does not affect appearing in any search or answer engine.
 AI_BOTS = [
     "GPTBot",
     "ChatGPT-User",
     "OAI-SearchBot",
     "ClaudeBot",
-    "anthropic-ai",
     "PerplexityBot",
-    "Google-Extended",
-    "CCBot",
-    "Applebot-Extended",
 ]
 
 _MEASURE_RE = re.compile(

@@ -526,7 +526,9 @@ function renderOpportunitiesTable() {
     document.getElementById("gsc-opportunities-tbody").innerHTML = sortedData("opportunities").map(r => `
         <tr>
             <td style="max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="${escapeHtml(r.page)}">${shortenUrl(r.page)}</td>
-            <td style="max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${escapeHtml(r.query)}</td>
+            <td style="max-width: 190px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${escapeHtml(r.query)} ${r.confirmed
+                ? '<span class="badge badge-warning" title="On page one with enough impressions to be sure the snippet is underperforming. These are the rows Home queues.">Confirmed</span>'
+                : '<span class="badge" title="Early signal: not enough impressions yet, or not on page one, to be sure the snippet is the problem.">Watch</span>'}</td>
             <td>${Math.round(r.impressions).toLocaleString()}</td>
             <td style="color: var(--error);">${(r.ctr * 100).toFixed(1)}%</td>
             <td>${positionBadge(r.position)}</td>

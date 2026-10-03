@@ -30,9 +30,9 @@ def analyze_article_seo(article):
 
     # Body Word Count
     wc = thresholds.get("word_count", {})
-    wc_excellent = wc.get("excellent", 1500)
-    wc_good = wc.get("good", 1000)
-    wc_short = wc.get("short", 500)
+    wc_excellent = wc.get("excellent", 600)
+    wc_good = wc.get("good", 400)
+    wc_short = wc.get("short", 200)
     wc_very_short = wc.get("very_short", 1)
 
     body = article.get("body") or ""
@@ -40,16 +40,16 @@ def analyze_article_seo(article):
     word_count = len(text_only.split())
     if word_count >= wc_excellent:
         scores["word_count"] = 100
-        details["word_count"] = f"Excellent length ({word_count} words)"
+        details["word_count"] = f"Enough to cover the topic ({word_count} words)"
     elif word_count >= wc_good:
         scores["word_count"] = 60
-        details["word_count"] = f"Good length ({word_count} words), aim for {wc_excellent}+"
+        details["word_count"] = f"On the short side ({word_count} words) — check the topic is fully covered"
     elif word_count >= wc_short:
         scores["word_count"] = 30
-        details["word_count"] = f"Short ({word_count} words), aim for {wc_excellent}+"
+        details["word_count"] = f"Thin ({word_count} words) — likely missing detail a reader needs"
     elif word_count >= wc_very_short:
         scores["word_count"] = 10
-        details["word_count"] = f"Very short ({word_count} words), aim for {wc_excellent}+"
+        details["word_count"] = f"Very thin ({word_count} words)"
     else:
         scores["word_count"] = 0
         details["word_count"] = "No content"
@@ -135,10 +135,17 @@ def analyze_article_seo(article):
         scores["summary"] = 0
         details["summary"] = "Missing summary/excerpt"
 
+    # Product News is rewritten from a source, not written to a length — it
+    # is as long as the story is.
+    if article.get("article_type") == "news":
+        scores.pop("word_count", None)
+
     weights = rules.get("weights", {})
-    overall = sum(scores[k] * weights.get(k, 0) for k in scores)
+    scored = [k for k in scores if weights.get(k, 0) > 0]
+    total_weight = sum(weights[k] for k in scored)
+    overall = sum(scores[k] * weights[k] for k in scored) / total_weight if total_weight else 0
 
     return {
         "score": round(overall),
-        "breakdown": {k: {"score": scores[k], "detail": details[k]} for k in scores},
+        "breakdown": {k: {"score": scores[k], "detail": details[k]} for k in scored},
     }

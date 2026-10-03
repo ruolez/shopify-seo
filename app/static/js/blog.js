@@ -210,9 +210,7 @@ function formatOptimizedDate(dateStr) {
 
 function getScoreBarMini(score) {
     const s = score || 0;
-    let color = "#ef4444";
-    if (s >= 70) color = "#22c55e";
-    else if (s >= 40) color = "#eab308";
+    const color = scoreColor(s);
     return `<span class="score-bar-mini"><span class="score-bar-mini-fill" style="width:${s}%;background:${color};"></span></span>`;
 }
 

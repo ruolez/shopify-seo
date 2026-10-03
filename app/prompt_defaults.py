@@ -76,7 +76,7 @@ DEFAULTS = {
         "You are an expert e-commerce SEO copywriter. Your ONLY task is to write a "
         "comprehensive, SEO-optimized product description in valid HTML.\n\n"
         "REQUIREMENTS:\n"
-        "- Target word count: approximately {target_word_count} words (exceed competitor average for better rankings)\n"
+        "- Target word count: approximately {target_word_count} words\n"
         "- Output format: valid HTML using <p>, <h2>, <h3>, <ul>, <li>, <strong>, <em>, <a> tags\n"
         "- Do NOT include <h1> tags (Shopify uses the product title as H1)\n"
         "- Do NOT wrap output in ```html code fences or JSON — return raw HTML only\n"
@@ -144,7 +144,7 @@ DEFAULTS = {
         "Replace vague superlatives with specific descriptors: product types, ingredients, use cases, brands, and variety. "
         "Sound like a knowledgeable store owner writing helpful content, not a marketing brochure.\n\n"
         "REQUIREMENTS:\n"
-        "- Target word count: approximately {target_word_count} words (exceed competitor average for better rankings)\n"
+        "- Target word count: approximately {target_word_count} words\n"
         "- Output format: valid HTML using <p>, <h2>, <h3>, <ul>, <li>, <strong>, <em>, <a> tags\n"
         "- Do NOT include <h1> tags (Shopify uses the collection title as H1)\n"
         "- Do NOT wrap output in ```html code fences or JSON — return raw HTML only\n"
@@ -471,7 +471,7 @@ DEFAULTS = {
         "REQUIREMENTS:\n"
         "- Improve heading structure (H2/H3 hierarchy)\n"
         "- Naturally incorporate internal links to products, collections, and other articles\n"
-        "- PRIMARY keyword: use it naturally in the first paragraph, in 2-3 H2 headings, and in the conclusion\n"
+        "- PRIMARY keyword: use it naturally in the first paragraph and wherever it fits; never force it into headings or repeat it to hit a count\n"
         "- SECONDARY keywords: cover related terms and synonyms naturally; never force repetition\n"
         "- Maintain the article's original topic and information\n"
         "- Use <p>, <h2>, <h3>, <ul>, <li>, <strong>, <em>, <a> tags\n"
@@ -703,7 +703,7 @@ DEFAULTS = {
         "KEYWORD STRATEGY:\n"
         "- The suggested title and meta title MUST include the primary keyword\n"
         "- The meta description MUST include the primary keyword\n"
-        "- Assign the primary keyword to the intro and 2-3 major outline sections\n"
+        "- Assign the primary keyword to the intro; use it in a section heading only where it reads naturally\n"
         "- Distribute secondary keywords across remaining sections\n\n"
         "Return JSON with:\n"
         "- suggested_title (string): Article title in the {title_style} style\n"
@@ -722,7 +722,7 @@ DEFAULTS = {
         "- Do NOT include <h1> tags\n"
         "- Do NOT wrap output in code fences or JSON — this is for the body_html field only\n"
         "- Do NOT include word counts, notes, or meta-commentary in the output\n"
-        "- PRIMARY KEYWORD: must appear naturally in the first paragraph, in 2-3 H2 headings, and in the conclusion\n"
+        "- PRIMARY KEYWORD: must appear naturally in the first paragraph; use it elsewhere only where it fits — never force it into headings or repeat it to hit a count\n"
         "- OPENING PARAGRAPH: answer the reader's query in sentence 1 (no scene-setting); when an INTRO block names "
         "a collection, link it in sentence 2 or 3 exactly as instructed\n"
         "- SECONDARY KEYWORDS: cover related terms and synonyms across sections; never force repetition\n"
@@ -750,7 +750,7 @@ DEFAULTS = {
         "KEYWORD STRATEGY:\n"
         "- The suggested title and meta title MUST include the primary keyword\n"
         "- The meta description MUST include the primary keyword\n"
-        "- Assign the primary keyword to the intro and 2-3 major outline sections\n"
+        "- Assign the primary keyword to the intro; use it in a section heading only where it reads naturally\n"
         "- Distribute secondary keywords across remaining sections\n"
         "- Phrase 2-3 H2 headings as the questions people actually search (they win snippets and AI citations)\n\n"
         "VISUAL STRUCTURE PLAN (readers skim — every article needs visual rhythm):\n"
@@ -807,7 +807,7 @@ DEFAULTS = {
         "<section>, <div>, <span>. No inline styles, no <img>, no <h1>, no <script>.\n"
         "- Do NOT wrap output in code fences or JSON — this is for the body_html field only\n"
         "- Do NOT include word counts, notes, or meta-commentary in the output\n"
-        "- PRIMARY KEYWORD: must appear naturally in the first paragraph, in 2-3 H2 headings, and in the conclusion\n"
+        "- PRIMARY KEYWORD: must appear naturally in the first paragraph; use it elsewhere only where it fits — never force it into headings or repeat it to hit a count\n"
         "- OPENING PARAGRAPH: answer the reader's query in sentence 1 (no scene-setting); when an INTRO block names "
         "a collection, link it in sentence 2 or 3 exactly as instructed\n"
         "- SECONDARY KEYWORDS: cover related terms and synonyms across sections; never force repetition\n"
@@ -984,7 +984,7 @@ DEFAULTS = {
         "Replace vague superlatives with specific descriptors: product types, use cases, brand strengths, and variety. "
         "Sound like a knowledgeable store owner writing helpful content, not a marketing brochure.\n\n"
         "REQUIREMENTS:\n"
-        "- Target word count: approximately {target_word_count} words (exceed competitor average for better rankings)\n"
+        "- Target word count: approximately {target_word_count} words\n"
         "- Output format: valid HTML using <p>, <h2>, <h3>, <ul>, <li>, <strong>, <em>, <a> tags\n"
         "- Do NOT include <h1> tags (Shopify uses the collection title as H1)\n"
         "- Do NOT wrap output in ```html code fences or JSON — return raw HTML only\n"
@@ -1276,14 +1276,14 @@ DEFAULTS = {
     "rules.product_seo": {
         "weights": {
             "meta_title": 0.30,
-            "meta_description": 0.30,
-            "description": 0.25,
-            "image_alt": 0.15,
+            "meta_description": 0.15,
+            "description": 0.35,
+            "image_alt": 0.20,
         },
         "thresholds": {
             "meta_title": {"good": [50, 60], "ok": [30, 70], "poor_min": 1},
             "meta_description": {"good": [120, 160], "ok": [100, 200], "poor_min": 1},
-            "description_words": {"good": 300, "ok": 150, "short": 50, "very_short": 1},
+            "description_words": {"good": 150, "ok": 75, "short": 30, "very_short": 1},
         },
     },
     "prompts.ai_seo_product": (
@@ -1405,11 +1405,12 @@ DEFAULTS = {
             "fact_density_per_100w": {"good": 4, "ok": 2, "min": 0.7, "bare_weight": 0.3},
             "freshness_days": {"fresh": 90, "aging": 365},
             "desired_schema": {
-                "product": ["Product", "BreadcrumbList", "FAQPage", "Organization"],
+                # FAQPage is not expected: Google retired FAQ rich results for
+                # all sites in May 2026, so its absence is not a gap.
+                "product": ["Product", "BreadcrumbList", "Organization"],
                 "collection": [
                     "CollectionPage",
                     "BreadcrumbList",
-                    "FAQPage",
                     "Organization",
                 ],
             },
@@ -1446,30 +1447,33 @@ DEFAULTS = {
     "rules.collection_seo": {
         "weights": {
             "meta_title": 0.35,
-            "meta_description": 0.35,
-            "description": 0.30,
+            "meta_description": 0.20,
+            "description": 0.45,
         },
         "thresholds": {
             "meta_title": {"good": [50, 60], "ok": [30, 70], "poor_min": 1},
             "meta_description": {"good": [120, 160], "ok": [100, 200], "poor_min": 1},
-            "description_words": {"good": 150, "ok": 75, "short": 1},
+            "description_words": {"good": 100, "ok": 50, "short": 1},
         },
     },
     "rules.article_seo": {
         "weights": {
             "meta_title": 0.15,
-            "meta_description": 0.15,
-            "word_count": 0.20,
+            "meta_description": 0.10,
+            # A thin-content floor, not a length target: Google has no
+            # preferred word count, and rewarding length rewards padding.
+            "word_count": 0.10,
             "headings": 0.15,
-            "internal_links": 0.15,
-            "image": 0.10,
-            "structure": 0.05,
-            "summary": 0.05,
+            "internal_links": 0.25,
+            "image": 0.15,
+            # Table + FAQ on every post is format for its own sake; unscored.
+            "structure": 0,
+            "summary": 0.10,
         },
         "thresholds": {
             "meta_title": {"good": [35, 46], "ok": [25, 55], "poor_min": 1},
             "meta_description": {"good": [120, 160], "ok": [100, 200], "poor_min": 1},
-            "word_count": {"excellent": 1500, "good": 1000, "short": 500, "very_short": 1},
+            "word_count": {"excellent": 600, "good": 400, "short": 200, "very_short": 1},
             "headings": {"good_h2": 2, "good_h3": 1},
             "internal_links": {"good": 3, "ok": 1},
             "image": {"inline_good": 2},
@@ -1530,7 +1534,7 @@ DEFAULTS = {
         "thresholds": {
             "keyword_stuffing_max": 4.0,
             "density_min_body_words": 50,
-            "description_words": {"good": 300, "ok": 150, "short": 50, "very_short": 1},
+            "description_words": {"good": 150, "ok": 75, "short": 30, "very_short": 1},
             "keyword_at_title_start": 5,
         },
     },
@@ -1552,7 +1556,7 @@ DEFAULTS = {
         "thresholds": {
             "keyword_stuffing_max": 4.0,
             "density_min_body_words": 50,
-            "description_words": {"good": 150, "ok": 75, "short": 25, "very_short": 1},
+            "description_words": {"good": 100, "ok": 50, "short": 25, "very_short": 1},
             "keyword_at_title_start": 5,
         },
     },

@@ -1161,16 +1161,14 @@ def get_store_insights(store_id):
             }
 
         # Cannibalization count
-        cur.execute(
-            """SELECT COUNT(*) as cnt FROM (
-                   SELECT query FROM gsc_daily_metrics
-                   WHERE store_id = %s AND date >= %s AND date <= %s
-                   GROUP BY query
-                   HAVING COUNT(DISTINCT page) >= 2 AND SUM(impressions) >= 10
-               ) sub""",
-            (store_id, date_from, date_to),
-        )
-        insights["cannibalization_count"] = cur.fetchone()["cnt"]
+        # Same detector as the Search Console tab this number links to, so
+        # the two always agree.
+        try:
+            from app.services.gsc_service import get_cannibalization
+            insights["cannibalization_count"] = len(get_cannibalization(store_id, date_from, date_to))
+        except Exception:
+            logger.exception("Cannibalization count failed for store %s", store_id)
+            insights["cannibalization_count"] = 0
 
         # Competitor alerts
         cur.execute(

@@ -705,7 +705,11 @@ def get_opportunities(store_id, date_from, date_to, limit=200, device=None, coun
     """CTR opportunities — position-aware: a query underperforms when its CTR
     is below half the expected CTR for its position (store-calibrated curve),
     not below a flat threshold that ignores where it ranks."""
-    from app.services.ctr_benchmarks import expected_ctr_for_position, get_expected_ctr_curve
+    from app.services.ctr_benchmarks import (
+        expected_ctr_for_position,
+        get_expected_ctr_curve,
+        is_ctr_underperformer,
+    )
 
     curve = get_expected_ctr_curve(store_id)
     where, params = _build_filters(store_id, date_from, date_to, device, country)
@@ -743,10 +747,13 @@ def get_opportunities(store_id, date_from, date_to, limit=200, device=None, coun
                 "ctr": round(ctr, 4),
                 "expected_ctr": round(expected, 4),
                 "position": round(position, 1),
+                # The app-wide definition (what Home queues). Rows without it
+                # are early signals: too few impressions or not on page one.
+                "confirmed": is_ctr_underperformer(position, ctr, impressions, curve),
                 "potential_clicks": round(max(potential_clicks, 0), 0),
                 "action": "Improve meta title & description" if position <= 10 else "Improve rankings first",
             })
-    results.sort(key=lambda x: x["potential_clicks"], reverse=True)
+    results.sort(key=lambda x: (x["confirmed"], x["potential_clicks"]), reverse=True)
     results = results[:limit]
     _attach_matched_items(store_id, results)
     return results

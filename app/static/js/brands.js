@@ -122,7 +122,7 @@ function renderBrandKpis() {
     const avgScore = created.length
         ? Math.round(created.reduce((sum, r) => sum + (r.score || 0), 0) / created.length)
         : 0;
-    const scoreColor = avgScore >= 70 ? "var(--success)" : avgScore >= 40 ? "var(--warning)" : "var(--error)";
+    const avgScoreColor = scoreColor(avgScore);
 
     document.getElementById("brands-kpis").innerHTML = `
         <div class="stat-card">
@@ -136,7 +136,7 @@ function renderBrandKpis() {
             <div class="stat-sub">${missing ? `${missing} missing` : "all created"}</div>
         </div>
         <div class="stat-card stat-card-clickable" onclick="setBrandFilter('lowseo')">
-            <div class="stat-value" style="color:${created.length ? scoreColor : "var(--on-surface-secondary)"};">${created.length ? avgScore : "\u2014"}</div>
+            <div class="stat-value" style="color:${created.length ? avgScoreColor : "var(--on-surface-secondary)"};">${created.length ? avgScore : "\u2014"}</div>
             <div class="stat-label">Avg SEO Score</div>
             <div class="stat-sub">${lowSeo} below 70</div>
         </div>
@@ -283,7 +283,7 @@ function renderBrandTable() {
             html += `<td><span class="badge badge-success">Created</span></td>`;
 
             const s = r.score || 0;
-            const color = s >= 70 ? "var(--success)" : s >= 40 ? "var(--warning)" : "var(--error)";
+            const color = scoreColor(s);
             html += `<td><span class="score-inline"><span style="font-weight:600;font-size:13px;color:${color};min-width:20px;">${s}</span><span class="score-bar-mini"><span class="score-bar-mini-fill" style="width:${s}%;background:${color};"></span></span></span></td>`;
 
             html += `<td><div class="row-actions">`;
@@ -846,7 +846,7 @@ async function openBrandSeoModal(gcId) {
         let html = "";
 
         // Info grid — same pattern as viewCollection
-        const scoreBadgeColor = data.seo_score >= 70 ? "#16a34a" : data.seo_score >= 40 ? "#d97706" : "#dc2626";
+        const scoreBadgeColor = scoreColor(data.seo_score);
         html += `<div class="preview-info-grid">
             <div class="info-item"><span class="info-label">SEO Score</span><span class="info-value" style="font-weight:700;color:${scoreBadgeColor}">${data.seo_score} / 100</span></div>
             <div class="info-item"><span class="info-label">Products</span><span class="info-value">${data.products_count || 0}</span></div>
