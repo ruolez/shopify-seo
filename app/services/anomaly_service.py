@@ -149,9 +149,38 @@ def scan_keyword_dropouts(store_id):
     return emitted
 
 
+def _close_gaps_covered_by_articles(store_id):
+    """A blog-type gap is addressed once a published article targets its
+    keyword — it need not rank yet to stop being "content we haven't written"."""
+    try:
+        from app.services.article_keywords import covered_by_articles
+        from app.services.keyword_identity import variant_key
+
+        covered = covered_by_articles(store_id)
+        if not covered:
+            return
+        with db.get_cursor() as cur:
+            cur.execute(
+                """SELECT id, keyword FROM content_gaps
+                   WHERE store_id = %s AND status IN ('new', 'analyzed', 'briefed')
+                     AND suggested_content_type IN ('blog', 'article')""",
+                (store_id,),
+            )
+            ids = [g["id"] for g in cur.fetchall() if variant_key(g["keyword"]) in covered]
+            if ids:
+                cur.execute(
+                    "UPDATE content_gaps SET status = 'addressed', addressed_at = NOW(), updated_at = NOW() "
+                    "WHERE id = ANY(%s)",
+                    (ids,),
+                )
+    except Exception:
+        logger.exception("Closing article-covered gaps failed for store %s", store_id)
+
+
 def scan_gap_closures(store_id):
     """Mark content gaps addressed once their keyword actually ranks
     (Semrush <=20, or GSC weighted <=20 with real impressions)."""
+    _close_gaps_covered_by_articles(store_id)
     end = gsc_data_end_date()
     week_start = end - timedelta(days=6)
 

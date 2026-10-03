@@ -92,6 +92,7 @@ const KA_ROLE_LABEL = {
     resolved_primary: "owned by",
     assigned: "assigned to",
     mapped_primary: "mentioned on",
+    article_covers: "covered by blog post",
 };
 
 function kaHeader(state) {

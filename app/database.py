@@ -765,6 +765,10 @@ class Database:
                 EXCEPTION WHEN duplicate_column THEN NULL;
                 END $$
             """)
+            cur.execute(
+                "DO $$ BEGIN ALTER TABLE synced_articles ADD COLUMN primary_keyword VARCHAR(500); "
+                "EXCEPTION WHEN duplicate_column THEN NULL; END $$"
+            )
             # A scheduled session publishes only after a person approves it.
             for _ddl in [
                 "ALTER TABLE news_sessions ADD COLUMN reviewed_at TIMESTAMP",

@@ -1373,6 +1373,13 @@ class ShopifyClient:
             raise Exception(f"Shopify articleCreate error: {errors[0].get('message', str(errors))}")
         article = result.get("article", {})
         image = article.get("image") or {}
+        # articleCreate has no SEO fields — the meta title and description are
+        # metafields. Without this a new post went live with neither.
+        if article.get("id") and (fields.get("meta_title") or fields.get("meta_description")):
+            try:
+                self.set_article_seo(article["id"], fields.get("meta_title"), fields.get("meta_description"))
+            except Exception:
+                logger.exception("Setting SEO meta failed for new article %s", article["id"])
         return {
             "shopify_id": article.get("id", ""),
             "title": article.get("title", ""),

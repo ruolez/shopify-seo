@@ -1857,6 +1857,11 @@ def _wizard_step_publish(session, store, client, is_published=True):
             (session_id,),
         )
 
+    if is_published:
+        from app.services.article_keywords import primary_of, record_article_keyword
+
+        record_article_keyword(article_row["id"], primary_of(session.get("target_keywords")))
+
     # Auto-regenerate landing page for this blog
     if is_published:
         _regen_landing_async(session["store_id"], blog_id, client, store)

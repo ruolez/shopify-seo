@@ -435,7 +435,8 @@ def recently_optimized():
         cur.execute(
             """SELECT ce.*, ce.created_at as optimized_at
                FROM seo_change_events ce
-               WHERE ce.store_id = %s
+               WHERE ce.store_id = %s AND ce.item_type IN ('product', 'collection')
+                 AND ce.change_type <> 'revert' AND ce.reverted_at IS NULL
                ORDER BY ce.created_at DESC
                LIMIT %s""",
             (store_id, limit),

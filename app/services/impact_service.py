@@ -22,7 +22,7 @@ MIN_PRE_IMPRESSIONS = 20
 MIN_POST_DAYS = 7
 FLAT_THRESHOLD_PCT = 10
 
-_PATH_PREFIX = {"product": "products", "collection": "collections"}
+_PATH_PREFIX = {"product": "products", "collection": "collections", "article": "blogs"}
 
 
 def get_optimization_impact(store_id, days=60, limit=10):
@@ -33,6 +33,7 @@ def get_optimization_impact(store_id, days=60, limit=10):
             """SELECT id, item_type, item_id, change_type, created_at
                FROM seo_change_events
                WHERE store_id = %s AND created_at >= NOW() - make_interval(days => %s)
+                 AND change_type <> 'revert' AND reverted_at IS NULL
                ORDER BY created_at DESC""",
             (store_id, days),
         )
@@ -47,6 +48,17 @@ def get_optimization_impact(store_id, days=60, limit=10):
                     (store_id, ids),
                 )
                 meta[item_type] = {r["id"]: r for r in cur.fetchall()}
+        article_ids = [e["item_id"] for e in events if e["item_type"] == "article"]
+        if article_ids:
+            # An article's path is /blogs/<blog>/<handle>; fold the blog handle
+            # into "handle" so the shared path join below needs no special case.
+            cur.execute(
+                """SELECT sa.id, sa.title, sb.handle || '/' || sa.handle AS handle
+                   FROM synced_articles sa JOIN synced_blogs sb ON sb.id = sa.blog_id
+                   WHERE sa.store_id = %s AND sa.id = ANY(%s)""",
+                (store_id, article_ids),
+            )
+            meta["article"] = {r["id"]: r for r in cur.fetchall()}
 
     summary = {"events_30d": sum(1 for e in events if (end - e["created_at"].date()).days <= 30),
                "improved": 0, "declined": 0, "collecting": 0}

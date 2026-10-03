@@ -128,6 +128,26 @@ def get_ownership_map(store_id, keyword_ids):
             for o in entry["owners"]
         ):
             entry["owners"].append(owner)
+
+    # Last resort — a published article written about the keyword. Coverage,
+    # not a claim: it fills the cell so the keyword stops reading as a gap,
+    # but never outranks or blocks a product/collection owner.
+    unowned = [k for k in keyword_ids if k not in result]
+    if unowned:
+        from app.services.article_keywords import covered_by_articles
+
+        covered = covered_by_articles(store_id)
+        if covered:
+            with db.get_cursor() as cur:
+                cur.execute("SELECT id, keyword FROM master_keywords WHERE id = ANY(%s)", (unowned,))
+                for row in cur.fetchall():
+                    article = covered.get(variant_key(row["keyword"]))
+                    if article:
+                        owner = {
+                            "role": "article_covers", "item_type": "article", "item_id": article["id"],
+                            "title": article["title"], "handle": article["handle"],
+                        }
+                        result[row["id"]] = {"owner": owner, "owners": [owner]}
     return result
 
 

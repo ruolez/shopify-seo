@@ -809,7 +809,7 @@ function renderKeywordDrawer(d) {
     // Owner
     html += '<div class="ks-drawer-section"><div class="ks-drawer-label">Owner</div>';
     if (d.owner) {
-        const roleLabels = { resolved_primary: "resolved primary", assigned: "assigned", mapped_primary: "audit primary" };
+        const roleLabels = { resolved_primary: "resolved primary", assigned: "assigned", mapped_primary: "audit primary", article_covers: "covered by a blog post" };
         html += `<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
             <span class="ks-owner-chip">
                 <span class="badge badge-${typeBadge(d.owner.item_type)}" style="font-size:10px;">${d.owner.item_type}</span>

@@ -6503,6 +6503,18 @@ def run_task(task_type, task_input, store_id=None):
             f"TOP VENDORS/BRANDS: {td_vendor_block}\n\n"
             f"EXISTING BLOG ARTICLES ({len(td_articles)} total):\n{td_article_block}\n"
         )
+        try:
+            from app.services.article_keywords import covered_by_articles
+            td_covered = sorted({a["keyword"] for a in covered_by_articles(td_store_id).values()})
+        except Exception:
+            td_covered = []
+        if td_covered:
+            td_user_prompt += (
+                "\nKEYWORDS YOUR ARTICLES ALREADY TARGET (do not propose a new article whose "
+                "primary keyword is one of these or a close variant — propose a refresh of the "
+                "existing post only if it clearly needs one):\n"
+                + "\n".join(f'- "{k}"' for k in td_covered) + "\n"
+            )
         if td_queued_block:
             td_user_prompt += (
                 "\nARTICLES ALREADY QUEUED OR IN PROGRESS (scheduled or being written, "
