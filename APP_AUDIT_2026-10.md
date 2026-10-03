@@ -375,26 +375,59 @@ and collection schema; llms.txt treated as informational; no hardcoded models.
 
 ---
 
-## Remediation status (3 Oct 2026)
+## Remediation status (3 Oct 2026, end of day)
 
 Done and committed: Phase 0 (stop the harm), Phase 1 (one apply pipeline with history and
-undo), most of Phase 2 (one vocabulary), Phase 3 core (articles first-class), Phase 4 (one
-queue, one unit), and from Phases 5–6: article Refresh, index coverage, task-based sidebar,
-page explainers.
+undo), most of Phase 2 (one vocabulary), Phase 3 (articles first-class), Phase 4 (one queue,
+one unit, verdict-based release), and from Phases 5–6: article Refresh, index coverage,
+"Nearly visible" page-two plan, near-duplicate detection, 28-day report, task-based sidebar,
+page explainers, one button wording, actions on the Search Console / Semrush / Competitors
+tables, author setting. The store was resynced and fully re-analysed under the new rules.
 
-Still open:
+### The September issue jump (open question 4)
 
-- **Phase 1:** C9 — move the remaining hardcoded prompts (Keyword Strategy steps, content-gap
-  prompts, targeted-fix description rules) into Settings.
-- **Phase 2:** D3, D6, D7 (one rules table for lengths and structure per page type); S6 deeper
-  rework of the AI-readiness score; S7 (rating source check); S8 (author setting, sources on
-  blog posts).
-- **Phase 3:** History and Performance tabs inside the article window.
-- **Phase 4:** release queue items on the impact verdict instead of a fixed 28 days.
-- **Phase 5:** page-two plan view; page-speed check; per-device CTR (desktop CTR is about a
-  third of mobile at the same position, and desktop holds most deep-position impressions);
-  near-duplicate detection; backlink import.
-- **Phase 6:** merge overlapping screens (H8), one verb set (H4), global store selector on the
-  remaining eight pages (H6), weekly plan and monthly report (H2), store goals (H1), actions
-  on the Semrush / Competitors / GSC tables (X4).
-- **Wrap-up:** full resync and re-analysis, then re-check the issue count.
+Explained. After a full resync and re-analysis there are 202 issues on 137 items. They are
+real, and of two kinds:
+
+- **New or changed content the app had not seen** — 18 pages with no meta description and 5
+  with no description (the catalogue grew from 750 to 755 products; collections had not been
+  synced since August).
+- **Keyword-alignment flags** (about 150, medium or low) — "keyword missing from meta
+  description / image alt / first 100 words". A page's resolved keyword is re-chosen as
+  Google demand data changes; when it changes, the page's existing text no longer contains
+  it and the checks re-flag. That is the mechanism behind the rise with nobody editing.
+  "Keyword missing from meta description" is now low severity (not a ranking factor).
+
+Worth doing next: stop re-flagging a page when its keyword changes to a close variant, so
+the Issues count moves only when something a person should act on changes.
+
+### What the new measurements show
+
+- **Indexing:** of the first 334 pages checked, 65 are not indexed by Google (the August
+  manual sweep found 264 of 1,187). The rest are checked nightly.
+- **Near-duplicates:** none. No two descriptions share even 35% of their text, so the
+  unindexed products are not explained by copied text within the store.
+- **Nearly visible:** 17 pages rank 4–20 with about +98 clicks a month between them, almost
+  all in articles. Collections have next to nothing in striking distance — they do not rank
+  yet, which is an authority and internal-linking problem, not a wording one.
+- **Device:** desktop click-through is about a third of mobile at the same position, and
+  desktop holds most impressions past position 20. Shown in the report; the ranking engines
+  still use blended figures.
+
+### Still open
+
+- **Page speed:** needs a Google API key (the shared free quota is exhausted and the Search
+  Console sign-in does not cover it). Not built.
+- **Backlink import** from Semrush exports. Not built.
+- **Per-device CTR** inside the ranking engines (reported only).
+- **C9:** remaining hardcoded prompts (Keyword Strategy steps, content-gap prompts,
+  targeted-fix description rules) are not yet editable in Settings.
+- **D3, D6, D7:** one rules table for lengths and structure per page type; the two "gap"
+  lists; one meaning of "low".
+- **S6, S7:** deeper rework of the AI-readiness score; rating-source check.
+- **S8:** sources block on blog posts (the author is now a setting).
+- **H1, H8:** store goals; merging the overlapping screens (keyword views, schema screens,
+  Intro Links into Interlinking).
+- **H6:** page-level store dropdowns are hidden when there is one store, not removed.
+- **Weekly plan** view (the 28-day report and the ranked queue exist; a "this week" cut does
+  not).
