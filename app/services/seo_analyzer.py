@@ -277,13 +277,15 @@ def compute_composite_score(on_page_result, search_result):
 
 
 def compute_unified_score(content_result, keyword_score, search_result):
-    """Blend the three pillars — content quality (completeness checks),
-    keyword alignment (technical_seo_analyzer score), search performance
-    (GSC/Semrush) — into one unified score.
+    """Score an item on what the owner controls and report the outcome beside it.
 
-    Missing pillars drop out and the remaining weights renormalize, so an
-    item that hasn't been keyword-analyzed (or has no search data) is never
-    dragged down by a pillar with no signal.
+    seo_score is the ON-PAGE score: content quality and keyword alignment,
+    weighted and renormalized when keyword analysis is missing. Search
+    performance (GSC/Semrush) is a result, not something an edit moves
+    directly, so it is returned as search_score and kept out of the headline
+    number — blended in, a perfect page with little traffic could never reach
+    green, and earning first impressions lowered the score. unified_score keeps
+    the three-pillar blend for ranking work by opportunity.
     """
     config = get_setting("rules.unified_scoring", DEFAULT_UNIFIED_SCORING)
     weights = config.get("weights", DEFAULT_UNIFIED_SCORING["weights"])
@@ -305,8 +307,16 @@ def compute_unified_score(content_result, keyword_score, search_result):
         unified = content_score
         effective = {"content": 1.0}
 
+    on_page_pillars = {k: v for k, v in pillars.items() if k != "search"}
+    on_page_weight = sum(weights.get(k, 0) for k in on_page_pillars)
+    on_page = (
+        sum(v * weights.get(k, 0) for k, v in on_page_pillars.items()) / on_page_weight
+        if on_page_weight > 0 else content_score
+    )
+
     return {
-        "seo_score": round(unified),
+        "seo_score": round(on_page),
+        "unified_score": round(unified),
         "content_score": content_score,
         "keyword_score": keyword_score,
         "search_score": search_score,

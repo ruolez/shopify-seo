@@ -492,7 +492,7 @@ def recently_optimized():
         unified = compute_unified_score(current_seo, kw["score"] if kw else None, search_perf)
 
         score_before = ev.get("composite_score_before") or ev.get("seo_score_before") or 0
-        score_now = unified["seo_score"]
+        score_now = unified["unified_score"]
         score_change = score_now - score_before
 
         results.append({
@@ -1221,7 +1221,7 @@ def apply_product_changes(product_id):
             scores_before = {
                 "seo": unified_before["content_score"],
                 "search": unified_before.get("search_score"),
-                "composite": unified_before["seo_score"],
+                "composite": unified_before["unified_score"],
             }
         except Exception:
             scores_before = None
@@ -1582,7 +1582,7 @@ def apply_collection_changes(collection_id):
             scores_before = {
                 "seo": unified_before["content_score"],
                 "search": unified_before.get("search_score"),
-                "composite": unified_before["seo_score"],
+                "composite": unified_before["unified_score"],
             }
         except Exception:
             scores_before = None

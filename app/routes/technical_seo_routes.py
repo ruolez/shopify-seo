@@ -735,7 +735,7 @@ def _scores_before(item_type, item):
         kw = _fetch_keyword_analysis(store_id, item_type, item["id"])
         unified = compute_unified_score(analyze_fn(dict(item)), kw["score"] if kw else None, search_before)
         return {"seo": unified["content_score"], "search": unified.get("search_score"),
-                "composite": unified["seo_score"]}
+                "composite": unified["unified_score"]}
     except Exception:
         logger.exception("Before-score computation failed for %s %s", item_type, item.get("id"))
         return None
@@ -787,7 +787,7 @@ def _record_change_event(item_type, item, fixes, change_type):
                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
                 (store_id, item_type, item["id"], change_type,
                  json.dumps(changes_map) if changes_map else None,
-                 unified["content_score"], unified.get("search_score"), unified["seo_score"]),
+                 unified["content_score"], unified.get("search_score"), unified["unified_score"]),
             )
     except Exception:
         logger.warning("Failed to record change event for %s %s", item_type, item.get("id"))

@@ -71,3 +71,14 @@ def missing_preserved(old_html, new_html):
     kept = set(_internal_paths(new_html))
     missing.extend(f"internal link {p}" for p in _internal_paths(old_html) if p not in kept)
     return missing
+
+
+def count_internal_links(html):
+    """Links to the store's own pages: relative hrefs, plus absolute hrefs to a
+    storefront path (an absolute link to your own domain is still internal)."""
+    count = 0
+    for href in _HREF_RE.findall(html or ""):
+        href = href.strip()
+        if (href.startswith("/") and not href.startswith("//")) or _INTERNAL_PATH_RE.match(href):
+            count += 1
+    return count

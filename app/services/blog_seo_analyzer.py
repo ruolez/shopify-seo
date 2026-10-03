@@ -2,6 +2,7 @@ import re
 
 from app.settings_manager import get_setting
 from app.prompt_defaults import DEFAULTS
+from app.services.content_preservation import count_internal_links
 from app.services.seo_rules import score_length
 
 _ALT_RE = re.compile(r"\balt\s*=\s*(?:\"[^\"]+\"|'[^']+')", re.IGNORECASE)
@@ -79,7 +80,7 @@ def analyze_article_seo(article):
     il_good = il.get("good", 3)
     il_ok = il.get("ok", 1)
 
-    internal_links = len(re.findall(r'<a\s[^>]*href\s*=\s*["\']/', body, re.IGNORECASE))
+    internal_links = count_internal_links(body)
     if internal_links >= il_good:
         scores["internal_links"] = 100
         details["internal_links"] = f"Good ({internal_links} internal links)"

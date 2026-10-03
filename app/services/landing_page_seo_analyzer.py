@@ -47,7 +47,8 @@ def _count_images_with_alt(html_text):
 
 
 def _count_internal_links(html_text):
-    return len(re.findall(r'<a\s[^>]*href\s*=\s*["\']/', html_text or "", re.IGNORECASE))
+    from app.services.content_preservation import count_internal_links
+    return count_internal_links(html_text)
 
 
 def _has_cta(html_text):

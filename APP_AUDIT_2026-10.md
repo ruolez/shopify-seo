@@ -118,22 +118,22 @@ Interlinking apply. There is no ordering rule and no "last changed by" marker.
 
 ### 3.2 Same concept, different definitions
 
-- [ ] ✔ **D1 — Cannibalization has six definitions.** Home count (≥10 impressions, 30 days,
+- [x] ✔ **D1 — Cannibalization has six definitions.** *(Home count now uses the Search Console detector. The priority warning, content-gap risk and ledger conflicts remain separate signals with their own names.)* Home count (≥10 impressions, 30 days,
   `dashboard_service.py:1164`), GSC page (≥3 per page, `gsc_routes.py:328`), priority warning
   (other page at position ≤10, `seo_priority_service.py:152`), content-gap risk
   (`content_gap_service.py:11-92`), Keyword Strategy report (two primaries,
   `keyword_strategy_service.py:1189`), coverage conflicts (`keyword_coverage.py:358`). The
   Home number never matches the page it links to.
-- [ ] ✔ **D2 — "CTR underperformer" has two definitions.** Home: ≥200 impressions, top 10,
+- [x] ✔ **D2 — "CTR underperformer" has two definitions.** *(One rule; GSC rows are labelled Confirmed or Watch.)* Home: ≥200 impressions, top 10,
   below 0.8× expected (`ctr_benchmarks.py:42-47`). GSC page: ≥10 impressions, any position,
   below 0.5× (`gsc_service.py:723-736`). Home links to a list that shows different rows.
 - [ ] ✔ **D3 — Two "gap" universes.** Content Gaps is built from Semrush gap rows and a title
   substring match; the Keyword Strategy matrix is built from ownership. Content Gaps checks
   ownership only at apply time (`content_gap_service.py:1090`). Home counts only the first.
-- [ ] ✔ **D4 — Score colours differ by page.** 80/50 in shared helpers (`app.js:170-199`),
+- [x] ✔ **D4 — Score colours differ by page.** 80/50 in shared helpers (`app.js:170-199`),
   70/40 in Blog, Landing Pages and Brands. In the Brands modal a 72 is green in the header and
   amber in the bars (`brands.js:849` vs `:863`).
-- [ ] ✔ **D5 — One product, several "SEO scores".** The SEO list shows the unified score;
+- [x] ✔ **D5 — One product, several "SEO scores".** *(Headline is the on-page score everywhere; search result shown beside it.)* The SEO list shows the unified score;
   Duplicates, Brands and the AI store audit show the content pillar alone; keyword coverage
   labels the keyword pillar alone as "SEO score" (`keyword_coverage.py:237`).
 - [ ] ✔ **D6 — "Low" means different things**: below 60/70/100 in the issue scanner, 50/70 in
@@ -229,13 +229,13 @@ What changed this year, from Google's own documentation and reporting on it:
   (`blog_scheduler.py:88-104`). News auto-batch publishes any number at once. With 105
   articles in July and half of all articles earning no impressions, this is the store's main
   exposure to the spam updates.
-- [ ] ✔ **S3 — Word-count ladders reward padding.** Articles need 1,500 words for full marks;
+- [x] ✔ **S3 — Word-count ladders reward padding.** Articles need 1,500 words for full marks;
   products 300; prompts say to exceed the competitor average "for better rankings". Google
   has no length preference.
-- [ ] ✔ **S4 — Blog prompts still mandate keyword repetition** ("in 2–3 H2 headings and the
+- [x] ✔ **S4 — Blog prompts still mandate keyword repetition** ("in 2–3 H2 headings and the
   conclusion", `prompt_defaults.py:467,718,803`) — the pattern removed from product prompts
   in August — and the article scorer has no stuffing check.
-- [ ] ✔ **S5 — Format for its own sake.** A table plus FAQ is scored on every article
+- [x] ✔ **S5 — Format for its own sake.** A table plus FAQ is scored on every article
   (`blog_seo_analyzer.py:114-120`); news is scored on blog rules it cannot meet.
 - [ ] ✔ **S6 — AI-readiness score rewards things with no basis.** FAQPage on every page
   (inside a 22% schema weight); outbound links and vendor-name mentions as "entity authority";
@@ -247,12 +247,12 @@ What changed this year, from Google's own documentation and reporting on it:
 - [ ] ✔ **S8 — Authorship.** Every article is authored by the organisation "A2Z"
   (`shopify_client.py:1304`); blog posts carry no sources block (news does). Weak
   experience and expertise signals on AI-written content.
-- [ ] ✔ **S9 — Meta description is over-weighted** (30–35% of the content pillar plus part of
+- [x] ✔ **S9 — Meta description is over-weighted** (30–35% of the content pillar plus part of
   the keyword pillar) for something that is not a ranking factor and is usually rewritten.
-- [ ] ✔ **S10 — The 40% search pillar is unexplained and perverse at the edge.** A perfect
+- [x] ✔ **S10 — The 40% search pillar is unexplained and perverse at the edge.** A perfect
   page with weak search data tops out at 68 (amber). A page with no impressions scores 100,
   then falls to about 68 when it earns its first ones. The UI never explains the weights.
-- [ ] ~ **S11 — Internal-link counters only match relative links** (`blog_seo_analyzer.py:82`),
+- [x] ~ **S11 — Internal-link counters only match relative links** (`blog_seo_analyzer.py:82`),
   so absolute links to your own domain count as zero.
 - [x] ~ **S12 — Feed readiness may not apply to this store.** *(Confirmed by owner; hidden behind `features.feed_readiness`, default off.)* Google Shopping does not accept
   tobacco products, and AI shopping channels are likely to follow. Confirm eligibility before

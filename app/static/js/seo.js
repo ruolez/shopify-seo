@@ -719,7 +719,7 @@ function renderProductsTable(container, products) {
     const columns = [
         { key: "title", label: "Product", cls: "item-col" },
         ...(singleStore ? [] : [{ key: "store", label: "Store" }]),
-        { key: "seo_score", label: "Score" },
+        { key: "seo_score", label: "On-page" },
         { key: "issues_count", label: "Issues" },
         { key: "gsc_clicks", label: "Traffic (28d)" },
         { key: "last_optimized_at", label: "Last Optimized" },
@@ -1633,7 +1633,7 @@ function renderCollectionsTable(container, collections) {
     if (!singleStore) columns.push({ key: "store", label: "Store" });
     columns.push(
         { key: "products_count", label: "Products" },
-        { key: "seo_score", label: "Score" },
+        { key: "seo_score", label: "On-page" },
         { key: "issues_count", label: "Issues" },
         { key: "gsc_clicks", label: "Traffic (28d)" },
         { key: "last_optimized_at", label: "Last Optimized" },

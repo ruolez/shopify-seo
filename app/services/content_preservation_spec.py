@@ -90,3 +90,23 @@ class TestMissingPreserved:
             '<a href="/products/honey-berry">Honey Berry</a></p>'
         )
         assert missing_preserved(OLD_BODY, new) == ["Specifications section", "Expert Verdict section"]
+
+
+from app.services.content_preservation import count_internal_links  # noqa: E402
+
+
+class TestCountInternalLinks:
+    def test_counts_relative_and_absolute_store_links(self):
+        html = (
+            '<a href="/collections/a">a</a>'
+            '<a href="https://a2ztobacco.com/products/b">b</a>'
+            '<a href="/pages/about">c</a>'
+        )
+        assert count_internal_links(html) == 3
+
+    def test_ignores_external_and_protocol_relative_links(self):
+        html = '<a href="https://example.com/study">x</a><a href="//cdn.example.com/a.js">y</a>'
+        assert count_internal_links(html) == 0
+
+    def test_counts_repeated_links_each_time(self):
+        assert count_internal_links('<a href="/collections/a">a</a><a href="/collections/a">again</a>') == 2

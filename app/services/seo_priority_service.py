@@ -288,7 +288,7 @@ def get_priority_ranked_items(store_id, item_type="product", limit=50, measuring
         seo = analyze_fn(dict(item))
         unified = compute_unified_item_score(seo, kw_scores.get(item["id"]), gsc, sr, ctr_curve)
         composite = {
-            "composite_score": unified["seo_score"],
+            "composite_score": unified["unified_score"],
             "on_page_score": unified["content_score"],
             "search_score": unified["search_score"],
         }

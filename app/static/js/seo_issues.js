@@ -52,12 +52,15 @@ function fixFieldsLabel(fields) {
 /* ── Unified detail modal helpers ────────────────────────────────────── */
 
 function renderPillarBars(item) {
+    // The ring is the on-page score: the first two bars. Search performance
+    // is the result — it moves when Google re-measures, not when you edit.
     const rows = [
-        ["Content quality", item.content_score],
-        ["Keyword alignment", item.keyword_score],
-        ["Search performance", item.search_score],
+        ["Content quality", item.content_score, "Part of the on-page score"],
+        ["Keyword alignment", item.keyword_score, "Part of the on-page score"],
+        ["Search result", item.search_score, "How the page performs in Google. Not part of the on-page score — it changes as Google re-measures, usually weeks after an edit."],
     ];
-    return `<div class="pillar-bars">` + rows.map(([label, score]) => {
+    return `<div class="pillar-bars" title="The ring shows the on-page score: content quality and keyword alignment.">` + rows.map(([label, score, hint]) => {
+        label = `<span title="${hint}">${label}</span>`;
         if (score == null) {
             return `<div class="score-item"><span class="score-item-label">${label}</span>
                 <div class="score-item-bar"></div>
