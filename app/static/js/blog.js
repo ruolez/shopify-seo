@@ -49,13 +49,17 @@ function initBlogTabs() {
         loadArticles();
     }
 
-    // /blog?tab=create&topic=<q> deep link (AI Search visibility → Draft post)
+    // /blog?tab=create&topic=<q>[&keywords=<newline-separated>] deep link
+    // (AI Search visibility → Draft post; Keyword Strategy → Write an article)
     const topic = params.get("topic");
-    if (topic) {
+    const seedKeywords = params.get("keywords");
+    if (topic || seedKeywords) {
         if (savedTab !== "create") document.querySelector('.tab[data-tab="create"]')?.click();
         setTimeout(() => {
             const el = document.getElementById("wizard-topic");
-            if (el && !el.value) el.value = topic;
+            if (el && topic && !el.value) el.value = topic;
+            const kwEl = document.getElementById("wizard-keywords");
+            if (kwEl && seedKeywords && !kwEl.value) kwEl.value = seedKeywords;
         }, 400);
     }
 }
@@ -1912,6 +1916,7 @@ async function renderVisuals(sessionId) {
             <div class="card">
                 <h4>Hero image</h4>
                 ${hero.prompt ? `<p style="font-size: 12px; color: var(--on-surface-secondary); margin: 0 0 10px;">Brief: ${escapeHtml(hero.prompt)}</p>` : ""}
+                ${hero.kind === "product" && (hero.product_handles || []).length ? `<p style="font-size: 12px; color: var(--on-surface-secondary); margin: 0 0 10px;"><span class="material-symbols-rounded" style="font-size: 14px; vertical-align: -2px;">photo_camera</span> Uses real product photos: ${escapeHtml(hero.product_handles.join(", "))}</p>` : ""}
                 <div id="featured-image-container">${_heroCardHtml(session.featured_image_url, session.featured_image_alt)}</div>
             </div>
             <div class="card" style="margin-top: 16px;">

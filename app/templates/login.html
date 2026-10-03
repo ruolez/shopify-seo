@@ -45,7 +45,9 @@
                     method: 'POST',
                     body: { username, password, remember }
                 });
-                window.location.href = '/';
+                const next = new URLSearchParams(window.location.search).get('next');
+                const safe = next && next.startsWith('/') && !next.startsWith('//') && !next.startsWith('/\\');
+                window.location.href = safe ? next : '/';
             } catch (err) {
                 showToast(err.message, 'error');
             }

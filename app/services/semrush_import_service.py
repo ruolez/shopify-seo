@@ -5,6 +5,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 
 from app.database import db
+from app.services.keyword_identity import is_valid_keyword
 
 logger = logging.getLogger(__name__)
 
@@ -374,7 +375,10 @@ def _import_keywords(store_id, import_id, source_type, rows, col_map):
     batch = []
     for row in rows:
         keyword = _get_col(row, col_map, "keyword")
-        if not keyword:
+        # Column artifacts ("0", "10", stray single letters) ride along in these
+        # exports and behave like wildcards downstream — a one-character keyword
+        # substring-matches nearly every page and hijacks its primary keyword.
+        if not keyword or not is_valid_keyword(keyword):
             continue
         batch.append((
             store_id, import_id, source_type, keyword,
@@ -530,7 +534,7 @@ def _import_keyword_gap(store_id, import_id, rows, col_map, headers):
     batch = []
     for row in rows:
         keyword = _get_col(row, col_map, "keyword")
-        if not keyword:
+        if not keyword or not is_valid_keyword(keyword):
             continue
 
         comp_positions = {}

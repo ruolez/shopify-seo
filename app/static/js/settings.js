@@ -358,7 +358,7 @@ const PROMPT_GROUPS = {
     "Competitor Prompts": ["prompts.competitor_analysis"],
     "News Prompts": ["prompts.news_analyze", "prompts.news_links"],
     "Other Prompts": ["prompts.interlinking", "prompts.inject_interlink", "prompts.technical_seo_fix", "prompts.keyword_phase1", "prompts.keyword_phase2", "prompts.store_audit"],
-    "Image Prompts": ["prompts.blog_image", "prompts.article_hero_image", "prompts.article_inline_image", "prompts.article_product_scene_image", "prompts.blog_hero_image", "prompts.collection_image", "prompts.landing_hero_image", "prompts.news_inline_image"],
+    "Image Prompts": ["prompts.blog_image", "prompts.article_hero_image", "prompts.article_hero_product_scene_image", "prompts.article_inline_image", "prompts.article_product_scene_image", "prompts.blog_hero_image", "prompts.collection_image", "prompts.landing_hero_image", "prompts.news_inline_image"],
 };
 
 async function loadPrompts() {

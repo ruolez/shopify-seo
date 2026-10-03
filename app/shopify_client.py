@@ -757,11 +757,29 @@ class ShopifyClient:
             "handle": collection.get("handle", ""),
         }
 
-    def create_smart_collection(self, title, vendor, description_html="", seo_title="", seo_description=""):
+    def create_smart_collection(self, title, vendor=None, description_html="", seo_title="",
+                                seo_description="", rules=None, applied_disjunctively=False,
+                                handle=None):
+        """Create a rule-based (smart) collection. Pass `rules` as
+        [{column, relation, condition}] for arbitrary conditions, or `vendor`
+        alone for the single VENDOR EQUALS rule brand pages use.
+
+        productsCount comes back from the mutation because a smart collection's
+        real membership (which includes draft products and honors publication)
+        is not something a local preview can know exactly."""
+        if not rules:
+            if not vendor:
+                raise ValueError("create_smart_collection needs either rules or vendor")
+            rules = [{"column": "VENDOR", "relation": "EQUALS", "condition": vendor}]
+
         query = """
         mutation ($input: CollectionInput!) {
           collectionCreate(input: $input) {
-            collection { id title handle }
+            collection {
+              id title handle
+              productsCount { count }
+              ruleSet { appliedDisjunctively rules { column relation condition } }
+            }
             userErrors { field message }
           }
         }
@@ -769,10 +787,12 @@ class ShopifyClient:
         input_vars = {
             "title": title,
             "ruleSet": {
-                "appliedDisjunctively": False,
-                "rules": [{"column": "VENDOR", "relation": "EQUALS", "condition": vendor}],
+                "appliedDisjunctively": bool(applied_disjunctively),
+                "rules": rules,
             },
         }
+        if handle:
+            input_vars["handle"] = handle
         if description_html:
             input_vars["descriptionHtml"] = description_html
         if seo_title or seo_description:
@@ -792,7 +812,29 @@ class ShopifyClient:
             "shopify_id": collection.get("id", ""),
             "title": collection.get("title", ""),
             "handle": collection.get("handle", ""),
+            "products_count": (collection.get("productsCount") or {}).get("count"),
+            "rule_set": collection.get("ruleSet"),
         }
+
+    def get_collection_rule_conditions(self):
+        """Which relations each rule column actually accepts. The GraphQL enums
+        are permissive — {TAG, CONTAINS} validates fine and then fails at
+        runtime as a userError — so proposed rules are checked against this."""
+        query = """
+        query { collectionRulesConditions { ruleType allowedRelations defaultRelation } }
+        """
+        data = self._graphql(query)
+        return data.get("collectionRulesConditions", []) or []
+
+    def get_collection_products_count(self, collection_shopify_id):
+        query = """
+        query ($id: ID!) {
+          collection(id: $id) { productsCount { count } }
+        }
+        """
+        data = self._graphql(query, {"id": collection_shopify_id})
+        collection = data.get("collection") or {}
+        return (collection.get("productsCount") or {}).get("count")
 
     def staged_upload_create(self, filename, mime_type, file_size, resource="PRODUCT_IMAGE"):
         query = """

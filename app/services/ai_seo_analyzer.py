@@ -282,11 +282,26 @@ def _parse_robots_ai_rules(robots_txt):
     return {"bots": bots, "blocks_sensitive": blocks_sensitive}
 
 
+BOT_FETCH_FAILURES = ("blocked", "challenged")
+
+
 def summarize_bot_access(bot_results):
-    """(ok_count, tested_count) from a stored ai_bot_checks results dict."""
+    """(ok_count, tested_count) from a stored ai_bot_checks results dict.
+
+    "error" means our own fetch died (timeout, DNS, reset) — that is not
+    evidence of a block, so it never counts against a bot. A bot fails only on
+    blocked/challenged; a bot whose every fetch errored is inconclusive and
+    drops out of tested entirely.
+    """
     bots = (bot_results or {}).get("bots") or {}
-    tested = len(bots)
-    ok = sum(1 for b in bots.values() if all(v == "ok" for v in b.values()))
+    ok = tested = 0
+    for checks in bots.values():
+        vals = list((checks or {}).values())
+        if any(v in BOT_FETCH_FAILURES for v in vals):
+            tested += 1
+        elif any(v == "ok" for v in vals):
+            tested += 1
+            ok += 1
     return ok, tested
 
 

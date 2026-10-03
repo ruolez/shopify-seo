@@ -1,4 +1,5 @@
 import json
+import math
 import logging
 import re
 import threading
@@ -8,6 +9,15 @@ from datetime import datetime, timedelta, timezone
 from app.database import db
 from app.services.ai_output_guard import guard_shopify_fields
 from app.services.content_gap_service import classify_intent
+from app.services.keyword_identity import (
+    MIN_KEYWORD_LENGTH,
+    MIN_KEYWORD_LETTERS,
+    fold_token,
+    is_valid_keyword,
+    norm,
+    tokens,
+    variant_key,
+)
 from app.services.technical_seo_analyzer import (
     _generate_ngrams,
     _keyword_in_text,
@@ -91,6 +101,7 @@ def consolidate_master_keywords(store_id):
         all_keywords = set(semrush_data.keys()) | set(gsc_data.keys())
         merged = []
         counts = {"from_semrush": 0, "from_gsc": 0, "from_both": 0}
+        skipped_invalid = 0
 
         for kw in all_keywords:
             sr = semrush_data.get(kw)
@@ -121,6 +132,10 @@ def consolidate_master_keywords(store_id):
 
             # Best URL
             current_url = (gc or {}).get("top_page") or (sr or {}).get("url")
+
+            if not is_valid_keyword(kw):
+                skipped_invalid += 1
+                continue
 
             intent = classify_intent(kw)
 
@@ -166,6 +181,31 @@ def consolidate_master_keywords(store_id):
                     row,
                 )
 
+            # Prune keywords already in the table that the validity rule now
+            # rejects. Import artifacts ("0", "a") don't just sit there: a
+            # one-character keyword substring-matches almost every page, so the
+            # content audit hands it to real content as a "primary keyword".
+            cur.execute(
+                "SELECT id, keyword FROM master_keywords WHERE store_id = %s", (store_id,)
+            )
+            junk_ids = [r["id"] for r in cur.fetchall() if not is_valid_keyword(r["keyword"])]
+            if junk_ids:
+                cur.execute(
+                    "DELETE FROM content_keyword_map WHERE store_id = %s AND master_keyword_id = ANY(%s)",
+                    (store_id, junk_ids),
+                )
+                cur.execute(
+                    "DELETE FROM keyword_assignments WHERE store_id = %s AND master_keyword_id = ANY(%s)",
+                    (store_id, junk_ids),
+                )
+                cur.execute(
+                    "DELETE FROM master_keywords WHERE store_id = %s AND id = ANY(%s)",
+                    (store_id, junk_ids),
+                )
+                logger.info("Pruned %d unusable keyword(s) for store %s", len(junk_ids), store_id)
+            counts["skipped_invalid"] = skipped_invalid
+            counts["pruned_invalid"] = len(junk_ids)
+
             cur.execute(
                 "UPDATE keyword_strategy_runs SET status='completed', "
                 "completed_items=%s, total_items=%s, summary=%s, completed_at=NOW() "
@@ -189,6 +229,11 @@ def add_manual_keyword(store_id, keyword, search_volume=None, intent=None):
     if not keyword or not keyword.strip():
         raise ValueError("Keyword is required")
     kw = keyword.strip().lower()
+    if not is_valid_keyword(kw):
+        raise ValueError(
+            f'"{keyword.strip()}" is not a usable keyword — it needs at least '
+            f"{MIN_KEYWORD_LENGTH} characters including {MIN_KEYWORD_LETTERS} letters."
+        )
     # Only a caller-supplied intent is authoritative; a rules-derived fallback
     # must stay overridable by the AI classification pass.
     explicit_intent = bool(intent)
@@ -502,39 +547,52 @@ def _get_text_fields(item_type, item):
     }
 
 
+def _folded(text):
+    """Plural-folded token set — the unit keyword matching happens on."""
+    return {fold_token(t) for t in _tokenize(text)}
+
+
 def _build_item_text_index(items):
-    """Pre-build lowercased text fields per item for fast lookup."""
+    """Pre-build per-item token sets for fast matching.
+
+    Tokenizing is done once per item here, never per keyword: the audit runs
+    ~10k keywords across ~1.2k items, so folding the document inside the match
+    loop turns a few minutes into a few hours.
+    """
     index = []
     for item_type, item in items:
         fields = _get_text_fields(item_type, item)
-        lowered = {k: v.lower() for k, v in fields.items()}
-        # Also build a combined text for quick substring pre-filter
-        combined = " ".join(lowered.values())
-        index.append((item_type, item["id"], lowered, combined))
+        field_tokens = {k: _folded(v) for k, v in fields.items() if v}
+        combined = set()
+        for toks in field_tokens.values():
+            combined |= toks
+        index.append((item_type, item["id"], field_tokens, combined))
     return index
 
 
 def _match_keyword_to_items(kw, kw_tokens, item_index):
-    """Match a single keyword against all items using pre-built index. Returns matches."""
-    kw_lower = kw.lower()
-    is_multi = len(kw_tokens) >= 2
+    """Match a single keyword against all items using pre-built index. Returns matches.
+
+    Matching is token-based, never substring. Substring matching made short
+    keywords behave like wildcards — "a" is inside "cigarillos", so it matched
+    every field of every page, scored the maximum possible relevance, and was
+    then handed to real content as its primary keyword.
+    """
+    folded_kw = {fold_token(t) for t in kw_tokens}
+    if not folded_kw:
+        return []
     results = []
 
-    for item_type, item_id, fields, combined in item_index:
-        # Fast pre-filter: skip if keyword not even partially in combined text
-        if kw_lower not in combined and (not is_multi or not kw_tokens.issubset(set(_tokenize(combined)))):
+    for item_type, item_id, field_tokens, combined in item_index:
+        # Cheap whole-document reject before scoring field by field.
+        if not folded_kw <= combined:
             continue
 
         found_in = []
         relevance = 0.0
         for field_name, weight in RELEVANCE_WEIGHTS.items():
-            text = fields.get(field_name, "")
-            if not text:
-                continue
-            if kw_lower in text:
-                found_in.append(field_name)
-                relevance += weight
-            elif is_multi and kw_tokens.issubset(set(_tokenize(text))):
+            toks = field_tokens.get(field_name)
+            if toks and folded_kw <= toks:
                 found_in.append(field_name)
                 relevance += weight
 
@@ -542,6 +600,76 @@ def _match_keyword_to_items(kw, kw_tokens, item_index):
             results.append((item_type, item_id, found_in, round(relevance, 2)))
 
     return results
+
+
+# Fields that mean "this page is about this keyword", as opposed to merely
+# mentioning it somewhere in the body.
+_TOPIC_FIELDS = ("title", "meta_title", "handle")
+
+
+def _audit_primary_score(keyword, search_volume, found_in, relevance):
+    """How good a candidate is as an item's primary keyword.
+
+    Raw field relevance alone picks whatever appears in the most fields, which
+    favours short generic terms over the specific phrase a page actually
+    targets. This is the audit's lightweight stand-in for the resolver's
+    scoring: demand and specificity matter, and a primary should appear where
+    the page states its topic.
+    """
+    n_tokens = len(tokens(keyword))
+    if n_tokens == 0:
+        return 0.0
+
+    # Demand, softly — most stores have plenty of zero-volume keywords and one
+    # of them still has to win, so this scales rather than gates.
+    volume = float(search_volume or 0)
+    demand = 1.0 + (math.log10(volume) / 4.0 if volume >= 10 else 0.0)
+
+    # Specificity: a one-word keyword is almost always a head term that belongs
+    # to a collection, not the thing a single page is about.
+    specificity = 0.55 if n_tokens == 1 else (1.0 if n_tokens < 6 else 0.85)
+
+    # Topic placement: appearing in the title/handle is what separates "this
+    # page is about X" from "this page mentions X".
+    topical = 1.5 if any(f in found_in for f in _TOPIC_FIELDS) else 1.0
+
+    return round(relevance * demand * specificity * topical, 4)
+
+
+def _resolve_content_primaries(store_id, items, master_kw_list):
+    """Resolver-chosen primary keyword for each article and page.
+
+    Returns {(item_type, item_id): master_keyword_id}. Only keywords already in
+    the master list can be assigned — the map is a view over tracked demand, so
+    an on-page n-gram that nobody searches for isn't a primary.
+    """
+    from app.services.keyword_resolver import build_prefetch, resolve_item_keywords
+
+    by_norm = {}
+    for mk in master_kw_list:
+        by_norm.setdefault(norm(mk["keyword"]), mk["id"])
+
+    out = {}
+    for item_type in ("article", "page"):
+        ids = [row["id"] for t, row in items if t == item_type]
+        if not ids:
+            continue
+        prefetch = build_prefetch(store_id, item_type, ids)
+        for item_id in ids:
+            try:
+                res = resolve_item_keywords(store_id, item_type, item_id, prefetch=prefetch)
+            except Exception:
+                logger.warning("Resolution failed for %s %s", item_type, item_id, exc_info=True)
+                continue
+            primary = (res or {}).get("primary")
+            if not primary:
+                continue
+            kw_id = by_norm.get(norm(primary["keyword"]))
+            if kw_id:
+                out[(item_type, item_id)] = kw_id
+    logger.info("Resolver assigned primaries to %d article/page item(s) for store %s",
+                len(out), store_id)
+    return out
 
 
 def run_content_audit(store_id):
@@ -568,7 +696,8 @@ def run_content_audit(store_id):
             # Load master keywords
             with db.get_cursor() as cur:
                 cur.execute(
-                    "SELECT id, keyword FROM master_keywords WHERE store_id = %s AND status = 'active'",
+                    "SELECT id, keyword, search_volume FROM master_keywords "
+                    "WHERE store_id = %s AND status = 'active'",
                     (store_id,),
                 )
                 master_kw_list = cur.fetchall()
@@ -619,9 +748,23 @@ def run_content_audit(store_id):
             primary_tracker = {}
             batch_rows = []
 
+            # Keywords owned by a product or collection are off-limits as an
+            # article's or page's primary — supporting content links to the
+            # money page rather than competing with it. Without this the demand
+            # weighting hands brand head terms ("dutch", 165k) to news posts.
+            try:
+                from app.services.keyword_resolver import get_owned_primary_keywords
+                money_keys = set(get_owned_primary_keywords(
+                    store_id, item_types=("product", "collection")))
+            except Exception:
+                money_keys = set()
+                logger.warning("Money-page ownership lookup failed during audit", exc_info=True)
+
             for mk in master_kw_list:
                 kw = mk["keyword"]
                 kw_tokens = set(_tokenize(kw))
+                kw_is_money = variant_key(kw) in money_keys
+                kw_is_head_term = len(kw_tokens) < 2
                 matches = _match_keyword_to_items(kw, kw_tokens, item_index)
 
                 for item_type, item_id, found_in, relevance in matches:
@@ -630,8 +773,30 @@ def run_content_audit(store_id):
                         json.dumps(found_in), False, relevance,
                     ))
                     key = (item_type, item_id)
-                    if key not in primary_tracker or relevance > primary_tracker[key][0]:
-                        primary_tracker[key] = (relevance, mk["id"])
+                    # Primary is chosen on demand + specificity + topical
+                    # placement, not raw field relevance — see
+                    # _audit_primary_score.
+                    # What an article is *about*, not what it mentions.
+                    # A primary must be declared in the title/handle/meta title;
+                    # it may not be a money-page keyword, and may not be a bare
+                    # one-word head term (those belong to category pages).
+                    # Without the title rule a news post about a Senate vape
+                    # inquiry claimed "zyn pouches" (74k) off a passing body
+                    # mention, which then hid a real coverage gap. An article
+                    # with no qualifying candidate gets no primary — an honest
+                    # blank beats a false claim.
+                    if item_type not in ("product", "collection") and (
+                        kw_is_money
+                        or kw_is_head_term
+                        or not any(f in _TOPIC_FIELDS for f in found_in)
+                    ):
+                        total_mapped += 1
+                        continue
+                    score = _audit_primary_score(
+                        mk["keyword"], mk.get("search_volume"), found_in, relevance
+                    )
+                    if key not in primary_tracker or score > primary_tracker[key][0]:
+                        primary_tracker[key] = (score, mk["id"])
                     total_mapped += 1
 
                 completed += 1
@@ -650,6 +815,19 @@ def run_content_audit(store_id):
             # Flush remaining
             if batch_rows:
                 _flush_audit_batch(batch_rows)
+
+            # Articles and pages take their primary from the resolver instead
+            # of the text heuristic: it weighs real search demand, reads GSC,
+            # and refuses keywords a product or collection already owns. Money
+            # pages don't need this here — they resolve through
+            # technical_seo_analyses on every analyze.
+            try:
+                resolved = _resolve_content_primaries(store_id, items, master_kw_list)
+                for key, kw_id in resolved.items():
+                    primary_tracker[key] = (float("inf"), kw_id)
+            except Exception:
+                logger.warning("Resolver pass for articles/pages failed; "
+                               "falling back to text relevance", exc_info=True)
 
             # Set primary flags — never over a preserved manual pin.
             with db.get_cursor() as cur:
@@ -848,6 +1026,146 @@ def _get_item_title(item_type, item_id):
         cur.execute(f"SELECT title FROM {table} WHERE id = %s", (item_id,))
         row = cur.fetchone()
         return row["title"] if row else None
+
+
+ITEM_TABLES = {
+    "product": "synced_products",
+    "collection": "synced_collections",
+    "article": "synced_articles",
+    "page": "synced_pages",
+}
+
+
+def _load_item(store_id, item_type, item_id):
+    table = ITEM_TABLES.get(item_type)
+    if not table:
+        return None
+    with db.get_cursor() as cur:
+        cur.execute(
+            f"SELECT id, title, handle FROM {table} WHERE id = %s AND store_id = %s",
+            (item_id, store_id),
+        )
+        return cur.fetchone()
+
+
+def assign_keyword_to_content(store_id, keyword_id, item_type, item_id):
+    """Pin a master keyword as an item's manual primary in the ownership ledger.
+
+    This is the one implementation of the ledger contract; the resolver-backed
+    /primary-keyword endpoint calls it too, then re-resolves. Works for all
+    four item types — articles and pages have no resolver analysis, but
+    keyword_coverage honors an accepted assignment as ownership regardless of
+    type, and generate_implementation_steps/apply_fix already read this row
+    shape for every type, so "assign then fix" needs no extra plumbing.
+
+    Takes the master_keywords id, never the display text: re-deriving the id
+    from a display string can mint a second master row when the stored keyword
+    carries punctuation.
+
+    Returns {keyword, item_type, item_id, title, master_keyword_id,
+             superseded: [{keyword, master_keyword_id}]} — superseded lists the
+    keywords this item stopped owning, so callers can report what changed
+    rather than promising a coverage cell will turn green (a zero-volume
+    keyword never flips one).
+    """
+    if item_type not in ITEM_TABLES:
+        raise ValueError(f"item_type must be one of {sorted(ITEM_TABLES)}")
+
+    item = _load_item(store_id, item_type, item_id)
+    if not item:
+        raise ValueError(f"{item_type} #{item_id} not found in this store")
+
+    with db.get_cursor() as cur:
+        cur.execute(
+            "SELECT id, keyword FROM master_keywords WHERE id = %s AND store_id = %s",
+            (keyword_id, store_id),
+        )
+        kw = cur.fetchone()
+        if not kw:
+            raise ValueError(f"keyword #{keyword_id} not found in this store")
+
+        # What this item is about to stop owning, captured before the demotion.
+        cur.execute(
+            """SELECT ka.master_keyword_id, mk.keyword
+               FROM keyword_assignments ka
+               JOIN master_keywords mk ON mk.id = ka.master_keyword_id
+               WHERE ka.store_id = %s AND ka.assigned_item_type = %s
+                 AND ka.assigned_item_id = %s AND ka.status = 'accepted'
+                 AND ka.master_keyword_id != %s""",
+            (store_id, item_type, item_id, keyword_id),
+        )
+        superseded = [dict(r) for r in cur.fetchall()]
+
+        cur.execute(
+            """INSERT INTO keyword_assignments
+               (store_id, master_keyword_id, assigned_item_type, assigned_item_id,
+                assignment_reason, priority, status)
+               VALUES (%s, %s, %s, %s, 'manual_primary', 'high', 'accepted')
+               ON CONFLICT (store_id, master_keyword_id) DO UPDATE SET
+                   assigned_item_type = EXCLUDED.assigned_item_type,
+                   assigned_item_id = EXCLUDED.assigned_item_id,
+                   assignment_reason = 'manual_primary',
+                   status = 'accepted',
+                   updated_at = NOW()""",
+            (store_id, keyword_id, item_type, item_id),
+        )
+        # One primary per item — demote ALL previous accepted picks, plan-
+        # accepted included, or a stale plan-accept can win again on recency.
+        cur.execute(
+            """UPDATE keyword_assignments SET status = 'superseded', updated_at = NOW()
+               WHERE store_id = %s AND assigned_item_type = %s AND assigned_item_id = %s
+                 AND master_keyword_id != %s AND status = 'accepted'""",
+            (store_id, item_type, item_id, keyword_id),
+        )
+        # Mirror into content_keyword_map for the strategy views. found_in
+        # ["manual"] is the sentinel that survives the content audit's
+        # delete-and-rebuild of this table.
+        cur.execute(
+            """UPDATE content_keyword_map SET is_primary = FALSE
+               WHERE store_id = %s AND item_type = %s AND item_id = %s AND is_primary = TRUE""",
+            (store_id, item_type, item_id),
+        )
+        cur.execute(
+            """INSERT INTO content_keyword_map
+               (store_id, master_keyword_id, item_type, item_id, found_in, is_primary, relevance_score)
+               VALUES (%s, %s, %s, %s, %s, TRUE, 100)
+               ON CONFLICT (store_id, master_keyword_id, item_type, item_id) DO UPDATE SET
+                   is_primary = TRUE, relevance_score = 100""",
+            (store_id, keyword_id, item_type, item_id, json.dumps(["manual"])),
+        )
+
+    return {
+        "keyword": kw["keyword"],
+        "master_keyword_id": kw["id"],
+        "item_type": item_type,
+        "item_id": item_id,
+        "title": item["title"],
+        "handle": item["handle"],
+        "superseded": superseded,
+    }
+
+
+def unassign_keyword_from_content(store_id, keyword_id, item_type, item_id):
+    """Undo assign_keyword_to_content. Demotes the claim rather than deleting
+    it, so the row's history stays in the ledger, and drops the manual mirror
+    so the next content audit can rebuild it from the page's actual text."""
+    with db.get_cursor() as cur:
+        cur.execute(
+            """UPDATE keyword_assignments SET status = 'superseded', updated_at = NOW()
+               WHERE store_id = %s AND master_keyword_id = %s
+                 AND assigned_item_type = %s AND assigned_item_id = %s
+                 AND status IN ('accepted', 'applied')""",
+            (store_id, keyword_id, item_type, item_id),
+        )
+        undone = cur.rowcount
+        cur.execute(
+            """DELETE FROM content_keyword_map
+               WHERE store_id = %s AND master_keyword_id = %s
+                 AND item_type = %s AND item_id = %s
+                 AND found_in @> '["manual"]'::jsonb""",
+            (store_id, keyword_id, item_type, item_id),
+        )
+    return {"undone": undone > 0}
 
 
 def get_item_audit(store_id, item_type, item_id):

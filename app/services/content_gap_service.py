@@ -717,6 +717,117 @@ def _upload_image_to_cdn(client, image_bytes, filename, alt_text):
     return client.file_get_url(file_obj.get("id"))
 
 
+def create_collection_on_shopify(client, store, proposal):
+    """Create a collection on Shopify and mirror it into synced_collections.
+
+    The one place that does this, shared by the Content Gaps publish flow and
+    the Keyword Strategy "create a money page" flow, so the two can't drift.
+
+    proposal: {title, body_html, meta_title, meta_description, handle?,
+               mode: 'smart'|'manual', rules?, applied_disjunctively?,
+               product_shopify_ids?, generate_image?, image_keywords?}
+
+    Ordering is deliberate: the Shopify id is persisted immediately after
+    creation, before publishing or any other follow-up, because a failure
+    after creation must not lose the id — a re-run would mint a duplicate
+    collection. Everything after the insert is best-effort.
+    """
+    store_id = store["store_id"] if "store_id" in store else store["id"]
+    title = proposal["title"]
+    body_html = proposal.get("body_html") or ""
+    meta_title = proposal.get("meta_title") or ""
+    meta_description = proposal.get("meta_description") or ""
+    smart = proposal.get("mode") == "smart"
+
+    if smart:
+        created = client.create_smart_collection(
+            title,
+            description_html=body_html,
+            seo_title=meta_title,
+            seo_description=meta_description,
+            rules=proposal.get("rules"),
+            applied_disjunctively=bool(proposal.get("applied_disjunctively")),
+            handle=proposal.get("handle") or None,
+        )
+    else:
+        created = client.create_collection(title, body_html)
+    shopify_id = created["shopify_id"]
+    handle = created["handle"]
+
+    # Persist before anything else can fail.
+    with db.get_cursor() as cur:
+        cur.execute(
+            """INSERT INTO synced_collections
+               (store_id, shopify_id, title, handle, description, meta_title, meta_description,
+                collection_type, products_count, synced_at)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+               ON CONFLICT (store_id, shopify_id) DO UPDATE SET
+                   title = EXCLUDED.title, description = EXCLUDED.description,
+                   collection_type = EXCLUDED.collection_type, synced_at = NOW()
+               RETURNING id""",
+            (store_id, shopify_id, title, handle, body_html, meta_title, meta_description,
+             "smart" if smart else "manual", created.get("products_count") or 0),
+        )
+        local_id = cur.fetchone()["id"]
+
+    # create_smart_collection carries SEO inline; the plain create can't.
+    if not smart and (meta_title or meta_description):
+        try:
+            client.update_collection(shopify_id, {"meta_title": meta_title,
+                                                  "meta_description": meta_description})
+        except Exception:
+            logger.warning("Setting SEO fields failed for collection %s", shopify_id, exc_info=True)
+
+    try:
+        client.publish_to_all_channels(shopify_id)
+    except Exception:
+        logger.warning("Publish to sales channels failed for %s", shopify_id, exc_info=True)
+
+    # collectionAddProducts errors on smart collections — their membership is
+    # the rule set, and there is no supported way to pin extras alongside it.
+    product_ids = proposal.get("product_shopify_ids") or []
+    if product_ids and not smart:
+        try:
+            client.add_products_to_collection(shopify_id, product_ids)
+        except Exception:
+            logger.warning("Could not add products to new collection %s", shopify_id, exc_info=True)
+
+    if proposal.get("generate_image"):
+        try:
+            from app.services.image_generator import generate_collection_image_ai
+            img_bytes, filename, alt_text, w, h = generate_collection_image_ai(
+                title, [], keywords=proposal.get("image_keywords") or [])
+            if img_bytes:
+                mime = "image/webp" if filename.endswith(".webp") else "image/jpeg"
+                staged = client.staged_upload_create(filename, mime, len(img_bytes), resource="IMAGE")
+                resource_url = client.upload_staged_file(staged, img_bytes, content_type=mime, filename=filename)
+                client.update_collection_image(shopify_id, resource_url, alt_text)
+        except Exception as e:
+            logger.warning("Collection image generation failed: %s", str(e))
+
+    # Membership is only knowable from Shopify: a rule set also matches draft
+    # products and honors publication, neither of which we mirror locally.
+    products_count = created.get("products_count")
+    if products_count is None:
+        try:
+            products_count = client.get_collection_products_count(shopify_id)
+        except Exception:
+            products_count = len(product_ids) if not smart else None
+    if products_count is not None:
+        with db.get_cursor() as cur:
+            cur.execute("UPDATE synced_collections SET products_count = %s WHERE id = %s",
+                        (products_count, local_id))
+
+    return {
+        "shopify_id": shopify_id,
+        "handle": handle,
+        "local_id": local_id,
+        "products_count": products_count,
+        "collection_type": "smart" if smart else "manual",
+        "url": f"https://{store['domain']}/collections/{handle}",
+    }
+
+
 def publish_content(store_id, gap_id, content_data):
     from app.auth import decrypt_value
     from app.services.ai_output_guard import guard_shopify_fields
@@ -753,50 +864,24 @@ def publish_content(store_id, gap_id, content_data):
     result = {}
 
     if content_type == "collection":
-        shopify_result = client.create_collection(title, body_html)
-        shopify_id = shopify_result["shopify_id"]
-        handle = shopify_result["handle"]
-
-        if meta_title or meta_description:
-            client.update_collection(shopify_id, {"meta_title": meta_title, "meta_description": meta_description})
-
-        try:
-            client.publish_to_all_channels(shopify_id)
-        except Exception:
-            logger.warning("Publish to sales channels failed for %s", shopify_id, exc_info=True)
-
+        product_shopify_ids = []
         if gap.get("matched_product_id"):
             with db.get_cursor() as cur:
                 cur.execute("SELECT shopify_id FROM synced_products WHERE id = %s", (gap["matched_product_id"],))
                 prod = cur.fetchone()
                 if prod:
-                    try:
-                        client.add_products_to_collection(shopify_id, [prod["shopify_id"]])
-                    except Exception:
-                        logger.warning("Could not add matched product to new collection %s", shopify_id, exc_info=True)
+                    product_shopify_ids = [prod["shopify_id"]]
 
-        if generate_image:
-            try:
-                from app.services.image_generator import generate_collection_image_ai
-                img_bytes, filename, alt_text, w, h = generate_collection_image_ai(title, [], keywords=[gap.get("keyword", "")])
-                if img_bytes:
-                    mime = "image/webp" if filename.endswith(".webp") else "image/jpeg"
-                    staged = client.staged_upload_create(filename, mime, len(img_bytes), resource="IMAGE")
-                    resource_url = client.upload_staged_file(staged, img_bytes, content_type=mime, filename=filename)
-                    client.update_collection_image(shopify_id, resource_url, alt_text)
-            except Exception as e:
-                logger.warning("Collection image generation failed: %s", str(e))
-
-        with db.get_cursor() as cur:
-            cur.execute(
-                """INSERT INTO synced_collections (store_id, shopify_id, title, handle, description, meta_title, meta_description, collection_type, products_count, synced_at)
-                   VALUES (%s, %s, %s, %s, %s, %s, %s, 'manual', 0, NOW())
-                   ON CONFLICT (store_id, shopify_id) DO UPDATE SET title = EXCLUDED.title, description = EXCLUDED.description, synced_at = NOW()
-                   RETURNING id""",
-                (store_id, shopify_id, title, handle, body_html, meta_title, meta_description),
-            )
-            local_id = cur.fetchone()["id"]
-        result = {"shopify_id": shopify_id, "handle": handle, "local_id": local_id, "url": f"https://{store['domain']}/collections/{handle}"}
+        result = create_collection_on_shopify(client, store, {
+            "title": title,
+            "body_html": body_html,
+            "meta_title": meta_title,
+            "meta_description": meta_description,
+            "mode": "manual",
+            "product_shopify_ids": product_shopify_ids,
+            "generate_image": generate_image,
+            "image_keywords": [gap.get("keyword", "")],
+        })
 
     elif content_type == "blog":
         with db.get_cursor() as cur:

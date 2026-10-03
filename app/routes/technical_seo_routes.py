@@ -940,14 +940,18 @@ def set_primary_keyword(item_type, item_id):
     """Manually pin an item's primary keyword. Recorded as an accepted
     keyword_assignments row (the durable manual signal the resolver honors),
     then the item is re-resolved and re-analyzed."""
-    from app.services.keyword_strategy_service import add_manual_keyword
+    from app.services.keyword_strategy_service import (
+        add_manual_keyword,
+        assign_keyword_to_content,
+    )
 
     if item_type not in ("product", "collection"):
         return jsonify({"error": "item_type must be 'product' or 'collection'"}), 400
 
     data = request.get_json(silent=True) or {}
     keyword = (data.get("keyword") or "").strip()
-    if not keyword:
+    keyword_id = data.get("keyword_id")
+    if not keyword and not keyword_id:
         return jsonify({"error": "keyword is required"}), 400
 
     table = "synced_products" if item_type == "product" else "synced_collections"
@@ -958,47 +962,14 @@ def set_primary_keyword(item_type, item_id):
         return jsonify({"error": f"{item_type} not found"}), 404
 
     store_id = item["store_id"]
-    mk_id = add_manual_keyword(store_id, keyword)
+    # Callers holding a master_keywords id pass it straight through; deriving
+    # the id from display text can mint a duplicate master row when the stored
+    # keyword carries punctuation.
+    mk_id = keyword_id or add_manual_keyword(store_id, keyword)
 
-    with db.get_cursor() as cur:
-        cur.execute(
-            """INSERT INTO keyword_assignments
-               (store_id, master_keyword_id, assigned_item_type, assigned_item_id,
-                assignment_reason, priority, status)
-               VALUES (%s, %s, %s, %s, 'manual_primary', 'high', 'accepted')
-               ON CONFLICT (store_id, master_keyword_id) DO UPDATE SET
-                   assigned_item_type = EXCLUDED.assigned_item_type,
-                   assigned_item_id = EXCLUDED.assigned_item_id,
-                   assignment_reason = 'manual_primary',
-                   status = 'accepted',
-                   updated_at = NOW()""",
-            (store_id, mk_id, item_type, item_id),
-        )
-        # One primary per item — demote ALL previous accepted picks, plan-
-        # accepted included (only manual_primary rows used to be demoted, so a
-        # stale plan-accept lingered and could win again on recency).
-        cur.execute(
-            """UPDATE keyword_assignments SET status = 'superseded', updated_at = NOW()
-               WHERE store_id = %s AND assigned_item_type = %s AND assigned_item_id = %s
-                 AND master_keyword_id != %s
-                 AND status = 'accepted'""",
-            (store_id, item_type, item_id, mk_id),
-        )
-        # Best-effort mirror into content_keyword_map for the strategy page UI
-        # (rebuilt by the next content audit anyway)
-        cur.execute(
-            """UPDATE content_keyword_map SET is_primary = FALSE
-               WHERE store_id = %s AND item_type = %s AND item_id = %s AND is_primary = TRUE""",
-            (store_id, item_type, item_id),
-        )
-        cur.execute(
-            """INSERT INTO content_keyword_map
-               (store_id, master_keyword_id, item_type, item_id, found_in, is_primary, relevance_score)
-               VALUES (%s, %s, %s, %s, %s, TRUE, 100)
-               ON CONFLICT (store_id, master_keyword_id, item_type, item_id) DO UPDATE SET
-                   is_primary = TRUE, relevance_score = 100""",
-            (store_id, mk_id, item_type, item_id, json.dumps(["manual"])),
-        )
+    # Ledger writes live in one place (the strategy service), shared with the
+    # Keyword Strategy assign flow, which also serves articles and pages.
+    ledger = assign_keyword_to_content(store_id, mk_id, item_type, item_id)
 
     analysis, resolution = _resolve_and_analyze(item_type, item)
     analysis["analysis_id"] = _upsert_analysis(store_id, item_type, item_id, analysis, resolution)
@@ -1009,7 +980,9 @@ def set_primary_keyword(item_type, item_id):
     # candidate instead of leaving a silent shared primary.
     try:
         from app.services.keyword_resolver import variant_key
-        vk = variant_key(keyword)
+        # ledger["keyword"] is the stored master form — `keyword` is empty when
+        # the caller passed keyword_id, which would silently skip dispossession.
+        vk = variant_key(ledger["keyword"])
         with db.get_cursor() as cur:
             cur.execute(
                 """SELECT item_type, item_id,
@@ -1032,6 +1005,11 @@ def set_primary_keyword(item_type, item_id):
     except Exception:
         logger.warning("Dispossession re-resolve failed after manual pin for %s %s", item_type, item_id)
 
+    # What this item stopped owning — the UI reports the actual change rather
+    # than promising a coverage cell turns green (zero-volume keywords never
+    # flip one).
+    analysis["assigned_keyword"] = ledger["keyword"]
+    analysis["superseded"] = ledger["superseded"]
     return jsonify(analysis)
 
 

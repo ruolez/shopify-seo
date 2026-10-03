@@ -106,11 +106,18 @@ def get_ownership_map(store_id, keyword_ids):
     titles = _resolve_titles(store_id, rows)
     result = {}
     for row in rows:
+        # Existence guard: keyword_assignments has no FK to the item tables and
+        # content is hard-deleted (articles especially) and pruned by sync. A
+        # dangling row used to keep its intent cell green forever, with a blank
+        # title. _TITLE_TABLES covers all four item types, so "no title" here
+        # means "no row" — not "type we can't resolve".
+        if (row["item_type"], row["item_id"]) not in titles:
+            continue
         owner = {
             "role": row["role"],
             "item_type": row["item_type"],
             "item_id": row["item_id"],
-            **titles.get((row["item_type"], row["item_id"]), {}),
+            **titles[(row["item_type"], row["item_id"])],
         }
         entry = result.setdefault(row["kw_id"], {"owner": None, "owners": []})
         # rows arrive rank-ordered, so the first owner per keyword is the best
@@ -442,6 +449,78 @@ def _detect_conflicts(store_id, pages, keywords):
     return conflicts
 
 
+def _existing_ranking_pages(store_id, keywords, limit_per_kw=3):
+    """Pages already earning impressions for these keywords, from GSC.
+
+    Ownership is string identity (variant_key), which is the right rule for
+    *claiming* a keyword but blind to a page that covers the topic under
+    different words — the reason a keyword can read as an uncovered gap while
+    an existing article already ranks for it, and blog research then rejects
+    the topic as cannibalization. GSC answers the question ownership can't:
+    is Google already sending this query somewhere on our site?
+
+    Returns {keyword_id: [{url, item_type, item_id, title, position, clicks,
+    impressions}]} — evidence, not ownership; nothing here confers a claim.
+    """
+    if not keywords:
+        return {}
+    by_text = {}
+    for k in keywords:
+        by_text.setdefault((k["keyword"] or "").lower(), []).append(k["id"])
+    if not by_text:
+        return {}
+
+    with db.get_cursor() as cur:
+        cur.execute(
+            """SELECT LOWER(query) AS q, page,
+                      SUM(clicks) AS clicks, SUM(impressions) AS impressions,
+                      SUM(position * impressions) / NULLIF(SUM(impressions), 0) AS position
+               FROM gsc_daily_metrics
+              WHERE store_id = %s AND LOWER(query) = ANY(%s)
+                AND date >= CURRENT_DATE - INTERVAL '30 days'
+              GROUP BY 1, 2
+              HAVING SUM(impressions) > 0
+              ORDER BY SUM(impressions) DESC""",
+            (store_id, list(by_text.keys())),
+        )
+        rows = [dict(r) for r in cur.fetchall()]
+    if not rows:
+        return {}
+
+    # Map URLs back to items by handle, the same way the conflict panel does.
+    handles = {}
+    with db.get_cursor() as cur:
+        for item_type, table in _TITLE_TABLES.items():
+            cur.execute(
+                f"SELECT id, title, handle FROM {table} WHERE store_id = %s AND handle IS NOT NULL",
+                (store_id,),
+            )
+            for r in cur.fetchall():
+                handles.setdefault(r["handle"], (item_type, r["id"], r["title"]))
+
+    def _match(url):
+        tail = (url or "").rstrip("/").rsplit("/", 1)[-1]
+        return handles.get(tail)
+
+    out = {}
+    for r in rows:
+        hit = _match(r["page"])
+        entry = {
+            "url": r["page"],
+            "item_type": hit[0] if hit else None,
+            "item_id": hit[1] if hit else None,
+            "title": hit[2] if hit else None,
+            "position": round(float(r["position"]), 1) if r["position"] is not None else None,
+            "clicks": int(r["clicks"] or 0),
+            "impressions": int(r["impressions"] or 0),
+        }
+        for kw_id in by_text.get(r["q"], []):
+            bucket = out.setdefault(kw_id, [])
+            if len(bucket) < limit_per_kw:
+                bucket.append(entry)
+    return out
+
+
 def _family_pages(store_id, keywords, ownership, rules):
     """Pivot one family's ownership by page -> (pages, unowned).
 
@@ -477,6 +556,13 @@ def _family_pages(store_id, keywords, ownership, rules):
                 if intent in ("informational", "commercial")
                 else "assign",
             })
+
+    # Annotate gaps with pages Google already sends this query to. A gap where
+    # an existing page ranks is usually an optimize job, not a new-page job.
+    if unowned:
+        ranking = _existing_ranking_pages(store_id, unowned)
+        for u in unowned:
+            u["ranking_pages"] = ranking.get(u["id"], [])
 
     ids_by_type = {}
     for item_type, item_id in buckets:
@@ -747,6 +833,180 @@ def get_keyword_detail(store_id, keyword_id):
         "mentions_count": mentions_count,
         "family": family,
     }
+
+
+# Per-type search: the columns worth matching a keyword against, and the
+# extra facts the picker shows so a choice can be made without leaving it.
+_TARGET_SEARCH = {
+    "product": {
+        "table": "synced_products",
+        "cols": ["title", "handle", "vendor", "product_type", "tags", "description"],
+        "extra": "vendor, product_type, NULL::int AS products_count",
+        "where": "status = 'ACTIVE'",
+        "url": "/products/",
+    },
+    "collection": {
+        "table": "synced_collections",
+        "cols": ["title", "handle", "description"],
+        "extra": "NULL AS vendor, collection_type AS product_type, products_count",
+        "where": "handle IS NOT NULL AND handle != ''",
+        "url": "/collections/",
+    },
+    "article": {
+        "table": "synced_articles",
+        "cols": ["title", "handle", "tags", "summary"],
+        "extra": "author AS vendor, NULL AS product_type, NULL::int AS products_count",
+        "where": "handle IS NOT NULL AND handle != ''",
+        "url": "/blogs/",
+    },
+    "page": {
+        "table": "synced_pages",
+        "cols": ["title", "handle", "body_html"],
+        "extra": "NULL AS vendor, NULL AS product_type, NULL::int AS products_count",
+        "where": "handle IS NOT NULL AND handle != ''",
+        "url": "/pages/",
+    },
+}
+
+
+def find_assignment_targets(store_id, keyword_id, item_type, q=None, limit=15):
+    """Candidate pages a keyword could be assigned to, ranked by how well they
+    already match it, each carrying the context needed to decide: current
+    primary keyword (and what assigning would cost), SEO score, and this
+    keyword's own GSC position on that page.
+
+    A composition of existing pieces, not a new ranker — the search mirrors the
+    blog wizard's ILIKE columns, ownership comes from get_ownership_map's
+    sources, and scores come from technical_seo_analyses."""
+    from app.services.keyword_identity import tokens, variant_key
+
+    cfg = _TARGET_SEARCH.get(item_type)
+    if not cfg:
+        raise ValueError(f"item_type must be one of {sorted(_TARGET_SEARCH)}")
+
+    with db.get_cursor() as cur:
+        cur.execute(
+            "SELECT id, keyword, search_volume FROM master_keywords WHERE id = %s AND store_id = %s",
+            (keyword_id, store_id),
+        )
+        kw = cur.fetchone()
+        if not kw:
+            return None
+
+        term = (q or kw["keyword"]).strip()
+        pattern = f"%{term}%"
+        like = " OR ".join(f"{c} ILIKE %s" for c in cfg["cols"])
+        cur.execute(
+            f"""SELECT id, title, handle, {cfg["extra"]}
+                  FROM {cfg["table"]}
+                 WHERE store_id = %s AND {cfg["where"]} AND ({like})
+                 ORDER BY title
+                 LIMIT 200""",
+            (store_id, *([pattern] * len(cfg["cols"]))),
+        )
+        rows = [dict(r) for r in cur.fetchall()]
+        if not rows:
+            return {"keyword": dict(kw), "targets": []}
+
+        ids = [r["id"] for r in rows]
+        cur.execute(
+            """SELECT item_id, score,
+                      keyword_resolution->'primary'->>'keyword' AS primary_keyword,
+                      COALESCE((keyword_resolution->'primary'->>'manual')::boolean, false) AS manual,
+                      COALESCE((keyword_resolution->'primary'->>'volume')::float, 0) AS primary_volume
+                 FROM technical_seo_analyses
+                WHERE store_id = %s AND item_type = %s AND item_id = ANY(%s)""",
+            (store_id, item_type, ids),
+        )
+        analyses = {r["item_id"]: dict(r) for r in cur.fetchall()}
+
+        # Accepted assignments outrank a resolved primary as "what this page is
+        # currently pinned to", and are the only owner signal for articles/pages.
+        cur.execute(
+            """SELECT ka.assigned_item_id AS item_id, mk.keyword, mk.search_volume
+                 FROM keyword_assignments ka
+                 JOIN master_keywords mk ON mk.id = ka.master_keyword_id
+                WHERE ka.store_id = %s AND ka.status IN ('accepted', 'applied')
+                  AND ka.assigned_item_type = %s AND ka.assigned_item_id = ANY(%s)""",
+            (store_id, item_type, ids),
+        )
+        pinned = {r["item_id"]: dict(r) for r in cur.fetchall()}
+
+        # This keyword's own ranking, per page, so an already-ranking page is
+        # the obvious choice rather than a guess.
+        cur.execute(
+            """SELECT page,
+                      SUM(clicks) AS clicks, SUM(impressions) AS impressions,
+                      SUM(position * impressions) / NULLIF(SUM(impressions), 0) AS position
+                 FROM gsc_daily_metrics
+                WHERE store_id = %s AND LOWER(query) = LOWER(%s)
+                  AND date >= CURRENT_DATE - INTERVAL '30 days'
+                GROUP BY page""",
+            (store_id, kw["keyword"]),
+        )
+        gsc_by_page = {r["page"]: dict(r) for r in cur.fetchall()}
+
+    kw_tokens = set(tokens(kw["keyword"]))
+    kw_vk = variant_key(kw["keyword"])
+    targets = []
+    for r in rows:
+        a = analyses.get(r["id"], {})
+        pin = pinned.get(r["id"])
+        current = (
+            {"keyword": pin["keyword"], "volume": int(pin["search_volume"] or 0), "manual": True}
+            if pin
+            else (
+                {"keyword": a["primary_keyword"], "volume": int(a.get("primary_volume") or 0),
+                 "manual": bool(a.get("manual"))}
+                if a.get("primary_keyword") else None
+            )
+        )
+        gsc = next(
+            (v for k, v in gsc_by_page.items() if r["handle"] and f'{cfg["url"]}{r["handle"]}' in k),
+            None,
+        )
+        title_tokens = set(tokens(r["title"] or "")) | set(tokens((r["handle"] or "").replace("-", " ")))
+        overlap = len(kw_tokens & title_tokens) / len(kw_tokens) if kw_tokens else 0
+
+        # Assigning replaces the page's current primary. Surfacing the volume it
+        # would give up is the single most useful thing the old picker lacked.
+        would_demote = None
+        if current and current["keyword"] and variant_key(current["keyword"]) != kw_vk:
+            would_demote = {
+                "keyword": current["keyword"],
+                "volume": current["volume"],
+                "manual": current["manual"],
+                "loses_volume": max(0, current["volume"] - int(kw["search_volume"] or 0)),
+            }
+
+        targets.append({
+            "item_type": item_type,
+            "item_id": r["id"],
+            "title": r["title"],
+            "handle": r["handle"],
+            "vendor": r.get("vendor"),
+            "product_type": r.get("product_type"),
+            "products_count": r.get("products_count"),
+            "seo_score": a.get("score"),
+            "current_primary": current,
+            "would_demote": would_demote,
+            "already_owns": bool(current and current["keyword"]
+                                 and variant_key(current["keyword"]) == kw_vk),
+            "gsc_position": round(float(gsc["position"]), 1) if gsc and gsc.get("position") else None,
+            "gsc_clicks": int(gsc["clicks"]) if gsc else 0,
+            "gsc_impressions": int(gsc["impressions"]) if gsc else 0,
+            "_rank": (
+                2 if (gsc and gsc.get("position")) else 0,
+                overlap,
+                -(would_demote["loses_volume"] if would_demote else 0),
+                a.get("score") or 0,
+            ),
+        })
+
+    targets.sort(key=lambda t: t["_rank"], reverse=True)
+    for t in targets:
+        t.pop("_rank", None)
+    return {"keyword": dict(kw), "targets": targets[:limit]}
 
 
 def get_keyword_mentions(store_id, keyword_id, limit=25, offset=0):

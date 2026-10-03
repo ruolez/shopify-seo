@@ -1977,28 +1977,36 @@ _ENRICH_STOPWORDS = {
 }
 
 
-def _reserved_money_page_keywords(store_id, cap=200):
+MONEY_PAGE_TYPES = ("product", "collection")
+
+
+def _reserved_money_page_keywords(store_id, cap=200, item_types=MONEY_PAGE_TYPES):
     """Keywords owned by money pages (resolver primaries + accepted manual
     assignments), top `cap` by volume — blog/topic flows must never claim one
-    as an article's primary. Shared by topic_discovery and topic_enrich."""
-    with db.get_cursor() as cur:
-        cur.execute(
-            """SELECT DISTINCT ON (kw) kw, vol, item_type FROM (
-                   SELECT keyword_resolution->'primary'->>'keyword' AS kw,
-                          NULLIF(keyword_resolution->'primary'->>'volume', '')::numeric AS vol,
-                          item_type
-                   FROM technical_seo_analyses
-                   WHERE store_id = %s AND keyword_resolution->'primary'->>'keyword' IS NOT NULL
-                   UNION ALL
-                   SELECT mk.keyword, mk.search_volume::numeric, ka.assigned_item_type
-                   FROM keyword_assignments ka
-                   JOIN master_keywords mk ON mk.id = ka.master_keyword_id
-                   WHERE ka.store_id = %s AND ka.status IN ('accepted', 'applied')
-               ) sub WHERE kw IS NOT NULL
-               ORDER BY kw, vol DESC NULLS LAST""",
-            (store_id, store_id),
+    as an article's primary. Shared by topic_discovery and topic_enrich.
+
+    Delegates to the ownership ledger rather than re-querying, which gets three
+    things this used to lack: only real money-page types count (a keyword
+    assigned to an *article* is not something an article must avoid — it would
+    forbid the post its own topic), owners whose page has been deleted are
+    dropped, and dedup is by variant_key so the list carries one canonical form
+    per claim instead of near-identical twins the model must wade through.
+    """
+    from app.services.keyword_resolver import get_owned_primary_keywords
+
+    owned = get_owned_primary_keywords(store_id, item_types=item_types)
+    if not owned:
+        # get_owned_primary_keywords fails soft (returns {}). An empty reserved
+        # list silently switches off the anti-cannibalization rule, so say so
+        # rather than letting a store with money pages look unprotected.
+        logger.warning(
+            "Reserved money-page keyword list is empty for store %s — blog topics will "
+            "not be checked against money-page keywords on this run", store_id,
         )
-        rows = cur.fetchall()
+    rows = [
+        {"kw": o["keyword"], "vol": o.get("volume") or 0, "item_type": o["item_type"]}
+        for o in owned.values() if o.get("keyword")
+    ]
     return sorted(rows, key=lambda r: float(r["vol"] or 0), reverse=True)[:cap]
 
 

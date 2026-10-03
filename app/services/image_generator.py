@@ -1007,24 +1007,29 @@ def _format_prompt(key, **kwargs):
         return DEFAULTS[key].format(**kwargs)
 
 
-def generate_article_hero_image(article_title, subject_prompt=None, alt_text=None, keywords=None):
+def generate_article_hero_image(article_title, subject_prompt=None, alt_text=None, keywords=None, reference_images=None):
     """Hero (featured) image for a visual blog article: 16:9 → 1200×628 WebP.
 
-    Returns (bytes, filename, alt_text, width, height) or None. No text is
-    ever rendered into the image; the alt is LLM-authored when provided.
+    When reference_images (real product photos) are given, the product-scene
+    hero prompt is used so the model reproduces the actual product(s), exactly
+    like inline product images. Returns (bytes, filename, alt_text, width,
+    height) or None. No text is ever rendered into the image; the alt is
+    LLM-authored when provided.
     """
     try:
         subject = (subject_prompt or "").strip() or f"An evocative editorial scene representing: {article_title}"
-        prompt_text = _format_prompt("prompts.article_hero_image", article_title=article_title, subject=subject)
+        refs = [r for r in (reference_images or []) if r]
+        key = "prompts.article_hero_product_scene_image" if refs else "prompts.article_hero_image"
+        prompt_text = _format_prompt(key, article_title=article_title, subject=subject)
         if keywords:
             prompt_text += f"\nTopic context: {', '.join(str(k) for k in keywords[:4])}"
-        raw = _openrouter_image(prompt_text, aspect_ratio="16:9")
+        raw = _openrouter_image(prompt_text, aspect_ratio="16:9", reference_images=refs)
         if not raw:
             return None
         compressed, width, height = compress_banner_image(raw)
         filename = f"{_slugify_for_filename(article_title, 60)}.webp"
         alt = (alt_text or "").strip()[:125] or f"{article_title}"[:125]
-        logger.info("Article hero image generated for '%s' (%d bytes)", article_title, len(compressed))
+        logger.info("Article hero image generated for '%s' (%d bytes, %d refs)", article_title, len(compressed), len(refs))
         return compressed, filename, alt, width, height
     except Exception as e:
         logger.warning("Article hero image failed for '%s': %s", article_title, e)

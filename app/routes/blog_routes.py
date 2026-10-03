@@ -1379,11 +1379,35 @@ def regenerate_article_image(article_id):
                 cur.execute("UPDATE ai_tasks SET status = 'running' WHERE id = %s", (task_id,))
 
             keywords = [t.strip() for t in (article.get("tags") or "").split(",") if t.strip()]
-            from app.services.image_generator import generate_blog_image_ai
-            result = generate_blog_image_ai(article["title"], keywords=keywords)
+            from app.services.image_generator import generate_article_hero_image, generate_blog_image_ai
+
+            session = _find_article_media_session(article)
+            hero = dict(((session or {}).get("media_plan") or {}).get("hero") or {})
+            refs, handles = _load_hero_reference_images(
+                store_id, hero,
+                fallback_product_ids=(session or {}).get("target_product_ids"),
+                body_html=article.get("body"), title=article["title"],
+            )
+            if refs or (session and _session_style(session) == STYLE_VISUAL):
+                result = generate_article_hero_image(
+                    article["title"], subject_prompt=hero.get("prompt"), alt_text=hero.get("alt") or article.get("image_alt"),
+                    keywords=keywords, reference_images=refs,
+                )
+            else:
+                result = generate_blog_image_ai(article["title"], keywords=keywords)
             if not result:
                 raise Exception("Image generation returned no result")
             image_bytes, filename, alt_text, width, height = result
+            if session and refs:
+                # Remember which products the hero was built around so the
+                # wizard's Visuals step and the next regenerate agree.
+                plan = dict(session.get("media_plan") or {})
+                plan["hero"] = {**hero, "kind": "product", "product_handles": handles}
+                with db.get_cursor() as cur:
+                    cur.execute(
+                        "UPDATE article_wizard_sessions SET media_plan = %s, updated_at = NOW() WHERE id = %s",
+                        (json.dumps(plan), session["id"]),
+                    )
 
             mime = "image/webp" if filename.endswith(".webp") else "image/jpeg"
             staged = client.staged_upload_create(filename, mime, len(image_bytes), resource="IMAGE")
@@ -1404,7 +1428,7 @@ def regenerate_article_image(article_id):
             with db.get_cursor() as cur:
                 cur.execute(
                     "UPDATE ai_tasks SET status = 'completed', result = %s, completed_at = NOW() WHERE id = %s",
-                    (json.dumps({"image_url": cdn_url, "image_alt": alt_text, "width": width, "height": height}), task_id),
+                    (json.dumps({"image_url": cdn_url, "image_alt": alt_text, "width": width, "height": height, "used_product_refs": len(refs)}), task_id),
                 )
         except Exception as e:
             logger.exception("Article image regeneration failed: %s", e)
@@ -1538,10 +1562,15 @@ def _wizard_step_image(session, client, permanent=False):
             )
             product_titles = [r["title"] for r in cur.fetchall()]
 
+    refs = []
     if _session_style(session) == STYLE_VISUAL:
         hero = ((session.get("media_plan") or {}).get("hero") or {})
+        body_html = generated.get("body_html") or ""
+        refs, _ = _load_hero_reference_images(
+            session["store_id"], hero, fallback_product_ids=target_product_ids, body_html=body_html, title=title
+        )
         result = generate_article_hero_image(
-            title, subject_prompt=hero.get("prompt"), alt_text=hero.get("alt"), keywords=keywords
+            title, subject_prompt=hero.get("prompt"), alt_text=hero.get("alt"), keywords=keywords, reference_images=refs
         )
     else:
         result = generate_blog_image_ai(title, keywords=keywords, product_titles=product_titles)
@@ -1565,7 +1594,40 @@ def _wizard_step_image(session, client, permanent=False):
             "UPDATE article_wizard_sessions SET featured_image_url = %s, featured_image_alt = %s, updated_at = NOW() WHERE id = %s",
             (image_url, alt_text, session["id"]),
         )
-    return {"image_url": image_url, "alt_text": alt_text, "width": width, "height": height}
+    return {"image_url": image_url, "alt_text": alt_text, "width": width, "height": height, "used_product_refs": len(refs)}
+
+
+def _resolve_hero_product_handles(store_id, hero_spec, fallback_product_ids=None, body_html=None, title=None):
+    """Which real products a hero should be built around, mirroring inline
+    'product' images. Explicit planner handles win; a plan that predates hero
+    kinds (no 'kind' key) or names none falls back to the session's hand-picked
+    products, then to the body's linked products ranked by title relevance.
+    A planner that explicitly chose a scene/concept hero gets no products."""
+    from app.services.article_media import rank_linked_product_handles, rank_product_handles
+
+    hero_spec = hero_spec or {}
+    kind = hero_spec.get("kind")
+    if kind and kind != "product":
+        return []
+    if not get_article_visuals(store_id)["product_composite"]:
+        return []
+    handles = [h for h in (hero_spec.get("product_handles") or []) if h]
+    if not handles and fallback_product_ids:
+        with db.get_cursor() as cur:
+            cur.execute(
+                "SELECT handle FROM synced_products WHERE store_id = %s AND id = ANY(%s) ORDER BY title",
+                (store_id, list(fallback_product_ids)),
+            )
+            picked = [r["handle"] for r in cur.fetchall() if r.get("handle")]
+        handles = rank_product_handles(picked, f"{title or ''} {hero_spec.get('prompt') or ''}")
+    if not handles and body_html:
+        handles = rank_linked_product_handles(body_html, f"{title or ''} {hero_spec.get('prompt') or ''}")
+    return handles[:3]
+
+
+def _load_hero_reference_images(store_id, hero_spec, fallback_product_ids=None, body_html=None, title=None):
+    handles = _resolve_hero_product_handles(store_id, hero_spec, fallback_product_ids, body_html, title)
+    return _load_product_reference_images(store_id, handles), handles
 
 
 def _load_product_reference_images(store_id, handles, limit=3):
@@ -1862,7 +1924,10 @@ def _scrub_query_echo_tags(store_id, tags, target_keywords=None):
                 kws = [kws]
         blocked = {variant_key(str(k)) for k in (kws or []) if k}
         try:
-            blocked |= set(get_owned_primary_keywords(store_id))
+            # Money pages only: an assignment can name an article or page, and
+            # an item-type-blind map would strip the article's own keyword.
+            blocked |= set(get_owned_primary_keywords(
+                store_id, item_types=("product", "collection")))
         except Exception:
             pass
         kept = [t for t in tags if variant_key(str(t)) not in blocked]
@@ -1883,7 +1948,10 @@ def _money_page_keyword_warning(store_id, keywords):
 
         primary = variant_key(keywords[0]) if keywords else ""
         if primary:
-            owner = get_owned_primary_keywords(store_id).get(primary)
+            # Money pages only — otherwise an article assigned this keyword
+            # (Keyword Strategy → Assign) makes the post warn about itself.
+            owner = get_owned_primary_keywords(
+                store_id, item_types=("product", "collection")).get(primary)
             if owner:
                 return (
                     f'"{keywords[0]}" is the primary keyword of a {owner["item_type"]} page in your '
@@ -2000,6 +2068,46 @@ def wizard_research(session_id):
 # ── Topic Discovery: AI market research for "what should I write next?" ──
 
 
+def _filter_seed_keywords(store_id, seed):
+    """Drop seeded keywords a blog post is forbidden to target anyway.
+
+    Rule 8 of the topic_discovery prompt makes money-page keywords
+    authoritative and FORBIDDEN as article primaries, so seeding one just
+    burns a slot: the model silently substitutes something else and the user
+    is left wondering why their keyword vanished. Filtering here means the
+    seed list only contains keywords the model is actually allowed to use,
+    and the excluded ones come back with their owner so the UI can say why.
+
+    Returns (kept, excluded) where excluded entries carry `owner`.
+    """
+    from app.ai_agent import _reserved_money_page_keywords
+    from app.services.keyword_identity import variant_key
+
+    keywords = (seed or {}).get("keywords") or []
+    if not keywords:
+        return [], []
+
+    try:
+        reserved = {}
+        for r in _reserved_money_page_keywords(store_id, cap=1000):
+            reserved[variant_key(r["kw"])] = r
+    except Exception:
+        logger.warning("Could not load reserved keywords for seed filtering", exc_info=True)
+        return list(keywords), []
+
+    kept, excluded = [], []
+    for k in keywords:
+        text = k.get("keyword") if isinstance(k, dict) else k
+        if not text:
+            continue
+        owner = reserved.get(variant_key(str(text)))
+        if owner:
+            excluded.append({"keyword": text, "owner": owner["kw"], "item_type": owner["item_type"]})
+        else:
+            kept.append(k)
+    return kept, excluded
+
+
 @blog_bp.route("/api/blog/topics/research", methods=["POST"])
 def topic_research_start():
     data = request.get_json(silent=True) or {}
@@ -2010,6 +2118,22 @@ def topic_research_start():
     # Optional focus seed from the Keyword Strategy coverage gaps view:
     # {family, intent, keywords: [{keyword, volume}], count}
     seed = data.get("seed") or None
+    excluded_seeds = []
+    if seed and seed.get("keywords"):
+        kept, excluded_seeds = _filter_seed_keywords(store_id, seed)
+        if not kept:
+            # Every seeded keyword belongs to a money page. Running unseeded
+            # would produce unrelated suggestions and look like the seed was
+            # ignored, so say what happened instead.
+            owners = ", ".join(f'"{e["keyword"]}" ({e["item_type"]})' for e in excluded_seeds[:5])
+            return jsonify({
+                "error": "Every keyword here is already the primary keyword of a product or "
+                         "collection page, so a blog post can't target them without competing "
+                         f"with your own money pages: {owners}. Write supporting content that "
+                         "links to those pages, or pick informational keywords instead.",
+                "excluded_seeds": excluded_seeds,
+            }), 400
+        seed = dict(seed, keywords=kept)
 
     with db.get_cursor() as cur:
         cur.execute("SELECT topic_suggestion_count FROM ai_config ORDER BY id LIMIT 1")
@@ -2103,7 +2227,9 @@ def topic_research_start():
 
     thread = threading.Thread(target=run_discovery, daemon=True)
     thread.start()
-    return jsonify({"run_id": run_id, "task_id": task_id})
+    return jsonify({"run_id": run_id, "task_id": task_id, "excluded_seeds": excluded_seeds,
+                    "seeded_keywords": [k.get("keyword") if isinstance(k, dict) else k
+                                        for k in ((seed or {}).get("keywords") or [])]})
 
 
 @blog_bp.route("/api/blog/topics", methods=["GET"])
@@ -2167,6 +2293,64 @@ def topic_research_list():
         _iso_suggestion(s)
 
     return jsonify({"runs": runs, "pipeline": pipeline})
+
+
+@blog_bp.route("/api/blog/topics/<int:run_id>", methods=["GET"])
+def topic_research_run(run_id):
+    """Status of one research run, so a caller that started it can poll and
+    report the outcome instead of firing and forgetting."""
+    store_id = request.args.get("store_id")
+    if not store_id:
+        return jsonify({"error": "store_id is required"}), 400
+
+    with db.get_cursor() as cur:
+        # Same orphan sweep as the list view: daemon threads don't survive a
+        # worker restart, so a run can otherwise poll as 'running' forever.
+        cur.execute(
+            """UPDATE topic_research_runs r SET status = 'failed',
+                error = COALESCE(r.error, 'Interrupted — worker restarted'), completed_at = NOW()
+            WHERE r.id = %s AND r.store_id = %s AND r.status IN ('pending', 'running')
+              AND (r.created_at < NOW() - INTERVAL '30 minutes'
+                   OR EXISTS (SELECT 1 FROM ai_tasks t WHERE t.id = r.task_id AND t.status = 'failed'))""",
+            (run_id, store_id),
+        )
+        cur.execute(
+            """SELECT r.id, r.task_id, r.status, r.market_summary, r.rejected_topics, r.error,
+                      r.created_at, r.completed_at, t.input AS task_input
+               FROM topic_research_runs r
+               LEFT JOIN ai_tasks t ON t.id = r.task_id
+               WHERE r.id = %s AND r.store_id = %s""",
+            (run_id, store_id),
+        )
+        run = cur.fetchone()
+        if not run:
+            return jsonify({"error": "Run not found"}), 404
+        run = dict(run)
+        # The seed the run was started with, so a caller can report which of
+        # its keywords the research actually used and which it ruled out.
+        task_input = run.pop("task_input", None) or {}
+        if isinstance(task_input, str):
+            try:
+                task_input = json.loads(task_input)
+            except ValueError:
+                task_input = {}
+        seed = task_input.get("seed") or {}
+        run["seed_keywords"] = [k.get("keyword") if isinstance(k, dict) else k
+                                for k in (seed.get("keywords") or [])]
+        run["seed_family"] = seed.get("family")
+        cur.execute(
+            "SELECT * FROM topic_suggestions WHERE run_id = %s ORDER BY position",
+            (run_id,),
+        )
+        suggestions = [dict(s) for s in cur.fetchall()]
+
+    run["created_at"] = run["created_at"].isoformat() if run.get("created_at") else None
+    run["completed_at"] = run["completed_at"].isoformat() if run.get("completed_at") else None
+    for s in suggestions:
+        s["created_at"] = s["created_at"].isoformat() if s.get("created_at") else None
+        s["updated_at"] = s["updated_at"].isoformat() if s.get("updated_at") else None
+    run["suggestions"] = suggestions
+    return jsonify(run)
 
 
 def start_topic_enrich(store_id, suggestion_id):
@@ -3753,10 +3937,19 @@ def restyle_article(article_id):
                 from app.services.image_generator import generate_article_hero_image
 
                 hero_spec = media_plan["hero"]
-                gen = generate_article_hero_image(article.get("title") or "", hero_spec.get("prompt"), hero_spec.get("alt"))
+                refs, _ = _load_hero_reference_images(
+                    article["store_id"], hero_spec, body_html=article.get("body"), title=article.get("title")
+                )
+                gen = generate_article_hero_image(
+                    article.get("title") or "", hero_spec.get("prompt"), hero_spec.get("alt"), reference_images=refs
+                )
                 if gen:
                     image_bytes, filename, alt_text, width, height = gen
-                    hero = {"image_url": upload_image_to_cdn(client, image_bytes, filename, alt_text), "image_alt": alt_text}
+                    hero = {
+                        "image_url": upload_image_to_cdn(client, image_bytes, filename, alt_text),
+                        "image_alt": alt_text,
+                        "used_product_refs": len(refs),
+                    }
             except Exception as e:
                 logger.warning("Restyle hero generation failed for article %s: %s", article_id, e)
 

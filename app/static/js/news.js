@@ -65,12 +65,23 @@ function parseNewsMarkdown(text) {
     // Drop a trailing "---" separator and surrounding blank lines left before the heading.
     let article = articleLines.join("\n").replace(/\n+-{3,}\s*$/g, "").trimEnd();
 
+    // One source per host: the section renders hostnames, so several pages from
+    // the same site would read as duplicates. Server-side clean_sources also
+    // drops the store's own domain.
     const sources = [];
     const seen = new Set();
+    const hostOf = (url) => {
+        try {
+            return new URL(/^https?:\/\//i.test(url) ? url : `https://${url}`).hostname.toLowerCase().replace(/^www\./, "");
+        } catch (_) {
+            return "";
+        }
+    };
     const push = (url, title) => {
         url = (url || "").trim();
-        if (url && !seen.has(url)) {
-            seen.add(url);
+        const host = url ? hostOf(url) : "";
+        if (host && !seen.has(host)) {
+            seen.add(host);
             sources.push({ url, title: (title || "").trim() });
         }
     };

@@ -186,6 +186,31 @@
         }
         .ks-unowned-row:hover { background: var(--surface); }
         .ks-req-type { font-size: 11.5px; color: var(--on-surface-secondary); white-space: nowrap; }
+        .ks-covered-hint {
+            font-size: 11.5px; color: var(--warning); white-space: nowrap;
+            cursor: help; max-width: 300px; overflow: hidden; text-overflow: ellipsis;
+        }
+
+        /* Act-on-keyword route cards (keyword_actions.js) */
+        .ka-route-card {
+            display: flex; align-items: center; gap: 12px; cursor: pointer;
+            padding: 12px 14px; border: 1px solid var(--outline);
+            border-radius: 8px; background: var(--surface); transition: all 0.12s;
+        }
+        .ka-route-card:hover { border-color: var(--primary); background: var(--primary-light); }
+        .ka-route-card.recommended { border-color: var(--primary); }
+        .ka-route-card > .material-symbols-rounded { color: var(--primary); }
+        .ka-field-label {
+            font-size: 11.5px; font-weight: 500; text-transform: uppercase;
+            letter-spacing: 0.4px; color: var(--on-surface-secondary);
+            margin: 10px 0 4px;
+        }
+        .ka-counter { font-weight: 400; text-transform: none; letter-spacing: 0; }
+        .ka-rule-row {
+            display: grid; grid-template-columns: 92px 118px 1fr 28px;
+            gap: 5px; align-items: center; margin-bottom: 5px;
+        }
+        .ka-rule-row .form-control { font-size: 12px; padding: 5px 7px; }
 
         /* Data freshness strip */
         .ks-fresh-strip {
@@ -559,7 +584,7 @@
                             </div>
                             <table class="data-table">
                                 <thead><tr>
-                                    <th>Keyword</th><th>Volume</th><th>Intent</th><th>Source</th>
+                                    <th>Keyword</th><th>Volume</th><th>Intent</th><th>Source</th><th></th>
                                 </tr></thead>
                                 <tbody id="ks-uncovered-tbody"></tbody>
                             </table>
@@ -691,21 +716,6 @@
                     </div>
                 </div>
 
-                <!-- Preview Fix Modal -->
-                <div id="ks-preview-modal" class="modal-overlay">
-                    <div class="modal" style="max-width:800px;">
-                        <div class="modal-header">
-                            <h3 id="ks-preview-title">Preview Changes</h3>
-                            <button class="icon-btn" onclick="document.getElementById('ks-preview-modal').classList.remove('active')"><span class="material-symbols-rounded">close</span></button>
-                        </div>
-                        <div class="modal-body" id="ks-preview-content"></div>
-                        <div style="padding:16px;display:flex;gap:8px;justify-content:flex-end;border-top:1px solid var(--outline);">
-                            <button class="btn btn-outline" onclick="document.getElementById('ks-preview-modal').classList.remove('active')">Cancel</button>
-                            <button id="ks-apply-fix-btn" class="btn btn-primary">Apply Changes</button>
-                        </div>
-                    </div>
-                </div>
-
                 {% include "_seo_item_modal.html" %}
 
 {% endblock %}
@@ -714,4 +724,5 @@
     <script src="/static/js/seo.js"></script>
     <script src="/static/js/seo_issues.js"></script>
     <script src="/static/js/keyword_strategy.js"></script>
+    <script src="/static/js/keyword_actions.js"></script>
 {% endblock %}

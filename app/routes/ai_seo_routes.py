@@ -97,10 +97,16 @@ def _classify_bot_fetch(url, user_agent):
     import time
 
     time.sleep(0.5)
-    try:
-        resp = requests.get(url, timeout=10, headers={"User-Agent": user_agent})
-    except Exception:
-        return "error"
+    resp = None
+    for attempt in range(2):  # a timeout on one heavy page is not a block — retry once
+        try:
+            resp = requests.get(url, timeout=15, headers={"User-Agent": user_agent})
+            break
+        except Exception as e:
+            if attempt:
+                logger.info("bot fetch %s failed twice (%s)", url, e)
+                return "error"
+            time.sleep(1.5)
     body = resp.text or ""
     low = body[:20000].lower()
     has_marker = any(m in low for m in _CHALLENGE_MARKERS)

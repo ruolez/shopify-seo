@@ -44,6 +44,14 @@ app.secret_key = SECRET_KEY
 # Applies only to sessions marked permanent ("Keep me signed in" at login);
 # refreshed on each request, so it's a rolling 30-day window.
 app.permanent_session_lifetime = timedelta(days=30)
+# Cookies are scoped by host, NOT by port: every app served from localhost
+# shares one cookie jar. Flask's default cookie name is "session", so any other
+# local Flask app (each with its own SECRET_KEY) overwrites ours and we read its
+# cookie as a bad signature — an empty session, i.e. a surprise logout. A unique
+# name keeps neighbours on localhost from evicting this app's login.
+app.config["SESSION_COOKIE_NAME"] = "shopify_seo_session"
+app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+app.config["SESSION_COOKIE_HTTPONLY"] = True
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_port=1)
 
 app.register_blueprint(auth_bp)

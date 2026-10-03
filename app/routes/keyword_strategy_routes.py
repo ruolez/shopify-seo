@@ -308,6 +308,151 @@ def keyword_mentions(keyword_id):
     return jsonify(data)
 
 
+@keyword_strategy_bp.route("/api/keyword-strategy/keywords/<int:keyword_id>/targets")
+def keyword_targets(keyword_id):
+    """Ranked pages this keyword could be assigned to, with the context needed
+    to choose one: current primary, what assigning would demote, SEO score and
+    this keyword's own GSC position on that page."""
+    store_id = _get_store_id()
+    if not store_id:
+        return jsonify({"error": "store_id required"}), 400
+    from app.services import keyword_coverage as kc
+
+    item_type = request.args.get("item_type", "collection")
+    try:
+        data = kc.find_assignment_targets(
+            store_id,
+            keyword_id,
+            item_type,
+            q=request.args.get("q"),
+            limit=request.args.get("limit", 15, type=int),
+        )
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    if data is None:
+        return jsonify({"error": "Keyword not found"}), 404
+    return jsonify(data)
+
+
+@keyword_strategy_bp.route("/api/keyword-strategy/keywords/<int:keyword_id>/assign", methods=["POST"])
+def assign_keyword(keyword_id):
+    """Assign a keyword to an article or page.
+
+    Products and collections deliberately do NOT route here: they have a
+    resolver analysis that must be rebuilt after the pin, which is what
+    POST /api/seo/items/<type>/<id>/primary-keyword does. One write path per
+    item type keeps the ownership ledger from drifting."""
+    store_id = _get_store_id()
+    if not store_id:
+        return jsonify({"error": "store_id required"}), 400
+
+    data = request.get_json(silent=True) or {}
+    item_type = data.get("item_type")
+    item_id = data.get("item_id")
+    if item_type in ("product", "collection"):
+        return jsonify({
+            "error": f"Use POST /api/seo/items/{item_type}/<id>/primary-keyword for "
+                     f"{item_type}s — it also rebuilds the keyword resolution."
+        }), 400
+    if item_type not in ("article", "page") or not item_id:
+        return jsonify({"error": "item_type must be 'article' or 'page', and item_id is required"}), 400
+
+    try:
+        result = kws.assign_keyword_to_content(store_id, keyword_id, item_type, int(item_id))
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 404
+    return jsonify(result)
+
+
+@keyword_strategy_bp.route("/api/keyword-strategy/keywords/<int:keyword_id>/assign", methods=["DELETE"])
+def unassign_keyword(keyword_id):
+    """Undo an assignment. Works for every item type — undoing a product or
+    collection pin only demotes the ledger claim; its stored resolution is
+    rebuilt by the next analyze."""
+    store_id = _get_store_id()
+    if not store_id:
+        return jsonify({"error": "store_id required"}), 400
+
+    data = request.get_json(silent=True) or {}
+    item_type = data.get("item_type")
+    item_id = data.get("item_id")
+    if item_type not in kws.ITEM_TABLES or not item_id:
+        return jsonify({"error": "item_type and item_id are required"}), 400
+
+    return jsonify(kws.unassign_keyword_from_content(store_id, keyword_id, item_type, int(item_id)))
+
+
+# ---------------------------------------------------------------------------
+# Create a collection for uncovered demand
+# ---------------------------------------------------------------------------
+
+
+@keyword_strategy_bp.route("/api/keyword-strategy/collections/propose", methods=["POST"])
+def propose_collection():
+    """AI-propose a category page covering a keyword cluster. Writes nothing."""
+    store_id = _get_store_id()
+    if not store_id:
+        return jsonify({"error": "store_id required"}), 400
+    from app.services import keyword_content_builder as kcb
+
+    data = request.get_json(silent=True) or {}
+    keyword_ids = data.get("keyword_ids") or ([data["keyword_id"]] if data.get("keyword_id") else [])
+    if not keyword_ids:
+        return jsonify({"error": "keyword_ids is required"}), 400
+
+    try:
+        proposal = kcb.propose_collection(store_id, [int(k) for k in keyword_ids])
+        preview = kcb.preview_collection(store_id, proposal)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        logger.exception("Collection proposal failed")
+        return jsonify({"error": str(e)}), 500
+    return jsonify({"proposal": proposal, "preview": preview})
+
+
+@keyword_strategy_bp.route("/api/keyword-strategy/collections/preview", methods=["POST"])
+def preview_collection():
+    """Re-check an edited proposal — rule validity, matching products,
+    handle collisions, cannibalization. Writes nothing."""
+    store_id = _get_store_id()
+    if not store_id:
+        return jsonify({"error": "store_id required"}), 400
+    from app.services import keyword_content_builder as kcb
+
+    proposal = (request.get_json(silent=True) or {}).get("proposal")
+    if not proposal:
+        return jsonify({"error": "proposal is required"}), 400
+    try:
+        return jsonify(kcb.preview_collection(store_id, proposal))
+    except Exception as e:
+        logger.exception("Collection preview failed")
+        return jsonify({"error": str(e)}), 500
+
+
+@keyword_strategy_bp.route("/api/keyword-strategy/collections/create", methods=["POST"])
+def create_collection():
+    """Create the proposed collection on Shopify and give it the keyword."""
+    store_id = _get_store_id()
+    if not store_id:
+        return jsonify({"error": "store_id required"}), 400
+    from app.services import keyword_content_builder as kcb
+
+    data = request.get_json(silent=True) or {}
+    proposal = data.get("proposal")
+    if not proposal:
+        return jsonify({"error": "proposal is required"}), 400
+    try:
+        result = kcb.create_collection_from_proposal(
+            store_id, proposal, generate_image=bool(data.get("generate_image")))
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        logger.exception("Collection creation failed")
+        return jsonify({"error": str(e)}), 500
+    return jsonify(result)
+
+
 # ---------------------------------------------------------------------------
 # Clusters
 # ---------------------------------------------------------------------------

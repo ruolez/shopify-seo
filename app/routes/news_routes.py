@@ -11,7 +11,7 @@ from app.routes.blog_routes import _get_store_client
 from app.services import url_utils
 from app.shopify_client import is_gone_error
 from app.services.ai_output_guard import clamp_meta_description, clamp_meta_title, sanitize_html
-from app.services.news_body import insert_inline_images, render_sources_html
+from app.services.news_body import clean_sources, insert_inline_images, render_sources_html
 from app.services.news_template import (
     NEWS_SECTION_FILE,
     NEWS_TEMPLATE_FILE,
@@ -198,7 +198,7 @@ def _normalize_sources(data):
             continue
         if u:
             sources.append({"url": u, "title": t})
-    return sources
+    return clean_sources(sources)
 
 
 def _step_analyze(session_id, store_id):
@@ -407,7 +407,7 @@ def _step_publish(session, store, client, is_published=True, regen_hub=True):
 
     # Compose final body: insert generated inline images, then append Sources.
     body_html = insert_inline_images(edited.get("body_html") or "", session.get("inline_images") or [])
-    sources_html = render_sources_html(session.get("source_urls") or [])
+    sources_html = render_sources_html(session.get("source_urls") or [], store)
     if sources_html:
         body_html = f"{body_html}\n{sources_html}"
     body_html = sanitize_html(body_html)
@@ -774,11 +774,11 @@ def _session_for_article(shopify_id):
     return dict(row) if row else None
 
 
-def _rebuild_article_body(session):
+def _rebuild_article_body(session, store):
     """Reproduce the published body: inline images inserted into the edited body, then Sources."""
     edited = session.get("edited_result") or session.get("analyze_result") or {}
     body_html = insert_inline_images(edited.get("body_html") or "", session.get("inline_images") or [])
-    sources_html = render_sources_html(session.get("source_urls") or [])
+    sources_html = render_sources_html(session.get("source_urls") or [], store)
     if sources_html:
         body_html = f"{body_html}\n{sources_html}"
     return body_html
@@ -943,7 +943,7 @@ def regenerate_article_inline():
                 "status": "ready",
             }
             sess["inline_images"] = imgs
-            new_body = _rebuild_article_body(sess)
+            new_body = _rebuild_article_body(sess, store)
             client.update_article(shopify_id, {"body": new_body})
 
             with db.get_cursor() as cur:

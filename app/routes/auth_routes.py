@@ -6,10 +6,17 @@ from app.database import db
 auth_bp = Blueprint("auth", __name__)
 
 
+def _safe_next(target):
+    """Only same-site paths — never an absolute or protocol-relative URL."""
+    if not target or not target.startswith("/") or target.startswith("//") or target.startswith("/\\"):
+        return None
+    return target
+
+
 @auth_bp.route("/login", methods=["GET"])
 def login_page():
     if session.get("user_id"):
-        return redirect(url_for("dashboard.dashboard_page"))
+        return redirect(_safe_next(request.args.get("next")) or url_for("dashboard.dashboard_page"))
     return render_template("login.html")
 
 

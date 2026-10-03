@@ -336,11 +336,36 @@ def build_faqpage_jsonld(faq):
     return {"@context": "https://schema.org", "@type": "FAQPage", "mainEntity": entities}
 
 
+def rank_product_handles(handles, text, limit=3):
+    """Order product handles by how many words of `text` (title, brief…) they
+    contain, ties kept in input order; de-duplicated and capped."""
+    handles = list(dict.fromkeys(h for h in (handles or []) if h))
+    words = {w for w in re.findall(r"[a-z0-9]+", (text or "").lower()) if len(w) > 3}
+    scored = sorted(
+        enumerate(handles),
+        key=lambda ih: (-sum(1 for w in words if w in ih[1].split("-")), ih[0]),
+    )
+    return [h for _, h in scored][: max(0, int(limit or 0))]
+
+
+def rank_linked_product_handles(body_html, title, limit=3):
+    """Product handles linked in a body, most relevant to the title first."""
+    return rank_product_handles(re.findall(r'href="/products/([a-z0-9\-]+)', body_html or ""), title, limit)
+
+
 # ── Media plan normalization ──────────────────────────────────────
+
+def _clean_handles(handles):
+    if not isinstance(handles, list):
+        handles = [handles] if handles else []
+    return [str(h).strip() for h in handles if str(h).strip()][:3]
+
 
 def normalize_media_plan(plan, inline_limit):
     """Coerce an LLM media plan into the canonical shape, trimmed to
-    `inline_limit` inline specs with tokens renumbered 1..n."""
+    `inline_limit` inline specs with tokens renumbered 1..n. The hero carries
+    the same kind/product_handles as inline specs so real product photos can
+    be fed to the image model for it too."""
     plan = plan if isinstance(plan, dict) else {}
     hero = plan.get("hero") if isinstance(plan.get("hero"), dict) else {}
     inline_raw = plan.get("inline") if isinstance(plan.get("inline"), list) else []
@@ -351,9 +376,6 @@ def normalize_media_plan(plan, inline_limit):
         if len(inline) >= max(0, int(inline_limit or 0)):
             break
         n = len(inline) + 1
-        handles = spec.get("product_handles") or []
-        if not isinstance(handles, list):
-            handles = [handles]
         inline.append({
             "token": f"[[INLINE_IMAGE_{n}]]",
             "section": (spec.get("section") or "").strip(),
@@ -361,12 +383,14 @@ def normalize_media_plan(plan, inline_limit):
             "prompt": spec.get("prompt", "").strip(),
             "alt": (spec.get("alt") or "").strip()[:125],
             "caption": (spec.get("caption") or "").strip(),
-            "product_handles": [str(h).strip() for h in handles if str(h).strip()][:3],
+            "product_handles": _clean_handles(spec.get("product_handles")),
         })
     return {
         "hero": {
             "prompt": (hero.get("prompt") or "").strip(),
             "alt": (hero.get("alt") or "").strip()[:125],
+            "kind": (hero.get("kind") or "scene").strip().lower(),
+            "product_handles": _clean_handles(hero.get("product_handles")),
         },
         "inline": inline,
     }

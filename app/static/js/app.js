@@ -9,8 +9,11 @@ async function apiRequest(url, options = {}) {
 
     const response = await fetch(url, config);
 
-    if (response.status === 401) {
-        window.location.href = "/login";
+    // A 401 from the login call itself means "wrong credentials" — bouncing to
+    // /login there would swallow the error instead of showing it.
+    if (response.status === 401 && window.location.pathname !== "/login") {
+        const back = window.location.pathname + window.location.search;
+        window.location.href = "/login?next=" + encodeURIComponent(back);
         return null;
     }
 

@@ -36,13 +36,45 @@ def _rules():
     return get_setting("rules.keyword_resolution", DEFAULTS["rules.keyword_resolution"])
 
 
+ITEM_TABLES = {
+    "product": "synced_products",
+    "collection": "synced_collections",
+    "article": "synced_articles",
+    "page": "synced_pages",
+}
+
+# Money pages own commercial demand. Articles and pages resolve too, but they
+# are never allowed to take a keyword a product or collection already holds.
+MONEY_PAGE_TYPES = ("product", "collection")
+
+
 def _item_table(item_type):
-    return "synced_products" if item_type == "product" else "synced_collections"
+    return ITEM_TABLES.get(item_type, "synced_collections")
 
 
-def _url_path(item_type, handle):
-    prefix = "products" if item_type == "product" else "collections"
+def _url_path(item_type, handle, blog_handle=None):
+    if item_type == "article":
+        return f"blogs/{blog_handle or 'news'}/{handle}"
+    prefix = {"product": "products", "collection": "collections", "page": "pages"}.get(
+        item_type, "collections"
+    )
     return f"{prefix}/{handle}"
+
+
+def _normalize_item(item_type, item):
+    """Map an article/page row onto the field names the resolver and the
+    on-page extractor expect. Articles keep their body in `body` and pages in
+    `body_html`; both would otherwise resolve against an empty document and
+    fall back to whatever GSC happened to record."""
+    if item_type == "article":
+        item = dict(item)
+        item["description"] = item.get("body") or ""
+    elif item_type == "page":
+        item = dict(item)
+        item["description"] = item.get("body_html") or ""
+        item["meta_title"] = item.get("meta_title") or item.get("seo_title") or ""
+        item["meta_description"] = item.get("meta_description") or item.get("seo_description") or ""
+    return item
 
 
 def build_prefetch(store_id, item_type, item_ids):
@@ -58,16 +90,32 @@ def build_prefetch(store_id, item_type, item_ids):
     from app.services.url_utils import gsc_base_url
     base_url = gsc_base_url(cred.get("gsc_property") if cred else "")
 
+    blog_handles = {}
     with db.get_cursor() as cur:
-        cur.execute(
-            f"SELECT id, handle FROM {_item_table(item_type)} WHERE id = ANY(%s)",
-            (list(item_ids),),
-        )
-        handles = {r["id"]: r["handle"] for r in cur.fetchall()}
+        if item_type == "article":
+            cur.execute(
+                """SELECT a.id, a.handle, b.handle AS blog_handle
+                   FROM synced_articles a
+                   LEFT JOIN synced_blogs b ON b.id = a.blog_id
+                   WHERE a.id = ANY(%s)""",
+                (list(item_ids),),
+            )
+            rows = cur.fetchall()
+            handles = {r["id"]: r["handle"] for r in rows}
+            blog_handles = {r["id"]: r["blog_handle"] for r in rows}
+        else:
+            cur.execute(
+                f"SELECT id, handle FROM {_item_table(item_type)} WHERE id = ANY(%s)",
+                (list(item_ids),),
+            )
+            handles = {r["id"]: r["handle"] for r in cur.fetchall()}
 
     gsc_pages = {}
     if base_url and handles:
-        page_urls = [f"{base_url}/{_url_path(item_type, h)}" for h in handles.values() if h]
+        page_urls = [
+            f"{base_url}/{_url_path(item_type, h, blog_handles.get(i))}"
+            for i, h in handles.items() if h
+        ]
         with db.get_cursor() as cur:
             cur.execute(
                 """SELECT page, query,
@@ -134,6 +182,7 @@ def build_prefetch(store_id, item_type, item_ids):
     return {
         "base_url": base_url,
         "handles": handles,
+        "blog_handles": blog_handles,
         "gsc_pages": gsc_pages,
         "semrush": semrush,
         "semrush_semantic_pool": semrush[:500],
@@ -224,13 +273,17 @@ def resolve_item_keywords(store_id, item_type, item_id, item=None, prefetch=None
             item = cur.fetchone()
     if not item:
         return None
-    item = dict(item)
+    item = _normalize_item(item_type, dict(item))
 
     if prefetch is None:
         prefetch = build_prefetch(store_id, item_type, [item_id])
 
     handle = item.get("handle") or prefetch["handles"].get(item_id) or ""
-    page_url = f"{prefetch['base_url']}/{_url_path(item_type, handle)}" if prefetch["base_url"] and handle else ""
+    blog_handle = (prefetch.get("blog_handles") or {}).get(item_id)
+    page_url = (
+        f"{prefetch['base_url']}/{_url_path(item_type, handle, blog_handle)}"
+        if prefetch["base_url"] and handle else ""
+    )
 
     body_text = _strip_html(item.get("description") or "")
     body_words = body_text.split()
@@ -472,8 +525,50 @@ def resolve_item_keywords(store_id, item_type, item_id, item=None, prefetch=None
         if cand["cannibalization"]:
             cand["score"] = round(cand["score"] * penalty, 1)
 
+    # ── Money-page protection ────────────────────────────────────────
+    # An article or page must never resolve onto a keyword a product or
+    # collection already owns. Commercial demand belongs to money pages;
+    # supporting content links to them rather than competing for the SERP.
+    # This is the same rule the blog flows enforce at generation time, applied
+    # where the primary is actually chosen.
+    if item_type not in MONEY_PAGE_TYPES:
+        # Built once per prefetch, not once per item: this is a store-wide
+        # ownership scan, and rebuilding it inside a bulk loop turned the
+        # audit's article pass into hundreds of full table scans.
+        money = prefetch.get("money_page_keywords")
+        if money is None:
+            try:
+                money = get_owned_primary_keywords(store_id, item_types=MONEY_PAGE_TYPES)
+            except Exception:
+                money = {}
+                logger.warning("Money-page ownership lookup failed for %s %s", item_type, item_id)
+            prefetch["money_page_keywords"] = money
+        for cand in candidates.values():
+            if cand["manual"]:
+                continue  # a manual pin is the user overruling this on purpose
+            owner = money.get(variant_key(cand["keyword"]))
+            if owner:
+                cand["money_page_owned"] = {
+                    "item_type": owner["item_type"], "item_id": owner["item_id"],
+                    "keyword": owner["keyword"],
+                }
+            # A bare one-word term is a head term; those belong to category
+            # pages. Supporting content targets the long-tail phrase instead.
+            elif len(cand["keyword"].split()) < 2:
+                cand["head_term"] = True
+
     # ── Primary selection ────────────────────────────────────────────
-    ranked = sorted(candidates.values(), key=lambda c: c["score"], reverse=True)
+    # Tie-break on natural phrasing. On-page n-grams are stopword-stripped and
+    # reordered, so a page with no search data produces several candidates with
+    # identical scores — "roll blunt step" alongside "how to roll a blunt".
+    # Preferring the phrase that appears verbatim in the title picks the one a
+    # person would actually search for.
+    title_blob = _norm(f"{fields['title']} {fields['handle']}")
+
+    def _rank_key(c):
+        return (c["score"], 1 if _norm(c["keyword"]) in title_blob else 0, len(c["keyword"]))
+
+    ranked = sorted(candidates.values(), key=_rank_key, reverse=True)
     min_rel = rel_rules.get("min_relevance", 10) / 100.0
 
     primary = None
@@ -486,11 +581,24 @@ def resolve_item_keywords(store_id, item_type, item_id, item=None, prefetch=None
     else:
         primary = next(
             (c for c in ranked
-             if c["relevance"] >= min_rel and not c.get("packaging_only") and not c.get("generic")),
+             if c["relevance"] >= min_rel and not c.get("packaging_only")
+             and not c.get("generic") and not c.get("money_page_owned")
+             and not c.get("head_term")),
             None,
         )
         if primary is None:
-            primary = next((c for c in ranked if not c.get("generic")), None) or (ranked[0] if ranked else None)
+            primary = next(
+                (c for c in ranked if not c.get("generic")
+                 and not c.get("money_page_owned") and not c.get("head_term")), None
+            )
+        # Last resort only: better to advertise a money-page keyword than to
+        # have no primary at all, but say so.
+        if primary is None:
+            primary = ranked[0] if ranked else None
+        if primary and primary.get("money_page_owned"):
+            owner = primary["money_page_owned"]
+            note = (f"“{primary['keyword']}” is owned by a {owner['item_type']} page — "
+                    f"this content should support it, not compete with it")
 
     final = []
     if primary:
@@ -670,16 +778,47 @@ def get_or_refresh_resolution(store_id, item_type, item_id, max_age_days=None):
         return resolution
 
 
-def get_owned_primary_keywords(store_id, exclude=None):
+_OWNER_TABLES = {
+    "product": "synced_products",
+    "collection": "synced_collections",
+    "article": "synced_articles",
+    "page": "synced_pages",
+}
+
+
+def _existing_items(cur, store_id, pairs):
+    """Subset of (item_type, item_id) pairs that still have a synced row.
+    keyword_assignments has no FK and content is hard-deleted and pruned by
+    sync, so a claim can outlive its page and reserve a keyword forever."""
+    by_type = {}
+    for item_type, item_id in pairs:
+        if item_type in _OWNER_TABLES:
+            by_type.setdefault(item_type, set()).add(item_id)
+    alive = set()
+    for item_type, ids in by_type.items():
+        cur.execute(
+            f"SELECT id FROM {_OWNER_TABLES[item_type]} WHERE store_id = %s AND id = ANY(%s)",
+            (store_id, list(ids)),
+        )
+        alive.update((item_type, r["id"]) for r in cur.fetchall())
+    return alive
+
+
+def get_owned_primary_keywords(store_id, exclude=None, item_types=None):
     """variant_key -> owning item for every resolved primary and
-    accepted/applied assignment in the store, across products and collections.
-    Keyed by variant_key (plural-folded, token-sorted) — the same identity
-    dedup/claiming uses — so guards can't miss what claiming blocks. Each
-    owner dict carries the display-form "keyword". Manual claims outrank
-    resolved ones. `exclude` is an optional (item_type, item_id) whose own
-    claims are skipped."""
+    accepted/applied assignment in the store. Keyed by variant_key
+    (plural-folded, token-sorted) — the same identity dedup/claiming uses —
+    so guards can't miss what claiming blocks. Each owner dict carries the
+    display-form "keyword". Manual claims outrank resolved ones. `exclude` is
+    an optional (item_type, item_id) whose own claims are skipped.
+
+    `item_types` restricts which item types can own a keyword. Money-page
+    guards must pass ("product", "collection"): assignments can name articles
+    and pages, and an item-type-blind map makes a blog post look like it
+    competes with itself."""
     owned = {}
     exclude = tuple(exclude) if exclude else None
+    allowed = set(item_types) if item_types else None
 
     def claim(kw, owner):
         key = variant_key(kw)
@@ -705,23 +844,38 @@ def get_owned_primary_keywords(store_id, exclude=None):
                      AND keyword_resolution->'primary'->>'keyword' IS NOT NULL""",
                 (store_id,),
             )
-            for r in cur.fetchall():
-                if exclude and (r["item_type"], r["item_id"]) == exclude:
-                    continue
-                claim(r["kw"], {"item_type": r["item_type"], "item_id": r["item_id"],
-                                "score": float(r["score"] or 0), "manual": bool(r["manual"]),
-                                "volume": int(r["volume"] or 0)})
+            resolved = [r for r in cur.fetchall()
+                        if not (exclude and (r["item_type"], r["item_id"]) == exclude)
+                        and (allowed is None or r["item_type"] in allowed)]
 
             cur.execute(
                 """SELECT ka.assigned_item_type AS item_type, ka.assigned_item_id AS item_id,
                           mk.keyword, mk.search_volume
                    FROM keyword_assignments ka
                    JOIN master_keywords mk ON mk.id = ka.master_keyword_id
-                   WHERE ka.store_id = %s AND ka.status IN ('accepted', 'applied')""",
+                   WHERE ka.store_id = %s AND ka.status IN ('accepted', 'applied')
+                     AND ka.assigned_item_type IS NOT NULL
+                     AND ka.assigned_item_id IS NOT NULL""",
                 (store_id,),
             )
-            for r in cur.fetchall():
-                if exclude and (r["item_type"], r["item_id"]) == exclude:
+            assigned = [r for r in cur.fetchall()
+                        if not (exclude and (r["item_type"], r["item_id"]) == exclude)
+                        and (allowed is None or r["item_type"] in allowed)]
+
+            alive = _existing_items(
+                cur, store_id,
+                [(r["item_type"], r["item_id"]) for r in resolved + assigned],
+            )
+
+            for r in resolved:
+                if (r["item_type"], r["item_id"]) not in alive:
+                    continue
+                claim(r["kw"], {"item_type": r["item_type"], "item_id": r["item_id"],
+                                "score": float(r["score"] or 0), "manual": bool(r["manual"]),
+                                "volume": int(r["volume"] or 0)})
+
+            for r in assigned:
+                if (r["item_type"], r["item_id"]) not in alive:
                     continue
                 claim(r["keyword"], {"item_type": r["item_type"], "item_id": r["item_id"],
                                      "score": None, "manual": True,

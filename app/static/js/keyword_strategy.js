@@ -643,16 +643,27 @@ function renderFamilyDetail(fam, cid) {
         html += '<div style="font-size:13px;color:var(--on-surface-secondary);padding:2px 0 6px;">Every keyword with demand has an owning page.</div>';
     }
     unowned.forEach(u => {
+        // A gap Google already sends this query to is an optimize job, not a
+        // new-page job. Ownership can't see this: it matches keyword strings,
+        // and the ranking page usually covers the topic under other words.
+        const rp = (u.ranking_pages || [])[0];
+        const covered = rp
+            ? `<span class="ks-covered-hint" title="${escapeAttr((u.ranking_pages || []).map(p => `${p.title || p.url} — pos ${p.position}`).join("\n"))}">
+                 already ranks #${rp.position} &middot; ${escapeHtml((rp.title || rp.url || "").slice(0, 34))}</span>`
+            : "";
         html += `<div class="ks-unowned-row" onclick="openKeywordDrawer(${u.id})">
             <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(u.keyword)}</span>
             <span style="color:var(--on-surface-secondary);font-size:12px;white-space:nowrap;">${(u.search_volume || 0).toLocaleString()}</span>
             <span class="badge badge-${intentBadge(u.intent)}" style="font-size:10px;">${u.intent}</span>
-            <span class="ks-req-type">&rarr; needs ${(u.required_types || []).join(" / ") || "content"}</span>
+            ${covered || `<span class="ks-req-type">&rarr; needs ${(u.required_types || []).join(" / ") || "content"}</span>`}
             <span onclick="event.stopPropagation();" style="display:flex;gap:4px;">
-                <button class="btn btn-sm btn-outline" style="font-size:11px;white-space:nowrap;" onclick="ksActionAssign(${u.id})">Assign</button>
-                ${u.action === "research_topic"
-                    ? `<button class="btn btn-sm btn-outline" style="font-size:11px;white-space:nowrap;" onclick='ksActionResearch(${cid}, ${JSON.stringify(u.intent)})'>Research</button>`
-                    : ''}
+                ${rp && rp.item_id && (rp.item_type === "product" || rp.item_type === "collection")
+                    ? `<button class="btn btn-sm btn-outline" style="font-size:11px;white-space:nowrap;"
+                        title="Optimize the page that already ranks for this"
+                        onclick='ksOptimizePage(${JSON.stringify(rp.item_type)}, ${rp.item_id}, ${JSON.stringify(u.keyword)}, ${u.search_volume || 0})'>Optimize</button>`
+                    : ""}
+                <button class="btn btn-sm btn-primary" style="font-size:11px;white-space:nowrap;"
+                    onclick='ksActionKeyword(${u.id}, ${JSON.stringify(u.intent)}, ${cid}, ${JSON.stringify(u.required_types || [])})'>Act</button>
             </span>
         </div>`;
     });
@@ -872,12 +883,29 @@ function renderFamilyKwMini(fam) {
 }
 
 function renderGapAction(gap, clusterId) {
-    if (gap.action === "research_topic") {
-        return `<button class="btn btn-sm btn-outline" style="font-size:11px;white-space:nowrap;" onclick='ksActionResearch(${clusterId || 0}, ${JSON.stringify(gap.intent)})'>Research topic</button>`;
-    }
     const kwArg = gap.keyword_id || (gap.keywords && gap.keywords[0] ? gap.keywords[0].id : null);
-    if (!kwArg) return "";
-    return `<button class="btn btn-sm btn-outline" style="font-size:11px;white-space:nowrap;" onclick="ksActionAssign(${kwArg})">Assign to page</button>`;
+    if (!kwArg) {
+        return `<button class="btn btn-sm btn-outline" style="font-size:11px;white-space:nowrap;" onclick='ksActionResearch(${clusterId || 0}, ${JSON.stringify(gap.intent)})'>Research topics</button>`;
+    }
+    return `<button class="btn btn-sm btn-outline" style="font-size:11px;white-space:nowrap;"
+        onclick='ksActionKeyword(${kwArg}, ${JSON.stringify(gap.intent)}, ${clusterId || 0}, ${JSON.stringify(gap.required_types || [])})'>Act on keyword</button>`;
+}
+
+/* Single entry point for acting on a keyword — the drawer, the family rows,
+ * the gap popover and the Uncovered Keywords table all come through here.
+ * Closes the drawer first so the action modal isn't stacked behind it. */
+function ksActionKeyword(keywordId, intent, clusterId, requiredTypes) {
+    if (ksKwDrawer && ksKwDrawer.isOpen()) ksKwDrawer.close();
+    ksOpenActionModal(keywordId, {
+        intent,
+        clusterId,
+        requiredTypes: requiredTypes || [],
+        onDone: () => {
+            ksFamilyCache = {};
+            if (ksActiveStep === "audit") loadUncoveredKeywords();
+            else loadFamilies();
+        },
+    });
 }
 
 async function loadKeywordMentions(keywordId, trigger) {
@@ -931,10 +959,9 @@ function openGapPopover(ev, cid, intent) {
     closeKsPopover();
     const el = document.createElement("div");
     el.className = "ks-popover";
-    const research = intent === "informational" || intent === "commercial"
-        ? `<button onclick='closeKsPopover();ksActionResearch(${cid}, ${JSON.stringify(intent)})'><span class="material-symbols-rounded">edit_note</span> Research blog topic</button>` : "";
-    el.innerHTML = `${research}
-        <button onclick="closeKsPopover();ksActionAssignTop(${cid}, '${intent}')"><span class="material-symbols-rounded">link</span> Assign top keyword to page</button>
+    el.innerHTML = `
+        <button onclick="closeKsPopover();ksActionAssignTop(${cid}, '${intent}')"><span class="material-symbols-rounded">bolt</span> Act on top keyword</button>
+        <button onclick='closeKsPopover();ksActionResearch(${cid}, ${JSON.stringify(intent)})'><span class="material-symbols-rounded">edit_note</span> Research blog topics</button>
         <button onclick="closeKsPopover();ksViewFamily(${cid})"><span class="material-symbols-rounded">travel_explore</span> Open family</button>`;
     document.body.appendChild(el);
     const x = Math.min(ev.clientX, window.innerWidth - 240);
@@ -958,7 +985,7 @@ async function ksActionAssignTop(cid, intent) {
         const bucket = (ksFamilyCache[cid].keywords_by_intent || {})[intent] || [];
         const target = bucket.find(k => !k.owner) || bucket[0];
         if (!target) { showToast("No keywords in this intent bucket", "info"); return; }
-        ksActionAssign(target.id);
+        ksActionKeyword(target.id, intent, cid);
     } catch (e) { showToast("Failed: " + e.message, "error"); }
 }
 
@@ -979,15 +1006,18 @@ async function ksActionResearch(cid, intent) {
                     <strong>${escapeHtml(intent)}</strong> keywords from the
                     <strong>${escapeHtml(fam.cluster.name)}</strong> family:</p>
                 <ul style="font-size:13px;margin:0 0 12px 18px;max-height:220px;overflow-y:auto;">${kwList}</ul>
-                <p style="font-size:12px;color:var(--on-surface-secondary);">Suggestions appear in Blog Posts &rarr; Research Topics. Money-page keywords stay protected.</p>`,
-            footerHtml: `<button class="btn btn-outline" data-ks-cancel>Cancel</button>
+                <p style="font-size:12px;color:var(--on-surface-secondary);">Keywords already owned by a product or collection page are excluded — an article targeting one would compete with it.</p>
+                <div id="ks-research-status" style="margin-top:10px;"></div>`,
+            footerHtml: `<button class="btn btn-outline" data-ks-cancel>Close</button>
                 <button class="btn btn-primary" data-ks-go><span class="material-symbols-rounded" style="font-size:16px;vertical-align:middle;">edit_note</span> Start research</button>`,
         });
         modal.el.querySelector("[data-ks-cancel]").addEventListener("click", () => modal.close());
         modal.el.querySelector("[data-ks-go]").addEventListener("click", async (ev) => {
             ev.target.disabled = true;
+            const status = modal.el.querySelector("#ks-research-status");
+            let run;
             try {
-                await apiRequest("/api/blog/topics/research", {
+                run = await apiRequest("/api/blog/topics/research", {
                     method: "POST", headers: { "Content-Type": "application/json" },
                     body: JSON.stringify({
                         store_id: ksStoreId, count: 2,
@@ -997,77 +1027,22 @@ async function ksActionResearch(cid, intent) {
                         },
                     }),
                 });
-                modal.close();
-                showToast("Topic research started — suggestions will appear in Blog Posts", "success");
-            } catch (e) { showToast("Failed to start research: " + e.message, "error"); ev.target.disabled = false; }
+            } catch (e) {
+                status.innerHTML = `<div style="font-size:12.5px;color:var(--error);">${escapeHtml(e.message)}</div>`;
+                ev.target.disabled = false;
+                return;
+            }
+            // Research rejects candidates that cannibalize a money page,
+            // duplicate an article, or face an unwinnable SERP — report that
+            // here rather than leaving the substitution to be discovered later.
+            if ((run.excluded_seeds || []).length) {
+                status.innerHTML = `<div style="font-size:12px;color:var(--warning);margin-bottom:6px;">
+                    ${run.excluded_seeds.length} keyword(s) excluded — already owned by a product or
+                    collection page: ${run.excluded_seeds.map(x => `“${escapeHtml(x.keyword)}”`).join(", ")}</div>`;
+            }
+            kaPollResearch(run.run_id, status);
         });
     } catch (e) { showToast("Failed: " + e.message, "error"); }
-}
-
-async function ksActionAssign(keywordId) {
-    if (!ksStoreId) return;
-    let kw;
-    try {
-        kw = (await apiRequest(`/api/keyword-strategy/keywords/${keywordId}/detail?store_id=${ksStoreId}`)).keyword;
-    } catch (e) { showToast("Failed: " + e.message, "error"); return; }
-
-    let pickType = "collection";
-    const modal = UIModal.open({
-        title: `Assign "${escapeHtml(kw.keyword)}" to a page`,
-        bodyHtml: `<div style="display:flex;gap:8px;margin-bottom:10px;">
-                <select id="ks-pick-type" class="form-control" style="width:auto;font-size:13px;">
-                    <option value="collection">Collection</option>
-                    <option value="product">Product</option>
-                </select>
-                <input type="text" id="ks-pick-search" class="form-control" placeholder="Search pages..." style="flex:1;font-size:13px;">
-            </div>
-            <div id="ks-pick-results" style="max-height:280px;overflow-y:auto;"></div>
-            <p style="font-size:12px;color:var(--on-surface-secondary);margin-top:10px;">
-                The keyword becomes the page's manual primary — the resolver re-analyzes
-                the page and every AI flow will optimize toward it.</p>`,
-    });
-    const results = modal.el.querySelector("#ks-pick-results");
-    const searchInput = modal.el.querySelector("#ks-pick-search");
-    modal.el.querySelector("#ks-pick-type").addEventListener("change", e => { pickType = e.target.value; doSearch(); });
-
-    let t;
-    searchInput.addEventListener("input", () => { clearTimeout(t); t = setTimeout(doSearch, 300); });
-    searchInput.value = kw.keyword;
-    setTimeout(doSearch, 50);
-
-    async function doSearch() {
-        const q = searchInput.value.trim();
-        if (!q) { results.innerHTML = ""; return; }
-        results.innerHTML = '<div class="spinner" style="margin:14px auto"></div>';
-        try {
-            const items = await apiRequest(`/api/blog/wizard/search/${pickType}s?store_id=${ksStoreId}&q=${encodeURIComponent(q)}`);
-            if (!items.length) { results.innerHTML = '<div style="font-size:13px;color:var(--on-surface-secondary);padding:10px;">No matches.</div>'; return; }
-            results.innerHTML = items.map(it => `<div class="ks-fam-kw-row" data-item-id="${it.id}">
-                <span class="badge badge-${typeBadge(pickType)}" style="font-size:10px;">${pickType}</span>
-                <span style="flex:1;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(it.title)}</span>
-            </div>`).join("");
-            results.querySelectorAll("[data-item-id]").forEach(row => row.addEventListener("click", () => pick(parseInt(row.dataset.itemId))));
-        } catch (e) { results.innerHTML = ""; }
-    }
-
-    async function pick(itemId) {
-        results.innerHTML = '<div class="spinner" style="margin:14px auto"></div>';
-        try {
-            // Full resolver pipeline: manual assignment + re-resolve + re-analysis
-            await apiRequest(`/api/seo/items/${pickType}/${itemId}/primary-keyword?store_id=${ksStoreId}`, {
-                method: "POST", headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ keyword: kw.keyword }),
-            });
-            modal.close();
-            showToast(`"${kw.keyword}" assigned as primary`, "success");
-            ksFamilyCache = {};
-            loadFamilies();
-            if (ksKwDrawer && ksKwDrawer.isOpen()) openKeywordDrawer(keywordId);
-        } catch (e) {
-            showToast("Assign failed: " + e.message, "error");
-            doSearch();
-        }
-    }
 }
 
 // ── Phase 2: Content Audit ───────────────────────────────────────────────
@@ -1249,6 +1224,10 @@ async function loadUncoveredKeywords() {
             <td>${(kw.search_volume || 0).toLocaleString()}</td>
             <td><span class="badge badge-${intentBadge(kw.intent)}">${kw.intent || '-'}</span></td>
             <td><span class="badge badge-${sourceBadge(kw.source)}">${kw.source || '-'}</span></td>
+            <td style="white-space:nowrap;">
+                <button class="btn btn-sm btn-outline" style="font-size:11px;"
+                    onclick='ksActionKeyword(${kw.id}, ${JSON.stringify(kw.intent || "commercial")}, ${kw.cluster_id || 0})'>Act</button>
+            </td>
         </tr>`).join("");
     } catch (e) {}
 }

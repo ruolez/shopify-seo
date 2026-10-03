@@ -801,25 +801,55 @@ async function ovDirectAction(index, btn) {
     }
 }
 
-async function runAllAudits(btn) {
+const ALL_AUDITS = [
+    { label: "AI readiness scan", detail: "Scores every product and collection for answer-engine readiness.", cost: "free",
+      endpoint: "/api/ai-seo/scan", extra: { type: "all" } },
+    { label: "Feed audit", detail: "Checks product feed completeness (GTIN, images, category, availability).", cost: "free",
+      endpoint: "/api/ai-seo/feed/scan", extra: {} },
+    { label: "Off-site audit", detail: "Looks for your brand on Reddit, review sites and roundup listicles.", cost: "free",
+      endpoint: "/api/ai-seo/offsite/run", extra: {} },
+    { label: "Visibility tracking", detail: "Asks AI engines your tracked prompts and records brand mentions.",
+      cost: "spends OpenRouter budget", endpoint: "/api/ai-seo/tracking/run", extra: {} },
+];
+
+function runAllAudits(btn) {
     const storeId = parseInt(getStoreId());
     if (!storeId) { showToast("Select a store first", "warning"); return; }
-    if (!confirm("Run 4 audits: AI readiness scan (products + collections), feed audit, off-site audit, and AI visibility tracking.\n\nVisibility tracking spends OpenRouter budget (capped at your daily budget in Settings); the other three are free.")) return;
+    const modal = UIModal.open({
+        title: "Run all audits",
+        bodyHtml: `<p style="margin-top:0;">These four audits run in the background — progress shows in Activity.</p>
+            ${ALL_AUDITS.map((a) => `
+                <div style="display:flex;gap:10px;align-items:flex-start;padding:8px 0;border-bottom:1px solid var(--outline);">
+                    <div style="flex:1;min-width:0;">
+                        <div style="font-weight:600;font-size:13px;">${a.label}</div>
+                        <div style="font-size:12px;color:var(--on-surface-secondary);">${a.detail}</div>
+                    </div>
+                    <span class="badge ${a.cost === "free" ? "badge-info" : "badge-warning"}">${a.cost}</span>
+                </div>`).join("")}
+            <p style="font-size:12px;color:var(--on-surface-secondary);">Visibility tracking is capped by the daily budget in Settings.</p>`,
+        footerHtml: `<button class="btn btn-secondary" data-c>Cancel</button>
+            <button class="btn btn-primary" data-go>Run all audits</button>`,
+    });
+    modal.el.querySelector("[data-c]").addEventListener("click", () => modal.close());
+    modal.el.querySelector("[data-go]").addEventListener("click", () => {
+        modal.close();
+        startAllAudits(storeId, btn);
+    });
+}
+
+async function startAllAudits(storeId, btn) {
     btn.disabled = true;
-    const posts = [
-        apiRequest("/api/ai-seo/scan", { method: "POST", body: { store_id: storeId, type: "all" } }),
-        apiRequest("/api/ai-seo/feed/scan", { method: "POST", body: { store_id: storeId } }),
-        apiRequest("/api/ai-seo/offsite/run", { method: "POST", body: { store_id: storeId } }),
-        apiRequest("/api/ai-seo/tracking/run", { method: "POST", body: { store_id: storeId } }),
-    ];
-    const results = await Promise.allSettled(posts);
+    btn.innerHTML = '<span class="material-symbols-rounded">hourglass_empty</span> Starting…';
+    showToast("Starting 4 audits…", "info");
+    const results = await Promise.allSettled(ALL_AUDITS.map((a) =>
+        apiRequest(a.endpoint, { method: "POST", body: { store_id: storeId, ...a.extra } })));
     let started = 0;
     results.forEach((r, i) => {
         if (r.status === "fulfilled") started++;
         else if (/already running|already in progress/i.test(r.reason?.message || "")) started++; // benign
-        else showToast(`${["Readiness scan", "Feed audit", "Off-site audit", "Visibility tracking"][i]} failed: ${r.reason?.message}`, "error");
+        else showToast(`${ALL_AUDITS[i].label} failed: ${r.reason?.message}`, "error");
     });
-    showToast(`Started ${started} of 4 audits — progress in Activity`, started ? "success" : "error");
+    showToast(`Started ${started} of ${ALL_AUDITS.length} audits — progress in Activity`, started ? "success" : "error");
     TasksPanel.open({ page: "/ai-seo" });
     loadSectionOverview();
 }
@@ -1364,19 +1394,22 @@ function botCheckCard(b) {
     if (!names.length) {
         body = `<div style="color:var(--on-surface-secondary);font-size:13px;">Not verified yet — run a scan or click Verify now.</div>`;
     } else {
+        // "error" is our own fetch failing (timeout/DNS), not a block — amber, never red.
         const chip = (name, statuses) => {
             const vals = Object.values(statuses);
-            const allOk = vals.every((v) => v === "ok");
-            const challenged = vals.includes("challenged");
-            const cls = allOk ? "badge-success" : "badge-error";
-            const label = allOk ? name : `${name}: ${challenged ? "challenged" : vals.find((v) => v !== "ok") || "blocked"}`;
-            return `<span class="badge ${cls}" style="margin:2px;">${escapeHtml(label)}</span>`;
+            const blocked = vals.find((v) => v === "blocked" || v === "challenged");
+            if (blocked) return `<span class="badge badge-error" style="margin:2px;">${escapeHtml(`${name}: ${blocked}`)}</span>`;
+            if (vals.every((v) => v === "error")) return `<span class="badge badge-warning" style="margin:2px;">${escapeHtml(`${name}: fetch failed`)}</span>`;
+            const cls = vals.includes("error") ? "badge-warning" : "badge-success";
+            return `<span class="badge ${cls}" style="margin:2px;">${escapeHtml(name)}</span>`;
         };
         const controlOk = b.results && b.results.control_ok;
         const anyChallenged = names.some((n) => Object.values(bots[n]).includes("challenged"));
+        const anyError = names.some((n) => Object.values(bots[n]).includes("error"));
         body = `<div style="font-size:13px;margin-bottom:6px;">${b.ok}/${b.tested} AI crawlers verified with live fetches${b.checked_at ? ` · checked ${new Date(b.checked_at).toLocaleString()}` : ""}</div>
             <div>${names.map((n) => chip(n, bots[n])).join("")}</div>
             ${anyChallenged && controlOk ? `<div style="font-size:12px;color:var(--error);margin-top:8px;"><span class="material-symbols-rounded" style="font-size:14px;vertical-align:middle;">warning</span> Your WAF/CDN (e.g. Cloudflare) is challenging AI crawlers while normal browsers pass — allowlist these bots or they can't read your pages.</div>` : ""}
+            ${anyError ? `<div style="font-size:12px;color:var(--on-surface-secondary);margin-top:8px;">Amber = our fetch failed (timeout or network), which is not a block — re-verify to get a clean read.</div>` : ""}
             ${!controlOk && names.length ? `<div style="font-size:12px;color:var(--on-surface-secondary);margin-top:8px;">Control fetch also failed — results may reflect a store-wide issue, not bot blocking.</div>` : ""}`;
     }
     return aeoCard({

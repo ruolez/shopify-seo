@@ -41,3 +41,24 @@ def variant_key(kw):
 def tokens(kw):
     """norm()-consistent token list."""
     return norm(kw).split()
+
+
+# Semrush exports carry column artifacts — bare numbers ("0", "10", "2024") and
+# stray single letters ("a") — that behave like wildcards downstream: a
+# one-character keyword substring-matches nearly every page, so it wins any
+# relevance contest and becomes the "primary keyword" of content it has nothing
+# to do with. Reject them at every entry point instead.
+MIN_KEYWORD_LENGTH = 3
+MIN_KEYWORD_LETTERS = 2
+
+
+def is_valid_keyword(kw):
+    """Whether a string is usable as a tracked keyword.
+
+    Deliberately permissive about real short keywords — "zyn" (3 letters) and
+    "3mg" (2 letters) pass — while rejecting pure numbers and single letters.
+    """
+    cleaned = norm(kw)
+    if len(cleaned) < MIN_KEYWORD_LENGTH:
+        return False
+    return sum(1 for c in cleaned if c.isalpha()) >= MIN_KEYWORD_LETTERS
