@@ -233,6 +233,14 @@ class NightlyScheduler:
                 maybe_run_weekly_visibility(store_id)
             except Exception as e:
                 logger.error("Weekly visibility check failed for store %s: %s", store_id, str(e))
+            # Index coverage: a daily slice of URL inspections, so every page
+            # is re-checked about every two weeks without manual sweeps.
+            try:
+                from app.services.index_coverage import inspect_batch
+                result = inspect_batch(store_id)
+                logger.info("Index coverage for store %s: %s", store_id, result)
+            except Exception as e:
+                logger.warning("Index coverage check skipped for store %s: %s", store_id, e)
             # Order pull for revenue attribution — a missing read_orders
             # scope logs one warning per day and the widget shows setup help.
             try:

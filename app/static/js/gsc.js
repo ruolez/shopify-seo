@@ -368,7 +368,72 @@ function loadActiveTab() {
     else if (tab === "queries") loadTopQueries();
     else if (tab === "opportunities") loadOpportunities();
     else if (tab === "cannibalization") loadCannibalization();
+    else if (tab === "indexing") loadIndexing();
     else if (tab === "scores") loadScoresTab();
+}
+
+// ─── Indexing: which pages Google has actually indexed ───
+
+const INDEX_ITEM_LINK = {
+    product: (id) => `/seo?optimize=product&id=${id}&store_id=${currentStoreId || ""}`,
+    collection: (id) => `/seo?optimize=collection&id=${id}&store_id=${currentStoreId || ""}`,
+    article: (id) => `/blog?article=${id}`,
+};
+
+async function loadIndexing() {
+    const box = document.getElementById("gsc-indexing-container");
+    if (!currentStoreId) { box.innerHTML = "<p>Select a store.</p>"; return; }
+    box.innerHTML = '<div class="loading-spinner"><div class="spinner"></div></div>';
+    try {
+        const data = await apiRequest(`/api/gsc/index-coverage?store_id=${currentStoreId}`);
+        const s = data.summary;
+        const intro = `<p style="font-size:13px;color:var(--on-surface-secondary);margin:0 0 12px;">A page Google has not indexed cannot appear in search, however good its text is. The app checks a few hundred pages a night; every page is re-checked about every two weeks.</p>`;
+        const checkBtn = `<button class="btn btn-secondary btn-sm" onclick="runIndexingCheck(this)"><span class="material-symbols-rounded">radar</span> Check more pages now</button>`;
+        if (!s.checked) {
+            box.innerHTML = intro + `<p>No pages checked yet.</p>` + checkBtn;
+            return;
+        }
+        const typeLine = Object.entries(s.by_type).map(([t, v]) => `${t}s ${v.indexed}/${v.checked}`).join(" · ");
+        const groups = {};
+        data.not_indexed.forEach((r) => (groups[r.coverage_state] = groups[r.coverage_state] || []).push(r));
+        const sections = Object.entries(groups).sort((a, b) => b[1].length - a[1].length).map(([state, rows]) => `
+            <details class="card" style="margin-top:12px;" ${rows.length <= 15 ? "open" : ""}>
+                <summary style="cursor:pointer;font-weight:600;">${escapeHtml(state)} — ${rows.length} page${rows.length === 1 ? "" : "s"}</summary>
+                <p style="font-size:13px;margin:8px 0 4px;">${escapeHtml(rows[0].why)}</p>
+                <p style="font-size:13px;margin:0 0 8px;"><strong>What to do:</strong> ${escapeHtml(rows[0].action)}</p>
+                <div class="table-container"><table class="data-table"><thead><tr><th>Page</th><th>Type</th><th>Google last read it</th><th></th></tr></thead><tbody>
+                ${rows.map((r) => `<tr>
+                    <td>${escapeHtml(r.title || r.url)}<div style="font-size:11px;color:var(--on-surface-secondary);">${escapeHtml(shortenUrl(r.url))}</div></td>
+                    <td>${r.item_type}</td>
+                    <td>${r.last_crawl_time ? formatDate(r.last_crawl_time) : "never"}</td>
+                    <td style="text-align:right;white-space:nowrap;">${INDEX_ITEM_LINK[r.item_type] ? `<a class="btn btn-secondary btn-sm" href="${INDEX_ITEM_LINK[r.item_type](r.item_id)}">Open</a>` : ""}
+                        <a class="btn btn-secondary btn-sm" target="_blank" rel="noopener" href="${escapeAttr(r.url)}">View</a></td>
+                </tr>`).join("")}</tbody></table></div>
+            </details>`).join("");
+        box.innerHTML = intro + `<div class="kpi-strip" style="margin-bottom:8px;">
+                <div class="stat-card"><div class="stat-value">${s.indexed}</div><div class="stat-label">Indexed</div></div>
+                <div class="stat-card"><div class="stat-value" style="color:${s.not_indexed ? "var(--error)" : "var(--success)"};">${s.not_indexed}</div><div class="stat-label">Not indexed</div></div>
+                <div class="stat-card"><div class="stat-value">${s.checked}</div><div class="stat-label">Pages checked</div></div>
+            </div>
+            <p style="font-size:12px;color:var(--on-surface-secondary);">${escapeHtml(typeLine)} · last checked ${s.last_checked ? formatDate(s.last_checked) : "—"} ${checkBtn}</p>`
+            + (sections || '<p style="color:var(--success);">Every page checked so far is indexed.</p>');
+    } catch (e) {
+        box.innerHTML = `<p style="color:var(--error);">${escapeHtml(e.message)}</p>`;
+    }
+}
+
+async function runIndexingCheck(btn) {
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner" style="width:14px;height:14px;border-width:2px;"></span> Checking… (a few minutes)';
+    try {
+        const { task_id } = await apiRequest("/api/gsc/index-coverage/check", { method: "POST", body: { store_id: currentStoreId } });
+        const task = await pollTaskUntilDone(`/api/tasks/${task_id}`, { intervalMs: 5000, timeoutMs: 20 * 60 * 1000 });
+        const r = task.result || {};
+        showToast(`Checked ${r.checked || 0} pages — ${r.not_indexed || 0} not indexed.`, "success");
+    } catch (e) {
+        showToast(`Indexing check: ${e.message}`, "error");
+    }
+    loadIndexing();
 }
 
 // ─── Sortable Table Helper ───

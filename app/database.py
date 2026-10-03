@@ -765,6 +765,20 @@ class Database:
                 EXCEPTION WHEN duplicate_column THEN NULL;
                 END $$
             """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS index_status (
+                    store_id INTEGER REFERENCES stores(id) ON DELETE CASCADE,
+                    item_type VARCHAR(20) NOT NULL,
+                    item_id INTEGER NOT NULL,
+                    url TEXT NOT NULL,
+                    indexed BOOLEAN NOT NULL,
+                    coverage_state VARCHAR(120),
+                    last_crawl_time TIMESTAMP,
+                    google_canonical TEXT,
+                    checked_at TIMESTAMP DEFAULT NOW(),
+                    PRIMARY KEY (store_id, item_type, item_id)
+                )
+            """)
             cur.execute(
                 "DO $$ BEGIN ALTER TABLE synced_articles ADD COLUMN primary_keyword VARCHAR(500); "
                 "EXCEPTION WHEN duplicate_column THEN NULL; END $$"

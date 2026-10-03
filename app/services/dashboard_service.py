@@ -627,6 +627,20 @@ def _article_refresh_rows(store_id):
     ]
 
 
+def _indexing_rows(store_id):
+    with db.get_cursor() as cur:
+        cur.execute(
+            "SELECT COUNT(*) AS n FROM index_status WHERE store_id = %s AND NOT indexed", (store_id,))
+        missing = cur.fetchone()["n"]
+    if not missing:
+        return []
+    return [_queue_row(
+        "indexing", "high", f"{missing} page{'s' if missing != 1 else ''} not indexed by Google",
+        "These cannot appear in search until Google indexes them — see why and what to do",
+        "/gsc?tab=indexing", "indexing:summary",
+    )]
+
+
 def _one_row_per_page(items):
     """A page flagged by two engines (priority + CTR) is one job: keep the row
     with the larger estimated gain and note the other reason on it."""
@@ -845,7 +859,7 @@ def build_action_queue(store_id, limit=15):
         summary_row("links", "low", f"{orphans} orphan pages · {il.get('broken_links', 0)} broken links",
                     f"{il.get('under_linked', 0)} under-linked", il_href)
 
-    for provider in (_draft_review_rows, _regression_rows, _article_refresh_rows):
+    for provider in (_draft_review_rows, _regression_rows, _article_refresh_rows, _indexing_rows):
         try:
             rows = [r for r in provider(store_id) if r["action_key"] not in dismissed]
         except Exception:

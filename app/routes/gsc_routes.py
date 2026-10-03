@@ -320,6 +320,55 @@ def opportunities():
     return jsonify(data)
 
 
+@gsc_bp.route("/api/gsc/index-coverage", methods=["GET"])
+def index_coverage():
+    store_id = request.args.get("store_id", type=int)
+    if not store_id:
+        return jsonify({"error": "store_id is required"}), 400
+    from app.services.index_coverage import get_coverage
+
+    return jsonify(get_coverage(store_id))
+
+
+@gsc_bp.route("/api/gsc/index-coverage/check", methods=["POST"])
+def index_coverage_check():
+    """Inspect the next slice of pages now, in the background."""
+    data = request.get_json(silent=True) or {}
+    store_id = data.get("store_id")
+    if not store_id:
+        return jsonify({"error": "store_id is required"}), 400
+    from app.database import db as _db
+
+    with _db.get_cursor() as cur:
+        cur.execute(
+            """INSERT INTO ai_tasks (store_id, task_type, status, input)
+               VALUES (%s, 'index_coverage_check', 'running', '{}') RETURNING id""",
+            (store_id,),
+        )
+        task_id = cur.fetchone()["id"]
+
+    def _run():
+        from app.services.index_coverage import inspect_batch
+
+        try:
+            result = inspect_batch(store_id)
+            with _db.get_cursor() as cur:
+                cur.execute(
+                    "UPDATE ai_tasks SET status = 'completed', result = %s, completed_at = NOW() WHERE id = %s",
+                    (json.dumps(result), task_id),
+                )
+        except Exception as e:
+            logger.exception("Index coverage check failed for store %s", store_id)
+            with _db.get_cursor() as cur:
+                cur.execute(
+                    "UPDATE ai_tasks SET status = 'failed', error = %s, completed_at = NOW() WHERE id = %s",
+                    (str(e), task_id),
+                )
+
+    threading.Thread(target=_run, daemon=True).start()
+    return jsonify({"task_id": task_id})
+
+
 @gsc_bp.route("/api/gsc/cannibalization")
 def cannibalization():
     store_id = _get_store_id()

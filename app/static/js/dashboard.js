@@ -226,7 +226,7 @@ function renderDelta(el, pct, invert = false) {
 const QUEUE_SOURCE_LABELS = {
     priority: "SEO", ctr: "CTR", cannibalization: "Cannibal", technical: "Technical",
     gaps: "Gaps", competitor: "Competitor", links: "Links",
-    review_draft: "Draft", regression: "Declined", refresh: "Refresh",
+    review_draft: "Draft", regression: "Declined", refresh: "Refresh", indexing: "Indexing",
 };
 
 async function loadActionQueue() {
@@ -275,7 +275,7 @@ async function loadActionQueue() {
         const BANDS = [
             { key: "attention", label: "Needs you now", verb: "Review", sources: ["review_draft", "regression"], open: true },
             { key: "quick", label: "Quick wins", verb: "Fix", sources: ["priority", "ctr", "refresh"], open: true },
-            { key: "review", label: "Needs review", verb: "Review", sources: ["cannibalization", "technical", "competitor", "links"], open: false },
+            { key: "review", label: "Needs review", verb: "Review", sources: ["indexing", "cannibalization", "technical", "competitor", "links"], open: false },
             { key: "create", label: "Create content", verb: "Draft", sources: ["gaps"], open: false },
         ];
         const sevBadge = { high: "badge-error", med: "badge-warning", low: "badge-info" };
