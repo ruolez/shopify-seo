@@ -226,6 +226,32 @@ function initPageIntro() {
 }
 document.addEventListener("DOMContentLoaded", initPageIntro);
 
+/* With one store there is nothing to choose: hide the page-level store
+ * dropdowns that sit beside the global one. Each page still auto-selects the
+ * store, so only the redundant control disappears. */
+const PAGE_STORE_SELECTS = ["store-select", "gsc-store-select", "sr-store-select", "comp-store-select",
+    "cg-store-select", "lp-store-select", "hp-store-select"];
+
+function hideRedundantStoreSelects() {
+    for (const id of PAGE_STORE_SELECTS) {
+        const sel = document.getElementById(id);
+        if (!sel || sel.tagName !== "SELECT") continue;
+        const real = [...sel.options].filter((o) => o.value);
+        if (real.length !== 1) continue;
+        if (!sel.value) {
+            sel.value = real[0].value;
+            sel.dispatchEvent(new Event("change", { bubbles: true }));
+        }
+        sel.style.display = "none";
+        const label = document.querySelector(`label[for="${id}"]`);
+        if (label) label.style.display = "none";
+    }
+}
+document.addEventListener("DOMContentLoaded", () => {
+    setTimeout(hideRedundantStoreSelects, 1200);
+    setTimeout(hideRedundantStoreSelects, 3000);
+});
+
 /* ── UISkeleton ──────────────────────────────────────────────────────── */
 const UISkeleton = {
     /** type: table | cards | stats | detail */

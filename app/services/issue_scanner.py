@@ -149,7 +149,9 @@ ISSUE_DEFS = {
     },
     "meta_desc_has_keyword": {
         "label": "Keyword missing from meta description",
-        "severity": "med", "source": "keyword", "fixable": True,
+        # Low: the meta description is not a ranking factor and Google rewrites
+        # most of them; this only affects how the snippet reads.
+        "severity": "low", "source": "keyword", "fixable": True,
         "fix_fields": ["meta_description"], "checks": ["meta_desc_has_keyword"],
         "item_types": ("product", "collection"),
     },
