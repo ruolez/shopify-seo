@@ -997,16 +997,15 @@ def _apply_faq_schema(data, store_id, client):
         ],
     }
 
-    client.set_product_metafield(item_shopify_id, "seo", "faq_schema_json_ld", json.dumps(faq_schema), "json")
+    if not item_id:
+        return jsonify({"error": "item_id is required"}), 400
+    from app.services.apply_pipeline import set_faq_schema
 
-    with db.get_cursor() as cur:
-        cur.execute(
-            """INSERT INTO schema_markup (store_id, resource_id, resource_type, schema_type, schema_json, is_valid, pushed_to_shopify, pushed_at)
-               VALUES (%s, %s, %s, 'FAQPage', %s, TRUE, TRUE, NOW())
-               ON CONFLICT (store_id, resource_id, schema_type) DO UPDATE
-               SET schema_json = EXCLUDED.schema_json, pushed_to_shopify = TRUE, pushed_at = NOW()""",
-            (store_id, str(item_shopify_id), item_type, json.dumps(faq_schema)),
-        )
+    try:
+        published = set_faq_schema(store_id, item_type, item_id, faq_schema, client)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    faqs = faqs[:published] if published < len(faqs) else faqs
 
     if item_id:
         table = "synced_products" if item_type == "product" else "synced_collections"

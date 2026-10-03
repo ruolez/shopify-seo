@@ -65,6 +65,11 @@ def refresh_item_analysis(store_id, item_type, item_id, clear_ai_fixes=True):
                 evict_page_cache(urls)
         except Exception:
             pass
+        try:
+            from app.routes.ai_seo_routes import rescore_stored_item
+            rescore_stored_item(store_id, item_type, item_id)
+        except Exception:
+            logger.warning("AI readiness rescore failed for %s %s", item_type, item_id)
         return analysis
     except Exception:
         logger.warning("Post-apply analysis refresh failed for %s %s", item_type, item_id)

@@ -940,6 +940,27 @@ def _stored_score(store_id, resource_type, resource_id):
         return cur.fetchone()
 
 
+def rescore_stored_item(store_id, resource_type, resource_id):
+    """Re-score AI readiness for an item that already has a score, after any
+    tool changed its content. Without this the score keeps describing the page
+    as it was before another tool rewrote it."""
+    stored = _stored_score(store_id, resource_type, resource_id)
+    if not stored:
+        return None
+    table = "synced_collections" if resource_type == "collection" else "synced_products"
+    with db.get_cursor() as cur:
+        cur.execute("SELECT * FROM stores WHERE id = %s", (store_id,))
+        store = cur.fetchone()
+        cur.execute(f"SELECT * FROM {table} WHERE id = %s AND store_id = %s", (resource_id, store_id))
+        item = cur.fetchone()
+    if not store or not item:
+        return None
+    return _rescore_item(
+        store_id, resource_type, dict(item), stored.get("live_crawl"),
+        _crawlability_from_breakdown(stored.get("breakdown")), url_utils.store_host(dict(store)),
+    )
+
+
 def _rescore_item(store_id, resource_type, item, live, crawlability, store_domain):
     site_asset = _site_schema_asset(store_id)
     markup = _credited_markup(
@@ -1073,24 +1094,19 @@ def _push_and_rescore(store, resource_type, item, description_html, meta_title, 
     )
     pushed = applied["pushed"]
 
-    if faqpage:
-        # Anchor the FAQPage into the page's entity graph — the metafield is
-        # replayed verbatim by the theme snippet, so @id must be set here.
-        page_url = _item_url(_store_base_url(store), resource_type, item.get("handle"))
-        if isinstance(faqpage, dict) and page_url:
-            faqpage.setdefault("@id", f"{page_url}#faq")
-            faqpage.setdefault("mainEntityOfPage", page_url)
-        client.set_product_metafield(shopify_id, "seo", "faq_schema_json_ld", json.dumps(faqpage), "json")
-        with db.get_cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO schema_markup (store_id, resource_id, resource_type, schema_type, schema_json, is_valid, pushed_to_shopify, pushed_at)
-                VALUES (%s, %s, %s, 'FAQPage', %s, TRUE, TRUE, NOW())
-                ON CONFLICT (store_id, resource_id, schema_type) DO UPDATE
-                SET schema_json = EXCLUDED.schema_json, pushed_to_shopify = TRUE, pushed_at = NOW()
-                """,
-                (store_id, str(shopify_id), resource_type, json.dumps(faqpage)),
+    if isinstance(faqpage, dict) and faqpage:
+        from app.services.apply_pipeline import set_faq_schema
+
+        # Runs after the content write, so questions the rewrite just added to
+        # the description count as visible. A FAQ with nothing visible is
+        # skipped rather than failing the content that already applied.
+        try:
+            set_faq_schema(
+                store_id, resource_type, resource_id, faqpage, client,
+                page_url=_item_url(_store_base_url(store), resource_type, item.get("handle")),
             )
+        except ValueError as e:
+            logger.info("FAQ schema skipped for %s %s: %s", resource_type, resource_id, e)
 
     if faqpage and not pushed:
         from app.services.analysis_refresh import refresh_item_analysis

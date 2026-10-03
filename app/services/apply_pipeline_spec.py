@@ -97,3 +97,32 @@ class TestCanRevert:
 
     def test_names_fields_changed_since(self):
         assert can_revert({"meta_title": NEW_META, "title": LIVE["title"]}, LIVE) == ["meta_title"]
+
+
+from app.services.apply_pipeline import visible_faq  # noqa: E402
+
+FAQ_BODY = "<h2>Are Backwoods cigars machine made?</h2><p>Yes, they are.</p><h3>How many come in a pack?</h3><p>Five.</p>"
+
+
+def _faq(*questions):
+    return {
+        "@type": "FAQPage",
+        "mainEntity": [{"@type": "Question", "name": q, "acceptedAnswer": {"@type": "Answer", "text": "A."}} for q in questions],
+    }
+
+
+class TestVisibleFaq:
+    def test_keeps_questions_that_appear_on_the_page(self):
+        faq = _faq("Are Backwoods cigars machine made?", "How many come in a pack?")
+        assert visible_faq(faq, FAQ_BODY) == faq
+
+    def test_drops_questions_the_page_does_not_show(self):
+        faq = _faq("Are Backwoods cigars machine made?", "Do you ship to Canada?")
+        assert visible_faq(faq, FAQ_BODY) == _faq("Are Backwoods cigars machine made?")
+
+    def test_matching_ignores_case_markup_and_spacing(self):
+        body = "<h2>Are <strong>Backwoods</strong>  cigars machine made?</h2>"
+        assert visible_faq(_faq("are backwoods cigars machine made?"), body) == _faq("are backwoods cigars machine made?")
+
+    def test_returns_none_when_no_question_is_visible(self):
+        assert visible_faq(_faq("Do you ship to Canada?"), FAQ_BODY) is None

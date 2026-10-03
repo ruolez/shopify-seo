@@ -98,18 +98,18 @@ Interlinking apply. There is no ordering rule and no "last changed by" marker.
 - [x] ✔ **C4 — The local copy diverges from Shopify.** Shopify receives the image-restored
   HTML (`seo_routes.py:1251-1253`); the local mirror stores the raw version (`:1301`). The
   next rewrite works from a copy that has lost the image.
-- [ ] ✔ **C5 — No check against live content.** Only intro links read the live body before
+- [x] ✔ **C5 — No check against live content.** *(Every writer now reads the live item first and refuses when Shopify holds edits the app has not seen.)* Only intro links read the live body before
   writing (`intro_link_service.py:317-322`). Every other whole-body writer works from the
   mirror, so edits made in Shopify admin since the last sync are overwritten.
-- [ ] ✔/~ **C6 — Old previews can be applied later.** Only targeted fixes are single-use.
+- [x] ✔/~ **C6 — Old previews can be applied later.** *(Covered by the live read: a preview applied after the page changed in Shopify is refused. A preview made stale by another in-app tool is still caught only by the preserved-content check.)* Only targeted fixes are single-use.
   Restyle applies a stored body without checking the article changed
   (`blog_routes.py:4021-4050`). The full-optimize apply takes no task reference or content
   hash (inferred from `seo_routes.py:1170-1198`).
-- [ ] ✔ **C7 — Two writers for the FAQ metafield.** The SEO "FAQ schema" action
+- [x] ✔ **C7 — Two writers for the FAQ metafield.** *(One writer (`apply_pipeline.set_faq_schema`); publishes only questions visible on the page.)* The SEO "FAQ schema" action
   (`seo_routes.py:996`) and GEO apply (`ai_seo_routes.py:1119`) both overwrite
   `seo.faq_schema_json_ld`. Last click wins, and neither checks the questions are visible on
   the page. Articles have the same pattern (`blog_routes.py:1841`, `:4054`).
-- [ ] ✔ **C8 — Interlinking re-emits the whole body** through the model instead of splicing
+- [x] ✔ **C8 — Interlinking re-emits the whole body** *(Mitigated, not rewritten: link injection still re-emits the body through the model, but the write is refused if any table, protected section or existing internal link is lost. Now leaves history.)* through the model instead of splicing
   (`interlinking_routes.py:935`, `:1292`), with no re-analysis and no change record.
 - [ ] ✔ **C9 — Prompts outside Settings.** Keyword Strategy steps
   (`keyword_strategy_service.py:1822`), content-gap prompts (`content_gap_service.py:644`,
@@ -158,7 +158,7 @@ Interlinking apply. There is no ordering rule and no "last changed by" marker.
 
 ## 4. Disconnections
 
-- [ ] ✔ **X1 — Most changes are never recorded.** `seo_change_events` is written only from
+- [x] ✔ **X1 — Most changes are never recorded.** *(All content writers record full before/after values in one history; item modal has a History tab with Undo.)* `seo_change_events` is written only from
   the full optimize, targeted fix and bulk paths. GEO apply, cannibalization fixes, brand
   apply, content-gap optimize, interlinking, intro links, article edits, restyle and landing
   publish write none — though several still start the 28-day lock. The record also truncates

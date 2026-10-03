@@ -318,6 +318,48 @@ def apply_item_changes(store_id, item_type, item_id, fields, *, source, change_t
     return {"status": "ok", "pushed": stored, "old": plan["old"], "event_id": event_id}
 
 
+def _squash(text):
+    return re.sub(r"\s+", " ", html.unescape(_TAG_RE.sub(" ", text or ""))).strip().lower()
+
+
+def visible_faq(faqpage, body_html):
+    """The FAQPage reduced to questions the page actually shows, or None when
+    none are visible. Schema must describe visible content."""
+    page_text = _squash(body_html)
+    kept = [
+        q for q in (faqpage or {}).get("mainEntity") or []
+        if _squash(q.get("name")) and _squash(q.get("name")) in page_text
+    ]
+    return {**faqpage, "mainEntity": kept} if kept else None
+
+
+def set_faq_schema(store_id, item_type, item_id, faqpage, client, page_url=None):
+    """The one writer of the product/collection FAQ schema metafield. Publishes
+    only questions visible in the item's description; raises ValueError when
+    none are. Returns the number of questions published."""
+    row, mirror = _load_mirror(item_type, item_id)
+    faq = visible_faq(faqpage, mirror["body"])
+    if not faq:
+        raise ValueError(
+            "None of these questions appear on the page. Add them to the description first "
+            "(AI Search › Optimize does this), then publish the FAQ schema."
+        )
+    if page_url:
+        faq.setdefault("@id", f"{page_url}#faq")
+        faq.setdefault("mainEntityOfPage", page_url)
+    client.set_product_metafield(row["shopify_id"], "seo", "faq_schema_json_ld", json.dumps(faq), "json")
+    with db.get_cursor() as cur:
+        cur.execute(
+            """INSERT INTO schema_markup (store_id, resource_id, resource_type, schema_type, schema_json,
+                                          is_valid, pushed_to_shopify, pushed_at)
+               VALUES (%s, %s, %s, 'FAQPage', %s, TRUE, TRUE, NOW())
+               ON CONFLICT (store_id, resource_id, schema_type) DO UPDATE
+               SET schema_json = EXCLUDED.schema_json, pushed_to_shopify = TRUE, pushed_at = NOW()""",
+            (store_id, str(row["shopify_id"]), item_type, json.dumps(faq)),
+        )
+    return len(faq["mainEntity"])
+
+
 def revert_change(event_id):
     """Undo one recorded change, if the page still holds what it wrote."""
     with db.get_cursor() as cur:
