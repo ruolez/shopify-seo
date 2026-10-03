@@ -320,6 +320,16 @@ def opportunities():
     return jsonify(data)
 
 
+@gsc_bp.route("/api/gsc/page-two-plan", methods=["GET"])
+def page_two_plan():
+    store_id = request.args.get("store_id", type=int)
+    if not store_id:
+        return jsonify({"error": "store_id is required"}), 400
+    from app.services.page_two_plan import get_page_two_plan
+
+    return jsonify(get_page_two_plan(store_id))
+
+
 @gsc_bp.route("/api/gsc/index-coverage", methods=["GET"])
 def index_coverage():
     store_id = request.args.get("store_id", type=int)

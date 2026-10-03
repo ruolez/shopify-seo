@@ -369,7 +369,39 @@ function loadActiveTab() {
     else if (tab === "opportunities") loadOpportunities();
     else if (tab === "cannibalization") loadCannibalization();
     else if (tab === "indexing") loadIndexing();
+    else if (tab === "pagetwo") loadPageTwoPlan();
     else if (tab === "scores") loadScoresTab();
+}
+
+// ─── Nearly visible: pages ranking 4–20, by what moving up could add ───
+
+async function loadPageTwoPlan() {
+    const box = document.getElementById("gsc-pagetwo-container");
+    if (!currentStoreId) { box.innerHTML = "<p>Select a store.</p>"; return; }
+    box.innerHTML = '<div class="loading-spinner"><div class="spinner"></div></div>';
+    try {
+        const plan = await apiRequest(`/api/gsc/page-two-plan?store_id=${currentStoreId}`);
+        const intro = `<p style="font-size:13px;color:var(--on-surface-secondary);margin:0 0 12px;">Searches where one of your pages already ranks between 4 and 20 — close enough to move. Pages on page one aim for the top three; pages on page two aim for page one. Collections come first because they carry the broad terms. Searches for your store's own name are left out.</p>`;
+        if (!plan.pages.length) {
+            box.innerHTML = intro + "<p>No pages are ranking between 4 and 20 with enough impressions yet.</p>";
+            return;
+        }
+        const typeLabel = { collection: "Collection", product: "Product", article: "Article" };
+        const open = (p) => p.item_type === "article" ? `/blog?article=${p.id}` : `/seo?optimize=${p.item_type}&id=${p.id}&store_id=${currentStoreId}`;
+        box.innerHTML = intro + `<p style="font-size:14px;"><strong>${plan.pages.length} pages</strong> could add about <strong style="color:var(--success);">+${plan.total_gain} clicks a month</strong> between them.</p>`
+            + plan.pages.map((p) => `<details class="card" style="margin-top:10px;">
+                <summary style="cursor:pointer;display:flex;gap:10px;align-items:center;">
+                    <span class="badge">${typeLabel[p.item_type] || p.item_type}</span>
+                    <span style="flex:1;font-weight:500;">${escapeHtml(p.title)}</span>
+                    <span style="color:var(--success);font-weight:600;white-space:nowrap;">+${p.est_clicks_gain}/mo</span>
+                    <a class="btn btn-secondary btn-sm" href="${open(p)}" onclick="event.stopPropagation()">Open</a>
+                </summary>
+                <div class="table-container" style="margin-top:10px;"><table class="data-table"><thead><tr><th>Search</th><th>Impressions</th><th>Clicks</th><th>Position now</th><th>Aim for</th><th>Could add</th></tr></thead><tbody>
+                ${p.queries.map((q) => `<tr><td>${escapeHtml(q.query)}</td><td>${q.impressions.toLocaleString()}</td><td>${q.clicks}</td><td>${q.position}</td><td>${q.target === 3 ? "top 3" : "page one"}</td><td style="color:var(--success);">+${q.est_clicks_gain}</td></tr>`).join("")}
+                </tbody></table></div></details>`).join("");
+    } catch (e) {
+        box.innerHTML = `<p style="color:var(--error);">${escapeHtml(e.message)}</p>`;
+    }
 }
 
 // ─── Indexing: which pages Google has actually indexed ───
