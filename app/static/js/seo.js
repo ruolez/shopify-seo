@@ -1997,10 +1997,14 @@ const CHANGE_SOURCE_LABELS = {
     content_gap: "Content gap", keyword_strategy: "Keyword Strategy", brands: "Brands",
     interlinking: "Interlinking", intro_links: "Intro links", blog: "Blog",
     landing_pages: "Landing pages", undo: "Undo",
+    // change types recorded before tools were named
+    ai_optimization: "AI Optimize", technical_fix: "Issue fix", image_alt_text: "Image alt text",
+    duplicate_fix: "Duplicates", faq_schema: "FAQ schema",
 };
 const CHANGE_FIELD_LABELS = {
     title: "title", description_html: "description", body: "description", meta_title: "meta title",
     meta_description: "meta description", tags: "tags", image_alts: "image alt text", summary: "summary",
+    image_alt: "image alt text", description: "description", faq_schema: "FAQ schema",
 };
 
 async function loadItemHistory(panel) {
@@ -2021,7 +2025,7 @@ async function loadItemHistory(panel) {
                         ? `<button class="btn btn-secondary btn-sm" onclick="undoItemChange(${r.id}, this)"><span class="material-symbols-rounded">undo</span> Undo</button>`
                         : '<span style="font-size:12px;color:var(--on-surface-secondary);" title="Recorded before undo was available, or not a content field">No undo</span>';
                 return `<tr><td style="white-space:nowrap;">${formatDate(r.created_at)}</td>
-                    <td>${escapeHtml(CHANGE_SOURCE_LABELS[r.source] || r.source || r.change_type || "—")}</td>
+                    <td>${escapeHtml(CHANGE_SOURCE_LABELS[r.source] || CHANGE_SOURCE_LABELS[r.change_type] || r.source || r.change_type || "—")}</td>
                     <td>${escapeHtml(fields)}</td><td style="text-align:right;">${state}</td></tr>`;
             }).join("")}</tbody></table></div>`;
     } catch (e) {

@@ -1327,6 +1327,10 @@ def list_item_changes():
             (item_type, item_id),
         )
         rows = [dict(r) for r in cur.fetchall()]
+    for row in rows:
+        for key in ("created_at", "reverted_at"):
+            if row[key]:
+                row[key] = row[key].isoformat()
     return jsonify({"changes": rows})
 
 
