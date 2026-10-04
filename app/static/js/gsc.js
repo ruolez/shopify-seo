@@ -448,7 +448,56 @@ async function loadIndexing() {
                 <div class="stat-card"><div class="stat-value">${s.checked}</div><div class="stat-label">Pages checked</div></div>
             </div>
             <p style="font-size:12px;color:var(--on-surface-secondary);">${escapeHtml(typeLine)} · last checked ${s.last_checked ? formatDate(s.last_checked) : "—"} ${checkBtn}</p>`
-            + (sections || '<p style="color:var(--success);">Every page checked so far is indexed.</p>');
+            + (sections
+                ? `<div id="gsc-unindexed-plan"><div class="loading-spinner"><div class="spinner"></div></div></div>
+                   <details style="margin-top:20px;"><summary style="cursor:pointer;font-weight:600;">The same pages grouped by Google's stated reason</summary>${sections}</details>`
+                : '<p style="color:var(--success);">Every page checked so far is indexed.</p>');
+        if (sections) loadUnindexedPlan();
+    } catch (e) {
+        box.innerHTML = `<p style="color:var(--error);">${escapeHtml(e.message)}</p>`;
+    }
+}
+
+// Which unindexed pages are worth the effort, why each is likely skipped, and
+// what to do — most-searched first.
+async function loadUnindexedPlan() {
+    const box = document.getElementById("gsc-unindexed-plan");
+    if (!box) return;
+    try {
+        const plan = await apiRequest(`/api/gsc/unindexed-plan?store_id=${currentStoreId}`);
+        const typeLabel = { product: "Product", collection: "Collection", article: "Article" };
+        const row = (p) => {
+            const open = INDEX_ITEM_LINK[p.item_type] ? INDEX_ITEM_LINK[p.item_type](p.item_id) : null;
+            const sources = (p.link_from || []).map((a) =>
+                `<a href="/blog?article=${a.id}" title="Open this article to add a link">${escapeHtml(a.title.length > 34 ? a.title.slice(0, 34) + "…" : a.title)}</a>`).join(" · ");
+            return `<tr>
+                <td><span class="badge">${typeLabel[p.item_type] || p.item_type}</span> ${escapeHtml(p.title || p.url)}
+                    ${p.keyword ? `<div style="font-size:11px;color:var(--on-surface-secondary);">searched as “${escapeHtml(p.keyword)}”</div>` : ""}</td>
+                <td>${p.volume ? p.volume.toLocaleString() : "—"}</td>
+                <td style="${p.incoming_links < 3 ? "color:var(--error);font-weight:600;" : ""}">${p.incoming_links}</td>
+                <td style="font-size:12.5px;">${escapeHtml(p.reason)}</td>
+                <td style="font-size:12.5px;">${escapeHtml(p.action)}${sources ? `<div style="margin-top:3px;">Could link from: ${sources}</div>` : ""}</td>
+                <td style="text-align:right;white-space:nowrap;">${open ? `<a class="btn btn-secondary btn-sm" href="${open}">Open</a>` : ""}</td>
+            </tr>`;
+        };
+        const table = (rows) => `<div class="table-container"><table class="data-table"><thead><tr>
+            <th>Page</th><th title="Monthly searches for the page's keyword">Searches / mo</th><th title="Pages on your store that link to it">Links in</th><th>Likely reason</th><th>What to do</th><th></th>
+            </tr></thead><tbody>${rows.map(row).join("")}</tbody></table></div>`;
+        const worth = plan.pages.filter((p) => p.worth_indexing);
+        const low = plan.pages.filter((p) => !p.worth_indexing);
+        const starved = plan.pages.filter((p) => p.incoming_links < 3).length;
+        box.innerHTML = `<div class="card" style="margin-top:12px;">
+                <h3 style="margin:0 0 6px;">What to do about them</h3>
+                <p style="font-size:13px;margin:0 0 4px;"><strong>${starved} of ${plan.pages.length}</strong> have fewer than three pages linking to them — the most common reason Google skips a page. Start with the ones people search for.</p>
+            </div>
+            <details class="card" style="margin-top:12px;" open>
+                <summary style="cursor:pointer;font-weight:600;">Worth getting indexed — ${worth.length} page${worth.length === 1 ? "" : "s"} people search for</summary>
+                ${worth.length ? table(worth) : '<p style="font-size:13px;">None.</p>'}
+            </details>
+            <details class="card" style="margin-top:12px;">
+                <summary style="cursor:pointer;font-weight:600;">Low priority — ${low.length} page${low.length === 1 ? "" : "s"} with little search demand</summary>
+                ${low.length ? table(low) : '<p style="font-size:13px;">None.</p>'}
+            </details>`;
     } catch (e) {
         box.innerHTML = `<p style="color:var(--error);">${escapeHtml(e.message)}</p>`;
     }

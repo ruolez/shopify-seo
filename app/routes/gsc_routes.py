@@ -353,6 +353,16 @@ def index_coverage():
     return jsonify(get_coverage(store_id))
 
 
+@gsc_bp.route("/api/gsc/unindexed-plan", methods=["GET"])
+def unindexed_plan():
+    store_id = request.args.get("store_id", type=int)
+    if not store_id:
+        return jsonify({"error": "store_id is required"}), 400
+    from app.services.unindexed_plan import get_unindexed_plan
+
+    return jsonify(get_unindexed_plan(store_id))
+
+
 @gsc_bp.route("/api/gsc/index-coverage/check", methods=["POST"])
 def index_coverage_check():
     """Inspect the next slice of pages now, in the background."""
