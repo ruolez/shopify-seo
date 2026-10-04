@@ -22,11 +22,13 @@ def diagnose(page):
     if page["coverage_state"] == UNKNOWN_STATE and not page.get("in_sitemap", True):
         return ("Google has never seen it, and it is not in your sitemap",
                 "Check the product is published to the Online Store sales channel in Shopify.")
+    # Collection grids list it, but a link inside an article or description
+    # tells Google the page matters.
     if links == 0:
-        return ("No other page links to it",
-                "Link to it from a related article or collection description so Google can reach it.")
+        return ("No article or description links to it",
+                "Link to it from a related article so Google sees it as worth indexing.")
     if links < MIN_LINKS:
-        return (f"Only {links} page{'s' if links != 1 else ''} link{'s' if links == 1 else ''} to it",
+        return (f"Only {links} article{'s' if links != 1 else ''} or description{'s' if links != 1 else ''} link{'s' if links == 1 else ''} to it",
                 "Add links from related articles or collection descriptions.")
     if _has_demand(page):
         return ("Google read it and found little that is new",

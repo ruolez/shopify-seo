@@ -40,6 +40,89 @@ def _iso(dt):
     return dt.isoformat() if dt else None
 
 
+# ── Automatic links ────────────────────────────────────────────────
+
+@interlinking_bp.route("/api/auto-links/preview", methods=["GET"])
+def auto_links_preview():
+    """What each automatic link plan would do. Nothing is written."""
+    store_id = request.args.get("store_id", type=int)
+    if not store_id:
+        return jsonify({"error": "store_id is required"}), 400
+    from app.services import auto_linker
+
+    articles = auto_linker.plan_article_collection_links(store_id)
+    back = auto_linker.plan_collection_backlinks(store_id)
+    return jsonify({
+        "article_collection": {
+            "pages": len(articles), "links": sum(len(a["collections"]) for a in articles),
+            "sample": articles[:8],
+        },
+        "collection_back": {"pages": len(back), "links": len(back), "sample": back[:8]},
+    })
+
+
+@interlinking_bp.route("/api/auto-links/add", methods=["POST"])
+def auto_links_add():
+    """Place one link from a page to a target and push it."""
+    data = request.get_json(silent=True) or {}
+    required = ("store_id", "source_type", "source_id", "target_type", "target_id")
+    if not all(data.get(k) for k in required):
+        return jsonify({"error": ", ".join(required) + " are required"}), 400
+    from app.services import auto_linker
+    from app.services.apply_pipeline import ApplyRefused, refusal_response
+
+    try:
+        return jsonify(auto_linker.add_link(
+            int(data["store_id"]), data["source_type"], int(data["source_id"]),
+            data["target_type"], int(data["target_id"])))
+    except ApplyRefused as refused:
+        return refusal_response(refused)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+
+
+@interlinking_bp.route("/api/auto-links/run", methods=["POST"])
+def auto_links_run():
+    """Apply a whole link plan in the background. kind: unindexed |
+    article_collection | collection_back."""
+    data = request.get_json(silent=True) or {}
+    store_id, kind = data.get("store_id"), data.get("kind")
+    if not store_id or kind not in ("unindexed", "article_collection", "collection_back"):
+        return jsonify({"error": "store_id and a valid kind are required"}), 400
+    with db.get_cursor() as cur:
+        cur.execute(
+            """INSERT INTO ai_tasks (store_id, task_type, status, input)
+               VALUES (%s, 'auto_links', 'running', %s) RETURNING id""",
+            (store_id, json.dumps({"kind": kind})),
+        )
+        task_id = cur.fetchone()["id"]
+
+    def _run():
+        from app.services import auto_linker
+
+        def progress(done, total):
+            with db.get_cursor() as cur:
+                cur.execute("UPDATE ai_tasks SET result = %s WHERE id = %s",
+                            (json.dumps({"progress": {"completed": done, "total": total}}), task_id))
+
+        try:
+            result = auto_linker.run_plan(int(store_id), kind, progress=progress)
+            with db.get_cursor() as cur:
+                cur.execute(
+                    "UPDATE ai_tasks SET status = 'completed', result = %s, completed_at = NOW() WHERE id = %s",
+                    (json.dumps(result), task_id))
+        except Exception as e:
+            logger.exception("Auto-links run failed (%s) for store %s", kind, store_id)
+            with db.get_cursor() as cur:
+                cur.execute(
+                    "UPDATE ai_tasks SET status = 'failed', error = %s, completed_at = NOW() WHERE id = %s",
+                    (str(e), task_id))
+
+    import threading
+    threading.Thread(target=_run, daemon=True).start()
+    return jsonify({"task_id": task_id})
+
+
 def _analysis_running_task(store_id):
     """Return the id of a live analysis task for this store, if any.
 

@@ -469,14 +469,16 @@ async function loadUnindexedPlan() {
         const row = (p) => {
             const open = INDEX_ITEM_LINK[p.item_type] ? INDEX_ITEM_LINK[p.item_type](p.item_id) : null;
             const sources = (p.link_from || []).map((a) =>
-                `<a href="/blog?article=${a.id}" title="Open this article to add a link">${escapeHtml(a.title.length > 34 ? a.title.slice(0, 34) + "…" : a.title)}</a>`).join(" · ");
+                `<span style="white-space:nowrap;"><a href="/blog?article=${a.id}" title="Open this article">${escapeHtml(a.title.length > 30 ? a.title.slice(0, 30) + "…" : a.title)}</a>
+                 <button class="btn btn-secondary btn-sm" style="padding:1px 8px;font-size:11px;" title="Add a link to this ${p.item_type} in that article now" onclick="addIndexingLink(${a.id}, '${p.item_type}', ${p.item_id}, this)">Add link</button></span>`).join(" · ");
             return `<tr>
                 <td><span class="badge">${typeLabel[p.item_type] || p.item_type}</span> ${escapeHtml(p.title || p.url)}
                     ${p.keyword ? `<div style="font-size:11px;color:var(--on-surface-secondary);">searched as “${escapeHtml(p.keyword)}”</div>` : ""}</td>
                 <td>${p.volume ? p.volume.toLocaleString() : "—"}</td>
                 <td style="${p.incoming_links < 3 ? "color:var(--error);font-weight:600;" : ""}">${p.incoming_links}</td>
                 <td style="font-size:12.5px;">${escapeHtml(p.reason)}</td>
-                <td style="font-size:12.5px;">${escapeHtml(p.action)}${sources ? `<div style="margin-top:3px;">Could link from: ${sources}</div>` : ""}</td>
+                <td style="font-size:12.5px;">${escapeHtml(p.action)}${sources ? `<div style="margin-top:3px;">Link from: ${sources}</div>` : ""}
+                    ${p.item_type !== "article" && p.reason.includes("little that is new") && open ? `<div style="margin-top:3px;"><a href="${open}">Open to rewrite the description</a></div>` : ""}</td>
                 <td style="text-align:right;white-space:nowrap;">${open ? `<a class="btn btn-secondary btn-sm" href="${open}">Open</a>` : ""}</td>
             </tr>`;
         };
@@ -486,9 +488,12 @@ async function loadUnindexedPlan() {
         const worth = plan.pages.filter((p) => p.worth_indexing);
         const low = plan.pages.filter((p) => !p.worth_indexing);
         const starved = plan.pages.filter((p) => p.incoming_links < 3).length;
+        const linkable = worth.filter((p) => p.item_type === "product" && (p.link_from || []).length).length;
         box.innerHTML = `<div class="card" style="margin-top:12px;">
                 <h3 style="margin:0 0 6px;">What to do about them</h3>
-                <p style="font-size:13px;margin:0 0 4px;"><strong>${starved} of ${plan.pages.length}</strong> have fewer than three pages linking to them — the most common reason Google skips a page. Start with the ones people search for.</p>
+                <p style="font-size:13px;margin:0 0 8px;"><strong>${starved} of ${plan.pages.length}</strong> have fewer than three articles or descriptions linking to them — the most common reason Google skips a page. Start with the ones people search for.</p>
+                ${linkable ? `<button class="btn btn-primary btn-sm" onclick="addAllIndexingLinks(${linkable}, this)"><span class="material-symbols-rounded">add_link</span> Add links for ${linkable} product${linkable === 1 ? "" : "s"} people search for</button>
+                    <span style="font-size:12px;color:var(--on-surface-secondary);margin-left:8px;">Each gets a link from the best article about its brand. Undo from that article's History.</span>` : ""}
             </div>
             <details class="card" style="margin-top:12px;" open>
                 <summary style="cursor:pointer;font-weight:600;">Worth getting indexed — ${worth.length} page${worth.length === 1 ? "" : "s"} people search for</summary>
@@ -501,6 +506,46 @@ async function loadUnindexedPlan() {
     } catch (e) {
         box.innerHTML = `<p style="color:var(--error);">${escapeHtml(e.message)}</p>`;
     }
+}
+
+async function addIndexingLink(articleId, targetType, targetId, btn) {
+    btn.disabled = true;
+    try {
+        const res = await apiRequest("/api/auto-links/add", {
+            method: "POST",
+            body: { store_id: currentStoreId, source_type: "article", source_id: articleId, target_type: targetType, target_id: targetId },
+        });
+        btn.textContent = res.status === "added" ? "Linked ✓" : "Already linked";
+        if (res.status === "added") showToast("Link added. Undo from the article's History.", "success");
+    } catch (e) {
+        showToast(`Could not add the link: ${e.message}`, "error");
+        btn.disabled = false;
+    }
+}
+
+async function addAllIndexingLinks(count, btn) {
+    const ok = await UIConfirm.ask({
+        title: `Add links for ${count} products?`,
+        message: `Each product gets one link from the most-read article about its brand, at most three new links per article. Where the article already names the product, those words become the link; otherwise it is added to a "Related" line at the end. Every link can be undone from the article's History.`,
+        confirmLabel: "Add links",
+    });
+    if (!ok) return;
+    btn.disabled = true;
+    try {
+        const { task_id } = await apiRequest("/api/auto-links/run", { method: "POST", body: { store_id: currentStoreId, kind: "unindexed" } });
+        const task = await pollTaskUntilDone(`/api/tasks/${task_id}`, {
+            intervalMs: 3000, timeoutMs: 60 * 60 * 1000,
+            onProgress: (t) => {
+                const p = t.result && t.result.progress;
+                if (p) btn.textContent = `Adding… ${p.completed}/${p.total}`;
+            },
+        });
+        const r = task.result || {};
+        showToast(`${r.added || 0} links added${r.no_source ? `, ${r.no_source} had no article to link from` : ""}${r.failed ? `, ${r.failed} failed` : ""}.`, r.failed ? "warning" : "success");
+    } catch (e) {
+        showToast(`Adding links failed: ${e.message}`, "error");
+    }
+    loadUnindexedPlan();
 }
 
 async function runIndexingCheck(btn) {

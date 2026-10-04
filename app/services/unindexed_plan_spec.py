@@ -22,12 +22,12 @@ class TestDiagnose:
 
     def test_page_nothing_links_to(self):
         reason, action = diagnose(_page(incoming_links=0))
-        assert reason == "No other page links to it"
+        assert reason == "No article or description links to it"
         assert "link" in action.lower()
 
     def test_page_with_too_few_links(self):
-        assert diagnose(_page(incoming_links=2))[0] == "Only 2 pages link to it"
-        assert diagnose(_page(incoming_links=1))[0] == "Only 1 page links to it"
+        assert diagnose(_page(incoming_links=2))[0] == "Only 2 articles or descriptions link to it"
+        assert diagnose(_page(incoming_links=1))[0] == "Only 1 article or description links to it"
 
     def test_well_linked_page_with_demand_needs_more_specific_content(self):
         reason, action = diagnose(_page(volume=300))
@@ -53,7 +53,7 @@ class TestRank:
 
     def test_each_page_carries_its_reason_and_action(self):
         page = rank([_page(incoming_links=0, volume=100)])[0]
-        assert page["reason"] == "No other page links to it"
+        assert page["reason"] == "No article or description links to it"
         assert page["action"]
 
 
