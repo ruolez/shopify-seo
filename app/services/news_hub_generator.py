@@ -10,6 +10,8 @@ import re
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
+from app.services.listing_archive import archive_css, archive_html, split_archive
+
 NEWS_BLOG_HANDLE = "news"
 
 
@@ -75,6 +77,9 @@ def _excerpt(article):
     return ""
 
 
+RECENT_COUNT = 30
+
+
 def _categories(articles):
     seen = []
     for a in articles:
@@ -87,12 +92,11 @@ def _categories(articles):
 def generate_news_hub_html(articles, intro_text=None, hero_image_url=None, hero_image_alt=None, heading="News", tz=None):
     articles = [a for a in articles if a.get("is_published")]
     articles.sort(key=_pub_sort_key, reverse=True)
-    articles = articles[:100]
 
     if not articles:
         return '<div class="news-hub"><div class="news-hub__empty"><p>No news published yet.</p></div></div>'
 
-    css = _build_css()
+    css = _build_css() + archive_css("news-hub")
 
     hero_html = ""
     if hero_image_url:
@@ -109,7 +113,11 @@ def generate_news_hub_html(articles, intro_text=None, hero_image_url=None, hero_
         intro_html = f'<div class="news-hub__intro"><p>{html.escape(intro_text.strip())}</p></div>'
 
     chips_html = _build_chips(_categories(articles))
-    grid_html = _build_grid(articles, tz=tz)
+    # Every post stays reachable: newest on top, the rest in a monthly archive.
+    recent, months = split_archive(articles, RECENT_COUNT, _pub_sort_key)
+    grid_html = _build_grid(recent, tz=tz)
+    archive = archive_html(months, lambda posts: _build_grid(posts, tz=tz), "news-hub",
+                           heading=f"Older {heading.lower()}")
 
     return f"""<style>{css}</style>
 <div class="news-hub">
@@ -118,6 +126,7 @@ def generate_news_hub_html(articles, intro_text=None, hero_image_url=None, hero_
 <h2 class="news-hub__section-title">Latest {html.escape(heading)}</h2>
 {chips_html}
 {grid_html}
+{archive}
 </div>"""
 
 
@@ -141,6 +150,11 @@ def _build_chips(categories):
       document.querySelectorAll('.news-hub__card').forEach(function(card){
         var show=!cat||card.getAttribute('data-cat')===cat;
         card.style.display=show?'':'none';
+      });
+      // A category can live entirely in the archive: open the months so its posts show.
+      document.querySelectorAll('.news-hub__month').forEach(function(m){
+        m.open=!!cat&&!!m.querySelector('.news-hub__card:not([style*="none"])');
+        m.style.display=(!cat||m.open)?'':'none';
       });
     });
   }

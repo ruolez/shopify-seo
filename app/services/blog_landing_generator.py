@@ -3,6 +3,8 @@ import re
 from collections import Counter
 from datetime import datetime
 
+from app.services.listing_archive import archive_css, archive_html, split_archive
+
 
 def _slugify(text):
     return re.sub(r"[^a-z0-9-]", "", text.strip().lower().replace(" ", "-"))
@@ -58,6 +60,9 @@ def _get_excerpt(article):
     return ""
 
 
+RECENT_COUNT = 24
+
+
 def get_tags(articles):
     tag_counter = Counter()
     for article in articles:
@@ -76,14 +81,13 @@ def generate_blog_landing_html(articles, blog_handle, blog_title, intro_text=Non
         if a.get("is_published") and "landing-page" not in (a.get("tags") or "").lower()
     ]
     articles.sort(key=_pub_sort_key, reverse=True)
-    articles = articles[:50]
 
     if not articles:
         return '<div class="blog-landing"><div class="blog-landing__empty"><p>No articles published yet.</p></div></div>'
 
     all_tags = get_tags(articles)
 
-    css = _build_css()
+    css = _build_css() + archive_css("blog-landing")
 
     hero_html = ""
     if hero_image_url:
@@ -101,7 +105,11 @@ def generate_blog_landing_html(articles, blog_handle, blog_title, intro_text=Non
         intro_html = f'<div class="blog-landing__intro"><p>{escaped_intro}</p></div>'
     tags_html = _build_tags(blog_handle, all_tags)
     h2_html = f'<h2 class="blog-landing__section-title">Latest {html.escape(blog_title)} Articles</h2>'
-    grid_html = _build_grid(articles, blog_handle)
+    # Every post stays reachable: newest on top, the rest in a monthly archive.
+    recent, months = split_archive(articles, RECENT_COUNT, _pub_sort_key)
+    grid_html = _build_grid(recent, blog_handle)
+    archive = archive_html(months, lambda posts: _build_grid(posts, blog_handle), "blog-landing",
+                           heading="Older articles")
 
     return f"""<style>{css}</style>
 <div class="blog-landing">
@@ -110,6 +118,7 @@ def generate_blog_landing_html(articles, blog_handle, blog_title, intro_text=Non
 {tags_html}
 {h2_html}
 {grid_html}
+{archive}
 </div>"""
 
 
