@@ -1944,6 +1944,10 @@ async function renderVisuals(sessionId) {
     images.forEach((e) => { if (e && e.token) byToken[e.token] = e; });
     const readyCount = images.filter((e) => e.status === "ready").length;
     const isBusy = session.status === "generating_media";
+    const hasHero = !!session.featured_image_url;
+    const totalCount = inline.length + 1;  // hero + inline
+    const doneCount = readyCount + (hasHero ? 1 : 0);
+    const nothingToGenerate = !inline.length && hasHero;
 
     let cards = "";
     if (!inline.length) {
@@ -1993,16 +1997,16 @@ async function renderVisuals(sessionId) {
         </div>`;
     });
 
-    const estimate = (inline.length + (session.featured_image_url ? 0 : 1)) * 0.05;
+    const estimate = (inline.length + (hasHero ? 0 : 1)) * 0.05;
     container.innerHTML = `
     <div style="display: grid; grid-template-columns: 1fr 340px; gap: 24px; align-items: start;">
         <div>
             <div class="card">
                 <div style="display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap;">
                     <div>
-                        <h4 style="margin: 0;">Inline images</h4>
+                        <h4 style="margin: 0;">Images</h4>
                         <p style="margin: 4px 0 0; font-size: 13px; color: var(--on-surface-secondary);">
-                            ${readyCount}/${inline.length} ready · placed inside the sections named below · ~$${estimate.toFixed(2)} per full run
+                            ${doneCount}/${totalCount} ready (hero + ${inline.length} inline) · ~$${estimate.toFixed(2)} for the missing ones
                         </p>
                     </div>
                     <div style="display: flex; gap: 8px;">
@@ -2010,9 +2014,9 @@ async function renderVisuals(sessionId) {
                             <span class="material-symbols-rounded">save</span>
                             Save plan
                         </button>
-                        <button class="btn btn-primary btn-sm" id="generate-all-media-btn" onclick="generateAllInlineImages()" ${isBusy || !inline.length ? "disabled" : ""}>
+                        <button class="btn btn-primary btn-sm" id="generate-all-media-btn" onclick="generateAllInlineImages()" title="Generates the hero and every inline image that is not ready yet" ${isBusy || nothingToGenerate ? "disabled" : ""}>
                             <span class="material-symbols-rounded">auto_awesome</span>
-                            ${readyCount ? "Generate missing" : "Generate all"}
+                            ${doneCount ? "Generate missing" : "Generate all"}
                         </button>
                     </div>
                 </div>
@@ -2025,7 +2029,9 @@ async function renderVisuals(sessionId) {
                 <h4>Hero image</h4>
                 ${hero.prompt ? `<p style="font-size: 12px; color: var(--on-surface-secondary); margin: 0 0 10px;">Brief: ${escapeHtml(hero.prompt)}</p>` : ""}
                 ${hero.kind === "product" && (hero.product_handles || []).length ? `<p style="font-size: 12px; color: var(--on-surface-secondary); margin: 0 0 10px;"><span class="material-symbols-rounded" style="font-size: 14px; vertical-align: -2px;">photo_camera</span> Uses real product photos: ${escapeHtml(hero.product_handles.join(", "))}</p>` : ""}
-                <div id="featured-image-container">${_heroCardHtml(session.featured_image_url, session.featured_image_alt)}</div>
+                <div id="featured-image-container">${isBusy && !hasHero
+                    ? '<div style="border: 2px dashed var(--outline); border-radius: 8px; padding: 24px; text-align: center;"><div class="spinner" style="margin: 0 auto 12px;"></div><p style="color: var(--on-surface-secondary); font-size: 13px; margin: 0;">Generating hero image…</p></div>'
+                    : _heroCardHtml(session.featured_image_url, session.featured_image_alt)}</div>
             </div>
             <div class="card" style="margin-top: 16px;">
                 <h4>Next</h4>
@@ -2079,8 +2085,8 @@ async function generateAllInlineImages() {
     const btn = document.getElementById("generate-all-media-btn");
     if (btn) btn.disabled = true;
     try {
-        await apiRequest(`/api/blog/wizard/${sessionId}/generate-media`, { method: "POST" });
-        showToast("Generating inline images…", "info");
+        const res = await apiRequest(`/api/blog/wizard/${sessionId}/generate-media`, { method: "POST" });
+        showToast(res.includes_hero ? "Generating hero and inline images…" : "Generating inline images…", "info");
         renderVisuals(sessionId);
     } catch (err) {
         showToast(err.message, "error");

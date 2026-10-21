@@ -3040,8 +3040,15 @@ def _run_session_media_task(session, client, task_type, only_index=None, resume_
             with db.get_cursor() as cur:
                 cur.execute("UPDATE ai_tasks SET status = 'running' WHERE id = %s", (task_id,))
             fresh = _fetch_wizard_session(session_id)
+            hero_error = None
+            if include_hero and not fresh.get("featured_image_url"):
+                try:
+                    _wizard_step_image(fresh, client, permanent=bool(fresh.get("scheduled_for")))
+                except Exception as e:
+                    logger.exception("Hero generation failed during generate-all: %s", e)
+                    hero_error = str(e)
             previous = fresh.get("inline_images") or []
-            images = _wizard_step_media(fresh, client, only_index=only_index)
+            images = _wizard_step_media(fresh, client, only_index=only_index) if (fresh.get("media_plan") or {}).get("inline") else previous
             # Already-published article (restyle / regenerate after publish): push the recomposed body.
             if fresh.get("shopify_article_id") and fresh.get("generated_article"):
                 from app.services.article_media import compose_article_body
@@ -3062,7 +3069,7 @@ def _run_session_media_task(session, client, task_type, only_index=None, resume_
                 )
                 cur.execute(
                     "UPDATE ai_tasks SET status = 'completed', result = %s, completed_at = NOW() WHERE id = %s",
-                    (json.dumps({"ready": ready, "total": len(images), "inline_images": images}), task_id),
+                    (json.dumps({"ready": ready, "total": len(images), "inline_images": images, "hero_error": hero_error}), task_id),
                 )
         except Exception as e:
             logger.exception("Article media generation failed: %s", e)
@@ -3087,14 +3094,15 @@ def wizard_generate_media(session_id):
         return jsonify({"error": "Session not found"}), 404
     if _session_style(session) != STYLE_VISUAL:
         return jsonify({"error": "Classic articles have no inline images"}), 400
-    if not (session.get("media_plan") or {}).get("inline"):
+    needs_hero = not session.get("featured_image_url")
+    if not (session.get("media_plan") or {}).get("inline") and not needs_hero:
         return jsonify({"error": "No inline images planned for this article"}), 400
     store, client = _get_store_client(session["store_id"])
     if not client:
         return jsonify({"error": "Store not found"}), 404
     resume = "published" if session.get("status") == "published" else "generated"
-    task_id = _run_session_media_task(session, client, "article_media", resume_status=resume)
-    return jsonify({"task_id": task_id})
+    task_id = _run_session_media_task(session, client, "article_media", resume_status=resume, include_hero=needs_hero)
+    return jsonify({"task_id": task_id, "includes_hero": needs_hero})
 
 
 @blog_bp.route("/api/blog/wizard/<int:session_id>/media/<int:index>/regenerate", methods=["POST"])
