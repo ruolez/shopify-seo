@@ -10,6 +10,7 @@ from googleapiclient.discovery import build
 
 from app.auth import decrypt_value, encrypt_value
 from app.database import db
+from app.services import gsc_page_totals as page_totals
 
 logging.getLogger("googleapiclient.discovery_cache").setLevel(logging.ERROR)
 logger = logging.getLogger(__name__)
@@ -333,6 +334,18 @@ def pull_data(store_id, date_from=None, date_to=None, pull_type="incremental"):
                 break
             fresh_start += MAX_ROWS_PER_REQUEST
             time.sleep(0.5)
+
+        # Page totals without the query dimension — the only figures that
+        # match what Search Console shows per URL (see gsc_page_totals).
+        page_from = page_totals.backfill_days_if_empty(store_id, today, date_from, BACKFILL_DAYS)
+        total_rows += page_totals.store_page_rows(
+            store_id, page_from, date_to,
+            page_totals.fetch_page_rows(service, site_url, page_from, date_to, "final"), is_fresh=False,
+        )
+        total_rows += page_totals.store_page_rows(
+            store_id, fresh_from, fresh_to,
+            page_totals.fetch_page_rows(service, site_url, fresh_from, fresh_to, "all"), is_fresh=True,
+        )
 
         with db.get_cursor() as cur:
             cur.execute(
@@ -864,6 +877,12 @@ def get_cannibalization(store_id, date_from, date_to, min_impressions=3, device=
             return {"type": "removed", "id": None, "title": "/" + path}
         if path == "" or path == "/":
             return {"type": "page", "id": None, "title": "Homepage"}
+        segments = path.split("?")[0].split("#")[0].strip("/").split("/")
+        if segments[0] == "blogs" and len(segments) == 2:
+            return {"type": "blog_index", "id": None, "title": "/" + path}
+        if segments[0] == "blogs" and len(segments) >= 3 and segments[2] == "tagged":
+            # Noindexed by the theme snippet; these drop out as Google recrawls.
+            return {"type": "tag_archive", "id": None, "title": "/" + path}
         return {"type": "page", "id": None, "title": "/" + path}
 
     grouped = {}

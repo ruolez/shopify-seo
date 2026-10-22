@@ -21,6 +21,8 @@ optimized for its keyword only in the body reads stale).
 """
 
 import logging
+import re
+from urllib.parse import urlparse
 
 from app.database import db
 from app.prompt_defaults import DEFAULTS
@@ -30,6 +32,8 @@ from app.settings_manager import get_setting
 logger = logging.getLogger(__name__)
 
 INTENTS = ["transactional", "commercial", "informational", "navigational"]
+
+_BLOG_LISTING_PATH = re.compile(r"^/blogs/[^/]+(/tagged/.*)?$")
 
 _TITLE_TABLES = {
     "product": "synced_products",
@@ -519,8 +523,12 @@ def _existing_ranking_pages(store_id, keywords, limit_per_kw=3):
                 handles.setdefault(r["handle"], (item_type, r["id"], r["title"]))
 
     def _match(url):
-        tail = (url or "").rstrip("/").rsplit("/", 1)[-1]
-        return handles.get(tail)
+        path = urlparse(url or "").path.rstrip("/")
+        # A blog index or tag archive is no item: /blogs/news would otherwise
+        # match any product, collection or page whose handle is "news".
+        if _BLOG_LISTING_PATH.match(path):
+            return None
+        return handles.get(path.rsplit("/", 1)[-1])
 
     out = {}
     for r in rows:

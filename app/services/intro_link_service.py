@@ -135,10 +135,10 @@ def _load_session_keywords(store_id):
 
 def build_context(store_id):
     """Everything drafting/auditing needs for one store, loaded once per batch."""
-    from app.routes.blog_routes import _gsc_article_metrics
+    from app.services.gsc_page_totals import article_gsc_metrics
 
     catalog = load_collection_catalog(store_id)
-    clicks, window = _gsc_article_metrics(store_id)
+    clicks, window = article_gsc_metrics(store_id)
     return {
         "store_id": store_id,
         "catalog": catalog,

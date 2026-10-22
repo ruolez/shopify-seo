@@ -13,6 +13,7 @@ from app.services import publish_gate
 from app.services.apply_pipeline import ApplyRefused, apply_item_changes, refusal_response
 from app.services.ai_output_guard import guard_shopify_fields
 from app.services.blog_seo_analyzer import analyze_article_seo
+from app.services.gsc_page_totals import article_gsc_metrics, attach_article_metrics
 from app.services.article_visuals import (
     STYLE_CLASSIC,
     STYLE_VISUAL,
@@ -80,6 +81,179 @@ def _repin_landing_article(store_id, blog_id, client):
     client.update_article(row["shopify_page_id"], {"is_published": True, "publish_date": now_date})
 
 
+def _hub_collections(store_id, topics):
+    """{handle: title} for the topic collections that exist in the store."""
+    handles = [t.get("collection_handle") for t in topics if t.get("collection_handle")]
+    if not handles:
+        return {}
+    with db.get_cursor() as cur:
+        cur.execute(
+            "SELECT handle, title FROM synced_collections WHERE store_id = %s AND handle = ANY(%s)",
+            (store_id, handles),
+        )
+        return {r["handle"]: r["title"] for r in cur.fetchall()}
+
+
+def _hub_news(store_id, blog_id):
+    """(newest published news articles in this blog, news hub URL or None)."""
+    with db.get_cursor() as cur:
+        cur.execute(
+            """SELECT title, handle, published_at, synced_at FROM synced_articles
+               WHERE store_id = %s AND blog_id = %s AND is_published = TRUE AND article_type = 'news'
+               ORDER BY COALESCE(published_at, synced_at) DESC LIMIT 3""",
+            (store_id, blog_id),
+        )
+        news = [dict(r) for r in cur.fetchall()]
+        cur.execute("SELECT handle FROM news_hub_pages WHERE store_id = %s AND shopify_page_id IS NOT NULL", (store_id,))
+        hub = cur.fetchone()
+    return news, (f"/pages/{hub['handle'] or 'news'}" if hub else None)
+
+
+def _build_and_push_landing(store_id, blog_id, client, store, create_news_blog=False):
+    """Build the hub body and write it to the landing article. Returns the
+    result dict for ai_tasks, or None when there is nothing to do."""
+    from app.prompt_defaults import DEFAULTS
+    from app.services.blog_landing_generator import generate_blog_landing_html, get_tags
+    from app.services.gsc_page_totals import page_totals_by_path
+    from app.settings_manager import get_setting
+
+    with db.get_cursor() as cur:
+        cur.execute("SELECT * FROM synced_blogs WHERE id = %s AND store_id = %s", (blog_id, store_id))
+        blog = cur.fetchone()
+    if not blog:
+        return None
+
+    with db.get_cursor() as cur:
+        cur.execute("SELECT shopify_id FROM synced_blogs WHERE store_id = %s AND handle = 'news'", (store_id,))
+        news_row = cur.fetchone()
+    news_blog_shopify_id = news_row["shopify_id"] if news_row else None
+    if not news_blog_shopify_id:
+        if not create_news_blog:
+            return None
+        news_result = client.create_blog("News")
+        news_blog_shopify_id = news_result["shopify_id"]
+        with db.get_cursor() as cur:
+            cur.execute(
+                """INSERT INTO synced_blogs (store_id, shopify_id, title, handle, synced_at)
+                VALUES (%s, %s, %s, %s, NOW())
+                ON CONFLICT (store_id, shopify_id) DO UPDATE SET
+                    title = EXCLUDED.title, handle = EXCLUDED.handle, synced_at = NOW()""",
+                (store_id, news_result["shopify_id"], news_result["title"], news_result.get("handle", "news")),
+            )
+
+    try:
+        for fa in client.get_all_articles():
+            if fa.get("image_url") and "shopify-staged-uploads" not in fa["image_url"]:
+                with db.get_cursor() as cur:
+                    cur.execute(
+                        "UPDATE synced_articles SET image_url = %s WHERE store_id = %s AND shopify_id = %s AND (image_url IS NULL OR image_url != %s)",
+                        (fa["image_url"], store_id, fa["shopify_id"], fa["image_url"]),
+                    )
+    except Exception as e:
+        logger.warning("Failed to refresh article images for landing page: %s", e)
+
+    with db.get_cursor() as cur:
+        cur.execute(
+            """SELECT * FROM synced_articles
+            WHERE store_id = %s AND blog_id = %s AND is_published = TRUE
+            AND article_type = 'blog'
+            AND COALESCE(tags, '') NOT ILIKE '%%landing-page%%'
+            ORDER BY COALESCE(published_at, synced_at) DESC""",
+            (store_id, blog_id),
+        )
+        articles = [dict(a) for a in cur.fetchall()]
+        cur.execute("SELECT * FROM blog_landing_pages WHERE store_id = %s AND blog_id = %s", (store_id, blog_id))
+        existing = cur.fetchone() or {}
+
+    if not articles:
+        if existing.get("shopify_page_id"):
+            try:
+                client.delete_article(existing["shopify_page_id"])
+            except Exception as e:
+                if not is_gone_error(e):
+                    # Keep the tracking row — dropping it would orphan a
+                    # still-live landing article with no local record.
+                    logger.warning("Landing delete failed for blog %s, keeping tracking row: %s", blog_id, e)
+                    return None
+            with db.get_cursor() as cur:
+                cur.execute("DELETE FROM blog_landing_pages WHERE store_id = %s AND blog_id = %s", (store_id, blog_id))
+        return {"skipped": True, "reason": "no published articles"}
+
+    topics = get_setting("lists.blog_hub_topics", DEFAULTS["lists.blog_hub_topics"]) or []
+    clicks, _ = page_totals_by_path(store_id, days=90, path_contains=f"/blogs/{blog['handle']}/")
+    news_articles, news_hub_url = _hub_news(store_id, blog_id)
+    html_content = generate_blog_landing_html(
+        articles, blog["handle"],
+        intro_text=existing.get("intro_text"),
+        hero_image_url=existing.get("hero_image_url"),
+        hero_image_alt=existing.get("hero_image_alt"),
+        topics=topics, clicks=clicks,
+        collections=_hub_collections(store_id, topics),
+        news_articles=news_articles, news_hub_url=news_hub_url,
+    )
+    clean_title = re.sub(r'\s+', ' ', blog['title']).strip()
+    article_title = f"{clean_title} — All Articles"
+    all_tags = get_tags(articles[:50])
+
+    now_date = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    landing_fields = {
+        "title": article_title,
+        "body": html_content,
+        "tags": ["landing-page"],
+        "is_published": True,
+        "publish_date": now_date,
+        "summary": "",
+        "image_url": "",
+        "clear_image": True,
+        "meta_title": article_title[:60],
+        "meta_description": (existing.get("hub_meta_description") or existing.get("intro_text")
+                             or f"Browse all {clean_title} articles, tips, and guides.")[:160],
+    }
+
+    shopify_article_id = None
+    if existing.get("shopify_page_id"):
+        try:
+            client.update_article(existing["shopify_page_id"], landing_fields)
+            shopify_article_id = existing["shopify_page_id"]
+        except Exception as e:
+            # Only recreate when the old article is confirmed gone — a
+            # transient error must not mint a duplicate landing.
+            if is_gone_error(e):
+                logger.info("Landing article %s gone on Shopify — recreating", existing["shopify_page_id"])
+            else:
+                raise
+
+    if not shopify_article_id:
+        landing_fields.pop("clear_image", None)
+        landing_fields.pop("image_url", None)
+        landing_fields["handle"] = f"{blog['handle']}-landing"
+        landing_fields["author"] = store.get("shop_name") or store["name"]
+        shopify_article_id = client.create_article(news_blog_shopify_id, landing_fields)["shopify_id"]
+
+    # The landing article's own URL duplicates /blogs/<handle>: seo.hidden
+    # noindexes it and drops it from the sitemap.
+    try:
+        client.set_article_metafields(shopify_article_id, [("seo", "hidden", "1", "number_integer")])
+    except Exception as e:
+        logger.warning("Could not hide landing article %s from search: %s", shopify_article_id, e)
+
+    with db.get_cursor() as cur:
+        cur.execute(
+            """INSERT INTO blog_landing_pages (store_id, blog_id, shopify_page_id, page_handle, page_title, articles_count, tags_count, last_generated_at)
+            VALUES (%s, %s, %s, 'news', %s, %s, %s, NOW())
+            ON CONFLICT (store_id, blog_id) DO UPDATE SET
+                shopify_page_id = EXCLUDED.shopify_page_id,
+                page_handle = 'news',
+                page_title = EXCLUDED.page_title,
+                articles_count = EXCLUDED.articles_count,
+                tags_count = EXCLUDED.tags_count,
+                last_generated_at = NOW()""",
+            (store_id, blog_id, shopify_article_id, article_title, len(articles), len(all_tags)),
+        )
+    logger.info("Regenerated landing page for blog %s", blog["title"])
+    return {"shopify_article_id": shopify_article_id, "articles_count": len(articles), "tags_count": len(all_tags)}
+
+
 def _regen_landing_async(store_id, blog_id, client, store):
     def _run():
         try:
@@ -87,10 +261,11 @@ def _regen_landing_async(store_id, blog_id, client, store):
         except Exception as e:
             logger.warning("Failed to re-pin landing article for blog %s: %s", blog_id, e)
 
+        time.sleep(5)
         attempts = 3
         for attempt in range(1, attempts + 1):
             try:
-                _regenerate()
+                _build_and_push_landing(store_id, blog_id, client, store)
                 return
             except Exception as e:
                 if attempt < attempts:
@@ -101,117 +276,6 @@ def _regen_landing_async(store_id, blog_id, client, store):
                     time.sleep(15 * attempt)
                 else:
                     logger.exception("Failed to auto-regenerate landing page after %d attempts: %s", attempts, e)
-
-    def _regenerate():
-        with db.get_cursor() as cur:
-            cur.execute("SELECT * FROM synced_blogs WHERE id = %s", (blog_id,))
-            blog = cur.fetchone()
-        if not blog:
-            return
-
-        try:
-            time.sleep(5)
-            fresh_articles = client.get_all_articles()
-            for fa in fresh_articles:
-                if fa.get("image_url") and "shopify-staged-uploads" not in fa["image_url"]:
-                    with db.get_cursor() as cur:
-                        cur.execute(
-                            "UPDATE synced_articles SET image_url = %s WHERE store_id = %s AND shopify_id = %s AND (image_url IS NULL OR image_url != %s)",
-                            (fa["image_url"], store_id, fa["shopify_id"], fa["image_url"]),
-                        )
-        except Exception as e:
-            logger.warning("Failed to refresh article images: %s", e)
-
-        with db.get_cursor() as cur:
-            cur.execute(
-                "SELECT * FROM synced_articles WHERE store_id = %s AND blog_id = %s AND is_published = TRUE AND article_type = 'blog' AND COALESCE(tags, '') NOT ILIKE '%%landing-page%%' ORDER BY COALESCE(published_at, synced_at) DESC",
-                (store_id, blog_id),
-            )
-            articles = [dict(a) for a in cur.fetchall()]
-
-        news_blog_shopify_id = None
-        with db.get_cursor() as cur:
-            cur.execute("SELECT shopify_id FROM synced_blogs WHERE store_id = %s AND handle = 'news'", (store_id,))
-            news_row = cur.fetchone()
-        if news_row:
-            news_blog_shopify_id = news_row["shopify_id"]
-        if not news_blog_shopify_id:
-            return
-
-        with db.get_cursor() as cur:
-            cur.execute("SELECT * FROM blog_landing_pages WHERE store_id = %s AND blog_id = %s", (store_id, blog_id))
-            existing = cur.fetchone()
-
-        if not articles:
-            if existing and existing.get("shopify_page_id"):
-                try:
-                    client.delete_article(existing["shopify_page_id"])
-                except Exception as e:
-                    if not is_gone_error(e):
-                        # Keep the tracking row — dropping it would orphan a
-                        # still-live landing article with no local record.
-                        logger.warning("Landing delete failed for blog %s, keeping tracking row: %s", blog_id, e)
-                        return
-                with db.get_cursor() as cur:
-                    cur.execute("DELETE FROM blog_landing_pages WHERE store_id = %s AND blog_id = %s", (store_id, blog_id))
-            return
-
-        from app.services.blog_landing_generator import generate_blog_landing_html, get_tags
-        intro_text = existing.get("intro_text") if existing else None
-        hero_image_url = existing.get("hero_image_url") if existing else None
-        hero_image_alt = existing.get("hero_image_alt") if existing else None
-        clean_title = re.sub(r'\s+', ' ', blog['title']).strip()
-        html_content = generate_blog_landing_html(articles, blog["handle"], clean_title, intro_text=intro_text, hero_image_url=hero_image_url, hero_image_alt=hero_image_alt)
-        all_tags = get_tags(articles[:50])
-        article_title = f"{clean_title} — All Articles"
-        meta_desc = (intro_text or f"Browse all {clean_title} articles, tips, and guides.")[:160]
-
-        from datetime import datetime, timezone
-        now_date = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-        landing_fields = {
-            "title": article_title, "body": html_content,
-            "tags": ["landing-page"], "is_published": True,
-            "publish_date": now_date,
-            "summary": "",
-            "image_url": "",
-            "clear_image": True,
-            "meta_title": article_title[:60],
-            "meta_description": meta_desc,
-        }
-
-        shopify_article_id = None
-        if existing and existing.get("shopify_page_id"):
-            try:
-                client.update_article(existing["shopify_page_id"], landing_fields)
-                shopify_article_id = existing["shopify_page_id"]
-            except Exception as e:
-                # Only recreate when the old article is confirmed gone — a
-                # transient error must not mint a duplicate landing.
-                if is_gone_error(e):
-                    logger.info("Landing article %s gone on Shopify — recreating", existing["shopify_page_id"])
-                else:
-                    raise
-
-        if not shopify_article_id:
-            landing_fields.pop("clear_image", None)
-            landing_fields.pop("image_url", None)
-            landing_fields["handle"] = f"{blog['handle']}-landing"
-            landing_fields["author"] = store.get("shop_name") or store["name"]
-            result = client.create_article(news_blog_shopify_id, landing_fields)
-            shopify_article_id = result["shopify_id"]
-
-        with db.get_cursor() as cur:
-            cur.execute(
-                """INSERT INTO blog_landing_pages (store_id, blog_id, shopify_page_id, page_handle, page_title, articles_count, tags_count, last_generated_at)
-                VALUES (%s, %s, %s, 'news', %s, %s, %s, NOW())
-                ON CONFLICT (store_id, blog_id) DO UPDATE SET
-                    shopify_page_id = EXCLUDED.shopify_page_id, page_title = EXCLUDED.page_title,
-                    articles_count = EXCLUDED.articles_count, tags_count = EXCLUDED.tags_count,
-                    last_generated_at = NOW()""",
-                (store_id, blog_id, shopify_article_id, article_title, len(articles), len(all_tags)),
-            )
-        logger.info("Auto-regenerated landing page for blog %s", blog["title"])
 
     threading.Thread(target=_run, daemon=True).start()
 
@@ -242,25 +306,28 @@ def content_calendar_data():
     with db.get_cursor() as cur:
         cur.execute(
             """SELECT id, 'blog' AS kind, COALESCE(generated_article->>'title', topic) AS title,
-                      status, scheduled_for
+                      status, scheduled_for, reviewed_at
                FROM article_wizard_sessions
                WHERE store_id = %s AND scheduled_for >= %s AND scheduled_for < %s
                UNION ALL
                SELECT id, 'news', COALESCE(edited_result->>'headline', analyze_result->>'headline', 'News article'),
-                      status, scheduled_for
+                      status, scheduled_for, reviewed_at
                FROM news_sessions
                WHERE store_id = %s AND scheduled_for >= %s AND scheduled_for < %s
                ORDER BY scheduled_for""",
             (store_id, start, end, store_id, start, end),
         )
         rows = cur.fetchall()
+    # The schedulers publish only reviewed sessions — the calendar must say
+    # so, or a queued-but-unapproved post looks like it will go out.
     entries = [
         {
             "id": r["id"],
             "kind": r["kind"],
             "title": r["title"],
             "status": r["status"],
-            "scheduled_for": r["scheduled_for"].isoformat() if r["scheduled_for"] else None,
+            "scheduled_for": r["scheduled_for"].replace(tzinfo=timezone.utc).isoformat() if r["scheduled_for"] else None,
+            "needs_approval": r["status"] == "scheduled" and r["reviewed_at"] is None,
         }
         for r in rows
     ]
@@ -416,7 +483,7 @@ def list_articles():
 
     # The Articles tab filters by blog_id only — take the store from the rows.
     metrics_store_id = store_id or (articles[0]["store_id"] if articles else None)
-    gsc_by_path, gsc_window = _gsc_article_metrics(metrics_store_id) if metrics_store_id else ({}, None)
+    gsc_by_path, gsc_window = article_gsc_metrics(metrics_store_id) if metrics_store_id else ({}, None)
 
     result = []
     for a in articles:
@@ -427,13 +494,7 @@ def list_articles():
         article_dict["created_at_display"] = (
             article_dict.get("shopify_created_at") or article_dict.get("published_at") or article_dict.get("synced_at")
         )
-        path = f"/blogs/{article_dict.get('blog_handle') or ''}/{article_dict.get('handle') or ''}".lower()
-        metrics = gsc_by_path.get(path) or {}
-        article_dict["gsc_clicks"] = metrics.get("clicks")
-        article_dict["gsc_impressions"] = metrics.get("impressions")
-        article_dict["gsc_position"] = metrics.get("position")
-        article_dict["gsc_window"] = gsc_window
-        result.append(article_dict)
+        result.append(attach_article_metrics(article_dict, gsc_by_path, gsc_window))
 
     if sort_by in python_sorts:
         reverse = sort_dir == "desc"
@@ -443,57 +504,6 @@ def list_articles():
             result.sort(key=lambda r: r.get(sort_by) is None)
 
     return jsonify(result)
-
-
-def _gsc_article_metrics(store_id, days=30):
-    """{'/blogs/<blog>/<handle>': {clicks, impressions, position}} over the last
-    `days` days of GSC data (ending 3 days ago, GSC's finalization lag), plus
-    the window as {'from', 'to'}. Empty when GSC isn't connected."""
-    from datetime import date
-
-    today = date.today()
-    date_to = today - timedelta(days=3)
-    date_from = date_to - timedelta(days=days)
-    window = {"from": date_from.isoformat(), "to": date_to.isoformat(), "days": days}
-    try:
-        with db.get_cursor() as cur:
-            cur.execute("SELECT gsc_property FROM gsc_credentials WHERE store_id = %s", (store_id,))
-            cred = cur.fetchone()
-            if not cred:
-                return {}, None
-            cur.execute(
-                """SELECT page, SUM(clicks) AS clicks, SUM(impressions) AS impressions,
-                          CASE WHEN SUM(impressions) > 0 THEN SUM(position * impressions) / SUM(impressions) END AS position
-                   FROM gsc_daily_metrics
-                   WHERE store_id = %s AND date BETWEEN %s AND %s AND page LIKE '%%/blogs/%%'
-                   GROUP BY page""",
-                (store_id, date_from, date_to),
-            )
-            rows = cur.fetchall()
-    except Exception as e:
-        logger.warning("GSC article metrics unavailable: %s", e)
-        return {}, None
-
-    from urllib.parse import urlparse
-
-    out = {}
-    for r in rows:
-        path = urlparse(r["page"] or "").path.rstrip("/").lower()
-        if not path:
-            continue
-        entry = out.setdefault(path, {"clicks": 0.0, "impressions": 0.0, "_pos_w": 0.0})
-        clicks = float(r["clicks"] or 0)
-        imps = float(r["impressions"] or 0)
-        entry["clicks"] += clicks
-        entry["impressions"] += imps
-        if r.get("position") and imps:
-            entry["_pos_w"] += float(r["position"]) * imps
-    for entry in out.values():
-        entry["position"] = round(entry["_pos_w"] / entry["impressions"], 1) if entry["impressions"] else None
-        entry["clicks"] = int(round(entry["clicks"]))
-        entry["impressions"] = int(round(entry["impressions"]))
-        entry.pop("_pos_w", None)
-    return out, window
 
 
 @blog_bp.route("/api/blog/articles/<int:article_id>", methods=["GET"])
@@ -1054,175 +1064,13 @@ def generate_landing_page():
         try:
             with db.get_cursor() as cur:
                 cur.execute("UPDATE ai_tasks SET status = 'running' WHERE id = %s", (task_id,))
-
-            with db.get_cursor() as cur:
-                cur.execute("SELECT * FROM synced_blogs WHERE id = %s AND store_id = %s", (blog_id, store_id))
-                blog = cur.fetchone()
-            if not blog:
-                raise Exception("Blog not found")
-
-            # Find or create the "News" blog to publish into
-            news_blog_shopify_id = None
-            with db.get_cursor() as cur:
-                cur.execute(
-                    "SELECT shopify_id FROM synced_blogs WHERE store_id = %s AND handle = 'news'",
-                    (store_id,),
-                )
-                news_row = cur.fetchone()
-            if news_row:
-                news_blog_shopify_id = news_row["shopify_id"]
-            else:
-                news_result = client.create_blog("News")
-                news_blog_shopify_id = news_result["shopify_id"]
-                with db.get_cursor() as cur:
-                    cur.execute(
-                        """INSERT INTO synced_blogs (store_id, shopify_id, title, handle, synced_at)
-                        VALUES (%s, %s, %s, %s, NOW())
-                        ON CONFLICT (store_id, shopify_id) DO UPDATE SET
-                            title = EXCLUDED.title, handle = EXCLUDED.handle, synced_at = NOW()""",
-                        (store_id, news_result["shopify_id"], news_result["title"], news_result.get("handle", "news")),
-                    )
-
-            try:
-                fresh_articles = client.get_all_articles()
-                for fa in fresh_articles:
-                    if fa.get("image_url") and "shopify-staged-uploads" not in fa["image_url"]:
-                        with db.get_cursor() as cur:
-                            cur.execute(
-                                "UPDATE synced_articles SET image_url = %s WHERE store_id = %s AND shopify_id = %s AND (image_url IS NULL OR image_url != %s)",
-                                (fa["image_url"], store_id, fa["shopify_id"], fa["image_url"]),
-                            )
-            except Exception as e:
-                logger.warning("Failed to refresh article images for landing page: %s", e)
-
-            with db.get_cursor() as cur:
-                cur.execute(
-                    """SELECT * FROM synced_articles
-                    WHERE store_id = %s AND blog_id = %s AND is_published = TRUE
-                    AND article_type = 'blog'
-                    AND COALESCE(tags, '') NOT ILIKE '%%landing-page%%'
-                    ORDER BY COALESCE(published_at, synced_at) DESC""",
-                    (store_id, blog_id),
-                )
-                articles = [dict(a) for a in cur.fetchall()]
-
-            if not articles:
-                with db.get_cursor() as cur:
-                    cur.execute(
-                        "SELECT * FROM blog_landing_pages WHERE store_id = %s AND blog_id = %s",
-                        (store_id, blog_id),
-                    )
-                    existing = cur.fetchone()
-                if existing and existing.get("shopify_page_id"):
-                    try:
-                        client.delete_article(existing["shopify_page_id"])
-                        logger.info("Deleted landing page for empty blog %s", blog["title"])
-                    except Exception as e:
-                        logger.warning("Failed to delete landing page for empty blog: %s", e)
-                    with db.get_cursor() as cur:
-                        cur.execute(
-                            "DELETE FROM blog_landing_pages WHERE store_id = %s AND blog_id = %s",
-                            (store_id, blog_id),
-                        )
-                with db.get_cursor() as cur:
-                    cur.execute(
-                        "UPDATE ai_tasks SET status = 'completed', result = %s, completed_at = NOW() WHERE id = %s",
-                        (json.dumps({"skipped": True, "reason": "no published articles"}), task_id),
-                    )
-                return
-
-            from app.services.blog_landing_generator import generate_blog_landing_html, get_tags
-
-            landing_intro = None
-            hero_image_url = None
-            hero_image_alt = None
-            with db.get_cursor() as cur:
-                cur.execute(
-                    "SELECT intro_text, hero_image_url, hero_image_alt FROM blog_landing_pages WHERE store_id = %s AND blog_id = %s",
-                    (store_id, blog_id),
-                )
-                lp_row = cur.fetchone()
-                if lp_row:
-                    landing_intro = lp_row.get("intro_text")
-                    hero_image_url = lp_row.get("hero_image_url")
-                    hero_image_alt = lp_row.get("hero_image_alt")
-
-            clean_title = re.sub(r'\s+', ' ', blog['title']).strip()
-            html_content = generate_blog_landing_html(articles, blog["handle"], clean_title, intro_text=landing_intro, hero_image_url=hero_image_url, hero_image_alt=hero_image_alt)
-            all_tags = get_tags(articles[:50])
-            article_title = f"{clean_title} — All Articles"
-            article_handle = f"{blog['handle']}-landing"
-            meta_desc = (landing_intro or f"Browse all {clean_title} articles, tips, and guides.")[:160]
-
-            with db.get_cursor() as cur:
-                cur.execute(
-                    "SELECT * FROM blog_landing_pages WHERE store_id = %s AND blog_id = %s",
-                    (store_id, blog_id),
-                )
-                existing = cur.fetchone()
-
-            from datetime import datetime, timezone
-            now_date = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-            landing_fields = {
-                "title": article_title,
-                "body": html_content,
-                "tags": ["landing-page"],
-                "is_published": True,
-                "publish_date": now_date,
-                "summary": "",
-                "image_url": "",
-                "clear_image": True,
-                "meta_title": article_title[:60],
-                "meta_description": meta_desc,
-            }
-
-            shopify_article_id = None
-
-            if existing and existing.get("shopify_page_id"):
-                try:
-                    client.update_article(existing["shopify_page_id"], landing_fields)
-                    shopify_article_id = existing["shopify_page_id"]
-                    logger.info("Updated existing landing page article %s", shopify_article_id)
-                except Exception as e:
-                    # Only recreate when the old article is confirmed gone — a
-                    # transient error must not mint a duplicate landing.
-                    if is_gone_error(e):
-                        logger.info("Landing article %s gone on Shopify — recreating", existing["shopify_page_id"])
-                    else:
-                        raise
-
-            if not shopify_article_id:
-                landing_fields.pop("clear_image", None)
-                landing_fields.pop("image_url", None)
-                landing_fields["handle"] = article_handle
-                landing_fields["author"] = store.get("shop_name") or store["name"]
-                result = client.create_article(news_blog_shopify_id, landing_fields)
-                shopify_article_id = result["shopify_id"]
-                logger.info("Created new landing page article %s", shopify_article_id)
-
-            with db.get_cursor() as cur:
-                cur.execute(
-                    """INSERT INTO blog_landing_pages (store_id, blog_id, shopify_page_id, page_handle, page_title, articles_count, tags_count, last_generated_at)
-                    VALUES (%s, %s, %s, 'news', %s, %s, %s, NOW())
-                    ON CONFLICT (store_id, blog_id) DO UPDATE SET
-                        shopify_page_id = EXCLUDED.shopify_page_id,
-                        page_handle = 'news',
-                        page_title = EXCLUDED.page_title,
-                        articles_count = EXCLUDED.articles_count,
-                        tags_count = EXCLUDED.tags_count,
-                        last_generated_at = NOW()""",
-                    (store_id, blog_id, shopify_article_id, article_title, len(articles), len(all_tags)),
-                )
-
+            result = _build_and_push_landing(store_id, blog_id, client, store, create_news_blog=True)
+            if result is None:
+                raise Exception("Blog not found, or the old landing article could not be removed")
             with db.get_cursor() as cur:
                 cur.execute(
                     "UPDATE ai_tasks SET status = 'completed', result = %s, completed_at = NOW() WHERE id = %s",
-                    (json.dumps({
-                        "shopify_article_id": shopify_article_id,
-                        "articles_count": len(articles),
-                        "tags_count": len(all_tags),
-                    }), task_id),
+                    (json.dumps(result), task_id),
                 )
         except Exception as e:
             logger.exception("Landing page generation failed: %s", e)
@@ -1258,6 +1106,8 @@ def landing_status():
     result["intro_text"] = result.get("intro_text") or ""
     result["hero_image_url"] = result.get("hero_image_url") or ""
     result["hero_image_alt"] = result.get("hero_image_alt") or ""
+    for key in ("hub_h1", "hub_meta_title", "hub_meta_description"):
+        result[key] = result.get(key) or ""
     return jsonify(result)
 
 
@@ -3020,8 +2870,10 @@ def _live_body_template(session, previous_images, only_index):
     return template
 
 
-def _run_session_media_task(session, client, task_type, only_index=None, resume_status="generated"):
-    """Background inline-image generation for a wizard session with an ai_tasks row."""
+def _run_session_media_task(session, client, task_type, only_index=None, resume_status="generated", include_hero=False):
+    """Background inline-image generation for a wizard session with an ai_tasks row.
+    With `include_hero`, a missing hero is generated first (best-effort: a hero
+    failure is recorded on the task but never blocks the inline images)."""
     session_id = session["id"]
     with db.get_cursor() as cur:
         cur.execute(
@@ -3476,6 +3328,11 @@ def blog_ai_suggestions():
                 },
                 store_id=store_id,
             )
+            if isinstance(result, dict) and not result.get("error"):
+                result["conflicts"] = hub_conflicts_for(store_id, {
+                    "hub_h1": result.get("suggested_hub_h1"),
+                    "hub_meta_title": result.get("suggested_meta_title"),
+                })
             with db.get_cursor() as cur:
                 cur.execute(
                     "UPDATE ai_tasks SET status = 'completed', result = %s, completed_at = NOW() WHERE id = %s",
@@ -3494,23 +3351,108 @@ def blog_ai_suggestions():
     return jsonify({"task_id": task_id})
 
 
+_HUB_FIELDS = ("intro_text", "hub_h1", "hub_meta_title", "hub_meta_description")
+
+
+def _hub_owned_keywords(store_id):
+    """variant_key -> owner for every page's primary keyword: resolved and
+    assigned primaries plus each published article's own primary."""
+    from app.services.keyword_identity import variant_key
+    from app.services.keyword_resolver import get_owned_primary_keywords
+
+    owned = get_owned_primary_keywords(store_id)
+    with db.get_cursor() as cur:
+        cur.execute(
+            """SELECT id, primary_keyword FROM synced_articles
+               WHERE store_id = %s AND is_published = TRUE AND COALESCE(primary_keyword, '') <> ''
+                 AND COALESCE(tags, '') NOT ILIKE '%%landing-page%%'""",
+            (store_id,),
+        )
+        for r in cur.fetchall():
+            kw = r["primary_keyword"].split(",")[0].strip()
+            key = variant_key(kw)
+            if key and key not in owned:
+                owned[key] = {"keyword": kw, "item_type": "article", "item_id": r["id"]}
+    return owned
+
+
+def hub_conflicts_for(store_id, fields):
+    """Owned keywords the hub H1 or meta title would compete for."""
+    from app.services.blog_landing_generator import hub_keyword_conflicts
+
+    texts = [fields[k] for k in ("hub_h1", "hub_meta_title") if fields.get(k)]
+    if not texts:
+        return []
+    owned = _hub_owned_keywords(store_id)
+    seen, conflicts = set(), []
+    for text in texts:
+        for c in hub_keyword_conflicts(text, owned):
+            if c["keyword"] not in seen:
+                seen.add(c["keyword"])
+                conflicts.append(c)
+    return conflicts
+
+
+@blog_bp.route("/api/blog/hub-settings", methods=["POST"])
 @blog_bp.route("/api/blog/save-intro", methods=["POST"])
-def save_intro():
+def save_hub_settings():
+    """Save any of the hub's intro, H1, meta title and meta description, push
+    the H1/meta to the blog's metafields, and rebuild the hub. An H1 or meta
+    title that names another page's keyword is refused unless force is set."""
     data = request.get_json(silent=True) or {}
     store_id = data.get("store_id")
     blog_id = data.get("blog_id")
-    intro_text = data.get("intro_text", "").strip()
     if not store_id or not blog_id:
         return jsonify({"error": "store_id and blog_id are required"}), 400
+    fields = {k: re.sub(r"[ \t]+", " ", str(data.get(k) or "")).strip() for k in _HUB_FIELDS if k in data}
+    if not fields:
+        return jsonify({"error": "Nothing to save"}), 400
 
+    if not data.get("force"):
+        conflicts = hub_conflicts_for(store_id, fields)
+        if conflicts:
+            named = "; ".join(f'"{c["phrase"]}" is the {c["item_type"]} keyword "{c["keyword"]}"' for c in conflicts)
+            return jsonify({
+                "error": f"The hub would compete with pages that already target these keywords: {named}.",
+                "code": "hub_keyword_conflict",
+                "conflicts": conflicts,
+                "can_force": True,
+                "confirm_title": "This name competes with another page",
+            }), 409
+
+    store, client = _get_store_client(store_id)
+    if not client:
+        return jsonify({"error": "Store not found"}), 404
+    with db.get_cursor() as cur:
+        cur.execute("SELECT shopify_id FROM synced_blogs WHERE id = %s AND store_id = %s", (blog_id, store_id))
+        blog = cur.fetchone()
+    if not blog:
+        return jsonify({"error": "Blog not found"}), 404
+
+    if "hub_h1" in fields:
+        if fields["hub_h1"]:
+            client.set_blog_metafields(blog["shopify_id"], [("global", "hub_h1", fields["hub_h1"], "single_line_text_field")])
+        else:
+            client.delete_metafields([(blog["shopify_id"], "global", "hub_h1")])
+    if fields.get("hub_meta_title") or fields.get("hub_meta_description"):
+        client.set_blog_seo(blog["shopify_id"], fields.get("hub_meta_title") or None,
+                            fields.get("hub_meta_description") or None)
+
+    cols = list(fields)
     with db.get_cursor() as cur:
         cur.execute(
-            """INSERT INTO blog_landing_pages (store_id, blog_id, intro_text)
-            VALUES (%s, %s, %s)
-            ON CONFLICT (store_id, blog_id) DO UPDATE SET intro_text = EXCLUDED.intro_text""",
-            (store_id, blog_id, intro_text),
+            f"""INSERT INTO blog_landing_pages (store_id, blog_id, {", ".join(cols)})
+                VALUES (%s, %s, {", ".join(["%s"] * len(cols))})
+                ON CONFLICT (store_id, blog_id) DO UPDATE SET {", ".join(f"{c} = EXCLUDED.{c}" for c in cols)}""",
+            (store_id, blog_id, *[fields[c] or None for c in cols]),
         )
+        cur.execute("SELECT shopify_page_id FROM blog_landing_pages WHERE store_id = %s AND blog_id = %s",
+                    (store_id, blog_id))
+        landing = cur.fetchone()
 
+    # Only rebuild a hub that exists; the first one is made with Landing Page.
+    if landing and landing.get("shopify_page_id"):
+        _regen_landing_async(store_id, blog_id, client, store)
     return jsonify({"ok": True, "success": True})
 
 
@@ -4236,6 +4178,48 @@ def article_media(article_id):
     return jsonify({"session_id": session["id"], "status": session.get("status"), "task_id": task_id, "inline": inline})
 
 
+def _blog_section_key(client, theme_id):
+    """Asset key of the section that prints the blog index H1, or None."""
+    template = client.get_theme_asset(theme_id, "templates/blog.json")
+    if not template:
+        return None
+    try:
+        sections = json.loads(re.sub(r"/\*.*?\*/", "", template, flags=re.S)).get("sections") or {}
+    except ValueError:
+        return None
+    for section in sections.values():
+        key = f"sections/{section.get('type')}.liquid"
+        content = client.get_theme_asset(theme_id, key) if section.get("type") else None
+        if content and "blog.title" in content and "<h1" in content.lower():
+            return key
+    return None
+
+
+def _blog_h1_patch_state(client, theme_id):
+    from app.services.seo_snippets import blog_section_patch_state
+
+    try:
+        key = _blog_section_key(client, theme_id)
+        return blog_section_patch_state(client.get_theme_asset(theme_id, key) if key else None)
+    except Exception as e:
+        logger.warning("Blog section patch state unavailable: %s", e)
+        return "unknown"
+
+
+def _patch_blog_h1(client, theme_id):
+    """Patch the blog section so the hub prints its own H1. Returns the parts changed."""
+    from app.services.seo_snippets import patch_blog_section
+
+    key = _blog_section_key(client, theme_id)
+    if not key:
+        return []
+    patched, parts = patch_blog_section(client.get_theme_asset(theme_id, key))
+    if parts:
+        client.upsert_theme_asset(theme_id, key, patched)
+        logger.info("Patched %s for the blog hub: %s", key, ", ".join(parts))
+    return parts
+
+
 @blog_bp.route("/api/blog/push-seo-snippet", methods=["POST"])
 def push_seo_snippet():
     data = request.get_json(silent=True) or {}
@@ -4269,11 +4253,18 @@ def push_seo_snippet():
 
         desc_results = _scan_and_fix_meta_descriptions(client, theme_id)
 
+        try:
+            hub_parts = _patch_blog_h1(client, theme_id)
+        except Exception as e:
+            logger.warning("Blog section patch failed: %s", e)
+            hub_parts = []
+
         return jsonify({
             "success": True,
             "snippet_pushed": True,
             "theme_liquid_updated": "{% render 'seo-fixes' %}" in theme_liquid,
             "meta_descriptions_commented": desc_results,
+            "blog_section_patched": hub_parts,
             "backup_length": len(backup),
         })
     except Exception as e:
@@ -4313,6 +4304,16 @@ def revert_seo_snippet():
             except Exception:
                 pass
 
+        try:
+            from app.services.seo_snippets import unpatch_blog_section
+
+            key = _blog_section_key(client, theme_id)
+            content = client.get_theme_asset(theme_id, key) if key else None
+            if content and unpatch_blog_section(content) != content:
+                client.upsert_theme_asset(theme_id, key, unpatch_blog_section(content))
+        except Exception as e:
+            logger.warning("Blog section unpatch failed: %s", e)
+
         return jsonify({"ok": True, "success": True, "reverted": True})
     except Exception as e:
         logger.exception("Failed to revert SEO snippet: %s", e)
@@ -4339,9 +4340,12 @@ def seo_snippet_status():
         if not installed:
             return jsonify({"installed": False})
 
+        from app.services.seo_snippets import SNIPPET_VERSION
+
         snippet_content = client.get_theme_asset(theme_id, "snippets/seo-fixes.liquid")
-        outdated = snippet_content is not None and not any(v in snippet_content for v in ("v2", "v3", "v4"))
-        return jsonify({"installed": True, "outdated": outdated})
+        outdated = snippet_content is not None and f"SEO Fixes Snippet {SNIPPET_VERSION} " not in snippet_content
+        h1_patch = _blog_h1_patch_state(client, theme_id)
+        return jsonify({"installed": True, "outdated": outdated or h1_patch == "missing", "hub_h1_patch": h1_patch})
     except Exception:
         return jsonify({"installed": False})
 

@@ -694,27 +694,35 @@ DEFAULTS = {
         "If none are relevant, return empty arrays."
     ),
     "prompts.blog_seo_suggestions": (
-        "You are an expert SEO strategist. Your task is to suggest an optimized blog title (H1), "
-        "an introductory paragraph, and SEO meta tags for a blog landing page.\n\n"
+        "You are an expert SEO strategist. Your task is to suggest the H1, an introductory paragraph, "
+        "and SEO meta tags for a blog hub page: the /blogs/{handle} page that groups every guide by topic "
+        "and links each topic to the shop collection.\n\n"
+        "SEARCH INTENT:\n"
+        "- The hub targets informational, hub-level queries: guides, reviews, how-tos, flavor rankings, "
+        "comparisons. It must never target a product type on its own (e.g. 'pipe tobacco', 'cigarillos', "
+        "'blunt wraps', 'nicotine pouches'). Those head terms belong to the shop's collection pages, and a "
+        "hub that targets them competes with them in search.\n"
+        "- The user message lists head terms owned by collections. Do not put any of them in the H1 or the "
+        "meta title.\n"
+        "- The hub holds guides only. News lives on a separate page, and there are no deals or coupons here, "
+        "so never use the words 'news', 'deals', 'coupons' or 'sale'.\n\n"
         "RULES:\n"
-        "- The blog title becomes the H1 on the /blogs/{handle} page. Max 255 characters. Keep it concise "
-        "(ideally under 60 chars), descriptive, keyword-rich, and signaling what the blog covers. "
-        "NOT the store name. NOT generic like 'News'.\n"
-        "- The intro paragraph appears above the article grid on the landing page. It should be "
-        "2-3 sentences, include relevant keywords naturally, and entice visitors to explore articles.\n"
-        "- The meta_title is the <title> tag for the blog listing page. 50-60 characters, keywords first.\n"
-        "- The meta_description is the <meta name=\"description\"> tag. 140-160 characters, action-oriented, "
-        "include a call to action.\n"
-        "- Use specific descriptors: product types, topics covered, audience. Avoid puffery.\n"
+        "- hub_h1: the visible H1, under 60 characters, plain and descriptive (e.g. 'Tobacco Guides, "
+        "Reviews & Flavor Rankings'). NOT the store name.\n"
+        "- intro: 2-3 sentences saying what the guides cover and who they are for (adult smokers, 21+). "
+        "No health claims and no claims that a product is safer or healthier.\n"
+        "- meta_title: the <title> tag, 50-60 characters, may end with ' | {store name}'.\n"
+        "- meta_description: 140-160 characters, says what a reader finds here, ends with a soft call to action.\n"
+        "- Use specific descriptors: topics covered, formats (rankings, how-tos, comparisons). Avoid puffery.\n"
         "- BANNED words: 'premium', 'top-quality', 'finest', 'ultimate', 'luxurious', 'exquisite'.\n\n"
         "Return JSON with:\n"
-        "- suggested_blog_title (string): The optimized blog H1 title\n"
-        "- blog_title_reasoning (string): Brief explanation of why this title is good for SEO\n"
+        "- suggested_hub_h1 (string): The hub H1\n"
+        "- hub_h1_reasoning (string): Brief explanation of why this H1 fits the hub's search intent\n"
         "- suggested_intro (string): The 2-3 sentence intro paragraph\n"
         "- intro_reasoning (string): Brief explanation of why this intro works for SEO\n"
         "- suggested_meta_title (string): SEO meta title, 50-60 chars\n"
         "- suggested_meta_description (string): SEO meta description, 140-160 chars\n"
-        "- keywords_targeted (array of strings): Keywords incorporated"
+        "- keywords_targeted (array of strings): Hub-level keywords incorporated"
     ),
     "prompts.article_outline": (
         "You are an expert SEO content strategist. Create a detailed article outline based on "
@@ -1264,7 +1272,7 @@ DEFAULTS = {
     ),
 
     # --- Blog Settings ---
-    "blog.search_keywords": "blog tips deals",
+    "blog.search_keywords": "tobacco guides reviews",
 
     # --- SEO Scoring Rules ---
     "rules.composite_scoring": {
@@ -1814,6 +1822,70 @@ DEFAULTS = {
         "make", "made", "going", "thing", "things",
     ],
     "lists.ngram_multipliers": {"1": 1.0, "2": 1.5, "3": 2.0},
+    # Topic sections on the blog hub (/blogs/news). A guide lands in the topic
+    # whose term appears earliest in its title (then its primary keyword, then
+    # its first collection link); terms are matched as whole, plural-folded words.
+    "lists.blog_hub_topics": [
+        {
+            "name": "Cigarillos",
+            "h2": "Cigarillo flavor guides & reviews",
+            "blurb": "Flavor rankings, brand comparisons and first-timer tips for the cigarillos people ask about most.",
+            "collection_handle": "cigarillos",
+            "terms": ["cigarillo", "swisher", "white owl", "dutch masters", "backwoods", "black and mild",
+                      "black & mild", "game leaf", "game", "4 kings", "good times", "al capone", "city life",
+                      "garcia y vega", "rillo"],
+        },
+        {
+            "name": "Filtered Cigars",
+            "h2": "Filtered cigar guides & rankings",
+            "blurb": "Brand rankings and cost comparisons for filtered cigars.",
+            "collection_handle": "filtered-cigars",
+            "terms": ["filtered cigar", "filter cigar", "cheyenne"],
+        },
+        {
+            "name": "Cigars",
+            "h2": "Cigar guides & how-tos",
+            "blurb": "How to pick, cut, light and store a cigar, and how the major lines compare.",
+            "collection_handle": "cigars",
+            "terms": ["cigar", "humidor", "djarum", "acid"],
+        },
+        {
+            "name": "Wraps & Leaf",
+            "h2": "Blunt wrap & leaf guides",
+            "blurb": "How to roll, which wraps burn best, and what makes natural leaf different.",
+            "collection_handle": "wraps",
+            "terms": ["wrap", "blunt", "loose leaf", "fronto", "grabba", "zig zag", "hemp"],
+        },
+        {
+            "name": "Pipe Tobacco",
+            "h2": "Pipe tobacco guides & blend reviews",
+            "blurb": "Blend rankings, budget brand showdowns and a beginner's guide to pipe smoking.",
+            "collection_handle": "pipe-tobacco",
+            "terms": ["pipe", "ohm", "gambler", "good stuff", "golden harvest", "cherokee", "farmer's gold",
+                      "captain black", "largo"],
+        },
+        {
+            "name": "Hookah & Shisha",
+            "h2": "Hookah & shisha guides",
+            "blurb": "Setup guides, flavor picks for beginners and brand-by-brand shisha reviews.",
+            "collection_handle": "hookah-tobacco",
+            "terms": ["hookah", "shisha", "al fakher", "fumari", "serbetli", "tangiers", "starbuzz"],
+        },
+        {
+            "name": "Nicotine Pouches",
+            "h2": "Nicotine pouch guides",
+            "blurb": "Strengths, flavors and how to use pouches, explained plainly.",
+            "collection_handle": "nicotine-pouches",
+            "terms": ["nicotine pouch", "zyn", "velo", "rogue", "pouch"],
+        },
+        {
+            "name": "Rolling Supplies",
+            "h2": "Roll-your-own guides",
+            "blurb": "Filter tubes, RYO tobacco and what rolling your own really costs.",
+            "collection_handle": "filter-tubes",
+            "terms": ["roll your own", "rolling your own", "ryo", "filter tube", "rolling paper", "cigarette"],
+        },
+    ],
     "lists.news_categories": [
         "Company News",
         "Product News",

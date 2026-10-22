@@ -13,6 +13,9 @@ document.addEventListener("DOMContentLoaded", async () => {
     storeId = await resolveStoreId();
     await loadCategories();
     await checkTemplateStatus();
+    // /news?tab=scheduled deep link (the calendar sends people here to approve)
+    const tab = new URLSearchParams(window.location.search).get("tab");
+    if (tab && document.getElementById("tab-" + tab)) switchTab(tab);
 });
 
 // ── Sources (multiple) ───────────────────────────────────────────
@@ -968,7 +971,13 @@ async function rescheduleSession(index) {
             method: "PATCH",
             body: { scheduled_at: when.toISOString() },
         });
-        showToast("Publish time updated.", "success");
+        // A saved time is not an approval — say so, or the post silently
+        // sits in the queue while the scheduler skips it.
+        if (row.status === "scheduled" && !row.reviewed_at) {
+            showToast("Publish time updated — still needs your approval before it publishes.", "warning");
+        } else {
+            showToast("Publish time updated.", "success");
+        }
         loadScheduledSessions();
     } catch (e) {
         showToast(`Reschedule failed: ${e.message}`, "error");
@@ -1072,16 +1081,68 @@ async function loadNewsArticles() {
             return;
         }
         publishedArticles = articles;
-        const rows = articles.map((a, i) => {
-            const status = a.is_published
-                ? `<span class="news-badge news-badge--ok">Published</span>`
-                : `<span class="news-badge news-badge--pending">Draft</span>`;
-            const url = `${storeBaseUrl}/blogs/news/${a.handle || ""}`;
-            return `<tr>
+        newsGscWindow = data.gsc_window || null;
+        renderNewsArticles();
+    } catch (e) {
+        container.innerHTML = `<p style="color:var(--error);">${escapeHtml(e.message)}</p>`;
+    }
+}
+
+let newsGscWindow = null;
+let newsArticleSort = { by: "published_at", dir: "desc" };
+
+function sortNewsArticles(key) {
+    if (newsArticleSort.by === key) {
+        newsArticleSort.dir = newsArticleSort.dir === "desc" ? "asc" : "desc";
+    } else {
+        newsArticleSort = { by: key, dir: "desc" };
+    }
+    renderNewsArticles();
+}
+
+function formatNewsGscMetric(value) {
+    if (value === null || value === undefined) return `<span style="color:var(--on-surface-secondary);">—</span>`;
+    return Number(value).toLocaleString();
+}
+
+function renderNewsArticles() {
+    const container = document.getElementById("news-articles-container");
+    const { by, dir } = newsArticleSort;
+    // Rows without GSC data stay at the bottom whichever way the column sorts.
+    const order = publishedArticles
+        .map((a, i) => ({ a, i }))
+        .sort((x, y) => {
+            const xv = by === "published_at" ? (x.a.published_at || "") : x.a[by];
+            const yv = by === "published_at" ? (y.a.published_at || "") : y.a[by];
+            const xMissing = xv === null || xv === undefined;
+            const yMissing = yv === null || yv === undefined;
+            if (xMissing !== yMissing) return xMissing ? 1 : -1;
+            if (xv === yv) return 0;
+            return (xv > yv ? 1 : -1) * (dir === "desc" ? -1 : 1);
+        });
+    const gscLabel = newsGscWindow ? `${newsGscWindow.days}d` : "GSC";
+    const gscTitle = newsGscWindow
+        ? `Google Search Console, ${newsGscWindow.from} → ${newsGscWindow.to}`
+        : "Connect Google Search Console to see search traffic";
+    const header = (key, label, title) => {
+        const arrow = by === key ? (dir === "asc" ? " ↑" : " ↓") : "";
+        return `<th class="sortable" style="cursor:pointer;" onclick="sortNewsArticles('${key}')" ${title ? `title="${escapeAttr(title)}"` : ""}>${label}${arrow}</th>`;
+    };
+    const rows = order.map(({ a, i }) => {
+        const status = a.is_published
+            ? `<span class="news-badge news-badge--ok">Published</span>`
+            : `<span class="news-badge news-badge--pending">Draft</span>`;
+        const url = `${storeBaseUrl}/blogs/${a.blog_handle || "news"}/${a.handle || ""}`;
+        const position = a.gsc_position
+            ? ` <span style="font-size:11px;color:var(--on-surface-secondary);" title="Average position">#${a.gsc_position}</span>`
+            : "";
+        return `<tr>
                 <td>${escapeHtml(a.title || "Untitled")}</td>
                 <td>${escapeHtml(a.category || "—")}</td>
                 <td>${status}</td>
                 <td>${a.published_at ? formatDate(a.published_at) : "—"}</td>
+                <td style="text-align:right;">${formatNewsGscMetric(a.gsc_clicks)}</td>
+                <td style="text-align:right;">${formatNewsGscMetric(a.gsc_impressions)}${position}</td>
                 <td style="white-space:nowrap;">
                     ${a.is_published ? "" : `<button class="btn btn-primary btn-sm" style="margin-right:6px;" title="Publish this draft to the live store" onclick="publishNewsArticle(${i}, this)"><span class="material-symbols-rounded">publish</span> Publish</button>`}
                     <button class="btn btn-secondary btn-sm" onclick="openManage(${i})"><span class="material-symbols-rounded">image</span> Images</button>
@@ -1089,13 +1150,16 @@ async function loadNewsArticles() {
                     <a class="news-link" href="${escapeAttr(url)}" target="_blank" rel="noopener" style="margin-left:10px;">View ↗</a>
                 </td>
             </tr>`;
-        }).join("");
-        container.innerHTML = `<div class="table-container"><table class="data-table">
-            <thead><tr><th>Title</th><th>Category</th><th>Status</th><th>Published</th><th></th></tr></thead>
-            <tbody>${rows}</tbody></table></div>`;
-    } catch (e) {
-        container.innerHTML = `<p style="color:var(--error);">${escapeHtml(e.message)}</p>`;
-    }
+    }).join("");
+    container.innerHTML = `<div class="table-container"><table class="data-table">
+        <thead><tr>
+            <th>Title</th><th>Category</th><th>Status</th>
+            ${header("published_at", "Published")}
+            ${header("gsc_clicks", `Clicks (${gscLabel})`, gscTitle)}
+            ${header("gsc_impressions", `Impressions (${gscLabel})`, gscTitle)}
+            <th></th>
+        </tr></thead>
+        <tbody>${rows}</tbody></table></div>`;
 }
 
 async function publishNewsArticle(index, btn) {

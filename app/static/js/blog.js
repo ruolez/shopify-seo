@@ -2689,10 +2689,16 @@ async function loadBlogSeoCard() {
     if (storeId) {
         try {
             const data = await apiRequest(`/api/blog/landing-status?store_id=${storeId}&blog_id=${newsBlog.id}`);
-            const introEl = document.getElementById("landing-intro-text");
-            if (introEl && data && data.intro_text) {
-                introEl.value = data.intro_text;
-            }
+            const fill = (id, value) => {
+                const el = document.getElementById(id);
+                if (el && value) el.value = value;
+            };
+            fill("landing-intro-text", data && data.intro_text);
+            fill("hub-h1-input", data && data.hub_h1);
+            fill("blog-meta-title", data && data.hub_meta_title);
+            fill("blog-meta-description", data && data.hub_meta_description);
+            updateMetaCharCount("blog-meta-title", "blog-meta-title-count", 60);
+            updateMetaCharCount("blog-meta-description", "blog-meta-desc-count", 160);
             renderHeroImagePreview(data);
         } catch {}
     }
@@ -2732,27 +2738,35 @@ async function renameBlog() {
     }
 }
 
-async function saveIntroText() {
+// Saves any of the hub's intro / H1 / meta fields. The server refuses an H1 or
+// meta title that names another page's keyword; apiRequest offers "apply anyway".
+async function saveHubSettings(fields, savedMessage) {
     const card = document.getElementById("blog-seo-card");
     const blogId = card ? card.dataset.blogId : null;
     const storeId = getSelectedStoreId();
-    const introEl = document.getElementById("landing-intro-text");
-    const introText = introEl ? introEl.value.trim() : "";
-
     if (!storeId || !blogId) {
         showToast("No blog available", "error");
         return;
     }
-
     try {
-        await apiRequest("/api/blog/save-intro", {
+        await apiRequest("/api/blog/hub-settings", {
             method: "POST",
-            body: { store_id: parseInt(storeId), blog_id: parseInt(blogId), intro_text: introText },
+            body: { store_id: parseInt(storeId), blog_id: parseInt(blogId), ...fields },
         });
-        showToast("Intro paragraph saved", "success");
+        showToast(savedMessage + " — the hub page is rebuilding", "success");
     } catch (err) {
         showToast(err.message, "error");
     }
+}
+
+function saveIntroText() {
+    const introEl = document.getElementById("landing-intro-text");
+    return saveHubSettings({ intro_text: introEl ? introEl.value.trim() : "" }, "Intro saved");
+}
+
+function saveHubH1() {
+    const input = document.getElementById("hub-h1-input");
+    return saveHubSettings({ hub_h1: input ? input.value.replace(/\s+/g, " ").trim() : "" }, "Hub heading saved");
 }
 
 function renderHeroImagePreview(data) {
@@ -2919,20 +2933,26 @@ function renderAISuggestions(result) {
     const titleSugDiv = document.getElementById("ai-title-suggestion");
     const introSugDiv = document.getElementById("ai-intro-suggestion");
 
-    if (result.suggested_blog_title && titleSugDiv) {
+    const conflicts = result.conflicts || [];
+    const conflictNote = conflicts.length
+        ? `<p style="margin: 0 0 8px; font-size: 12px; color: var(--error);"><strong>Competes with:</strong> ${escapeHtml(
+              conflicts.map((c) => `"${c.phrase}" (${c.item_type} keyword)`).join(", "))}</p>`
+        : "";
+    if (result.suggested_hub_h1 && titleSugDiv) {
         titleSugDiv.style.display = "";
         titleSugDiv.innerHTML = `
             <div style="background: var(--primary-light); border-radius: 8px; padding: 12px;">
                 <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 6px;">
                     <span class="material-symbols-rounded" style="font-size: 18px; color: var(--primary);">lightbulb</span>
-                    <strong style="font-size: 13px;">Suggested Title</strong>
+                    <strong style="font-size: 13px;">Suggested Hub Heading</strong>
                 </div>
-                <p style="margin: 0 0 8px; font-size: 14px;">${escapeHtml(result.suggested_blog_title)}</p>
-                ${result.blog_title_reasoning ? `<p style="margin: 0 0 8px; font-size: 12px; color: var(--on-surface-secondary);">${escapeHtml(result.blog_title_reasoning)}</p>` : ""}
+                <p style="margin: 0 0 8px; font-size: 14px;">${escapeHtml(result.suggested_hub_h1)}</p>
+                ${result.hub_h1_reasoning ? `<p style="margin: 0 0 8px; font-size: 12px; color: var(--on-surface-secondary);">${escapeHtml(result.hub_h1_reasoning)}</p>` : ""}
                 ${result.keywords_targeted ? `<p style="margin: 0 0 8px; font-size: 12px; color: var(--on-surface-secondary);"><strong>Keywords:</strong> ${escapeHtml(result.keywords_targeted.join(", "))}</p>` : ""}
+                ${conflictNote}
                 <button class="btn btn-primary btn-sm" onclick="useAISuggestedTitle()">
                     <span class="material-symbols-rounded">check</span>
-                    Use This Title
+                    Use This Heading
                 </button>
             </div>`;
     }
@@ -2990,17 +3010,17 @@ function renderAISuggestions(result) {
             </div>`;
     }
 
-    window._aiSuggestedTitle = result.suggested_blog_title || "";
+    window._aiSuggestedTitle = result.suggested_hub_h1 || "";
     window._aiSuggestedIntro = result.suggested_intro || "";
     window._aiSuggestedMetaTitle = result.suggested_meta_title || "";
     window._aiSuggestedMetaDesc = result.suggested_meta_description || "";
 }
 
 function useAISuggestedTitle() {
-    const input = document.getElementById("blog-rename-input");
+    const input = document.getElementById("hub-h1-input");
     if (input && window._aiSuggestedTitle) {
         input.value = window._aiSuggestedTitle;
-        showToast("Title applied — click Save Title to push to Shopify", "success");
+        showToast("Heading applied — click Save to push to Shopify", "success");
     }
 }
 
@@ -3051,29 +3071,14 @@ function initMetaCharCounters() {
     }
 }
 
-async function saveBlogSeoMeta() {
-    const card = document.getElementById("blog-seo-card");
-    const blogId = card ? card.dataset.blogId : null;
-    const input = document.getElementById("blog-rename-input");
-    const title = input ? input.value.replace(/\s+/g, ' ').trim() : "";
+function saveBlogSeoMeta() {
     const metaTitle = (document.getElementById("blog-meta-title")?.value || "").trim();
     const metaDesc = (document.getElementById("blog-meta-description")?.value || "").trim();
-
-    if (!blogId || !title) {
-        showToast("Blog title is required", "error");
+    if (!metaTitle && !metaDesc) {
+        showToast("Enter a meta title or description", "error");
         return;
     }
-
-    try {
-        await apiRequest(`/api/blog/blogs/${blogId}`, {
-            method: "PUT",
-            body: { title, meta_title: metaTitle, meta_description: metaDesc },
-        });
-        showToast("Blog title and meta tags saved", "success");
-        loadArticles();
-    } catch (err) {
-        showToast(err.message, "error");
-    }
+    return saveHubSettings({ hub_meta_title: metaTitle, hub_meta_description: metaDesc }, "Meta tags saved");
 }
 
 async function refreshBlogImages() {
@@ -3370,20 +3375,21 @@ async function pushSeoSnippet() {
     showBlogConfirmDialog(
         "Push Theme SEO Fixes",
         "This will add a Liquid snippet to your theme that fixes:<br><br>" +
-        "&#8226; BlogPosting structured data (JSON-LD)<br>" +
         "&#8226; Duplicate meta description tags<br>" +
         "&#8226; font-display: swap for web fonts<br>" +
         "&#8226; Twitter meta tags<br>" +
-        "&#8226; og:type for blog pages + Blog schema<br>" +
-        "&#8226; WebSite schema with correct name<br><br>" +
-        "A <code>snippets/seo-fixes.liquid</code> file will be created and rendered in <code>layout/theme.liquid</code>.",
+        "&#8226; og:type, Blog and breadcrumb schema on the blog hub<br>" +
+        "&#8226; noindex on tag archives, paginated blog pages and the landing article's own URL<br><br>" +
+        "A <code>snippets/seo-fixes.liquid</code> file will be created and rendered in <code>layout/theme.liquid</code>. " +
+        "The blog section is also edited so the hub prints its own heading and drops the full tag list (Revert restores it).",
         async () => {
             try {
-                await apiRequest("/api/blog/push-seo-snippet", {
+                const res = await apiRequest("/api/blog/push-seo-snippet", {
                     method: "POST",
                     body: { store_id: parseInt(storeId) },
                 });
-                showToast("SEO snippet pushed to theme", "success");
+                const parts = (res && res.blog_section_patched) || [];
+                showToast("SEO snippet pushed to theme" + (parts.length ? " (blog section: " + parts.join(", ") + ")" : ""), "success");
                 loadSeoSnippetStatus();
             } catch (err) {
                 showToast(err.message, "error");
@@ -4009,7 +4015,13 @@ async function rescheduleBlogPost(index) {
             method: "PATCH",
             body: { scheduled_at: when.toISOString() },
         });
-        showToast("Publish time updated.", "success");
+        // A saved time is not an approval — say so, or the post silently
+        // sits in the queue while the scheduler skips it.
+        if (row.status === "scheduled" && !row.reviewed_at) {
+            showToast("Publish time updated — still needs your approval before it publishes.", "warning");
+        } else {
+            showToast("Publish time updated.", "success");
+        }
         loadScheduledPosts();
     } catch (e) {
         showToast(`Reschedule failed: ${e.message}`, "error");

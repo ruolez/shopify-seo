@@ -55,10 +55,10 @@
                             <div class="blog-settings-section">
                                 <h5>Content</h5>
                                 <div class="form-group">
-                                    <label>Blog Title (H1)</label>
+                                    <label>Hub Heading (H1) <span style="color: var(--on-surface-secondary); font-weight: normal;">(shown on /blogs/news; needs Theme SEO installed)</span></label>
                                     <div style="display: flex; gap: 8px; align-items: center;">
-                                        <input type="text" id="blog-rename-input" class="form-control" style="flex: 1; font-size: 13px;" placeholder="e.g., Tobacco News, Tips & Deals">
-                                        <button class="btn btn-primary btn-sm" onclick="renameBlog()" style="white-space: nowrap;">
+                                        <input type="text" id="hub-h1-input" class="form-control" style="flex: 1; font-size: 13px;" maxlength="120" placeholder="e.g., Tobacco Guides, Reviews & Flavor Rankings">
+                                        <button class="btn btn-primary btn-sm" onclick="saveHubH1()" style="white-space: nowrap;">
                                             <span class="material-symbols-rounded">save</span>
                                             Save
                                         </button>
@@ -66,8 +66,18 @@
                                 </div>
                                 <div id="ai-title-suggestion" style="display: none;"></div>
                                 <div class="form-group">
+                                    <label>Blog Name <span style="color: var(--on-surface-secondary); font-weight: normal;">(breadcrumbs and schema on every article)</span></label>
+                                    <div style="display: flex; gap: 8px; align-items: center;">
+                                        <input type="text" id="blog-rename-input" class="form-control" style="flex: 1; font-size: 13px;">
+                                        <button class="btn btn-secondary btn-sm" onclick="renameBlog()" style="white-space: nowrap;">
+                                            <span class="material-symbols-rounded">save</span>
+                                            Rename
+                                        </button>
+                                    </div>
+                                </div>
+                                <div class="form-group">
                                     <label>Intro Paragraph</label>
-                                    <textarea id="landing-intro-text" class="form-control" rows="2" placeholder="Shown above articles on the landing page..." style="font-size: 13px;"></textarea>
+                                    <textarea id="landing-intro-text" class="form-control" rows="3" placeholder="Shown above the topic sections. A blank line starts a second paragraph." style="font-size: 13px;"></textarea>
                                     <div style="margin-top: 6px;">
                                         <button class="btn btn-primary btn-sm" onclick="saveIntroText()">
                                             <span class="material-symbols-rounded">save</span>
@@ -82,7 +92,7 @@
                                 <div class="form-group">
                                     <label>Meta Title <span style="color: var(--on-surface-secondary); font-weight: normal;">(50-60 chars)</span></label>
                                     <div style="display: flex; gap: 8px; align-items: center;">
-                                        <input type="text" id="blog-meta-title" class="form-control" style="flex: 1; font-size: 13px;" maxlength="70" placeholder="e.g., Tobacco Blog — Tips & Deals | Store">
+                                        <input type="text" id="blog-meta-title" class="form-control" style="flex: 1; font-size: 13px;" maxlength="70" placeholder="e.g., Tobacco Guides & Flavor Reviews | Store">
                                         <span id="blog-meta-title-count" style="font-size: 11px; color: var(--on-surface-secondary); white-space: nowrap;">0/60</span>
                                     </div>
                                 </div>

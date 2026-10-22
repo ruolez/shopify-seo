@@ -1482,12 +1482,19 @@ class ShopifyClient:
         None are skipped. Uses the same metafieldsSet pattern as set_article_seo.
         The 'global' namespace is readable from Liquid without a definition.
         """
+        return self._set_owner_metafields(article_shopify_id, pairs, "article")
+
+    def set_blog_metafields(self, blog_shopify_id, pairs):
+        """set_article_metafields for a blog."""
+        return self._set_owner_metafields(blog_shopify_id, pairs, "blog")
+
+    def _set_owner_metafields(self, owner_id, pairs, label):
         metafields = []
         for namespace, key, value, mtype in pairs:
             if value is None:
                 continue
             metafields.append({
-                "ownerId": article_shopify_id,
+                "ownerId": owner_id,
                 "namespace": namespace,
                 "key": key,
                 "value": value,
@@ -1501,8 +1508,8 @@ class ShopifyClient:
         result = data.get("metafieldsSet", {})
         errors = result.get("userErrors", [])
         if errors:
-            raise Exception(f"Shopify article metafieldsSet error: {errors[0].get('message', str(errors))}")
-        logger.info("Set %d article metafields for %s", len(metafields), article_shopify_id)
+            raise Exception(f"Shopify {label} metafieldsSet error: {errors[0].get('message', str(errors))}")
+        logger.info("Set %d %s metafields for %s", len(metafields), label, owner_id)
         return result.get("metafields", [])
 
     def set_blog_seo(self, blog_shopify_id, meta_title=None, meta_description=None):

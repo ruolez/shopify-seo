@@ -702,6 +702,14 @@ class Database:
                 EXCEPTION WHEN duplicate_column THEN NULL;
                 END $$
             """)
+            # Hub-level heading and meta, separate from the blog title that every
+            # article's breadcrumb and schema carries.
+            cur.execute("""
+                ALTER TABLE blog_landing_pages
+                    ADD COLUMN IF NOT EXISTS hub_h1 VARCHAR(255),
+                    ADD COLUMN IF NOT EXISTS hub_meta_title VARCHAR(255),
+                    ADD COLUMN IF NOT EXISTS hub_meta_description TEXT
+            """)
             # --- News section additions ---
             cur.execute("""
                 DO $$ BEGIN
@@ -1125,6 +1133,23 @@ class Database:
             cur.execute("""
                 CREATE INDEX IF NOT EXISTS idx_gsc_metrics_query
                 ON gsc_daily_metrics(store_id, query)
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS gsc_page_daily (
+                    store_id INTEGER REFERENCES stores(id) ON DELETE CASCADE,
+                    date DATE NOT NULL,
+                    page TEXT NOT NULL,
+                    clicks DOUBLE PRECISION DEFAULT 0,
+                    impressions DOUBLE PRECISION DEFAULT 0,
+                    ctr DOUBLE PRECISION DEFAULT 0,
+                    position DOUBLE PRECISION DEFAULT 0,
+                    is_fresh BOOLEAN DEFAULT FALSE,
+                    PRIMARY KEY (store_id, date, page)
+                )
+            """)
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_gsc_page_daily_page
+                ON gsc_page_daily(store_id, page)
             """)
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS gsc_data_pulls (

@@ -23,7 +23,7 @@ async function apiRequest(url, options = {}) {
     // "apply anyway?" for every apply endpoint; the retry carries force:true.
     if (response.status === 409 && data.can_force && !options._forced && typeof UIConfirm !== "undefined") {
         const confirmed = await UIConfirm.ask({
-            title: "This change removes existing content",
+            title: data.confirm_title || "This change removes existing content",
             message: data.error,
             confirmLabel: "Apply anyway",
         });
@@ -166,7 +166,9 @@ function parseServerDate(isoStr) {
     // Server timestamps are UTC but serialized WITHOUT a timezone marker
     // ("2026-07-23T18:08:05.383109"). new Date() would parse that as LOCAL
     // time and display hours off — mark it UTC unless an offset is present.
-    if (typeof isoStr === "string" && isoStr.includes("T") && !/([zZ]|[+-]\d{2}:?\d{2})$/.test(isoStr)) {
+    // Only ISO-shaped strings — RFC-1123 ("Fri, 09 Oct 2026 16:20:15 GMT")
+    // contains a "T" too and must parse as-is.
+    if (typeof isoStr === "string" && /^\d{4}-\d{2}-\d{2}T/.test(isoStr) && !/([zZ]|[+-]\d{2}:?\d{2})$/.test(isoStr)) {
         return new Date(isoStr + "Z");
     }
     return new Date(isoStr);

@@ -5688,7 +5688,7 @@ def run_task(task_type, task_input, store_id=None):
         serp_context = ""
         try:
             from app.services.serp_scraper import brave_search
-            blog_keywords = get_setting("blog.search_keywords", DEFAULTS.get("blog.search_keywords", "blog tips deals"))
+            blog_keywords = get_setting("blog.search_keywords", DEFAULTS.get("blog.search_keywords", "tobacco guides reviews"))
             queries = [f"{store_name} blog", blog_keywords]
             if article_tags:
                 queries.append(" ".join(article_tags[:3]) + " blog")
@@ -5712,14 +5712,29 @@ def run_task(task_type, task_input, store_id=None):
         if article_tags:
             tags_context = f"\nArticle tags: {', '.join(article_tags[:15])}"
 
+        owned_context = ""
+        try:
+            from app.services.keyword_resolver import get_owned_primary_keywords
+            owned = get_owned_primary_keywords(suggestion_store_id, item_types=("collection",))
+            head_terms = sorted(
+                (o for o in owned.values() if len((o.get("keyword") or "").split()) <= 3),
+                key=lambda o: o.get("volume") or 0, reverse=True,
+            )[:40]
+            if head_terms:
+                owned_context = "\nHead terms owned by collections (never target these): " + ", ".join(
+                    o["keyword"] for o in head_terms)
+        except Exception as e:
+            logger.warning("Owned keywords unavailable for blog suggestions: %s", e)
+
         user_prompt = (
             f"Store name: {store_name}\n"
             f"Store domain: {store_domain}\n"
-            f"Current blog title: {blog_title}\n"
+            f"Blog title (shown in article breadcrumbs, not changing): {blog_title}\n"
             f"Blog handle: /blogs/{blog_handle}\n"
             f"Current intro: {current_intro or '(none)'}\n"
             f"{articles_context}"
-            f"{tags_context}\n"
+            f"{tags_context}"
+            f"{owned_context}\n"
         )
         if serp_context:
             user_prompt += f"\nCompetitor blog pages from SERP:\n{serp_context}"

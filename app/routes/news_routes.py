@@ -9,6 +9,7 @@ from flask import Blueprint, jsonify, render_template, request
 from app.database import db
 from app.routes.blog_routes import _get_store_client
 from app.services import publish_gate
+from app.services.gsc_page_totals import article_gsc_metrics, attach_article_metrics
 from app.settings_manager import get_setting
 from app.services import url_utils
 from app.shopify_client import is_gone_error
@@ -617,19 +618,25 @@ def list_news_articles():
         return jsonify({"articles": []})
     with db.get_cursor() as cur:
         cur.execute(
-            """SELECT id, shopify_id, title, handle, category, tags, image_url,
-                      is_published, published_at, date_modified
-               FROM synced_articles
-               WHERE store_id = %s AND article_type = 'news'
-               ORDER BY published_at DESC NULLS LAST""",
+            """SELECT sa.id, sa.shopify_id, sa.title, sa.handle, sa.category, sa.tags, sa.image_url,
+                      sa.is_published, sa.published_at, sa.date_modified,
+                      COALESCE(sb.handle, 'news') AS blog_handle
+               FROM synced_articles sa
+               LEFT JOIN synced_blogs sb ON sb.id = sa.blog_id
+               WHERE sa.store_id = %s AND sa.article_type = 'news'
+               ORDER BY sa.published_at DESC NULLS LAST""",
             (store_id,),
         )
         articles = [dict(a) for a in cur.fetchall()]
         cur.execute("SELECT domain, primary_domain FROM stores WHERE id = %s", (store_id,))
         store = cur.fetchone()
+    gsc_by_path, gsc_window = article_gsc_metrics(store_id)
+    for a in articles:
+        attach_article_metrics(a, gsc_by_path, gsc_window)
     return jsonify({
         "articles": articles,
         "store_base_url": _store_base_url(dict(store)) if store else "",
+        "gsc_window": gsc_window,
     })
 
 

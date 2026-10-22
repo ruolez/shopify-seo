@@ -1,5 +1,10 @@
+import re
+
+SNIPPET_VERSION = "v5"
+
+
 def generate_seo_snippet(include_website_schema=False, include_blogposting=False):
-    """SEO fixes theme snippet. Defaults produce v4 — the schema-safe build.
+    """SEO fixes theme snippet. Defaults produce v5 — the schema-safe build.
 
     include_website_schema (v2 only): the WebSite JSON-LD block and its DOM-dedup
     script — retired because ai-seo-schema.liquid owns the canonical WebSite
@@ -14,8 +19,9 @@ def generate_seo_snippet(include_website_schema=False, include_blogposting=False
         version = "v3"
         version_note = "  v3: WebSite schema + dedup moved to ai-seo-schema.liquid (single schema source)."
     else:
-        version = "v4"
-        version_note = "  v4: BlogPosting removed — structured-data-article (blog) / seo-news-article (news) own article schema."
+        version = SNIPPET_VERSION
+        version_note = ("  v4: BlogPosting removed — structured-data-article (blog) / seo-news-article (news) own article schema.\n"
+                        "  v5: blog tag and paginated views noindexed, landing article noindexed, hub Blog + BreadcrumbList schema.")
     header = (
         "{% comment %} SEO Fixes Snippet "
         + version
@@ -113,19 +119,47 @@ _SNIPPET_BODY = r"""
 {% endif %}
 <script>(function(){function d(s){var m=document.querySelectorAll('meta[name="'+s+'"]');if(m.length>1){for(var i=0;i<m.length-1;i++){m[i].parentNode.removeChild(m[i]);}}}function r(){d('twitter:card');d('twitter:image');}r();new MutationObserver(function(){r();}).observe(document.head,{childList:true,subtree:true});})();</script>
 
-{% comment %} 5. og:type fix for blog listing + Blog schema {% endcomment %}
+{% comment %} 5. Blog listing: og:type; tag and paginated views noindexed (they competed with the guides); the hub gets Blog + BreadcrumbList schema {% endcomment %}
 {% if template == 'blog' %}
 <meta property="og:type" content="blog">
 <script>(function(){function d(){var m=document.querySelectorAll('meta[property="og:type"]');if(m.length>1){for(var i=m.length-1;i>0;i--){m[i].parentNode.removeChild(m[i]);}}}d();new MutationObserver(function(){d();}).observe(document.head,{childList:true,subtree:true});})();</script>
+{%- assign hub_name = blog.metafields.global.hub_h1 | default: blog.title -%}
+{%- if current_tags or current_page > 1 -%}
+<meta name="robots" content="noindex, follow">
+{%- else -%}
 <script type="application/ld+json">
 {
   "@context": "https://schema.org",
   "@type": "Blog",
-  "name": {{ blog.title | json }},
+  "@id": "{{ canonical_url }}#blog",
+  "name": {{ hub_name | json }},
   "description": {{ blog.metafields.global.description_tag | default: page_description | json }},
-  "url": "{{ canonical_url }}"
+  "url": "{{ canonical_url }}",
+  "inLanguage": {{ request.locale.iso_code | json }},
+  "publisher": {"@id": "{{ shop.url }}/#organization"},
+  "blogPost": [
+    {%- assign hub_posts = 0 -%}
+    {%- for post in blog.articles limit: 20 -%}
+      {%- if post.tags contains 'landing-page' or hub_posts >= 10 -%}{%- continue -%}{%- endif -%}
+      {%- if hub_posts > 0 -%},{%- endif -%}
+      {"@type": "BlogPosting", "headline": {{ post.title | json }}, "url": "{{ shop.url }}{{ post.url }}", "datePublished": "{{ post.published_at | date: '%Y-%m-%dT%H:%M:%S%z' }}"{% if post.image %}, "image": "https:{{ post.image | image_url: width: 1200 }}"{% endif %}}
+      {%- assign hub_posts = hub_posts | plus: 1 -%}
+    {%- endfor -%}
+  ]
 }
 </script>
+<script type="application/ld+json">
+{"@context": "https://schema.org", "@type": "BreadcrumbList", "itemListElement": [
+  {"@type": "ListItem", "position": 1, "name": "Home", "item": "{{ shop.url }}"},
+  {"@type": "ListItem", "position": 2, "name": {{ hub_name | json }}, "item": "{{ canonical_url }}"}
+]}
+</script>
+{%- endif -%}
+{% endif %}
+
+{% comment %} 6. The landing article's own URL duplicates the blog hub {% endcomment %}
+{% if template contains 'article' and article.tags contains 'landing-page' %}
+<meta name="robots" content="noindex, follow">
 {% endif %}
 
 """
@@ -153,3 +187,65 @@ _WEBSITE_SCHEMA_BLOCK = r"""
 })();
 </script>
 """
+
+
+# ── Blog section patch: hub H1 + theme tag list ──────────────────────────────
+# The theme's blog section prints {{ blog.title }} as the H1 and lists every
+# article tag. The hub needs its own H1 (the blog title stays as it is — every
+# article's breadcrumb and schema carry it), and the tag list only links to
+# noindexed tag archives. Both edits are marked so revert restores the
+# original text exactly.
+
+HUB_H1_START = "{% comment %}seo-platform:hub-h1{% endcomment %}"
+HUB_H1_END = "{% comment %}/seo-platform:hub-h1{% endcomment %}"
+HUB_TAGS_MARK = "{% comment %}seo-platform:hub-tags{% endcomment %}"
+_HUB_TAGS_CONDITION = " and current_tags.size > 0"
+
+_H1_BLOCK = re.compile(r"<h1\b[^>]*>.*?</h1>", re.S | re.I)
+_BLOG_TITLE_OUTPUT = re.compile(r"\{\{-?\s*blog\.title\s*-?\}\}")
+_SHOW_TAGS_IF = re.compile(r"(\{%-?\s*if\s+section\.settings\.show_tags\s+and\s+blog\.all_tags\.size\s*>\s*0)(\s*-?%\})")
+_PATCHED_H1 = re.compile(re.escape(HUB_H1_START) + r".*?\{% else %\}(.*?)\{% endif %\}" + re.escape(HUB_H1_END), re.S)
+_PATCHED_TAGS = re.compile(re.escape(_HUB_TAGS_CONDITION) + r"(\s*-?%\})" + re.escape(HUB_TAGS_MARK))
+
+
+def _hub_h1_liquid(original):
+    return (HUB_H1_START
+            + "{% if current_tags == blank and current_page == 1 and blog.metafields.global.hub_h1 != blank %}"
+            + "{{ blog.metafields.global.hub_h1 }}{% else %}" + original + "{% endif %}" + HUB_H1_END)
+
+
+def patch_blog_section(content):
+    """(patched content, [parts changed]) for a blog section. Parts are 'h1'
+    and 'tags'; a part already patched, or a theme that prints neither in the
+    expected shape, is left alone."""
+    parts = []
+    if HUB_H1_START not in content:
+        h1 = _H1_BLOCK.search(content)
+        title = _BLOG_TITLE_OUTPUT.search(h1.group(0)) if h1 else None
+        if title:
+            start = h1.start() + title.start()
+            end = h1.start() + title.end()
+            content = content[:start] + _hub_h1_liquid(title.group(0)) + content[end:]
+            parts.append("h1")
+    if HUB_TAGS_MARK not in content:
+        content, n = _SHOW_TAGS_IF.subn(lambda m: m.group(1) + _HUB_TAGS_CONDITION + m.group(2) + HUB_TAGS_MARK,
+                                        content, count=1)
+        if n:
+            parts.append("tags")
+    return content, parts
+
+
+def unpatch_blog_section(content):
+    """patch_blog_section undone."""
+    content = _PATCHED_H1.sub(lambda m: m.group(1), content)
+    return _PATCHED_TAGS.sub(lambda m: m.group(1), content)
+
+
+def blog_section_patch_state(content):
+    """'installed' when the H1 is patched, 'missing' when it could be,
+    'unsupported' when the section prints no {{ blog.title }} H1."""
+    if content is None:
+        return "unsupported"
+    if HUB_H1_START in content:
+        return "installed"
+    return "missing" if "h1" in patch_blog_section(content)[1] else "unsupported"
