@@ -795,6 +795,8 @@ class Database:
             for _ddl in [
                 "ALTER TABLE news_sessions ADD COLUMN reviewed_at TIMESTAMP",
                 "ALTER TABLE article_wizard_sessions ADD COLUMN reviewed_at TIMESTAMP",
+                # Fields from an imported brief file; the pipeline never changes them.
+                "ALTER TABLE article_wizard_sessions ADD COLUMN locked_fields JSONB",
             ]:
                 cur.execute(f"DO $$ BEGIN {_ddl}; EXCEPTION WHEN duplicate_column THEN NULL; END $$")
             cur.execute("""

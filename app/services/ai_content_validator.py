@@ -339,18 +339,28 @@ def validate_seo_result(result, primary_keyword, client, config):
     return result
 
 
-def validate_named_fields(result, field_map, primary_keyword, client, config):
+def validate_named_fields(result, field_map, primary_keyword, client, config, locked=()):
     """Quality-gate arbitrary meta fields in place.
 
     `field_map` maps validator field names ("meta_title"/"meta_description"/
     "title") to the result's own key names — brand results use
     optimized_meta_*, GEO uses meta_* — so every generator gets the same
-    rephrase-first, clamp-last treatment without renaming its output."""
+    rephrase-first, clamp-last treatment without renaming its output.
+
+    Fields named in `locked` (validator names) came from a person and are
+    never rephrased or clamped; their violations land in _qa.locked_warnings."""
     try:
         if not isinstance(result, dict) or result.get("error") or result.get("raw_response"):
             return result
-        fields = {std: result.get(key) for std, key in field_map.items()}
+        locked = set(locked or ())
         qa = {}
+        if locked:
+            held = {std: result.get(key) for std, key in field_map.items() if std in locked}
+            warnings = find_violations(held, primary_keyword)
+            if warnings:
+                qa["locked_warnings"] = warnings
+            field_map = {std: key for std, key in field_map.items() if std not in locked}
+        fields = {std: result.get(key) for std, key in field_map.items()}
         _validate_fields(fields, primary_keyword, client, (config or {}).get("model"), qa)
         for std, key in field_map.items():
             if fields.get(std):

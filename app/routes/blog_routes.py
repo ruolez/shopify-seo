@@ -13,6 +13,16 @@ from app.services import publish_gate
 from app.services.apply_pipeline import ApplyRefused, apply_item_changes, refusal_response
 from app.services.ai_output_guard import guard_shopify_fields
 from app.services.blog_seo_analyzer import analyze_article_seo
+from app.services.blog_import import (
+    ARTICLE_KEYS,
+    OUTLINE_KEYS,
+    apply_locked_fields,
+    check_brief,
+    dedupe_keywords,
+    locked_fields_of,
+    parse_blog_briefs,
+)
+from app.services.title_match import titles_match
 from app.services.gsc_page_totals import article_gsc_metrics, attach_article_metrics
 from app.services.article_visuals import (
     STYLE_CLASSIC,
@@ -1378,9 +1388,11 @@ def _wizard_step_outline(session):
             "keywords": session["target_keywords"],
             "research_data": session["research_data"],
             "store_id": session["store_id"],
+            "locked_fields": session.get("locked_fields"),
         },
         store_id=session["store_id"],
     )
+    result = apply_locked_fields(result, session.get("locked_fields"), OUTLINE_KEYS)
     media_plan = result.get("media_plan") if isinstance(result, dict) else None
     with db.get_cursor() as cur:
         cur.execute(
@@ -1404,9 +1416,11 @@ def _wizard_step_generate(session):
             "outline_data": session["outline_data"],
             "research_data": session["research_data"],
             "store_id": session["store_id"],
+            "locked_fields": session.get("locked_fields"),
         },
         store_id=session["store_id"],
     )
+    result = apply_locked_fields(result, session.get("locked_fields"), ARTICLE_KEYS)
     with db.get_cursor() as cur:
         cur.execute(
             "UPDATE article_wizard_sessions SET generated_article = %s, updated_at = NOW() WHERE id = %s",
@@ -1668,6 +1682,9 @@ def _wizard_step_publish(session, store, client, is_published=True):
     handle = (generated.get("handle") or "").strip()
     if handle:
         fields["handle"] = handle
+    # An imported brief's text wins over every clamp and edit above.
+    locked = session.get("locked_fields") or {}
+    fields = apply_locked_fields(fields, locked, ARTICLE_KEYS)
 
     if session.get("featured_image_url"):
         fields["image_url"] = session["featured_image_url"]
@@ -1696,7 +1713,13 @@ def _wizard_step_publish(session, store, client, is_published=True):
         except Exception as create_err:
             # A pre-existing article already owns this handle — let Shopify
             # auto-generate a unique one instead of failing the whole save.
+            # A slug from an imported brief is locked: fail instead.
             if "Handle has already been taken" in str(create_err):
+                if locked.get("handle"):
+                    raise ValueError(
+                        f"URL slug '{locked['handle']}' is already taken on Shopify — "
+                        "change the slug in the file and import it again"
+                    ) from create_err
                 fields.pop("handle", None)
                 result = client.create_article(blog["shopify_id"], fields)
             else:
@@ -2424,6 +2447,9 @@ def _run_blog_auto_pipeline(session_id, store, client):
         _set_status("auto_researching")
         _wizard_step_research(session)
         session = _fetch_wizard_session(session_id)
+    if session.get("locked_fields") and not session.get("outline_data"):
+        _adopt_research_targets(session)
+        session = _fetch_wizard_session(session_id)
     if not session.get("outline_data"):
         _set_status("auto_outlining")
         _wizard_step_outline(session)
@@ -2454,9 +2480,52 @@ def _run_blog_auto_pipeline(session_id, store, client):
     _set_status("scheduled")
 
 
-def _spawn_blog_auto_pipeline(session_id, store, client):
-    # One ai_tasks row per pipeline run so the Tasks panel shows the
-    # background writing; per-step tasks stay a manual-wizard concern.
+def _adopt_research_targets(session):
+    """Imported briefs accept the wizard's defaults: the products and
+    collections research found become the link targets, exactly as Step 2
+    pre-selects them in the manual wizard."""
+    if session.get("target_product_ids") or session.get("target_collection_ids"):
+        return
+    research = session.get("research_data") or {}
+
+    def _ids(items):
+        out = []
+        for item in items or []:
+            try:
+                out.append(int(item["id"]))
+            except (KeyError, TypeError, ValueError):
+                continue
+        return out
+
+    product_ids = _ids(research.get("related_products"))
+    collection_ids = _ids(research.get("related_collections"))
+    if not (product_ids or collection_ids):
+        return
+    with db.get_cursor() as cur:
+        # The ids come from the model — keep only rows this store really has.
+        cur.execute(
+            "SELECT id FROM synced_products WHERE store_id = %s AND id = ANY(%s)",
+            (session["store_id"], product_ids),
+        )
+        known = {r["id"] for r in cur.fetchall()}
+        product_ids = [i for i in product_ids if i in known]
+        cur.execute(
+            "SELECT id FROM synced_collections WHERE store_id = %s AND id = ANY(%s)",
+            (session["store_id"], collection_ids),
+        )
+        known = {r["id"] for r in cur.fetchall()}
+        collection_ids = [i for i in collection_ids if i in known]
+        cur.execute(
+            """UPDATE article_wizard_sessions
+               SET target_product_ids = %s, target_collection_ids = %s, updated_at = NOW()
+               WHERE id = %s""",
+            (json.dumps(product_ids), json.dumps(collection_ids), session["id"]),
+        )
+
+
+def _run_tracked_blog_pipeline(session_id, store, client):
+    """Run the auto pipeline under one ai_tasks row (so the Tasks panel shows
+    the background writing); a failure marks the session failed, never raises."""
     session = _fetch_wizard_session(session_id)
     with db.get_cursor() as cur:
         cur.execute(
@@ -2465,28 +2534,30 @@ def _spawn_blog_auto_pipeline(session_id, store, client):
             (session["store_id"], json.dumps({"session_id": session_id, "topic": session["topic"]})),
         )
         task_id = cur.fetchone()["id"]
+    try:
+        _run_blog_auto_pipeline(session_id, store, client)
+        with db.get_cursor() as cur:
+            cur.execute(
+                "UPDATE ai_tasks SET status = 'completed', result = %s, completed_at = NOW() WHERE id = %s",
+                (json.dumps({"session_id": session_id, "status": "scheduled"}), task_id),
+            )
+    except Exception as e:
+        logger.exception("Blog auto pipeline: session %s failed: %s", session_id, e)
+        with db.get_cursor() as cur:
+            cur.execute(
+                "UPDATE article_wizard_sessions SET status = 'failed', error = %s, updated_at = NOW() WHERE id = %s",
+                (str(e), session_id),
+            )
+            cur.execute(
+                "UPDATE ai_tasks SET status = 'failed', error = %s, completed_at = NOW() WHERE id = %s",
+                (str(e), task_id),
+            )
 
-    def _run():
-        try:
-            _run_blog_auto_pipeline(session_id, store, client)
-            with db.get_cursor() as cur:
-                cur.execute(
-                    "UPDATE ai_tasks SET status = 'completed', result = %s, completed_at = NOW() WHERE id = %s",
-                    (json.dumps({"session_id": session_id, "status": "scheduled"}), task_id),
-                )
-        except Exception as e:
-            logger.exception("Blog auto pipeline: session %s failed: %s", session_id, e)
-            with db.get_cursor() as cur:
-                cur.execute(
-                    "UPDATE article_wizard_sessions SET status = 'failed', error = %s, updated_at = NOW() WHERE id = %s",
-                    (str(e), session_id),
-                )
-                cur.execute(
-                    "UPDATE ai_tasks SET status = 'failed', error = %s, completed_at = NOW() WHERE id = %s",
-                    (str(e), task_id),
-                )
 
-    threading.Thread(target=_run, daemon=True).start()
+def _spawn_blog_auto_pipeline(session_id, store, client):
+    threading.Thread(
+        target=_run_tracked_blog_pipeline, args=(session_id, store, client), daemon=True
+    ).start()
 
 
 @blog_bp.route("/api/blog/schedule-from-suggestion", methods=["POST"])
@@ -2548,6 +2619,158 @@ def schedule_from_suggestion():
     return jsonify({"session_id": session_id, "scheduled_for": _iso_utc(scheduled_for)})
 
 
+# ── Auto mode: import briefs from a file ────────────────────────
+
+
+def _annotate_brief_conflicts(store_id, briefs):
+    """Add store-dependent errors/warnings to checked briefs in place: a URL
+    slug already used (live or queued) or repeated in the batch is an error; a
+    title that reads like an existing or queued post, or a primary keyword a
+    money page owns, is a warning (`keyword_conflict` = that keyword)."""
+    with db.get_cursor() as cur:
+        cur.execute(
+            """SELECT a.title, a.handle FROM synced_articles a
+               JOIN synced_blogs b ON b.id = a.blog_id
+               WHERE a.store_id = %s AND b.handle = 'news'""",
+            (store_id,),
+        )
+        live = [dict(r) for r in cur.fetchall()]
+        cur.execute(
+            """SELECT locked_fields->>'handle' AS handle,
+                      COALESCE(locked_fields->>'title', generated_article->>'title', topic) AS title
+               FROM article_wizard_sessions
+               WHERE store_id = %s AND scheduled_for IS NOT NULL AND status != 'published'""",
+            (store_id,),
+        )
+        queued = [dict(r) for r in cur.fetchall()]
+    live_handles = {r["handle"]: r["title"] for r in live if r.get("handle")}
+    queued_handles = {r["handle"]: r["title"] for r in queued if r.get("handle")}
+    seen_handles, seen_titles = set(), []
+    for b in briefs:
+        handle, title = b.get("handle"), b.get("title")
+        if handle:
+            if handle in live_handles:
+                b["errors"].append(f"URL slug '{handle}' is already used by “{live_handles[handle]}”")
+            elif handle in queued_handles:
+                b["errors"].append(f"URL slug '{handle}' is already queued for “{queued_handles[handle]}”")
+            elif handle in seen_handles:
+                b["errors"].append(f"URL slug '{handle}' appears twice in this import")
+            seen_handles.add(handle)
+        if title:
+            match = (
+                next((("published", r["title"]) for r in live if titles_match(title, r["title"])), None)
+                or next((("queued", r["title"]) for r in queued if r["title"] and titles_match(title, r["title"])), None)
+                or next((("in this import", t) for t in seen_titles if titles_match(title, t)), None)
+            )
+            if match:
+                b["warnings"].append(f"Reads like a post already {match[0]}: “{match[1]}”")
+            seen_titles.append(title)
+        conflict = _money_page_keyword_warning(store_id, b.get("keywords") or [])
+        b["keyword_conflict"] = b["keywords"][0] if conflict else None
+        if conflict:
+            b["warnings"].append(conflict)
+    return briefs
+
+
+def _brief_from_payload(item):
+    keywords = item.get("keywords") or []
+    if isinstance(keywords, str):
+        keywords = keywords.split(",")
+    return {
+        "topic": str(item.get("topic") or ""),
+        "title": str(item.get("title") or "").strip(),
+        "meta_title": str(item.get("meta_title") or "").strip(),
+        "meta_description": str(item.get("meta_description") or "").strip(),
+        "handle": str(item.get("handle") or "").strip(),
+        "keywords": dedupe_keywords([str(k).strip() for k in keywords if str(k).strip()]),
+    }
+
+
+@blog_bp.route("/api/blog/import/preview", methods=["POST"])
+def import_briefs_preview():
+    """Parse brief files and report what each row would import as."""
+    data = request.get_json(silent=True) or {}
+    store_id = data.get("store_id")
+    if not store_id:
+        return jsonify({"error": "store_id is required"}), 400
+    briefs = []
+    for f in data.get("files") or []:
+        for brief in parse_blog_briefs(f.get("text") or ""):
+            checked = check_brief(brief)
+            checked["source_file"] = f.get("name") or ""
+            briefs.append(checked)
+    if not briefs:
+        return jsonify({"error": "No briefs found — each brief needs at least an “H1:” line"}), 400
+    _annotate_brief_conflicts(store_id, briefs)
+    slots = publish_gate.next_open_slots(store_id, len(briefs))
+    return jsonify({
+        "briefs": briefs,
+        "default_slots": [_iso_utc(s) for s in slots],
+        "default_style": _resolve_article_style(store_id),
+    })
+
+
+@blog_bp.route("/api/blog/import/schedule", methods=["POST"])
+def import_briefs_schedule():
+    """Queue imported briefs: one locked session per row, run through the
+    auto pipeline one after another, publishing at each row's date."""
+    data = request.get_json(silent=True) or {}
+    store_id = data.get("store_id")
+    items = data.get("items") or []
+    if not store_id or not items:
+        return jsonify({"error": "store_id and items are required"}), 400
+    store, client = _get_store_client(store_id)
+    if not client:
+        return jsonify({"error": "Store not found"}), 404
+
+    # Validate every row before creating anything (all-or-nothing).
+    rows = []
+    now = datetime.utcnow()
+    for i, item in enumerate(items, 1):
+        brief = check_brief(_brief_from_payload(item))
+        try:
+            scheduled_for = _parse_scheduled_at(item.get("scheduled_at"))
+        except (ValueError, TypeError):
+            return jsonify({"error": f"Row {i}: a valid publish date is required"}), 400
+        if scheduled_for < now:
+            return jsonify({"error": f"Row {i}: the publish time is in the past — pick a future date/time"}), 400
+        rows.append((brief, scheduled_for, item))
+    _annotate_brief_conflicts(store_id, [b for b, _, _ in rows])
+    for i, (brief, _, _) in enumerate(rows, 1):
+        if brief["errors"]:
+            return jsonify({"error": f"Row {i} ({brief['title'] or 'no H1'}): {brief['errors'][0]}"}), 400
+
+    style = _resolve_article_style(store_id, data.get("style"))
+    approve = bool(data.get("approve", True))
+    session_ids = []
+    with db.get_cursor() as cur:
+        for brief, scheduled_for, item in rows:
+            locked = locked_fields_of(brief)
+            locked["source_file"] = str(item.get("source_file") or "")
+            if item.get("keyword_conflict_ack") and brief.get("keyword_conflict"):
+                locked["keyword_conflict_ack"] = brief["keyword_conflict"]
+            cur.execute(
+                """INSERT INTO article_wizard_sessions
+                    (store_id, topic, target_keywords, target_product_ids, target_collection_ids,
+                     status, current_step, scheduled_for, style, locked_fields, reviewed_at)
+                VALUES (%s, %s, %s, '[]', '[]', 'auto_queued', 1, %s, %s, %s,
+                        CASE WHEN %s THEN NOW() END)
+                RETURNING id""",
+                (store_id, brief["title"][:500], json.dumps(brief["keywords"]), scheduled_for,
+                 style, json.dumps(locked), approve),
+            )
+            session_ids.append(cur.fetchone()["id"])
+
+    def _run_in_order():
+        # One at a time — a batch of posts would otherwise hit the research
+        # and image APIs all at once.
+        for sid in session_ids:
+            _run_tracked_blog_pipeline(sid, store, client)
+
+    threading.Thread(target=_run_in_order, daemon=True).start()
+    return jsonify({"sessions": session_ids})
+
+
 @blog_bp.route("/api/blog/scheduled", methods=["GET"])
 def list_scheduled_posts():
     """List scheduled blog sessions (processing, ready, or failed) for a store."""
@@ -2557,7 +2780,8 @@ def list_scheduled_posts():
     with db.get_cursor() as cur:
         cur.execute(
             """SELECT id, status, scheduled_for, reviewed_at, error, created_at, updated_at, topic, style,
-                      COALESCE(generated_article->>'title', topic) AS title,
+                      COALESCE(locked_fields->>'title', generated_article->>'title', topic) AS title,
+                      (locked_fields IS NOT NULL) AS from_file,
                       (featured_image_url IS NOT NULL) AS has_image
                FROM article_wizard_sessions
                WHERE store_id = %s AND scheduled_for IS NOT NULL AND status != 'published'

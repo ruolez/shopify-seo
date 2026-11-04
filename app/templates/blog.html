@@ -207,6 +207,45 @@
                 </div>
 
                 <div class="tab-panel" id="tab-create">
+                    <div class="card" id="brief-import-card" style="margin-bottom: 24px;">
+                        <div style="display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; flex-wrap: wrap;">
+                            <div>
+                                <h3 style="margin: 0;">Auto mode: import briefs</h3>
+                                <p style="margin: 4px 0 0; font-size: 13px; color: var(--on-surface-secondary);">
+                                    Load a text file of briefs (H1, SEO Title, Meta Description, Keywords, URL Slug). Each one is written by the pipeline with default settings and published at its date. The file's fields are used exactly as written.
+                                </p>
+                            </div>
+                            <div style="display: flex; gap: 8px; align-items: center;">
+                                <span id="brief-import-status" style="font-size: 13px; color: var(--on-surface-secondary);"></span>
+                                <input type="file" id="brief-import-file" accept=".md,.markdown,.txt,text/markdown,text/plain" multiple style="display:none;" onchange="importBriefFiles(event)">
+                                <button class="btn btn-primary" onclick="document.getElementById('brief-import-file').click()">
+                                    <span class="material-symbols-rounded">upload_file</span>
+                                    Load file
+                                </button>
+                            </div>
+                        </div>
+                        <div id="brief-import-preview" style="display: none; margin-top: 16px;">
+                            <div id="brief-import-table"></div>
+                            <div style="display: flex; gap: 16px; align-items: center; flex-wrap: wrap; margin-top: 12px;">
+                                <label style="font-size: 13px;">Style
+                                    <select id="brief-import-style" class="form-control" style="display: inline-block; width: auto; margin-left: 6px;">
+                                        <option value="visual">Visual</option>
+                                        <option value="classic">Classic</option>
+                                    </select>
+                                </label>
+                                <label style="font-size: 13px;" title="Imported posts publish at their date without the Approve step">
+                                    <input type="checkbox" id="brief-import-approve" checked> Approve on import
+                                </label>
+                                <span style="flex: 1;"></span>
+                                <button class="btn btn-secondary" onclick="clearBriefImport()">Clear</button>
+                                <button class="btn btn-primary" id="brief-import-btn" onclick="scheduleBriefImport(this)">
+                                    <span class="material-symbols-rounded">schedule_send</span>
+                                    <span id="brief-import-btn-label">Schedule posts</span>
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+
                     <div class="card" id="topic-research-card" style="margin-bottom: 24px;">
                         <div style="display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; flex-wrap: wrap;">
                             <div>
@@ -337,7 +376,7 @@
                     <div class="card" style="margin-bottom: 24px;">
                         <h3 style="margin: 0;">Posting Cadence</h3>
                         <p style="margin: 4px 0 12px; font-size: 13px; color: var(--on-surface-secondary);">
-                            Blog posts and Product News share one calendar. New items take the next open slot, and nothing publishes until you approve it below. Each date stays editable.
+                            Blog posts and Product News share one calendar. New items take the next open slot, and nothing publishes until you approve it below (posts imported from a brief file with “Approve on import” are approved already). Each date stays editable.
                         </p>
                         <div style="display: flex; gap: 12px; align-items: flex-end; flex-wrap: wrap;">
                             <div class="form-group" style="margin: 0;">

@@ -3822,6 +3822,163 @@ document.addEventListener("click", (e) => {
     }
 });
 
+// ── Auto mode: import briefs ─────────────────────────────────────
+
+let importBriefs = [];
+
+const LOCKED_FIELD_LABELS = { title: "H1", meta_title: "SEO title", meta_description: "Meta description" };
+
+function lockedWarningText(v) {
+    const label = LOCKED_FIELD_LABELS[v.field] || v.field;
+    if (v.kind === "length") return `${label} is ${v.length} characters (over ${v.limit})`;
+    return `${label} doesn't contain the primary keyword`;
+}
+
+function readTextFile(file) {
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result || ""));
+        reader.onerror = () => reject(new Error(`Could not read ${file.name}`));
+        reader.readAsText(file);
+    });
+}
+
+async function importBriefFiles(event) {
+    const files = Array.from(event.target.files || []);
+    event.target.value = "";
+    if (!files.length) return;
+    const storeId = await getFirstStoreId();
+    if (!storeId) return showToast("No store found", "error");
+    const status = document.getElementById("brief-import-status");
+    status.textContent = "Reading…";
+    try {
+        const payload = await Promise.all(files.map(async (f) => ({ name: f.name, text: await readTextFile(f) })));
+        const res = await apiRequest("/api/blog/import/preview", {
+            method: "POST",
+            body: { store_id: storeId, files: payload },
+        });
+        let slot = 0;
+        importBriefs = res.briefs.map((b) => {
+            const ok = !b.errors.length;
+            return { ...b, include: ok, when: ok ? new Date(res.default_slots[slot++]) : null };
+        });
+        document.getElementById("brief-import-style").value = res.default_style || "visual";
+        const ready = importBriefs.filter((b) => b.include).length;
+        status.textContent = `${importBriefs.length} brief${importBriefs.length === 1 ? "" : "s"}, ${ready} ready`;
+        renderBriefImport();
+    } catch (err) {
+        status.textContent = "";
+        showToast(err.message, "error");
+    }
+}
+
+function renderBriefImport() {
+    const wrap = document.getElementById("brief-import-preview");
+    if (!importBriefs.length) { wrap.style.display = "none"; return; }
+    const rows = importBriefs.map((b, i) => {
+        const disabled = b.errors.length > 0;
+        const [primary, ...rest] = b.keywords || [];
+        const details = [
+            b.meta_title ? `<div><strong>SEO title:</strong> ${escapeHtml(b.meta_title)} <span style="opacity:.7;">(${b.meta_title.length})</span></div>` : "",
+            b.meta_description ? `<div><strong>Meta:</strong> ${escapeHtml(b.meta_description)} <span style="opacity:.7;">(${b.meta_description.length})</span></div>` : "",
+            b.handle ? `<div><strong>URL:</strong> /blogs/news/${escapeHtml(b.handle)}</div>` : "",
+            primary ? `<div><strong>Keywords:</strong> <strong>${escapeHtml(primary)}</strong>${rest.length ? ", " + rest.map(escapeHtml).join(", ") : ""}</div>` : "",
+        ].join("");
+        const notes = [
+            ...b.errors.map((e) => `<div style="color:var(--error);">✕ ${escapeHtml(e)}</div>`),
+            ...b.warnings.map((w) => `<div style="color:var(--warning);">⚠ ${escapeHtml(w)}</div>`),
+        ].join("");
+        const when = b.when ? toLocalInputValue(b.when) : "";
+        return `<tr style="${disabled ? "opacity:.6;" : ""}">
+            <td style="vertical-align:top;"><input type="checkbox" ${b.include ? "checked" : ""} ${disabled ? "disabled" : ""} onchange="toggleBriefInclude(${i}, this.checked)"></td>
+            <td style="vertical-align:top;">
+                <div style="font-weight:600;">${escapeHtml(b.title || b.topic || "(no H1)")}</div>
+                <div style="font-size:12px;color:var(--on-surface-secondary);margin-top:4px;line-height:1.5;">${details}</div>
+                ${notes ? `<div style="font-size:12px;margin-top:6px;line-height:1.5;">${notes}</div>` : ""}
+            </td>
+            <td style="vertical-align:top;white-space:nowrap;">
+                <input type="datetime-local" id="brief-when-${i}" class="form-control" style="max-width:200px;" value="${when}" ${disabled || !b.include ? "disabled" : ""}>
+            </td>
+        </tr>`;
+    }).join("");
+    document.getElementById("brief-import-table").innerHTML = `<div class="table-container"><table class="data-table">
+        <thead><tr><th></th><th>Brief</th><th>Publish at</th></tr></thead>
+        <tbody>${rows}</tbody></table></div>`;
+    const count = importBriefs.filter((b) => b.include).length;
+    document.getElementById("brief-import-btn-label").textContent = `Schedule ${count} post${count === 1 ? "" : "s"}`;
+    document.getElementById("brief-import-btn").disabled = count === 0;
+    wrap.style.display = "";
+}
+
+function toggleBriefInclude(index, include) {
+    const b = importBriefs[index];
+    if (!b) return;
+    const input = document.getElementById(`brief-when-${index}`);
+    if (input && input.value) b.when = new Date(input.value);
+    b.include = include;
+    if (include && !b.when) {
+        const last = importBriefs.filter((x) => x.include && x.when && x !== b).map((x) => x.when.getTime());
+        b.when = new Date((last.length ? Math.max(...last) : Date.now()) + 2 * 86400000);
+    }
+    renderBriefImport();
+}
+
+function clearBriefImport() {
+    importBriefs = [];
+    document.getElementById("brief-import-status").textContent = "";
+    renderBriefImport();
+}
+
+async function scheduleBriefImport(btn) {
+    const storeId = await getFirstStoreId();
+    if (!storeId) return showToast("No store found", "error");
+    const items = [];
+    for (let i = 0; i < importBriefs.length; i++) {
+        const b = importBriefs[i];
+        if (!b.include) continue;
+        const value = document.getElementById(`brief-when-${i}`).value;
+        const when = value ? new Date(value) : null;
+        if (!when || isNaN(when) || when <= new Date()) {
+            return showToast(`“${b.title}”: pick a future publish date`, "error");
+        }
+        items.push({
+            topic: b.topic,
+            title: b.title,
+            meta_title: b.meta_title,
+            meta_description: b.meta_description,
+            handle: b.handle,
+            keywords: b.keywords,
+            source_file: b.source_file,
+            scheduled_at: when.toISOString(),
+            // Including a row whose keyword a money page owns accepts that conflict.
+            keyword_conflict_ack: !!b.keyword_conflict,
+        });
+    }
+    if (!items.length) return;
+    const approve = document.getElementById("brief-import-approve").checked;
+    btn.disabled = true;
+    try {
+        const res = await apiRequest("/api/blog/import/schedule", {
+            method: "POST",
+            body: {
+                store_id: storeId,
+                style: document.getElementById("brief-import-style").value,
+                approve,
+                items,
+            },
+        });
+        const n = res.sessions.length;
+        showToast(`${n} post${n === 1 ? "" : "s"} queued — writing them one at a time now.${approve ? "" : " Approve each in the Scheduled tab before it publishes."}`, "success");
+        clearBriefImport();
+        const schedTab = document.querySelector('.tab[data-tab="scheduled"]');
+        if (schedTab) schedTab.click();
+    } catch (err) {
+        showToast(err.message, "error");
+    } finally {
+        btn.disabled = false;
+    }
+}
+
 // ── Scheduled Posts ──────────────────────────────────────────────
 
 let scheduledPosts = [];
@@ -3946,7 +4103,7 @@ async function loadScheduledPosts() {
     }
     scheduledPosts = rows;
     if (!rows.length) {
-        container.innerHTML = `<div class="card"><p style="color:var(--on-surface-secondary);">Nothing queued. Use “Schedule” on a topic in the Create Post tab — the draft is written and lands here for your review before it publishes.</p></div>`;
+        container.innerHTML = `<div class="card"><p style="color:var(--on-surface-secondary);">Nothing queued. Use “Schedule” on a topic or “Load file” under Auto mode in the Create Post tab — the draft is written and lands here before it publishes.</p></div>`;
         return;
     }
     const body = rows.map((row, i) => {
@@ -3957,7 +4114,7 @@ async function loadScheduledPosts() {
             <button class="icon-btn" title="Save new time" onclick="rescheduleBlogPost(${i})" ${busy ? "disabled" : ""}><span class="material-symbols-rounded">save</span></button>
         </span>`;
         return `<tr>
-            <td>${escapeHtml(row.title || row.topic || "(processing…)")} ${row.style === "classic" ? '<span class="badge" title="Legacy text article">Classic</span>' : '<span class="badge badge-success" title="Images, blocks, styled template">Visual</span>'}</td>
+            <td>${escapeHtml(row.title || row.topic || "(processing…)")} ${row.from_file ? '<span class="badge" title="Imported from a brief file. Title, SEO title, meta description and slug are locked.">From file</span> ' : ""}${row.style === "classic" ? '<span class="badge" title="Legacy text article">Classic</span>' : '<span class="badge badge-success" title="Images, blocks, styled template">Visual</span>'}</td>
             <td style="white-space:nowrap;">${whenInput}</td>
             <td>${scheduledPostChip(row)}</td>
             <td style="white-space:nowrap;">
@@ -4089,8 +4246,20 @@ async function previewScheduledPost(index) {
     const art = s.generated_article || {};
     document.getElementById("scheduled-preview-title").textContent = art.title || s.topic || "Scheduled Post";
     let html = "";
-    if (art.meta_title) html += `<p style="font-size:13px;"><strong>Meta title:</strong> ${escapeHtml(art.meta_title)}</p>`;
-    if (art.meta_description) html += `<p style="font-size:13px;"><strong>Meta description:</strong> ${escapeHtml(art.meta_description)}</p>`;
+    const locked = s.locked_fields || null;
+    const lock = (key) => (locked && locked[key]
+        ? ' <span class="material-symbols-rounded" style="font-size:14px;vertical-align:-2px;" title="From the brief file — locked">lock</span>'
+        : "");
+    if (locked) {
+        html += `<p style="font-size:13px;"><span class="badge">From file</span> ${escapeHtml(locked.source_file || "")}${locked.title ? ` · <strong>H1:</strong> ${escapeHtml(locked.title)}${lock("title")}` : ""}</p>`;
+    }
+    if (art.meta_title) html += `<p style="font-size:13px;"><strong>Meta title:</strong> ${escapeHtml(art.meta_title)}${lock("meta_title")}</p>`;
+    if (art.meta_description) html += `<p style="font-size:13px;"><strong>Meta description:</strong> ${escapeHtml(art.meta_description)}${lock("meta_description")}</p>`;
+    if (locked && locked.handle) html += `<p style="font-size:13px;"><strong>URL:</strong> /blogs/news/${escapeHtml(locked.handle)}${lock("handle")}</p>`;
+    const lockedWarnings = ((art._qa || {}).locked_warnings || []).map(lockedWarningText);
+    if (lockedWarnings.length) {
+        html += `<div style="font-size:12px;color:var(--warning);margin:4px 0 8px;">Kept as written in the file: ${lockedWarnings.map(escapeHtml).join(" · ")}</div>`;
+    }
     if (s.featured_image_url) html += `<img src="${escapeAttr(s.featured_image_url)}" alt="" style="max-width:320px;border-radius:8px;margin:8px 0;">`;
     const isVisual = s.style !== "classic";
     if (art.body_html) {

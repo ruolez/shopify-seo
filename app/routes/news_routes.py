@@ -1,6 +1,5 @@
 import json
 import logging
-import re
 import threading
 from datetime import datetime, timezone
 
@@ -15,6 +14,7 @@ from app.services import url_utils
 from app.shopify_client import is_gone_error
 from app.services.ai_output_guard import clamp_meta_description, clamp_meta_title, sanitize_html
 from app.services.news_body import clean_sources, insert_inline_images, render_sources_html
+from app.services.title_match import titles_match as _titles_match
 from app.services.news_template import (
     NEWS_SECTION_FILE,
     NEWS_TEMPLATE_FILE,
@@ -339,43 +339,6 @@ def _step_links(session, store_id):
 
 
 # ── Duplicate-title guard ───────────────────────────────────────
-
-_TITLE_TOKEN_RE = re.compile(r"[a-z0-9]+")
-
-_TITLE_STOPWORDS = {
-    "a", "an", "the", "and", "or", "of", "in", "on", "for", "to", "with", "as",
-    "at", "by", "its", "is", "are", "from", "this", "that", "up", "over", "under",
-}
-
-
-def _title_tokens(title):
-    # Apostrophes (straight or curly) are removed, not treated as separators, so
-    # quoted words ('Lax') and possessives (Estate's/Estates) tokenize identically.
-    # Stopwords are dropped so filler-word rewrites don't dilute the overlap.
-    cleaned = (title or "").casefold().replace("'", "").replace("’", "")
-    tokens = set(_TITLE_TOKEN_RE.findall(cleaned))
-    content = tokens - _TITLE_STOPWORDS
-    return content or tokens
-
-
-def _titles_match(a, b, threshold=0.8):
-    """True when two headlines read as the same story.
-
-    Fuzzy on purpose — re-importing the same source yields AI headlines that differ
-    by a word or two ("Over Lax" vs "For Lax") or trim trailing detail, which exact
-    matching would miss. Same story = token-set Jaccard >= threshold, or (for titles
-    with enough substance) the shorter title's tokens are >= threshold contained in
-    the longer one's.
-    """
-    ta, tb = _title_tokens(a), _title_tokens(b)
-    if not ta or not tb:
-        return False
-    inter = len(ta & tb)
-    if inter / len(ta | tb) >= threshold:
-        return True
-    smaller = min(len(ta), len(tb))
-    return smaller >= 4 and inter / smaller >= threshold
-
 
 def _find_duplicate_news_article(store_id, title, exclude_shopify_id=None):
     """Return the existing news article whose title matches `title`, or None."""

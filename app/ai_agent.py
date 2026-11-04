@@ -5834,6 +5834,18 @@ def run_task(task_type, task_input, store_id=None):
             f"Topic: {topic}",
             f"Primary Keyword: {o_primary_kw}",
         ]
+        locked = task_input.get("locked_fields") or {}
+        fixed = [
+            f"{label} (fixed by the editor — return it verbatim as {key} and plan the article around it): {locked[field]}"
+            for field, key, label in (
+                ("title", "suggested_title", "Article Title / H1"),
+                ("meta_title", "meta_title", "SEO Title"),
+                ("meta_description", "meta_description", "Meta Description"),
+            )
+            if locked.get(field)
+        ]
+        if fixed:
+            user_parts.extend(fixed)
         if outline_visual:
             user_parts.append(
                 f"Inline images to plan: {outline_visuals['inline_image_count']} "
@@ -6186,7 +6198,12 @@ def run_task(task_type, task_input, store_id=None):
                 sp.get("alt", "") for sp in ((media_plan.get("inline") or []) if isinstance(media_plan, dict) else [])
                 if isinstance(sp, dict)
             ]
-            gen_result = validate_article_result(gen_result, g_primary_kw, client, config, hero_alt, inline_alts)
+            from app.services.blog_import import locked_article_keys
+
+            gen_result = validate_article_result(
+                gen_result, g_primary_kw, client, config, hero_alt, inline_alts,
+                locked=locked_article_keys(task_input.get("locked_fields")),
+            )
         if gen_qa:
             gen_result["_qa"] = {**(gen_result.get("_qa") or {}), **gen_qa}
         if intro_collection:

@@ -95,7 +95,10 @@ class BlogPublishScheduler:
                             kws = json.loads(kws)
                         except (ValueError, TypeError):
                             kws = []
-                    warning = _money_page_keyword_warning(store_id, kws)
+                    # An imported brief whose conflict was shown and accepted
+                    # at import is not held again for the same keyword.
+                    acked = (sess.get("locked_fields") or {}).get("keyword_conflict_ack")
+                    warning = None if (kws and acked == kws[0]) else _money_page_keyword_warning(store_id, kws)
                     if warning:
                         raise ValueError(f"Held — keyword conflict: {warning} Use Publish now to publish anyway.")
                     _wizard_step_publish(sess, store, client, True)

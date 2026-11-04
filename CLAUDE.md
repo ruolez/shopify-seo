@@ -53,6 +53,8 @@ apply_item_changes(store_id, item_type, item_id, fields, source=..., change_type
 
 Blog posts and Product News share one calendar and one review gate (`app/services/publish_gate.py`). New drafts take `next_open_slot(store_id)`; the schedulers publish only sessions with `reviewed_at` set (the Approve button in each Scheduled tab). Nothing publishes unattended without approval.
 
+Blog auto mode (Blog → Create Post → "Auto mode: import briefs") imports a text file of briefs (`app/services/blog_import.py` parses it; `POST /api/blog/import/preview` then `/import/schedule`). With "Approve on import" ticked the import is the approval (`reviewed_at` set at insert). The file's H1, SEO title, meta description and URL slug live in `article_wizard_sessions.locked_fields` and win over the AI: the outline, the QA gate (`validate_named_fields(..., locked=)` reports, never rewrites) and publish all run `apply_locked_fields`; a locked slug that Shopify reports as taken fails the session instead of getting a `-1` suffix. Keywords keep the file's order (first = primary). Any new step that writes a title, meta or handle for a wizard session must call `apply_locked_fields` too.
+
 ## Architecture
 
 **Stack:** Python 3.11 / Flask 3.1 / PostgreSQL 15 / Vanilla JS / Docker Compose

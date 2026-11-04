@@ -200,17 +200,18 @@ def lint_and_fix_anchors(body_html, client=None, model=None, destinations=None):
     return body, {"violations": violations, "rewritten": rewritten, "remaining": remaining}
 
 
-def validate_article_result(result, primary_keyword, client, config, hero_alt=None, inline_alts=None):
+def validate_article_result(result, primary_keyword, client, config, hero_alt=None, inline_alts=None, locked=()):
     """Meta title/description/title keyword + length gate, and alt balance
     across hero + inline alts (keyword in the hero alt only). Returns the
-    (possibly corrected) result plus `balanced_alts` when alts were given."""
+    (possibly corrected) result plus `balanced_alts` when alts were given.
+    `locked` fields (from an imported brief) are checked but never rewritten."""
     try:
         from app.services.ai_content_validator import balance_alt_keyword, validate_named_fields
 
         result = validate_named_fields(
             result,
             {"meta_title": "meta_title", "meta_description": "meta_description", "title": "title"},
-            primary_keyword, client, config,
+            primary_keyword, client, config, locked=locked,
         )
         alts = [hero_alt or ""] + [a or "" for a in (inline_alts or [])]
         if primary_keyword and any(alts):
