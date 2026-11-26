@@ -198,3 +198,50 @@ def dashboard_trends():
     if not store_id:
         return jsonify({"gsc_daily": [], "score_daily": [], "events": []})
     return jsonify(dashboard_service.get_trends(store_id, days))
+
+
+# ── Store goals and the weekly plan ──────────────────────────────────────────
+
+@dashboard_bp.route("/api/dashboard/goals")
+def dashboard_goals():
+    from app.services.store_plan import goals_progress
+
+    store_id = _resolve_store_id()
+    if not store_id:
+        return jsonify({"goals": []})
+    return jsonify(goals_progress(store_id))
+
+
+@dashboard_bp.route("/api/dashboard/goals/options")
+def dashboard_goal_options():
+    from app.services.store_plan import MAX_GOALS, family_options
+
+    store_id = _resolve_store_id()
+    if not store_id:
+        return jsonify({"families": [], "max": MAX_GOALS})
+    return jsonify({"families": family_options(store_id), "max": MAX_GOALS})
+
+
+@dashboard_bp.route("/api/dashboard/goals", methods=["POST"])
+def dashboard_set_goals():
+    from app.services.store_plan import set_goals
+
+    data = request.get_json(silent=True) or {}
+    store_id = _resolve_store_id() or data.get("store_id")
+    if not store_id:
+        return jsonify({"error": "store_id required"}), 400
+    try:
+        ids = [int(i) for i in data.get("cluster_ids") or []]
+    except (TypeError, ValueError):
+        return jsonify({"error": "cluster_ids must be numbers"}), 400
+    return jsonify({"goals": set_goals(int(store_id), ids)})
+
+
+@dashboard_bp.route("/api/dashboard/week")
+def dashboard_week():
+    from app.services.store_plan import weekly_plan
+
+    store_id = _resolve_store_id()
+    if not store_id:
+        return jsonify({"lines": []})
+    return jsonify(weekly_plan(store_id, include_fixes=request.args.get("fixes", "1") != "0"))

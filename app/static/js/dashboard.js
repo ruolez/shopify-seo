@@ -20,7 +20,7 @@ document.addEventListener("DOMContentLoaded", () => {
 function loadDashboard() {
     // Reset store-scoped widgets so a store switch never shows stale data
     // from the previous store while the new requests are in flight.
-    for (const id of ["trend-card", "queue-card", "ctr-card", "impact-card", "movers-card", "ops-row", "dash-freshness", "changes-card", "revenue-card", "kpi-revenue-card", "setup-card"]) {
+    for (const id of ["trend-card", "queue-card", "ctr-card", "impact-card", "movers-card", "ops-row", "dash-freshness", "changes-card", "revenue-card", "kpi-revenue-card", "setup-card", "week-card", "goals-card"]) {
         document.getElementById(id).style.display = "none";
     }
     loadOverview().then(() => {
@@ -35,6 +35,8 @@ function loadDashboard() {
         loadMovers();
         loadOps();
         loadRevenue();
+        loadWeek();
+        loadGoals();
     });
 }
 
@@ -267,10 +269,17 @@ async function loadMonthlyReport() {
     }
 }
 
+// The weekly plan takes its top fixes from the queue Home already loaded
+// (building the queue is the slow part; doing it twice doubled the wait).
+let dashQueueResolve = () => {};
+let dashQueuePromise = Promise.resolve(null);
+
 async function loadActionQueue() {
+    dashQueuePromise = new Promise((resolve) => { dashQueueResolve = resolve; });
     try {
-        if (!dashStoreId) return;
+        if (!dashStoreId) { dashQueueResolve(null); return; }
         const data = await apiRequest(`/api/dashboard/action-queue?store_id=${dashStoreId}&limit=15`);
+        dashQueueResolve(data);
         const container = document.getElementById("dash-queue");
         const card = document.getElementById("queue-card");
 
@@ -378,6 +387,7 @@ async function loadActionQueue() {
         container.innerHTML = html;
         card.style.display = "";
     } catch {
+        dashQueueResolve(null);
         // Queue unavailable — card stays hidden
     }
 }
@@ -788,4 +798,101 @@ async function loadRevenue() {
     } catch {
         // Revenue not available — cards stay hidden
     }
+}
+
+
+// ─── This week: one short list from the queue, calendar, links, duplicates ───
+
+async function loadWeek() {
+    const card = document.getElementById("week-card");
+    try {
+        const [d, queue] = await Promise.all([
+            apiRequest(`/api/dashboard/week?store_id=${dashStoreId || ""}&fixes=0`),
+            dashQueuePromise,
+        ]);
+        const fixes = ((queue && queue.items) || []).slice(0, 5).map((it) => ({
+            kind: "fix", text: it.title || "Fix", href: it.href, count: it.est_clicks_gain }));
+        d.lines = fixes.concat(d.lines || []);
+        if (queue && queue.failed_sources && queue.failed_sources.length) d.queue_failed = queue.failed_sources;
+        const fmt = (iso) => new Date(iso + "T00:00:00").toLocaleDateString(undefined, { month: "short", day: "numeric" });
+        document.getElementById("week-note").textContent = d.week ? `${fmt(d.week.from)} – ${fmt(d.week.to)}` : "";
+        const icon = { fix: "build", approve: "task_alt", publish: "event", links: "add_link", duplicates: "content_copy" };
+        const lines = (d.lines || []).map((l) => `<li style="display:flex;gap:8px;align-items:flex-start;padding:4px 0;">
+            <span class="material-symbols-rounded" style="font-size:16px;color:var(--on-surface-secondary);margin-top:1px;">${icon[l.kind] || "chevron_right"}</span>
+            <span style="flex:1;font-size:13px;">${l.href ? `<a href="${escapeHtml(l.href)}">${escapeHtml(l.text)}</a>` : escapeHtml(l.text)}
+                ${l.kind === "fix" && l.count ? `<span style="color:var(--on-surface-secondary);font-size:12px;"> · ~${l.count} clicks/mo</span>` : ""}</span></li>`).join("");
+        const failed = (d.queue_failed || []).length ? `<p style="font-size:12px;color:var(--error);margin:4px 0 0;">Couldn't check: ${escapeHtml(d.queue_failed.join(", "))}</p>` : "";
+        document.getElementById("dash-week").innerHTML = (lines ? `<ul style="list-style:none;margin:0;padding:0;">${lines}</ul>` : '<p class="aside-text">Nothing planned — the queue is clear.</p>')
+            + failed + `<p style="font-size:12px;color:var(--on-surface-secondary);margin:6px 0 0;">${d.changed_this_week || 0} change${d.changed_this_week === 1 ? "" : "s"} made since Monday.</p>`;
+        card.style.display = "";
+    } catch (err) {
+        console.error("Weekly plan failed:", err);
+    }
+}
+
+// ─── Goals: keyword families the store is trying to win ───
+
+function goalDelta(v, invert = false, suffix = "") {
+    if (v === null || v === undefined || v === 0) return "";
+    const good = invert ? v < 0 : v > 0;
+    return ` <span style="font-size:11.5px;color:${good ? "var(--success)" : "var(--error)"};">${v > 0 ? "+" : ""}${v}${suffix}</span>`;
+}
+
+async function loadGoals() {
+    const card = document.getElementById("goals-card");
+    const box = document.getElementById("dash-goals");
+    try {
+        const d = await apiRequest(`/api/dashboard/goals?store_id=${dashStoreId || ""}`);
+        if (!d.goals.length) {
+            box.innerHTML = `<p class="aside-text">Pick up to ${d.max || 10} keyword families you want to win (for example a brand), and Home tracks their clicks, position and top-10 keywords.</p>`;
+        } else {
+            box.innerHTML = `<div style="font-size:11.5px;color:var(--on-surface-secondary);margin-bottom:4px;">Last ${d.window_days} days vs the ${d.window_days} before</div>`
+                + d.goals.map((g) => `<div style="padding:5px 0;border-top:1px solid var(--outline);font-size:13px;">
+                    <a href="/keyword-strategy?tab=explorer&family=${g.cluster_id}" style="font-weight:600;">${escapeHtml(g.name)}</a>
+                    <div style="font-size:12px;color:var(--on-surface-secondary);">${g.now.clicks.toLocaleString()} clicks${goalDelta(g.change.clicks)}
+                        · pos ${g.now.position ?? "—"}${goalDelta(g.change.position, true)}
+                        · ${g.now.top10} in top 10${goalDelta(g.change.top10)}</div></div>`).join("");
+        }
+        card.style.display = "";
+    } catch (err) {
+        console.error("Goals failed:", err);
+    }
+}
+
+async function openGoalPicker() {
+    let d;
+    try {
+        d = await apiRequest(`/api/dashboard/goals/options?store_id=${dashStoreId || ""}`);
+    } catch (err) {
+        showToast(err.message, "error");
+        return;
+    }
+    if (!d.families.length) {
+        showToast("No keyword families yet — build them in Keyword Strategy first", "info");
+        return;
+    }
+    const rows = d.families.map((f) => `<label style="display:flex;gap:8px;align-items:center;padding:4px 0;font-size:13px;cursor:pointer;">
+        <input type="checkbox" value="${f.id}" ${f.chosen ? "checked" : ""}> <span style="flex:1;">${escapeHtml(f.name)}</span>
+        <span style="color:var(--on-surface-secondary);font-size:12px;">${(f.total_volume || 0).toLocaleString()} searches/mo · ${f.keyword_count} keywords</span></label>`).join("");
+    const modal = UIModal.open({
+        title: "Goals",
+        bodyHtml: `<p style="font-size:13px;margin:0 0 8px;">Choose up to ${d.max} keyword families to track on Home.</p>
+            <div style="max-height:50vh;overflow:auto;">${rows}</div>`,
+        footerHtml: `<button class="btn btn-secondary" data-ui-cancel>Cancel</button><button class="btn btn-primary" data-save>Save</button>`,
+    });
+    const boxes = () => [...modal.el.querySelectorAll("input[type=checkbox]")];
+    boxes().forEach((b) => b.addEventListener("change", () => {
+        if (boxes().filter((x) => x.checked).length > d.max) { b.checked = false; showToast(`Up to ${d.max} goals`, "info"); }
+    }));
+    modal.el.querySelector("[data-ui-cancel]").addEventListener("click", () => modal.close());
+    modal.el.querySelector("[data-save]").addEventListener("click", async () => {
+        const ids = boxes().filter((x) => x.checked).map((x) => parseInt(x.value, 10));
+        try {
+            await apiRequest("/api/dashboard/goals", { method: "POST", body: JSON.stringify({ store_id: dashStoreId, cluster_ids: ids }) });
+            modal.close();
+            loadGoals();
+        } catch (err) {
+            showToast(err.message, "error");
+        }
+    });
 }

@@ -512,6 +512,12 @@ async function loadFamilies() {
             </tr>
             <tr class="ks-fam-expand" id="ks-fam-expand-${cid}" style="display:none;"><td colspan="10"><div class="ks-fam-kws" id="ks-fam-kws-${cid}"></div></td></tr>`;
         }).join("");
+        // ?family=<id> (Home goals link here): open that family once.
+        const wanted = new URLSearchParams(location.search).get("family");
+        if (wanted && !loadFamilies.openedFromLink) {
+            loadFamilies.openedFromLink = true;
+            ksViewFamily(parseInt(wanted, 10));
+        }
     } catch (e) {
         tbody.innerHTML = `<tr><td colspan="10" style="text-align:center;color:var(--error);">Error loading families</td></tr>`;
     }

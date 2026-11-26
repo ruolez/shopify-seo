@@ -363,7 +363,7 @@ async function loadDuplicateCollections() {
         ${m.undone_at ? '<span style="font-size:12px;">Undone</span>' : `<button class="btn btn-secondary btn-sm" style="padding:1px 8px;font-size:11px;" onclick="undoCollectionMerge(${m.id}, this)">Undo</button>`}</div>`).join("");
     box.innerHTML = `<details class="card" style="margin-bottom:12px;" ${data.pairs.length ? "open" : ""}>
         <summary style="cursor:pointer;font-weight:600;">Collections that duplicate each other — ${data.pairs.length}
-            <span style="font-weight:400;font-size:13px;color:var(--on-surface-secondary);"> · Google indexes one of each pair and splits links and clicks between them. A merge keeps one (the one Google indexed first), adds the other's missing products to it, hides the other from the Online Store and redirects its address. Undo publishes it again.</span></summary>
+            <span style="font-weight:400;font-size:13px;color:var(--on-surface-secondary);"> · Google indexes one of each pair and splits links and clicks between them. A merge keeps one (the one Google indexes, else the one with more clicks), adds the other's missing products to it, hides the other from the Online Store and redirects its address. Undo publishes it again.</span></summary>
         ${pairs || '<p style="font-size:13px;margin:8px 0 0;">No duplicate collections found.</p>'}
         ${merges ? `<div style="margin-top:10px;padding-top:8px;border-top:1px solid var(--outline);"><div style="font-weight:600;font-size:13px;">Merged</div>${merges}</div>` : ""}
     </details>`;

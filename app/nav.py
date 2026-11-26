@@ -62,7 +62,7 @@ GROUPS = [
          "related": ["keyword-strategy", "competitors"]},
         {"key": "ai-seo", "label": "AI Search", "href": "/ai-seo", "icon": "auto_awesome",
          "badge": "ai-seo", "badge_tone": "error",
-         "desc": "How ready your pages are to be quoted by AI assistants, and whether those answers mention you.",
+         "desc": "How ready your pages are to be quoted by AI assistants, and whether those answers mention you. The readiness score is a guide, not a Google ranking signal: Google's AI answers use the same signals as normal search.",
          "related": ["blog", "seo"]},
     ]},
 ]

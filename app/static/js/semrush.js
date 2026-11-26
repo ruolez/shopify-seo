@@ -204,6 +204,18 @@ function initSrTabs() {
             loadSrActiveTab();
         });
     });
+    // /semrush?tab=<name> deep link (cross-links from Search Console).
+    const wanted = new URLSearchParams(location.search).get("tab");
+    if (wanted) {
+        const btn = document.querySelector(`[data-sr-tab="${CSS.escape(wanted)}"]`);
+        if (btn) {
+            document.querySelectorAll("[data-sr-tab]").forEach(t => t.classList.remove("active"));
+            document.querySelectorAll(".sr-tab-panel").forEach(p => p.style.display = "none");
+            btn.classList.add("active");
+            const panel = document.getElementById("sr-tab-" + wanted);
+            if (panel) panel.style.display = "";
+        }
+    }
 
     let kwSearchTimeout;
     document.getElementById("sr-kw-search").addEventListener("input", () => {

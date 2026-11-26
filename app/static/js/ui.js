@@ -168,7 +168,8 @@ const UIHistory = (() => {
 
 /* With one store there is nothing to choose: hide the page-level store
  * dropdowns that sit beside the global one. Each page still auto-selects the
- * store, so only the redundant control disappears. */
+ * store, so only the redundant control disappears. With several stores the
+ * page dropdown starts on the store picked in the sidebar and follows it. */
 const PAGE_STORE_SELECTS = ["store-select", "gsc-store-select", "sr-store-select", "comp-store-select",
     "cg-store-select", "lp-store-select", "hp-store-select"];
 
@@ -177,6 +178,18 @@ function hideRedundantStoreSelects() {
         const sel = document.getElementById(id);
         if (!sel || sel.tagName !== "SELECT") continue;
         const real = [...sel.options].filter((o) => o.value);
+        if (real.length > 1) {
+            if (!sel.dataset.followsGlobal) {
+                sel.dataset.followsGlobal = "1";
+                StoreSelector.bindLegacy(sel);
+                const active = String(StoreSelector.getStoreId() || "");
+                if (active && sel.value !== active && real.some((o) => o.value === active)) {
+                    sel.value = active;
+                    sel.dispatchEvent(new Event("change", { bubbles: true }));
+                }
+            }
+            continue;
+        }
         if (real.length !== 1) continue;
         if (!sel.value) {
             sel.value = real[0].value;

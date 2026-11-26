@@ -1229,6 +1229,14 @@ class Database:
                 )
             """)
             cur.execute("""
+                CREATE TABLE IF NOT EXISTS store_goals (
+                    store_id INTEGER REFERENCES stores(id) ON DELETE CASCADE,
+                    cluster_id INTEGER REFERENCES master_keyword_clusters(id) ON DELETE CASCADE,
+                    created_at TIMESTAMP DEFAULT NOW(),
+                    PRIMARY KEY (store_id, cluster_id)
+                )
+            """)
+            cur.execute("""
                 CREATE TABLE IF NOT EXISTS collection_merges (
                     id SERIAL PRIMARY KEY,
                     store_id INTEGER REFERENCES stores(id) ON DELETE CASCADE,
