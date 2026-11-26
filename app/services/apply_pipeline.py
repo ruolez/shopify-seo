@@ -88,8 +88,28 @@ def _visible_text(content):
     ])
 
 
+# Writers that splice into the page's existing text (or restore an earlier
+# version) send values verbatim: sanitizing would strip the merchant's own
+# <style>/<script> embeds and the clamps would cut a 70-character meta to 60.
+VERBATIM_SOURCES = frozenset({"undo", "auto_links", "interlinking", "intro_links",
+                              "price_strip", "price_refresh", "hero_image",
+                              # Renders its own JSON-LD <script> from templates.
+                              "landing_builder"})
+
+
+# Edits that change layout or wiring, not what the article says.
+NON_CONTENT_CHANGES = frozenset({"restyle", "revert"})
+
+
+def is_content_update(source, change_type, pushed):
+    """Whether a write changed what the article says (so its "Updated" date
+    should move). Link inserts, price fixes, images, restyles and undo don't."""
+    return ("body" in pushed and source not in VERBATIM_SOURCES
+            and change_type not in NON_CONTENT_CHANGES)
+
+
 def plan_apply(mirror, live, fields, *, allow_dropped_blocks=False, primary_keyword=None,
-               restore_media=True):
+               restore_media=True, guard=True):
     """Decide what, if anything, may be pushed. Pure.
 
     mirror: what the app last saw; live: what Shopify holds now; fields: the
@@ -101,7 +121,8 @@ def plan_apply(mirror, live, fields, *, allow_dropped_blocks=False, primary_keyw
     if stale:
         return {"status": "stale", "fields": stale}
 
-    guard_shopify_fields(requested)
+    if guard:
+        guard_shopify_fields(requested)
     if "body" in requested:
         body = requested["body"]
         # A person editing by hand may remove an image on purpose; only AI
@@ -127,6 +148,23 @@ def plan_apply(mirror, live, fields, *, allow_dropped_blocks=False, primary_keyw
             return {"status": "blocked", "code": "dropped_primary", "missing": [primary_keyword]}
 
     return {"status": "ok", "pushed": pushed, "old": {k: live.get(k) or "" for k in pushed}}
+
+
+def _record_partial_write(store_id, item_type, item_id, row, client, plan, source, change_type):
+    try:
+        after = client.get_item_content(item_type, row["shopify_id"])
+    except Exception:
+        logger.warning("Could not re-read %s %s after a failed write", item_type, item_id)
+        return
+    if not after:
+        return
+    landed = {k: after.get(k) or "" for k in plan["pushed"]
+              if _norm(after.get(k)) != _norm(plan["old"].get(k))}
+    if not landed:
+        return
+    _write_mirror(item_type, item_id, landed, stamp=False)
+    _record_event(store_id, item_type, item_id, source, f"{change_type}"[:40] + " (partial)",
+                  {k: plan["old"].get(k) or "" for k in landed}, landed, None)
 
 
 def can_revert(new_values, live):
@@ -281,7 +319,8 @@ def apply_item_changes(store_id, item_type, item_id, fields, *, source, change_t
 
     primary = None if allow_dropped_primary else _resolved_primary(store_id, item_type, item_id)
     plan = plan_apply(mirror, live, fields, allow_dropped_blocks=allow_dropped_blocks,
-                      primary_keyword=primary, restore_media=restore_media)
+                      primary_keyword=primary, restore_media=restore_media,
+                      guard=source not in VERBATIM_SOURCES)
 
     if plan["status"] == "stale":
         _write_mirror(item_type, item_id, {k: live.get(k) or "" for k in plan["fields"]}, stamp=False)
@@ -294,7 +333,15 @@ def apply_item_changes(store_id, item_type, item_id, fields, *, source, change_t
         return {"status": "noop", "pushed": {}, "old": {}, "event_id": None}
 
     update = getattr(client, f"update_{item_type}")
-    update(row["shopify_id"], {**shopify_fields(item_type, pushed), **(extra_fields or {})})
+    try:
+        update(row["shopify_id"], {**shopify_fields(item_type, pushed), **(extra_fields or {})})
+    except Exception:
+        # Some writes take two calls (an article's body, then its meta
+        # metafields). When the second fails, the first already changed the
+        # page: mirror and record that part so the app matches Shopify and the
+        # change can be undone, then report the failure.
+        _record_partial_write(store_id, item_type, item_id, row, client, plan, source, change_type)
+        raise
 
     if not pushed:
         return {"status": "ok", "pushed": {}, "old": {}, "event_id": None}
@@ -311,6 +358,16 @@ def apply_item_changes(store_id, item_type, item_id, fields, *, source, change_t
     _write_mirror(item_type, item_id, stored, stamp=stamp)
 
     event_id = _record_event(store_id, item_type, item_id, source, change_type, plan["old"], stored, scores_before)
+
+    if item_type == "article" and is_content_update(source, change_type, stored):
+        # The visible "Updated" date and dateModified read this, not
+        # updated_at (which moves on every link, image or price edit).
+        try:
+            from datetime import date
+            client.set_article_metafields(row["shopify_id"], [
+                ("global", "content_updated", date.today().isoformat(), "date")])
+        except Exception:
+            logger.warning("Could not stamp content_updated on article %s", item_id)
 
     from app.services.analysis_refresh import refresh_item_analysis
     refresh_item_analysis(store_id, item_type, item_id)
@@ -337,6 +394,12 @@ def set_faq_schema(store_id, item_type, item_id, faqpage, client, page_url=None)
     """The one writer of the product/collection FAQ schema metafield. Publishes
     only questions visible in the item's description; raises ValueError when
     none are. Returns the number of questions published."""
+    from app.services.schema_generator import faq_markup_enabled
+
+    if not faq_markup_enabled():
+        # Off by default: Google shows no FAQ rich results. The visible FAQ
+        # section on the page is unaffected.
+        return 0
     row, mirror = _load_mirror(item_type, item_id)
     faq = visible_faq(faqpage, mirror["body"])
     if not faq:
@@ -389,7 +452,7 @@ def revert_change(event_id):
     _write_mirror(item_type, item_id, {k: live.get(k) or "" for k in new}, stamp=False)
     result = apply_item_changes(
         store_id, item_type, item_id, old, source="undo", change_type="revert", client=client,
-        allow_dropped_blocks=True, allow_dropped_primary=True, stamp=False,
+        allow_dropped_blocks=True, allow_dropped_primary=True, stamp=False, restore_media=False,
     )
     with db.get_cursor() as cur:
         cur.execute("UPDATE seo_change_events SET reverted_at = NOW() WHERE id = %s", (event_id,))

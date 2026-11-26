@@ -132,3 +132,24 @@ def _strip_html(html):
     clean = re.sub(r"<[^>]+>", "", html)
     clean = re.sub(r"\s+", " ", clean).strip()
     return clean[:5000]
+
+
+# Google shows no FAQ rich results, so FAQPage markup earns nothing there.
+# Visible FAQ sections stay; only the markup is gated (setting
+# schema.emit_faq, off by default) so it can come back with one switch.
+_FAQ_MICRODATA = re.compile(
+    r'\s+itemscope(?:\s+itemprop="(?:mainEntity|acceptedAnswer)")?\s+itemtype="https://schema\.org/(?:FAQPage|Question|Answer)"'
+    r'|\s+itemprop="(?:mainEntity|acceptedAnswer|name|text)"'
+)
+
+
+def faq_markup_enabled():
+    from app.settings_manager import get_setting
+
+    return bool(get_setting("schema.emit_faq", False))
+
+
+def strip_faq_microdata(html):
+    """Remove FAQPage/Question/Answer microdata attributes, keeping the text.
+    Only for markup that is FAQ-only (it also drops itemprop name/text)."""
+    return _FAQ_MICRODATA.sub("", html or "")

@@ -584,7 +584,7 @@ def generate_brief(store_id, gap_id):
         internal_links=internal_links,
     ) + cannibal_context
 
-    client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=api_key)
+    client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=api_key, timeout=120.0, max_retries=1)
     response = client.chat.completions.create(
         model=model,
         messages=[{"role": "user", "content": prompt}],
@@ -686,7 +686,7 @@ def generate_content(store_id, gap_id, selected_title, content_type):
         f'"slug": "url-slug"}}'
     )
 
-    client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=api_key)
+    client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=api_key, timeout=120.0, max_retries=1)
     response = client.chat.completions.create(
         model=model,
         messages=[
@@ -938,7 +938,8 @@ def optimize_existing_page(store_id, gap_id, override_keyword=None, override_vol
         with db.get_cursor() as cur:
             cur.execute("SELECT gsc_property FROM gsc_credentials WHERE store_id = %s", (store_id,))
             cred = cur.fetchone()
-        base = (cred["gsc_property"] or "").rstrip("/") if cred else ""
+        from app.services.url_utils import gsc_base_url
+        base = gsc_base_url(cred["gsc_property"] if cred else "").rstrip("/")
         path = url.replace(base, "").strip("/")
         if path.startswith("products/"):
             handle = path.replace("products/", "").split("?")[0]
@@ -1115,7 +1116,7 @@ def optimize_existing_page(store_id, gap_id, override_keyword=None, override_vol
         f' "keywords_targeted": ["list of all keywords this page now targets"]}}'
     )
 
-    client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=api_key)
+    client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=api_key, timeout=120.0, max_retries=1)
     response = client.chat.completions.create(
         model=model,
         messages=[

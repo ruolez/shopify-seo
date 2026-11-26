@@ -289,6 +289,7 @@ def test_ai_connection():
         client = OpenAI(
             base_url="https://openrouter.ai/api/v1",
             api_key=api_key,
+            timeout=120.0, max_retries=1,
         )
         response = client.chat.completions.create(
             model=model,

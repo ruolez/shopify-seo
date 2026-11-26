@@ -234,7 +234,7 @@ def propose_collection(store_id, keyword_ids):
         f"CATALOG FACTS (use only these values in rules; counts are active products):\n{fact_block}\n"
     )
 
-    client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=decrypt_value(config["api_key_enc"]))
+    client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=decrypt_value(config["api_key_enc"]), timeout=120.0, max_retries=1)
     response = client.chat.completions.create(
         model=config.get("model") or "anthropic/claude-sonnet-4",
         messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],

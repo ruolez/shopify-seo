@@ -1,8 +1,6 @@
 {% extends "base.html" %}
 
-{% block title %}Content Gaps{% endblock %}
 
-{% block page_title %}Content Gaps{% endblock %}
 
 {% block content %}
                 <div style="display: flex; gap: 12px; align-items: center; margin-bottom: 24px; flex-wrap: wrap;">
@@ -10,7 +8,7 @@
                         <label for="cg-store-select">Store</label>
                         <select id="cg-store-select" class="form-control"><option value="">Select a store...</option></select>
                     </div>
-                    <button id="cg-discover-btn" class="btn btn-primary" style="margin-top: 18px;">
+                    <button id="cg-discover-btn" class="btn btn-primary" data-page-action>
                         <span class="material-symbols-rounded" style="font-size:16px;vertical-align:middle;">search</span> Run Gap Discovery
                     </button>
                 </div>

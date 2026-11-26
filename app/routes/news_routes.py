@@ -21,6 +21,7 @@ from app.services.news_template import (
     NEWS_TEMPLATE_MARKER,
     NEWS_TEMPLATE_SUFFIX,
     NEWS_TEMPLATE_VERSION,
+    NEWS_SECTION_MARKER,
     get_news_theme_files,
 )
 
@@ -435,10 +436,15 @@ def _step_publish(session, store, client, is_published=True, regen_hub=True):
     # SEO meta + news metafields (category + dateModified).
     meta_title = clamp_meta_title(edited.get("meta_title") or "")
     meta_description = clamp_meta_description(edited.get("meta_description") or "")
+    # Not fatal (the article is live), but never silent: the mirror must not
+    # claim metas Shopify does not have, and the session says what is missing.
+    warnings = []
     try:
         client.set_article_seo(shopify_id, meta_title, meta_description)
     except Exception as e:
         logger.warning("Failed to set news SEO metafields: %s", e)
+        warnings.append(f"Meta title and description were not saved on Shopify ({e}) — publish again to retry")
+        meta_title = meta_description = ""
     try:
         client.set_article_metafields(shopify_id, [
             ("global", "news_category", category or None, "single_line_text_field"),
@@ -446,6 +452,7 @@ def _step_publish(session, store, client, is_published=True, regen_hub=True):
         ])
     except Exception as e:
         logger.warning("Failed to set news category/date metafields: %s", e)
+        warnings.append(f"Category and date were not saved on Shopify ({e})")
 
     cdn_image_url = result.get("image_url", "")
     # Update path returns no image URL — fall back to what was pushed so a
@@ -486,8 +493,10 @@ def _step_publish(session, store, client, is_published=True, regen_hub=True):
         )
         article_row = cur.fetchone()
         cur.execute(
-            "UPDATE news_sessions SET status = %s, shopify_article_id = %s, article_handle = %s, updated_at = NOW() WHERE id = %s",
-            ("published" if is_published else "draft", shopify_id, result.get("handle", ""), session["id"]),
+            "UPDATE news_sessions SET status = %s, shopify_article_id = %s, article_handle = %s, "
+            "error = %s, updated_at = NOW() WHERE id = %s",
+            ("published" if is_published else "draft", shopify_id, result.get("handle", ""),
+             "; ".join(warnings) or None, session["id"]),
         )
 
     if is_published and regen_hub:
@@ -504,6 +513,7 @@ def _step_publish(session, store, client, is_published=True, regen_hub=True):
 
     return {
         "success": True,
+        "warnings": warnings,
         "article_id": article_row["id"],
         "shopify_id": shopify_id,
         "handle": result.get("handle", ""),
@@ -746,16 +756,6 @@ def _session_for_article(shopify_id):
     return dict(row) if row else None
 
 
-def _rebuild_article_body(session, store):
-    """Reproduce the published body: inline images inserted into the edited body, then Sources."""
-    edited = session.get("edited_result") or session.get("analyze_result") or {}
-    body_html = insert_inline_images(edited.get("body_html") or "", session.get("inline_images") or [])
-    sources_html = render_sources_html(session.get("source_urls") or [], store)
-    if sources_html:
-        body_html = f"{body_html}\n{sources_html}"
-    return body_html
-
-
 @news_bp.route("/api/news/article-images", methods=["GET"])
 def get_article_images():
     shopify_id = request.args.get("shopify_id")
@@ -905,6 +905,7 @@ def regenerate_article_inline():
             if not result:
                 raise Exception("Inline image generation returned no result")
             image_bytes, filename, alt_text, width, height = result
+            old_url = spec.get("cdn_url") or ""
             cdn_url = _upload_image_to_cdn(client, image_bytes, filename, alt_text)
             imgs[index] = {
                 **spec,
@@ -914,18 +915,31 @@ def regenerate_article_inline():
                 "height": height,
                 "status": "ready",
             }
-            sess["inline_images"] = imgs
-            new_body = _rebuild_article_body(sess, store)
-            client.update_article(shopify_id, {"body": new_body})
+            # Swap only this image in the article as it is now. Rebuilding
+            # the body from the session snapshot wiped every link, price fix
+            # and hand edit made since publishing.
+            from app.services.apply_pipeline import ApplyRefused, _load_mirror, apply_item_changes
+
+            for attempt in (1, 2):
+                _, mirror = _load_mirror("article", article["id"])
+                body = mirror.get("body") or ""
+                if not old_url or old_url not in body:
+                    raise Exception("The live article no longer contains this image, so nothing was replaced")
+                try:
+                    apply_item_changes(
+                        store_id, "article", article["id"], {"body": body.replace(old_url, cdn_url)},
+                        source="hero_image", change_type="inline_image_regen", client=client,
+                        allow_dropped_primary=True, stamp=False, restore_media=False,
+                    )
+                    break
+                except ApplyRefused as refused:
+                    if refused.status != "stale" or attempt == 2:
+                        raise
 
             with db.get_cursor() as cur:
                 cur.execute(
                     "UPDATE news_sessions SET inline_images = %s, updated_at = NOW() WHERE id = %s",
                     (json.dumps(imgs), sess["id"]),
-                )
-                cur.execute(
-                    "UPDATE synced_articles SET body = %s, synced_at = NOW() WHERE shopify_id = %s AND store_id = %s",
-                    (new_body, str(shopify_id), store_id),
                 )
             with db.get_cursor() as cur:
                 cur.execute(
@@ -1194,10 +1208,26 @@ def publish_news(session_id):
     if not edited:
         return jsonify({"error": "Nothing to publish — run analysis first"}), 400
 
+    prior_status = session["status"]
+    with db.get_cursor() as cur:
+        cur.execute(
+            """UPDATE news_sessions SET status = 'publishing', updated_at = NOW()
+               WHERE id = %s AND status NOT IN ('publishing', 'auto_publishing') RETURNING id""",
+            (session_id,),
+        )
+        claimed = cur.fetchone()
+    if not claimed:
+        return jsonify({"error": "This article is already being published"}), 409
+
     try:
         result = _step_publish(dict(session), store, client, is_published)
     except Exception as e:
         logger.exception("news publish failed: %s", e)
+        with db.get_cursor() as cur:
+            cur.execute(
+                "UPDATE news_sessions SET status = %s, updated_at = NOW() WHERE id = %s AND status = 'publishing'",
+                (prior_status, session_id),
+            )
         return jsonify({"error": str(e)}), 500
     return jsonify(result)
 
@@ -1567,6 +1597,9 @@ def template_status():
         if not installed:
             return jsonify({"installed": False})
         outdated = NEWS_TEMPLATE_MARKER not in (template or "")
+        if not outdated:
+            # The section carries its own version (dates, byline, schema).
+            outdated = NEWS_SECTION_MARKER not in (client.get_theme_asset(theme_id, NEWS_SECTION_FILE) or "")
         return jsonify({"installed": True, "outdated": outdated, "version": NEWS_TEMPLATE_VERSION})
     except Exception:
         return jsonify({"installed": False})

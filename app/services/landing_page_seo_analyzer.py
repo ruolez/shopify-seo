@@ -119,7 +119,7 @@ def _analyze_html(body_html, meta_title, meta_description, schema_json=None):
 
     # Meta Description
     md = thresholds.get("meta_description", {})
-    md_good = md.get("good", [140, 160])
+    md_good = md.get("good", [120, 160])
     md_ok = md.get("ok", [100, 200])
     desc_len = len(meta_description or "")
     if md_good[0] <= desc_len <= md_good[1]:

@@ -1,171 +1,52 @@
-<aside class="sidebar">
-    <div class="sidebar-header">
-        <div class="logo">S</div>
-        <h1>SEO Platform</h1>
+<aside class="sidebar" id="sidebar" aria-label="Main navigation">
+    <div class="rail-top">
+        <div id="global-store-select" class="store-switch">
+            <a href="/stores" class="store-card"><span class="store-mark">S</span><span class="store-text"><b>Store</b><small>Loading…</small></span></a>
+        </div>
+        <button type="button" id="cmdk-button" class="rail-jump" title="Jump to a page or action (⌘K)">
+            <span class="material-symbols-rounded">search</span>
+            <span class="rail-jump-label">Jump to…</span>
+            <kbd>⌘K</kbd>
+        </button>
     </div>
     <nav class="sidebar-nav">
-        <div class="nav-section">
-            <a href="/" class="nav-item" data-page="dashboard">
-                <span class="material-symbols-rounded">dashboard</span>
-                Home
-                <span class="nav-badge" data-badge="home"></span>
+        {% for g in nav_groups %}
+        <div class="nav-section" data-group="{{ g.key }}">
+            <div class="nav-section-label">{{ g.label }}</div>
+            {% for it in g["items"] %}
+            <a href="{{ it.href }}" class="nav-item{% if nav_item and nav_item.key == it.key %} active{% endif %}" data-page="{{ it.key }}"{% if nav_item and nav_item.key == it.key %} aria-current="page"{% endif %}>
+                <span class="material-symbols-rounded">{{ it.icon }}</span>
+                <span class="nav-label">{{ it.label }}</span>
+                {% if it.badge %}<span class="nav-badge nav-badge-{{ it.badge_tone or 'count' }}" data-badge="{{ it.badge }}"></span>{% endif %}
             </a>
-        </div>
-        <div class="nav-section nav-group" data-group="optimize">
-            <button type="button" class="nav-section-label nav-group-toggle" data-href="/seo">
-                Fix pages
-                <span class="nav-badge" data-badge="optimize"></span>
-                <span class="material-symbols-rounded nav-group-chevron">expand_more</span>
+            {% endfor %}
+            {% if g.key == 'today' %}
+            <button type="button" class="nav-item tasks-panel-toggle" id="tasksPanelToggle">
+                <span class="material-symbols-rounded">pending_actions</span>
+                <span class="nav-label">Activity</span>
+                <span class="tasks-badge" id="tasksBadge" hidden>0</span>
             </button>
-            <div class="nav-group-items">
-                <a href="/seo" class="nav-item" data-page="seo">
-                    <span class="material-symbols-rounded">search</span>
-                    SEO
-                    <span class="nav-badge" data-badge="seo"></span>
-                </a>
-                <a href="/interlinking" class="nav-item" data-page="interlinking">
-                    <span class="material-symbols-rounded">link</span>
-                    Internal links
-                    <span class="nav-badge" data-badge="interlinking"></span>
-                </a>
-                <a href="/duplicates" class="nav-item" data-page="duplicates">
-                    <span class="material-symbols-rounded">difference</span>
-                    Duplicates
-                </a>
-                <a href="/images" class="nav-item" data-page="images">
-                    <span class="material-symbols-rounded">image</span>
-                    Missing images
-                </a>
-            </div>
+            {% endif %}
         </div>
-        <div class="nav-section nav-group" data-group="content">
-            <button type="button" class="nav-section-label nav-group-toggle" data-href="/blog">
-                Create content
-                <span class="nav-badge nav-badge-error" data-badge="content"></span>
-                <span class="material-symbols-rounded nav-group-chevron">expand_more</span>
-            </button>
-            <div class="nav-group-items">
-                <a href="/content/calendar" class="nav-item" data-page="content/calendar">
-                    <span class="material-symbols-rounded">calendar_month</span>
-                    Calendar
-                </a>
-                <a href="/blog" class="nav-item" data-page="blog">
-                    <span class="material-symbols-rounded">edit_note</span>
-                    Blog posts
-                </a>
-                <a href="/news" class="nav-item" data-page="news">
-                    <span class="material-symbols-rounded">newspaper</span>
-                    News
-                </a>
-                <a href="/content-gaps" class="nav-item" data-page="content-gaps">
-                    <span class="material-symbols-rounded">target</span>
-                    Content ideas
-                    <span class="nav-badge" data-badge="content-gaps"></span>
-                </a>
-                <a href="/landing-pages" class="nav-item" data-page="landing-pages">
-                    <span class="material-symbols-rounded">web</span>
-                    Landing pages
-                </a>
-                <a href="/brands" class="nav-item" data-page="brands">
-                    <span class="material-symbols-rounded">loyalty</span>
-                    Brands
-                </a>
-                <a href="/home-page" class="nav-item" data-page="home-page">
-                    <span class="material-symbols-rounded">view_carousel</span>
-                    Home page carousel
-                </a>
-            </div>
-        </div>
-        <div class="nav-section nav-group" data-group="research">
-            <button type="button" class="nav-section-label nav-group-toggle" data-href="/gsc">
-                Understand
-                <span class="material-symbols-rounded nav-group-chevron">expand_more</span>
-            </button>
-            <div class="nav-group-items">
-                <a href="/gsc" class="nav-item" data-page="gsc">
-                    <span class="material-symbols-rounded">monitoring</span>
-                    Search Console
-                </a>
-                <a href="/keyword-strategy" class="nav-item" data-page="keyword-strategy">
-                    <span class="material-symbols-rounded">hub</span>
-                    Keywords
-                </a>
-                <a href="/competitors" class="nav-item" data-page="competitors">
-                    <span class="material-symbols-rounded">groups</span>
-                    Competitors
-                    <span class="nav-badge" data-badge="competitors"></span>
-                </a>
-                <a href="/semrush" class="nav-item" data-page="semrush">
-                    <span class="material-symbols-rounded">query_stats</span>
-                    Semrush data
-                </a>
-                <a href="/ai-seo" class="nav-item" data-page="ai-seo">
-                    <span class="material-symbols-rounded">smart_toy</span>
-                    AI Search
-                    <span class="nav-badge" data-badge="ai-seo"></span>
-                </a>
-            </div>
+        {% endfor %}
+        <div class="nav-section" data-group="setup">
+            <div class="nav-section-label">Setup</div>
+            {% for it in nav_setup %}
+            <a href="{{ it.href }}" class="nav-item{% if nav_item and nav_item.key == it.key %} active{% endif %}" data-page="{{ it.key }}">
+                <span class="material-symbols-rounded">{{ it.icon }}</span>
+                <span class="nav-label">{{ it.label }}</span>
+            </a>
+            {% endfor %}
         </div>
     </nav>
     <div class="sidebar-footer">
-        <button type="button" class="nav-item tasks-panel-toggle" id="tasksPanelToggle" style="width: 100%; background: none; border: none; cursor: pointer; font: inherit; text-align: left;">
-            <span class="material-symbols-rounded">checklist</span>
-            Activity
-            <span class="tasks-badge" id="tasksBadge" hidden>0</span>
+        <span class="sidebar-user" title="Signed in"><span class="material-symbols-rounded">account_circle</span>{{ session.get('username', 'admin') }}</span>
+        <button type="button" id="theme-toggle" class="icon-btn" title="Switch light / dark" aria-label="Switch light / dark">
+            <span class="material-symbols-rounded">dark_mode</span>
         </button>
-        <a href="/settings" class="nav-item" data-page="settings">
-            <span class="material-symbols-rounded">settings</span>
-            Settings
-        </a>
-        <a href="/logout" class="nav-item">
+        <a href="/logout" class="icon-btn" title="Log out" aria-label="Log out">
             <span class="material-symbols-rounded">logout</span>
-            Logout
         </a>
     </div>
 </aside>
-
-<script>
-    (function() {
-        // Active-page highlighting (unchanged behavior)
-        const path = window.location.pathname;
-        let activeGroup = null;
-        document.querySelectorAll('.nav-item[data-page]').forEach(item => {
-            const page = item.dataset.page;
-            const isActive = (page === 'dashboard' && path === '/') ||
-                             (page !== 'dashboard' && path.startsWith('/' + page));
-            if (isActive) {
-                item.classList.add('active');
-                const group = item.closest('.nav-group');
-                if (group) activeGroup = group.dataset.group;
-            }
-        });
-
-        // Exclusive accordion: at most one group open. The active page's group
-        // always opens; otherwise the last-opened group (navOpenGroup) does.
-        let openGroup = activeGroup;
-        if (!openGroup) {
-            try { openGroup = localStorage.getItem('navOpenGroup') || null; } catch (e) {}
-        }
-
-        const groups = [...document.querySelectorAll('.nav-group')];
-        const apply = () => groups.forEach(g =>
-            g.classList.toggle('collapsed', g.dataset.group !== openGroup));
-        apply();
-
-        groups.forEach(group => {
-            const toggle = group.querySelector('.nav-group-toggle');
-            toggle.addEventListener('click', (e) => {
-                // Chevron toggles; anywhere else on the header navigates to the
-                // group's primary page (which also opens the group on arrival).
-                const onChevron = e.target.closest('.nav-group-chevron');
-                if (!onChevron && toggle.dataset.href) {
-                    window.location.href = toggle.dataset.href;
-                    return;
-                }
-                openGroup = group.classList.contains('collapsed') ? group.dataset.group : null;
-                try { localStorage.setItem('navOpenGroup', openGroup || ''); } catch (e2) {}
-                apply();
-            });
-        });
-    })();
-</script>
+<div class="sidebar-scrim" id="sidebar-scrim"></div>

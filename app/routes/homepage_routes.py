@@ -139,11 +139,8 @@ def generate_home_page():
         from app.ai_agent import run_task
         try:
             result = run_task("home_page_generate", {"topic": topic, "keywords": keywords, "store_id": store_id}, store_id=store_id)
-            with db.get_cursor() as cur:
-                cur.execute(
-                    "UPDATE ai_tasks SET status = 'completed', result = %s, completed_at = NOW() WHERE id = %s",
-                    (json.dumps(result), task_id),
-                )
+            from app.services.task_runner import finish_task
+            finish_task(task_id, result)
         except Exception as e:
             logger.exception("Home page generation failed: %s", e)
             with db.get_cursor() as cur:

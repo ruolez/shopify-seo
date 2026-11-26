@@ -40,6 +40,7 @@ from app.services.blog_template import (
     BLOG_TEMPLATE_SUFFIX,
     BLOG_TEMPLATE_VERSION,
     get_article_css,
+    blog_section_marker,
     get_blog_theme_files,
 )
 from app.shopify_client import ShopifyClient, is_gone_error
@@ -628,11 +629,25 @@ def move_article(article_id):
             "UPDATE synced_articles SET blog_id = %s, shopify_blog_id = %s WHERE id = %s",
             (target_blog_id, target_blog["shopify_id"], article_id),
         )
+        cur.execute("SELECT handle FROM synced_blogs WHERE id = %s", (source_blog_id,))
+        source_blog = cur.fetchone()
+
+    # The article's URL changed: send visitors and Google from the old one.
+    redirect_warning = None
+    if source_blog and article.get("handle"):
+        old_path = f"/blogs/{source_blog['handle']}/{article['handle']}"
+        new_path = f"/blogs/{target_blog['handle']}/{article['handle']}"
+        try:
+            client.create_url_redirect(old_path, new_path)
+        except Exception as e:
+            logger.warning("Redirect %s -> %s failed: %s", old_path, new_path, e)
+            redirect_warning = f"Moved, but the redirect from {old_path} could not be created: {e}"
 
     _regen_landing_async(article["store_id"], source_blog_id, client, store)
     _regen_landing_async(article["store_id"], target_blog_id, client, store)
 
-    return jsonify({"ok": True, "success": True, "moved_to": target_blog["title"]})
+    return jsonify({"ok": True, "success": True, "moved_to": target_blog["title"],
+                    "warning": redirect_warning})
 
 
 @blog_bp.route("/api/blog/articles/<int:article_id>", methods=["DELETE"])
@@ -745,11 +760,8 @@ def analyze_article_ai(article_id):
                 cur.execute("UPDATE ai_tasks SET status = 'running' WHERE id = %s", (task_id,))
             from app.ai_agent import run_task as ai_run_task
             result = ai_run_task("article_seo", {"article_id": article_id}, store_id=article["store_id"])
-            with db.get_cursor() as cur:
-                cur.execute(
-                    "UPDATE ai_tasks SET status = 'completed', result = %s, completed_at = NOW() WHERE id = %s",
-                    (json.dumps(result), task_id),
-                )
+            from app.services.task_runner import finish_task
+            finish_task(task_id, result)
         except Exception as e:
             logger.exception("Article AI analysis failed: %s", e)
             with db.get_cursor() as cur:
@@ -1355,6 +1367,19 @@ def _fetch_wizard_session(session_id):
         return cur.fetchone()
 
 
+def _require_step_output(step, result, required_key=None):
+    """Raise instead of saving a failed AI step. A saved {'error': ...} or
+    {'raw_response': ...} counted as a finished step, so every retry skipped
+    it and later steps ran on nothing."""
+    from app.services.task_runner import is_failed_result
+
+    if is_failed_result(result):
+        detail = result.get("error") if isinstance(result, dict) else None
+        raise ValueError(f"The {step} step failed: {detail or 'the AI reply could not be read'}")
+    if required_key and not (result.get(required_key) or "").strip():
+        raise ValueError(f"The {step} step returned no {required_key.replace('_', ' ')}")
+
+
 def _wizard_step_research(session):
     from app.ai_agent import run_task as ai_run_task
 
@@ -1368,6 +1393,7 @@ def _wizard_step_research(session):
         },
         store_id=session["store_id"],
     )
+    _require_step_output("research", result)
     with db.get_cursor() as cur:
         cur.execute(
             "UPDATE article_wizard_sessions SET research_data = %s, updated_at = NOW() WHERE id = %s",
@@ -1392,6 +1418,7 @@ def _wizard_step_outline(session):
         },
         store_id=session["store_id"],
     )
+    _require_step_output("outline", result)
     result = apply_locked_fields(result, session.get("locked_fields"), OUTLINE_KEYS)
     media_plan = result.get("media_plan") if isinstance(result, dict) else None
     with db.get_cursor() as cur:
@@ -1420,6 +1447,7 @@ def _wizard_step_generate(session):
         },
         store_id=session["store_id"],
     )
+    _require_step_output("writing", result, "body_html")
     result = apply_locked_fields(result, session.get("locked_fields"), ARTICLE_KEYS)
     with db.get_cursor() as cur:
         cur.execute(
@@ -1711,19 +1739,38 @@ def _wizard_step_publish(session, store, client, is_published=True):
         try:
             result = client.create_article(blog["shopify_id"], fields)
         except Exception as create_err:
-            # A pre-existing article already owns this handle — let Shopify
-            # auto-generate a unique one instead of failing the whole save.
-            # A slug from an imported brief is locked: fail instead.
-            if "Handle has already been taken" in str(create_err):
-                if locked.get("handle"):
-                    raise ValueError(
-                        f"URL slug '{locked['handle']}' is already taken on Shopify — "
-                        "change the slug in the file and import it again"
-                    ) from create_err
+            if "Handle has already been taken" not in str(create_err):
+                raise
+            owner = client.find_article(blog["shopify_id"], fields.get("handle"))
+            if owner and owner["title"] == fields["title"]:
+                # An earlier attempt for this session created it and then
+                # failed before saving the id: finish that article, never a
+                # second copy under "-1".
+                logger.warning("Session %s: reusing article %s left by an earlier attempt",
+                               session_id, owner["shopify_id"])
+                raw = client.update_article(owner["shopify_id"], fields)
+                result = {
+                    "shopify_id": owner["shopify_id"],
+                    "title": raw.get("title", "") or owner["title"],
+                    "handle": raw.get("handle", "") or owner["handle"],
+                    "image_url": fields.get("image_url", ""),
+                    "image_alt": fields.get("image_alt", ""),
+                }
+            elif locked.get("handle"):
+                raise ValueError(
+                    f"URL slug '{locked['handle']}' is already taken on Shopify — "
+                    "change the slug in the file and import it again"
+                ) from create_err
+            else:
+                # A different article owns the handle: let Shopify pick a free one.
                 fields.pop("handle", None)
                 result = client.create_article(blog["shopify_id"], fields)
-            else:
-                raise
+        # Saved at once: if anything below fails, a retry updates this article.
+        with db.get_cursor() as cur:
+            cur.execute(
+                "UPDATE article_wizard_sessions SET shopify_article_id = %s, updated_at = NOW() WHERE id = %s",
+                (result["shopify_id"], session_id),
+            )
 
     if is_visual:
         from app.services.article_media import faq_jsonld_string
@@ -1734,6 +1781,14 @@ def _wizard_step_publish(session, store, client, is_published=True):
                 client.set_article_metafields(result["shopify_id"], [("global", "faq_jsonld", faq_json, "json")])
         except Exception as e:
             logger.warning("FAQ metafield write failed for article %s: %s", result.get("shopify_id"), e)
+
+    publish_warning = None
+    if result.get("seo_error"):
+        # The post is live without its meta tags; the mirror must not say
+        # otherwise, and the session tells the reviewer to publish again.
+        publish_warning = (f"Meta title and description were not saved on Shopify "
+                           f"({result['seo_error']}) — publish again to retry")
+        fields["meta_title"] = fields["meta_description"] = ""
 
     cdn_image_url = result.get("image_url", "")
     if not cdn_image_url or "shopify-staged-uploads" in cdn_image_url:
@@ -1753,6 +1808,11 @@ def _wizard_step_publish(session, store, client, is_published=True):
             ON CONFLICT (store_id, shopify_id) DO UPDATE SET
                 title = EXCLUDED.title, handle = EXCLUDED.handle,
                 body = EXCLUDED.body, article_type = 'blog', synced_at = NOW(),
+                summary = EXCLUDED.summary, tags = EXCLUDED.tags,
+                meta_title = EXCLUDED.meta_title, meta_description = EXCLUDED.meta_description,
+                image_url = COALESCE(NULLIF(EXCLUDED.image_url, ''), synced_articles.image_url),
+                image_alt = COALESCE(NULLIF(EXCLUDED.image_alt, ''), synced_articles.image_alt),
+                is_published = EXCLUDED.is_published,
                 published_at = COALESCE(synced_articles.published_at, EXCLUDED.published_at),
                 template_suffix = EXCLUDED.template_suffix
             RETURNING id""",
@@ -1778,8 +1838,9 @@ def _wizard_step_publish(session, store, client, is_published=True):
         article_row = cur.fetchone()
 
         cur.execute(
-            "UPDATE article_wizard_sessions SET status = 'published', current_step = 7, shopify_article_id = %s, updated_at = NOW() WHERE id = %s",
-            (result["shopify_id"], session_id),
+            "UPDATE article_wizard_sessions SET status = 'published', current_step = 7, shopify_article_id = %s, "
+            "error = %s, updated_at = NOW() WHERE id = %s",
+            (result["shopify_id"], publish_warning, session_id),
         )
         cur.execute(
             "UPDATE topic_suggestions SET status = 'used', updated_at = NOW() "
@@ -1955,8 +2016,8 @@ def wizard_research(session_id):
             logger.exception("Article research failed: %s", e)
             with db.get_cursor() as cur:
                 cur.execute(
-                    "UPDATE article_wizard_sessions SET status = 'error', updated_at = NOW() WHERE id = %s",
-                    (session_id,),
+                    "UPDATE article_wizard_sessions SET status = 'error', error = %s, updated_at = NOW() WHERE id = %s",
+                    (str(e)[:1000], session_id),
                 )
                 cur.execute(
                     "UPDATE ai_tasks SET status = 'failed', error = %s, completed_at = NOW() WHERE id = %s",
@@ -3296,8 +3357,8 @@ def wizard_outline(session_id):
             logger.exception("Article outline failed: %s", e)
             with db.get_cursor() as cur:
                 cur.execute(
-                    "UPDATE article_wizard_sessions SET status = 'error', updated_at = NOW() WHERE id = %s",
-                    (session_id,),
+                    "UPDATE article_wizard_sessions SET status = 'error', error = %s, updated_at = NOW() WHERE id = %s",
+                    (str(e)[:1000], session_id),
                 )
                 cur.execute(
                     "UPDATE ai_tasks SET status = 'failed', error = %s, completed_at = NOW() WHERE id = %s",
@@ -3369,8 +3430,8 @@ def wizard_generate(session_id):
             logger.exception("Article generation failed: %s", e)
             with db.get_cursor() as cur:
                 cur.execute(
-                    "UPDATE article_wizard_sessions SET status = 'error', updated_at = NOW() WHERE id = %s",
-                    (session_id,),
+                    "UPDATE article_wizard_sessions SET status = 'error', error = %s, updated_at = NOW() WHERE id = %s",
+                    (str(e)[:1000], session_id),
                 )
                 cur.execute(
                     "UPDATE ai_tasks SET status = 'failed', error = %s, completed_at = NOW() WHERE id = %s",
@@ -3416,11 +3477,33 @@ def wizard_publish(session_id):
     if not client:
         return jsonify({"error": "Store not found"}), 404
 
+    # Same atomic claim idea as the scheduler: two clicks, or a click during
+    # a scheduler tick, must not both create the article.
+    prior_status = session["status"]
+    with db.get_cursor() as cur:
+        cur.execute(
+            """UPDATE article_wizard_sessions SET status = 'publishing', updated_at = NOW()
+               WHERE id = %s AND status NOT IN ('publishing', 'auto_publishing')
+               RETURNING id""",
+            (session_id,),
+        )
+        claimed = cur.fetchone()
+    if not claimed:
+        return jsonify({"error": "This post is already being published"}), 409
+    with db.get_cursor() as cur:
+        cur.execute("SELECT * FROM article_wizard_sessions WHERE id = %s", (session_id,))
+        session = cur.fetchone()
+
     try:
         result = _wizard_step_publish(session, store, client, is_published)
     except Exception as e:
         logger.exception("Wizard publish failed for session %s: %s", session_id, e)
-        return jsonify({"error": f"Shopify rejected the article: {e}"}), 502
+        with db.get_cursor() as cur:
+            cur.execute(
+                "UPDATE article_wizard_sessions SET status = %s, updated_at = NOW() WHERE id = %s AND status = 'publishing'",
+                (prior_status, session_id),
+            )
+        return jsonify({"error": f"Publishing failed: {e}"}), 502
 
     return jsonify({
         "success": True,
@@ -3874,6 +3957,12 @@ def _blog_template_state(client):
     template = client.get_theme_asset(theme_id, BLOG_TEMPLATE_FILE)
     installed = template is not None and BLOG_TEMPLATE_MARKER_PREFIX in (template or "")
     outdated = installed and BLOG_TEMPLATE_MARKER not in (template or "")
+    if installed and not outdated:
+        # The section carries its own version (dates, byline, schema).
+        section = client.get_theme_asset(theme_id, BLOG_SECTION_FILE) or ""
+        from app.services.schema_generator import faq_markup_enabled
+
+        outdated = blog_section_marker(faq_markup_enabled()) not in section
     return theme_id, installed, outdated
 
 
@@ -4621,11 +4710,12 @@ def create_redirects():
         path = r.get("path", "")
         target = r.get("target", "/blogs/news")
         try:
-            client.create_url_redirect(path, target)
-            results.append({"path": path, "target": target, "status": "created"})
+            outcome = client.create_url_redirect(path, target)
+            results.append({"path": path, "target": target, "status": outcome["status"]})
         except Exception as e:
             results.append({"path": path, "target": target, "status": "error", "error": str(e)})
 
-    created = sum(1 for r in results if r["status"] == "created")
+    created = sum(1 for r in results if r["status"] in ("created", "updated"))
+    existing = sum(1 for r in results if r["status"] == "exists")
     failed = sum(1 for r in results if r["status"] == "error")
-    return jsonify({"results": results, "created": created, "failed": failed})
+    return jsonify({"results": results, "created": created, "existing": existing, "failed": failed})

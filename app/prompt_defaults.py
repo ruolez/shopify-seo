@@ -4,6 +4,7 @@ DEFAULTS = {
     "dashboard.anomaly": {
         "clicks_drop_pct": 30,
         "min_weekly_clicks": 10,
+        "critical_min_weekly_clicks": 30,
         "min_keyword_volume": 50,
     },
     # --- AI Prompts ---
@@ -19,9 +20,8 @@ DEFAULTS = {
         "- optimized_meta_description (string): SEO-optimized meta description. Aim for about 150 characters; "
         "HARD LIMIT 160 characters — never exceed it. Front-load the primary keyword and core message in the first 120 characters (mobile truncation)\n"
         "- h1_tag (string): Optimized product title for the Shopify product title field (the page's H1). "
-        "START with the primary keyword — its first word must appear within the first 5 words of the title. "
-        "REORDER the existing title elements (brand, product name, pack size, count, flavor) to achieve this; "
-        "keep every element, drop nothing, invent nothing\n"
+        "Put the primary keyword early where it still reads naturally (you may reorder the existing "
+        "elements: brand, product name, pack size, count, flavor); keep every element, drop nothing, invent nothing\n"
         "{tags_keys}"
         "- competitor_insights (string): Brief summary of competitor patterns and positioning\n"
         "- image_alt_suggestions (array of strings): One alt text string per product image, "
@@ -52,16 +52,14 @@ DEFAULTS = {
         "beat raw volume; never pick a bare brand or category word as a product primary.\n"
         "- actionable_recommendations (array of objects): Each recommendation MUST include these fields:\n"
         "  * 'text' (string): Description of what to do\n"
-        "  * 'type' (string): One of: 'internal_linking', 'image_alt_text', 'faq_schema', 'advisory'\n"
+        "  * 'type' (string): One of: 'internal_linking', 'image_alt_text', 'advisory'\n"
         "     - 'internal_linking': Add links FROM blog posts or other pages TO this product. Include 'anchor_text' and 'target_handle'. "
         "IMPORTANT: Only recommend this if the EXISTING INBOUND INTERNAL LINKS section shows fewer than 3 links. "
         "If 3+ inbound links already exist, do NOT recommend internal_linking — it's already well-linked.\n"
         "     - 'image_alt_text': Update image alt text for this product's images. Already handled by image_alt_suggestions above, so only suggest this if alt suggestions weren't complete.\n"
-        "     - 'faq_schema': Add FAQ structured data. Include 'questions' array with 2-5 FAQ question strings relevant to search queries.\n"
         "     - 'advisory': Recommendations that require manual action or monitoring (e.g. 'monitor this query', 'consider creating a landing page').\n"
         "  * 'anchor_text' (string, only for internal_linking): The anchor text to use for the link\n"
         "  * 'target_handle' (string, only for internal_linking): The handle of this product (for building the link URL)\n"
-        "  * 'questions' (array of strings, only for faq_schema): FAQ questions to add as schema\n"
         "- summary (string): Brief summary of all changes made and why"
     ),
     "prompts.article_refresh": (
@@ -134,8 +132,7 @@ DEFAULTS = {
         "- optimized_meta_description (string): SEO-optimized meta description. Aim for about 150 characters; "
         "HARD LIMIT 160 characters — never exceed it. Front-load the primary keyword and core message in the first 120 characters (mobile truncation)\n"
         "- h1_tag (string): Optimized collection title (the page's H1) — clear and descriptive, no puffery adjectives. "
-        "START with the primary keyword: its first word must appear within the first 5 words of the title; "
-        "reorder existing elements to achieve this, keep them all\n"
+        "Put the primary keyword early where it still reads naturally; you may reorder existing elements, keep them all\n"
         "- keywords_used (array of strings): Keywords you incorporated into the optimizations\n"
         "- target_keywords (object with keys 'primary' and 'secondary'): Primary keyword as a string with search volume, "
         "and secondary keywords as an array of strings with volume.\n"
@@ -151,16 +148,14 @@ DEFAULTS = {
         "- competitor_insights (string): Brief summary of competitor patterns and positioning\n"
         "- actionable_recommendations (array of objects): Each recommendation MUST include these fields:\n"
         "  * 'text' (string): Description of what to do\n"
-        "  * 'type' (string): One of: 'internal_linking', 'image_alt_text', 'faq_schema', 'advisory'\n"
+        "  * 'type' (string): One of: 'internal_linking', 'image_alt_text', 'advisory'\n"
         "     - 'internal_linking': Add links FROM blog posts or other pages TO this collection. Include 'anchor_text' and 'target_handle'. "
         "IMPORTANT: Only recommend this if the EXISTING INBOUND INTERNAL LINKS section shows fewer than 3 links. "
         "If 3+ inbound links already exist, do NOT recommend internal_linking — it's already well-linked.\n"
         "     - 'image_alt_text': Update image alt text for products in this collection. Set 'scope' to 'collection_products'.\n"
-        "     - 'faq_schema': Add FAQ structured data. Include 'questions' array with 2-5 FAQ question strings relevant to search queries.\n"
         "     - 'advisory': Recommendations that require manual action or monitoring.\n"
         "  * 'anchor_text' (string, only for internal_linking): The anchor text to use\n"
         "  * 'target_handle' (string, only for internal_linking): The handle of this collection\n"
-        "  * 'questions' (array of strings, only for faq_schema): FAQ questions\n"
         "  * 'scope' (string, only for image_alt_text): 'collection_products' to update all product images in this collection\n"
         "- summary (string): Brief summary of all changes made and why"
     ),
@@ -447,7 +442,8 @@ DEFAULTS = {
         "Product: {product_title}\n"
         "Number of images needing alt text: {image_count}\n\n"
         "Return JSON with key 'alts' — an array of strings, one per image. "
-        "Keep each under 125 characters. Naturally include the product name. "
+        "Keep each under 125 characters. Describe what the image shows; name the product where it "
+        "helps, but do not repeat the same keyword in every alt. "
         "Vary descriptions (front view, side view, detail shot, lifestyle, etc.)."
     ),
     "prompts.action_generate_faq": (
@@ -505,11 +501,12 @@ DEFAULTS = {
         "- Use <p>, <h2>, <h3>, <ul>, <li>, <strong>, <em>, <a> tags\n"
         "- Do NOT include <h1> tags\n"
         "- Do NOT wrap output in code fences — return raw HTML only\n"
-        "- Aim for 1500+ words if current content is shorter\n\n"
+        "- Length: keep it as long as a complete, useful answer needs; add depth only where a reader "
+        "would want it, never filler to reach a word count\n\n"
         "ANCHOR TEXT RULES:\n"
         "- Anchor text MUST match or closely reflect the destination page's title/keywords\n"
         "- Use the product/collection name as anchor text, not generic phrases like 'click here' or 'browse our selection'\n"
-        "- Keyword-rich anchor text boosts the linked page's SEO rankings\n"
+        "- Link each destination once, with anchor text that reads naturally in the sentence\n"
     ),
     "prompts.article_research": (
         "You are an SEO content strategist. Based on the SERP research data provided, "
@@ -517,7 +514,8 @@ DEFAULTS = {
         "Return JSON with:\n"
         "- keyword_opportunities (array of strings): Additional high-value keywords to target\n"
         "- content_angle_suggestions (array of strings): Unique content angles to differentiate\n"
-        "- recommended_word_count (integer): Target word count to beat competitors"
+        "- recommended_word_count (integer): Words a complete, useful answer to this topic needs "
+        "(usually 800-1800). Do not inflate it to outdo competitors — length is not a ranking factor"
     ),
     "prompts.topic_discovery": (
         "You are an expert SEO content strategist for an e-commerce store. Your job is to "
@@ -594,8 +592,8 @@ DEFAULTS = {
         "- Prefer evergreen topics over news unless a trend clearly justifies it.\n"
         "- Reuse title formats that already work on this blog (visible in the existing "
         "article list) when they fit.\n"
-        "- Include the current year (provided in the user message) in titles and slugs when "
-        "it adds freshness value.\n\n"
+        "- A year may go in a title (provided in the user message) only when the article is genuinely "
+        "about that year; NEVER put a year in the url_slug (the URL would go stale and need a redirect).\n\n"
         "OUTPUT RULES for each suggestion:\n"
         "- topic: a concise working title for the article.\n"
         "- h1: the on-page H1. Must contain the primary keyword, under 70 characters. BANNED "
@@ -944,9 +942,9 @@ DEFAULTS = {
         "- Anchor text MUST match or closely reflect the destination page's title/keywords\n"
         "- For a collection like 'Swisher Sweets Flavors', use 'Swisher Sweets flavors' as anchor text — NOT a generic phrase like 'browse our selection'\n"
         "- For a product like 'Grape Cigarillos 30-Pack', use the product name or its key terms as anchor text\n"
-        "- The anchor text tells search engines what the linked page is about — keyword-rich anchors boost the target page's rankings\n"
+        "- The anchor text tells readers and search engines what the linked page is about — describe it plainly, do not stuff keywords\n"
         "- Never use generic anchors like 'click here', 'learn more', 'check it out', or 'browse here'\n"
-        "- Vary anchor text slightly across multiple links to the same page (e.g., 'Swisher Sweets flavors', 'Swisher flavors lineup')\n"
+        "- Link each destination page once per article\n"
     ),
     "prompts.article_intro_link": (
         "You rewrite ONLY the opening paragraph of an existing blog article so it answers the reader's query "
@@ -1217,7 +1215,7 @@ DEFAULTS = {
         "- Never change the meaning, claims, or the author's wording of substantive sentences.\n"
         "- You MAY fix spelling/grammar/punctuation, split run-on paragraphs, and add structure.\n"
         "- When unsure whether something is a fact vs. phrasing, keep the original wording.\n"
-        "- The byline is ALWAYS 'A2Z'. Never write an author name or byline line in the body.\n\n"
+        "- Never write an author name or byline line in the body (the theme renders the byline).\n\n"
         "FORMATTING:\n"
         "- Output body_html as valid HTML using <p>, <h2>, <h3>, <ul>, <li>, <strong>, <em>, "
         "<blockquote>, <a>. Do NOT include <h1> (the theme renders the headline).\n"
@@ -1319,7 +1317,7 @@ DEFAULTS = {
         "thresholds": {
             "meta_title": {"good": [50, 60], "ok": [30, 70], "poor_min": 1},
             "meta_description": {"good": [120, 160], "ok": [100, 200], "poor_min": 1},
-            "description_words": {"good": 150, "ok": 75, "short": 30, "very_short": 1},
+            "description_words": {"good": 80, "ok": 40, "short": 20, "very_short": 1},
         },
     },
     "prompts.ai_seo_product": (
@@ -1345,10 +1343,11 @@ DEFAULTS = {
         "authoritative.\n"
         "6. SPECIFICATIONS TABLE — when VERIFIED PRODUCT FACTS are provided, render an HTML <table> "
         "titled 'Specifications' (or 'At a glance') listing those facts (brand, type, options/flavors, "
-        "pack/size, price, availability, SKU/GTIN, and any spec fields). Include ONLY the provided "
-        "facts; never invent spec rows or values.\n"
-        "7. EXPERT VERDICT — add a short 'Expert Verdict' section (2-3 sentences, an extractable "
-        "summary): who this product is best for, its standout qualities, and a quick honest take, "
+        "pack/size, SKU/GTIN, and any spec fields). Include ONLY the provided facts; never invent spec "
+        "rows or values, and never add price or stock rows (the page shows those live).\n"
+        "7. SUMMARY — add a short closing summary section (2-3 sentences, an extractable summary; never "
+        "title it 'Expert' anything, since no named expert reviewed it): who this product is best for, "
+        "its standout qualities, and a quick honest take, "
         "grounded in the facts. No hype.\n\n"
         "INTEGRITY (critical): NEVER fabricate specifications, prices, certifications, statistics, "
         "studies, organizations, or quotes/attributions. Only include a statistic, quote or cited "
@@ -1361,7 +1360,7 @@ DEFAULTS = {
         "Also produce a meta title (<=60 chars), a meta description (<=160 chars), and 3-5 FAQ pairs "
         "whose answers are self-contained and directly extractable.\n\n"
         "Respond with ONLY a JSON object: {\"optimized_description_html\": string (MUST include the "
-        "Specifications table and the Expert Verdict section), \"faq\": [{\"question\": string, "
+        "Specifications table and the closing summary section), \"faq\": [{\"question\": string, "
         "\"answer\": string}], \"meta_title\": string, \"meta_description\": string, "
         "\"expert_verdict\": string, \"geo_edits_applied\": [string]}."
     ),
@@ -1385,12 +1384,14 @@ DEFAULTS = {
         "each section with a concise direct answer before elaborating.\n"
         "5. STRUCTURE — include a comparison table or buying-criteria list; fluent, authoritative tone.\n"
         "6. AT-A-GLANCE TABLE — when VERIFIED FACTS are provided, render an HTML <table> summarising the "
-        "category (e.g. brands/options available, price range, key attributes). Use ONLY provided facts.\n"
+        "category (e.g. brands/options available, key attributes). Use ONLY provided facts. No prices or "
+        "stock status: the page already shows them live, and typed copies go stale.\n"
         "7. COMPARISON MATRIX — when FEATURED PRODUCTS are provided, render a second HTML <table> that "
-        "compares them side by side (columns: Product, Brand, Price, Availability). Include one row per "
+        "compares them side by side (columns: Product, Brand, and attributes given). Include one row per "
         "provided product using ONLY those exact values; never add products, prices, or attributes that "
         "were not provided. AI engines extract tabular comparisons far more reliably than prose.\n"
-        "8. EXPERT VERDICT — add a short 'Expert Verdict' section (2-3 sentences, extractable): who this "
+        "8. SUMMARY — add a short closing summary section (2-3 sentences, extractable; never title it "
+        "'Expert' anything): who this "
         "category is best for and how to choose, grounded in the facts. No hype.\n\n"
         "INTEGRITY (critical): NEVER fabricate statistics, studies, organizations, named experts, "
         "review counts, or quotes/attributions. Only include a statistic, quote or cited source if it "
@@ -1400,8 +1401,8 @@ DEFAULTS = {
         "Also produce a meta title (<=60 chars), a meta description (<=160 chars), and 3-5 FAQ pairs "
         "with self-contained, directly extractable answers.\n\n"
         "Respond with ONLY a JSON object: {\"optimized_description_html\": string (MUST include the "
-        "at-a-glance table, the comparison matrix when FEATURED PRODUCTS are provided, and the Expert "
-        "Verdict section), \"faq\": [{\"question\": string, \"answer\": string}], \"meta_title\": string, "
+        "at-a-glance table, the comparison matrix when FEATURED PRODUCTS are provided, and the closing "
+        "summary section), \"faq\": [{\"question\": string, \"answer\": string}], \"meta_title\": string, "
         "\"meta_description\": string, \"expert_verdict\": string, \"geo_edits_applied\": [string]}."
     ),
     "prompts.ai_seo_facts": (
@@ -1430,12 +1431,14 @@ DEFAULTS = {
     ),
     "rules.ai_seo": {
         "weights": {
-            "structured_data": 0.22,
-            "extractability": 0.20,
-            "fact_density": 0.18,
-            "crawlability": 0.15,
+            # Freshness is reported but not scored: the only date available
+            # moves on every edit, so scoring it rewarded churn.
+            "structured_data": 0.25,
+            "extractability": 0.25,
+            "fact_density": 0.15,
+            "crawlability": 0.20,
             "entity_authority": 0.15,
-            "freshness": 0.10,
+            "freshness": 0.0,
         },
         "thresholds": {
             "fact_density_per_100w": {"good": 4, "ok": 2, "min": 0.7, "bare_weight": 0.3},
@@ -1460,6 +1463,14 @@ DEFAULTS = {
     # AI shopping channels do not accept tobacco, so the score measures
     # eligibility for a channel this catalogue cannot use.
     "features.feed_readiness": False,
+    # FAQPage structured data. Off: Google shows no FAQ rich results, so the
+    # markup earns nothing there. Visible FAQ sections are unaffected.
+    "schema.emit_faq": False,
+    # Links to pages Google has not indexed (unindexed_links). Off: the app
+    # suggests links and a person adds them. On: the nightly job adds up to
+    # links.auto_unindexed_per_night of the best suggestions itself.
+    "links.auto_unindexed": False,
+    "links.auto_unindexed_per_night": 15,
     # Byline on every article the app publishes. A named person with real
     # experience of the products is a stronger trust signal than a store name.
     "content.author_name": "A2Z",
@@ -1492,7 +1503,7 @@ DEFAULTS = {
         "thresholds": {
             "meta_title": {"good": [50, 60], "ok": [30, 70], "poor_min": 1},
             "meta_description": {"good": [120, 160], "ok": [100, 200], "poor_min": 1},
-            "description_words": {"good": 100, "ok": 50, "short": 1},
+            "description_words": {"good": 60, "ok": 30, "short": 1},
         },
     },
     "rules.article_seo": {
@@ -1510,7 +1521,9 @@ DEFAULTS = {
             "summary": 0.10,
         },
         "thresholds": {
-            "meta_title": {"good": [35, 46], "ok": [25, 55], "poor_min": 1},
+            # Same 60-character display budget as products: past ~60 Google
+            # cuts the theme's " – <shop>" suffix, which is harmless.
+            "meta_title": {"good": [35, 60], "ok": [25, 70], "poor_min": 1},
             "meta_description": {"good": [120, 160], "ok": [100, 200], "poor_min": 1},
             "word_count": {"excellent": 600, "good": 400, "short": 200, "very_short": 1},
             "headings": {"good_h2": 2, "good_h3": 1},
@@ -1573,7 +1586,7 @@ DEFAULTS = {
         "thresholds": {
             "keyword_stuffing_max": 4.0,
             "density_min_body_words": 50,
-            "description_words": {"good": 150, "ok": 75, "short": 30, "very_short": 1},
+            "description_words": {"good": 80, "ok": 40, "short": 20, "very_short": 1},
             "keyword_at_title_start": 5,
         },
     },
@@ -1595,7 +1608,7 @@ DEFAULTS = {
         "thresholds": {
             "keyword_stuffing_max": 4.0,
             "density_min_body_words": 50,
-            "description_words": {"good": 100, "ok": 50, "short": 25, "very_short": 1},
+            "description_words": {"good": 60, "ok": 30, "short": 15, "very_short": 1},
             "keyword_at_title_start": 5,
         },
     },
@@ -1632,7 +1645,7 @@ DEFAULTS = {
         },
         "thresholds": {
             "meta_title": {"good": [50, 60], "ok": [35, 70]},
-            "meta_description": {"good": [140, 160], "ok": [100, 200]},
+            "meta_description": {"good": [120, 160], "ok": [100, 200]},
             "content_length": {"good": 300, "ok": 150},
             "internal_links": {"good": 3, "ok": 1},
         },
@@ -1729,7 +1742,7 @@ DEFAULTS = {
         "IMAGE RULES:\n"
         "- For each slide, provide an 'image_prompt': a vivid description of a premium, TEXT-FREE "
         "hero background showcasing the store's real products/category (images are generated later).\n"
-        "- Provide descriptive 'image_alt' (with keyword) for each slide.\n\n"
+        "- Provide a descriptive 'image_alt' for each slide that says what the image shows.\n\n"
         "Return ONLY JSON with these keys:\n"
         "- meta_title (string)\n"
         "- meta_description (string)\n"
@@ -1908,7 +1921,7 @@ DEFAULTS = {
         },
         {
             "style": "listicle",
-            "instruction": "Use a specific number to set expectations. Odd numbers perform best.",
+            "instruction": "Use a specific number to set expectations — the real count of items covered.",
             "examples": ["7 Loose Leaf Wraps Every Smoker Should Try", "5 Black and Mild Flavors Ranked by Smoothness"],
         },
         {
@@ -1923,7 +1936,7 @@ DEFAULTS = {
         },
         {
             "style": "year-specific",
-            "instruction": "Include the current year to signal freshness. Pair with a bold claim or ranking.",
+            "instruction": "Only for a topic that is genuinely about this year (new releases, rule changes). Put the year in the title, never in the URL slug.",
             "examples": ["The Best Pipe Tobacco Blends to Try in 2026", "2026's Most Popular Cigarillo Flavors, Ranked"],
         },
         {
@@ -2063,7 +2076,7 @@ DEFAULTS = {
         "  \"title_options\": [\"3 compelling title options, about 50 chars each (never over 60)\"],\n"
         "  \"meta_description\": \"145-160 char meta description\",\n"
         "  \"slug\": \"url-slug-suggestion\",\n"
-        "  \"target_word_count\": 1500,\n"
+        "  \"target_word_count\": 1200,\n"
         "  \"primary_keyword\": \"{keyword}\",\n"
         "  \"secondary_keywords\": [\"list of 5-10 related keywords to include\"],\n"
         "  \"search_intent\": \"{intent}\",\n"
@@ -2126,7 +2139,7 @@ DEFAULTS = {
     "prompts.keyword_strategy_fix": (
         "You are an SEO copywriter. Generate optimized meta titles, meta descriptions, "
         "and tag suggestions for the assigned content. Follow these rules:\n"
-        "- Meta title: about 50 characters (never over 60), primary keyword in first 3 words\n"
+        "- Meta title: about 50 characters (never over 60), primary keyword early where it reads naturally\n"
         "- Meta description: about 150 characters (never over 160), include primary keyword, include CTA\n"
         "- Avoid keyword stuffing\n"
         "- For products: include variant/size/flavor if relevant\n"

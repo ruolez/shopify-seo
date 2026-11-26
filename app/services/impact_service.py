@@ -1,9 +1,11 @@
 """Before/after search impact of applied optimizations.
 
-Joins seo_change_events to gsc_daily_metrics per item URL. The pre window
-is the 14 days ending the day before the change; the post window starts
-2 days after it (Google recrawl lag) and is clipped to the GSC data lag,
-so fresh changes report as "collecting" instead of a fake verdict.
+Joins seo_change_events to gsc_page_daily (query-free page totals: the
+query-level table drops anonymised queries, about half an article's
+clicks). The pre window is the 14 days ending the day before the change; the
+post window starts 2 days after it (Google recrawl lag) and is clipped to
+the GSC data lag, so fresh changes report as "collecting" instead of a fake
+verdict. impact_verdict decides whether the change beats the noise.
 """
 
 import logging
@@ -11,6 +13,7 @@ from datetime import timedelta
 
 from app.database import db
 from app.services.dashboard_service import gsc_data_end_date
+from app.services.impact_verdict import impact_verdict
 from app.services.url_utils import url_path_key
 
 logger = logging.getLogger(__name__)
@@ -20,22 +23,23 @@ POST_DAYS = 14
 RECRAWL_LAG_DAYS = 2
 MIN_PRE_IMPRESSIONS = 20
 MIN_POST_DAYS = 7
-FLAT_THRESHOLD_PCT = 10
 
 _PATH_PREFIX = {"product": "products", "collection": "collections", "article": "blogs"}
 
 
-def get_optimization_impact(store_id, days=60, limit=10):
+def get_optimization_impact(store_id, days=60, limit=10, only=None):
+    """only=(item_type, item_id) limits the analysis to that item's latest change."""
     end = gsc_data_end_date()
 
     with db.get_cursor() as cur:
+        only_sql = " AND item_type = %s AND item_id = %s" if only else ""
         cur.execute(
-            """SELECT id, item_type, item_id, change_type, created_at
+            f"""SELECT id, item_type, item_id, change_type, created_at
                FROM seo_change_events
                WHERE store_id = %s AND created_at >= NOW() - make_interval(days => %s)
-                 AND change_type <> 'revert' AND reverted_at IS NULL
+                 AND change_type <> 'revert' AND reverted_at IS NULL{only_sql}
                ORDER BY created_at DESC""",
-            (store_id, days),
+            (store_id, days, *(only or ())),
         )
         events = cur.fetchall()
 
@@ -89,11 +93,9 @@ def get_optimization_impact(store_id, days=60, limit=10):
     earliest = min(e["created_at"].date() for e in deduped) - timedelta(days=PRE_DAYS + 1)
     with db.get_cursor() as cur:
         cur.execute(
-            """SELECT page, date, SUM(clicks) AS clicks, SUM(impressions) AS impressions,
-                      SUM(position * impressions) / NULLIF(SUM(impressions), 0) AS position
-               FROM gsc_daily_metrics
-               WHERE store_id = %s AND date >= %s AND date <= %s
-               GROUP BY page, date""",
+            """SELECT page, date, clicks, impressions, position
+               FROM gsc_page_daily
+               WHERE store_id = %s AND date >= %s AND date <= %s AND NOT is_fresh""",
             (store_id, earliest.isoformat(), end.isoformat()),
         )
         gsc_rows = cur.fetchall()
@@ -122,6 +124,7 @@ def get_optimization_impact(store_id, days=60, limit=10):
             d += timedelta(days=1)
         n_days = (stop - start).days + 1
         return {
+            "clicks": clicks,
             "clicks_per_day": round(clicks / n_days, 2) if n_days else 0,
             "impressions": impressions,
             "position": round(pos_w / impressions, 1) if impressions else None,
@@ -144,20 +147,12 @@ def get_optimization_impact(store_id, days=60, limit=10):
                 summary["collecting"] += 1
             else:
                 post = window_stats(daily, post_start, post_stop)
-                base = pre["clicks_per_day"]
-                clicks_change_pct = round((post["clicks_per_day"] - base) / base * 100, 1) if base else None
+                status, clicks_change_pct = impact_verdict(
+                    pre["clicks"], pre["days"], post["clicks"], post["days"])
                 position_change = (
                     round(post["position"] - pre["position"], 1)
                     if post["position"] is not None and pre["position"] is not None else None
                 )
-                if clicks_change_pct is None:
-                    status = "flat" if not post["clicks_per_day"] else "improved"
-                elif clicks_change_pct > FLAT_THRESHOLD_PCT:
-                    status = "improved"
-                elif clicks_change_pct < -FLAT_THRESHOLD_PCT:
-                    status = "declined"
-                else:
-                    status = "flat"
                 if status == "improved":
                     summary["improved"] += 1
                 elif status == "declined":
@@ -187,6 +182,12 @@ def get_optimization_impact(store_id, days=60, limit=10):
 
 
 _VERDICTS = ("improved", "flat", "declined")
+
+
+def item_impact(store_id, item_type, item_id):
+    """The impact row for one item's latest change, or None without one."""
+    items = get_optimization_impact(store_id, days=365, limit=1, only=(item_type, int(item_id)))["items"]
+    return items[0] if items else None
 
 
 def measured_items(store_id):

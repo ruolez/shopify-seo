@@ -22,10 +22,16 @@ BLOG_SECTION_NAME = "seo-blog-article"
 
 # Bump these to force a re-push ("outdated") on existing installs.
 BLOG_TEMPLATE_VERSION = "v1"
-BLOG_SECTION_VERSION = "v1"
+BLOG_SECTION_VERSION = "v3"
 
 BLOG_TEMPLATE_MARKER = f"A2Z Blog Template {BLOG_TEMPLATE_VERSION}"
 BLOG_SECTION_MARKER = f"A2Z Blog Section {BLOG_SECTION_VERSION}"
+
+
+def blog_section_marker(emit_faq):
+    """Marker for the pushed section; it records the FAQ-markup choice so
+    flipping the setting shows the template as needing a re-push."""
+    return f"{BLOG_SECTION_MARKER} faq-{'on' if emit_faq else 'off'}"
 BLOG_TEMPLATE_MARKER_PREFIX = "A2Z Blog Template"
 
 BLOG_TEMPLATE_BLOB = (
@@ -175,7 +181,6 @@ _ARTICLE_CSS = """
 _SECTION_TEMPLATE = """{% comment %} @@SECTION_MARKER@@ {% endcomment %}
 {%- assign a2z_words = article.content | strip_html | split: ' ' | size -%}
 {%- assign a2z_minutes = a2z_words | divided_by: 200 | at_least: 1 -%}
-{%- assign a2z_faq = article.metafields.global.faq_jsonld -%}
 
 <article class="a2z-blog">
   {% if article.image %}
@@ -191,11 +196,14 @@ _SECTION_TEMPLATE = """{% comment %} @@SECTION_MARKER@@ {% endcomment %}
     <p class="a2z-blog__byline">
       <time datetime="{{ article.published_at | date: '%Y-%m-%d' }}">{{ article.published_at | date: '%B %-d, %Y' }}</time>
       <span class="a2z-blog__dot">&middot;</span>{{ a2z_minutes }} min read
+      {%- comment -%} Updated = the last real content change (set by the app), not
+      updated_at, which moves on every link, image or price edit. {%- endcomment -%}
+      {%- assign a2z_content_mod = article.metafields.global.content_updated.value | default: article.published_at -%}
       {%- assign a2z_pub_ts = article.published_at | date: '%s' | plus: 0 -%}
-      {%- assign a2z_mod_ts = article.updated_at | date: '%s' | plus: 0 -%}
+      {%- assign a2z_mod_ts = a2z_content_mod | date: '%s' | plus: 0 -%}
       {%- assign a2z_day_gap = a2z_mod_ts | minus: a2z_pub_ts -%}
       {%- if a2z_day_gap > 86400 -%}
-      <span class="a2z-blog__dot">&middot;</span>Updated {{ article.updated_at | date: '%B %-d, %Y' }}
+      <span class="a2z-blog__dot">&middot;</span>Updated {{ a2z_content_mod | date: '%B %-d, %Y' }}
       {%- endif -%}
     </p>
   </header>
@@ -233,17 +241,14 @@ _SECTION_TEMPLATE = """{% comment %} @@SECTION_MARKER@@ {% endcomment %}
   "headline": {{ article.title | json }},
   {% if article.excerpt != blank %}"description": {{ article.excerpt | strip_html | json }},{% endif %}
   "datePublished": "{{ article.published_at | date: '%Y-%m-%dT%H:%M:%S%z' }}",
-  "dateModified": "{{ article.updated_at | date: '%Y-%m-%dT%H:%M:%S%z' }}",
+  "dateModified": "{{ article.metafields.global.content_updated.value | default: article.published_at | date: '%Y-%m-%dT%H:%M:%S%z' }}",
   {% if article.image %}"image": ["{{ article.image | image_url: width: 1600 | prepend: 'https:' }}"],{% endif %}
-  "author": { "@type": "Organization", "name": {{ shop.name | json }}, "url": {{ shop.url | json }} },
+  {% if article.author != blank %}{% unless shop.name contains article.author %}"author": { "@type": "Person", "name": {{ article.author | json }} },{% else %}"author": { "@type": "Organization", "name": {{ shop.name | json }}, "url": {{ shop.url | json }} },{% endunless %}{% else %}"author": { "@type": "Organization", "name": {{ shop.name | json }}, "url": {{ shop.url | json }} },{% endif %}
   "publisher": { "@type": "Organization", "name": {{ shop.name | json }}, "@id": "{{ shop.url }}/#organization" },
   "mainEntityOfPage": { "@type": "WebPage", "@id": "{{ canonical_url }}" }
 }
 </script>
-{%- if a2z_faq != blank -%}
-<script type="application/ld+json">{{ a2z_faq.value | json }}</script>
-{%- endif -%}
-
+@@FAQ_JSONLD@@
 <style>
 @@ARTICLE_CSS@@
 </style>
@@ -265,10 +270,24 @@ def get_article_css(brand_color=DEFAULT_BRAND_COLOR):
     return css.strip()
 
 
-def generate_blog_section(brand_color=DEFAULT_BRAND_COLOR, related_limit=3):
-    """Return the rendered sections/seo-blog-article.liquid content."""
+_FAQ_JSONLD_BLOCK = """{%- assign a2z_faq = article.metafields.global.faq_jsonld -%}
+{%- if a2z_faq != blank -%}
+<script type="application/ld+json">{{ a2z_faq.value | json }}</script>
+{%- endif -%}
+"""
+
+
+def generate_blog_section(brand_color=DEFAULT_BRAND_COLOR, related_limit=3, emit_faq=None):
+    """Return the rendered sections/seo-blog-article.liquid content. FAQPage
+    JSON-LD stored on older articles is printed only while FAQ markup is on
+    (schema.emit_faq); the visible FAQ section is unaffected."""
+    if emit_faq is None:
+        from app.services.schema_generator import faq_markup_enabled
+
+        emit_faq = faq_markup_enabled()
     content = _SECTION_TEMPLATE
-    content = content.replace("@@SECTION_MARKER@@", BLOG_SECTION_MARKER)
+    content = content.replace("@@SECTION_MARKER@@", blog_section_marker(emit_faq))
+    content = content.replace("@@FAQ_JSONLD@@", _FAQ_JSONLD_BLOCK if emit_faq else "")
     content = content.replace("@@RELATED_LIMIT@@", str(max(0, int(related_limit or 0))))
     content = content.replace("@@ARTICLE_CSS@@", get_article_css(brand_color))
     return content

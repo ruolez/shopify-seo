@@ -1576,7 +1576,8 @@ def _ai_meta_fix(keyword, title, meta_title, meta_desc, needs_title, needs_desc,
         if not ai_config or not ai_config.get("api_key_enc"):
             return {}
         client = OpenAI(base_url="https://openrouter.ai/api/v1",
-                        api_key=decrypt_value(ai_config["api_key_enc"]))
+                        api_key=decrypt_value(ai_config["api_key_enc"]),
+                        timeout=120.0, max_retries=1)
         model = ai_config.get("model") or "anthropic/claude-sonnet-4"
         wants = []
         if needs_title:
@@ -1875,7 +1876,7 @@ def generate_implementation_steps(store_id, assignment_id):
     api_key = decrypt_value(ai_config["api_key_enc"])
     model = ai_config.get("model") or "anthropic/claude-sonnet-4"
 
-    client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=api_key)
+    client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=api_key, timeout=120.0, max_retries=1)
 
     response = client.chat.completions.create(
         model=model,

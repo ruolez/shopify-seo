@@ -6,15 +6,24 @@ happens in the route layer via ShopifyClient and is always preview-first.
 """
 
 import json
+import re
 
 from app.database import db
 from app.services import url_utils
 from app.services.ai_seo_analyzer import AI_BOTS
 
 
+# Crawlers given their own robots.txt group. Googlebot is deliberately not
+# here: a named group replaces the "*" rules for that bot, and Google must keep
+# Shopify's defaults.
+ROBOTS_AI_GROUP_BOTS = [b for b in AI_BOTS if b != "Googlebot"]
+
+
 def generate_robots_liquid():
-    """robots.txt.liquid that preserves Shopify defaults and explicitly welcomes
-    AI answer-engine crawlers while blocking transactional paths."""
+    """robots.txt.liquid that keeps Shopify's defaults and names the AI
+    answer-engine crawlers. A crawler with its own group ignores the "*"
+    group, so each AI group repeats Shopify's "*" rules (search, sort,
+    filter, cart, checkout...) instead of opening those crawl traps."""
     lines = [
         "{% for group in robots.default_groups %}",
         "  {{ group.user_agent }}",
@@ -23,15 +32,13 @@ def generate_robots_liquid():
         "  {% endif %}",
         "{% endfor %}",
         "",
-        "# --- AI answer-engine crawlers (managed by AI SEO) ---",
+        "# --- AI answer-engine crawlers (managed by AI SEO): same rules as * ---",
     ]
-    for bot in AI_BOTS:
+    for bot in ROBOTS_AI_GROUP_BOTS:
         lines.append(f"User-agent: {bot}")
-        lines.append("Allow: /")
-        lines.append("Disallow: /cart")
-        lines.append("Disallow: /checkout")
-        lines.append("Disallow: /account")
-        lines.append("")
+        lines.append("{% for group in robots.default_groups %}{% if group.user_agent.value == '*' %}"
+                     "{% for rule in group.rules %}{{ rule }}")
+        lines.append("{% endfor %}{% endif %}{% endfor %}")
     return "\n".join(lines)
 
 
@@ -146,18 +153,23 @@ def generate_website_jsonld(store_id, base_override=None):
         "name": settings.get("organization_name") or store.get("name"),
         "url": base,
         "publisher": {"@id": f"{base}/#organization"},
-        "potentialAction": {
-            "@type": "SearchAction",
-            "target": {"@type": "EntryPoint", "urlTemplate": f"{base}/search?q={{search_term_string}}"},
-            "query-input": "required name=search_term_string",
-        },
+        # No SearchAction: Google retired the sitelinks search box in 2024.
     }
 
 
 # Dynamic BreadcrumbList — rendered by Shopify Liquid per page type at request time.
 _BREADCRUMB_LIQUID = """{%- capture _crumbs -%}
 {%- if template contains 'product' -%}
-{%- assign _col = product.collections.first -%}
+{%- comment -%} The visitor's collection when browsing one, else the first
+collection that is not a catch-all or promotion (a "Sale" crumb misleads). {%- endcomment -%}
+{%- assign _col = collection -%}
+{%- unless _col -%}
+{%- for _c in product.collections -%}
+{%- unless _c.handle == 'all' or _c.handle == 'frontpage' or _c.handle contains 'sale' or _c.handle contains 'new-arrival' or _c.handle contains 'best-seller' -%}
+{%- assign _col = _c -%}{%- break -%}
+{%- endunless -%}
+{%- endfor -%}
+{%- endunless -%}
 {"@type":"ListItem","position":1,"name":"Home","item":"{{ shop.url }}/"}
 {%- if _col -%},{"@type":"ListItem","position":2,"name":{{ _col.title | json }},"item":"{{ shop.url }}{{ _col.url }}"}{%- endif -%}
 ,{"@type":"ListItem","position":{% if _col %}3{% else %}2{% endif %},"name":{{ product.title | json }},"item":"{{ shop.url }}{{ product.url }}"}
@@ -188,7 +200,8 @@ _BREADCRUMB_LIQUID = """{%- capture _crumbs -%}
 # know: AI-verified additionalProperty specs plus optional description/category
 # overrides. Ratings are read from review-app metafields (`reviews.*` standard
 # namespace first, Stamped's `stamped.*` as fallback), strictly gated on a
-# review count > 0 — never fabricated. FAQPage metafields are replayed verbatim.
+# review count > 0 — never fabricated. FAQPage metafields are replayed only
+# while schema.emit_faq is on.
 _ITEM_SCHEMA_LIQUID = """{%- if template contains 'product' and product -%}
 {%- assign _base = shop.url | append: '/products/' | append: product.handle -%}
 {%- assign _enr = product.metafields.seo.schema_enrichment.value -%}
@@ -210,7 +223,7 @@ _ITEM_SCHEMA_LIQUID = """{%- if template contains 'product' and product -%}
 "name":{{ product.title | json }}
 ,"description":{{ _enr.description | default: product.description | strip_html | truncate: 5000 | json }}
 ,"url":{{ _base | json }}
-,"brand":{"@type":"Brand","name":{{ product.vendor | default: shop.name | json }}}
+{%- if product.vendor != blank -%},"brand":{"@type":"Brand","name":{{ product.vendor | json }}}{%- endif -%}
 {%- assign _cat = _enr.category | default: product.type -%}
 {%- if _cat != blank -%},"category":{{ _cat | json }}{%- endif -%}
 {%- if product.images.size > 0 -%},"image":[{%- for _img in product.images limit: 8 -%}{{ _img | image_url: width: 1200 | prepend: 'https:' | json }}{%- unless forloop.last -%},{%- endunless -%}{%- endfor -%}]{%- endif -%}
@@ -227,12 +240,12 @@ _ITEM_SCHEMA_LIQUID = """{%- if template contains 'product' and product -%}
 {%- for v in product.variants -%}
 {"@type":"Product","@id":"{{ _base }}#variant-{{ v.id }}"
 ,"name":{{ product.title | append: ' - ' | append: v.title | json }}
-{%- if v.sku != blank -%},"sku":{{ v.sku | json }},"mpn":{{ v.sku | json }}{%- endif -%}
-{%- if v.barcode != blank -%}{%- assign _bl = v.barcode | size -%},"gtin{% case _bl %}{% when 8 %}8{% when 12 %}12{% when 13 %}13{% when 14 %}14{% endcase %}":{{ v.barcode | json }}{%- endif -%}
+{%- if v.sku != blank -%},"sku":{{ v.sku | json }}{%- endif -%}
+{%- if v.barcode != blank -%}{%- assign _bl = v.barcode | size -%}{%- if _bl == 8 or _bl == 12 or _bl == 13 or _bl == 14 -%},"gtin{{ _bl }}":{{ v.barcode | json }}{%- endif -%}{%- endif -%}
 {%- assign _vimg = v.featured_image | default: product.featured_image -%}
 {%- if _vimg -%},"image":{{ _vimg | image_url: width: 1200 | prepend: 'https:' | json }}{%- endif -%}
 ,"additionalProperty":[{%- for _opt in product.options -%}{"@type":"PropertyValue","name":{{ _opt | json }},"value":{{ v.options[forloop.index0] | json }}}{%- unless forloop.last -%},{%- endunless -%}{%- endfor -%}]
-,"offers":{"@type":"Offer","url":"{{ _base }}?variant={{ v.id }}","priceCurrency":{{ cart.currency.iso_code | json }},"price":{{ v.price | divided_by: 100.0 }},"availability":"https://schema.org/{% if v.available %}InStock{% else %}OutOfStock{% endif %}","itemCondition":"https://schema.org/NewCondition","priceValidUntil":"{{ 'now' | date: '%s' | plus: 31536000 | date: '%Y-%m-%d' }}","seller":{"@id":"{{ shop.url }}/#organization"}}}
+,"offers":{"@type":"Offer","url":"{{ _base }}?variant={{ v.id }}","priceCurrency":{{ cart.currency.iso_code | json }},"price":{{ v.price | divided_by: 100.0 }},"availability":"https://schema.org/{% if v.available %}InStock{% else %}OutOfStock{% endif %}","itemCondition":"https://schema.org/NewCondition","seller":{"@id":"{{ shop.url }}/#organization"}}}
 {%- unless forloop.last -%},{%- endunless -%}
 {%- endfor -%}
 ]{{ _rating }}}
@@ -242,9 +255,9 @@ _ITEM_SCHEMA_LIQUID = """{%- if template contains 'product' and product -%}
 <script type="application/ld+json">
 {"@context":"https://schema.org","@type":"Product","@id":"{{ _base }}#product"
 ,{{ _entity }}
-{%- if v.sku != blank -%},"sku":{{ v.sku | json }},"mpn":{{ v.sku | json }}{%- endif -%}
-{%- if v.barcode != blank -%}{%- assign _bl = v.barcode | size -%},"gtin{% case _bl %}{% when 8 %}8{% when 12 %}12{% when 13 %}13{% when 14 %}14{% endcase %}":{{ v.barcode | json }}{%- endif -%}
-,"offers":{"@type":"Offer","url":{{ _base | json }},"priceCurrency":{{ cart.currency.iso_code | json }},"price":{{ v.price | divided_by: 100.0 }},"availability":"https://schema.org/{% if v.available %}InStock{% else %}OutOfStock{% endif %}","itemCondition":"https://schema.org/NewCondition","priceValidUntil":"{{ 'now' | date: '%s' | plus: 31536000 | date: '%Y-%m-%d' }}","seller":{"@id":"{{ shop.url }}/#organization"}}{{ _rating }}}
+{%- if v.sku != blank -%},"sku":{{ v.sku | json }}{%- endif -%}
+{%- if v.barcode != blank -%}{%- assign _bl = v.barcode | size -%}{%- if _bl == 8 or _bl == 12 or _bl == 13 or _bl == 14 -%},"gtin{{ _bl }}":{{ v.barcode | json }}{%- endif -%}{%- endif -%}
+,"offers":{"@type":"Offer","url":{{ _base | json }},"priceCurrency":{{ cart.currency.iso_code | json }},"price":{{ v.price | divided_by: 100.0 }},"availability":"https://schema.org/{% if v.available %}InStock{% else %}OutOfStock{% endif %}","itemCondition":"https://schema.org/NewCondition","seller":{"@id":"{{ shop.url }}/#organization"}}{{ _rating }}}
 </script>
 {%- endif -%}
 {%- if product.metafields.seo.faq_schema_json_ld != blank -%}
@@ -307,7 +320,14 @@ def generate_a11y_snippet():
     )
 
 
-SNIPPET_VERSION = 2
+SNIPPET_VERSION = 3
+
+# The product/collection FAQ metafield replay; dropped while
+# schema.emit_faq is off.
+_FAQ_REPLAY_RE = re.compile(
+    r"\{%- if (?:product|collection)\.metafields\.seo\.faq_schema_json_ld != blank -%\}\n"
+    r"<script type=\"application/ld\+json\">[^\n]*</script>\n\{%- endif -%\}\n?"
+)
 
 
 def generate_site_schema_snippet(store_id):
@@ -323,5 +343,10 @@ def generate_site_schema_snippet(store_id):
             payload = json.dumps(entity, ensure_ascii=False).replace("__BASE__", "{{ shop.url }}")
             parts.append('<script type="application/ld+json">\n' + payload + "\n</script>")
     parts.append(_BREADCRUMB_LIQUID)
-    parts.append(_ITEM_SCHEMA_LIQUID)
+    from app.services.schema_generator import faq_markup_enabled
+
+    item_liquid = _ITEM_SCHEMA_LIQUID
+    if not faq_markup_enabled():
+        item_liquid = _FAQ_REPLAY_RE.sub("", item_liquid)
+    parts.append(item_liquid)
     return "\n".join(parts)

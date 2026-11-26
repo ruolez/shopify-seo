@@ -95,9 +95,12 @@ def get_expected_ctr_curve(store_id):
     """Store-calibrated expected-CTR curve from 28d of GSC query data.
 
     Per bucket: total clicks / total impressions (impressions-weighted by
-    construction). Buckets under MIN_BUCKET_IMPRESSIONS fall back to the
-    default; the final curve is forced monotonically non-increasing so a
-    sparse bucket can't invert the shape.
+    construction). Searches for the store's own name are left out: people
+    looking for the store click it at rates no product page can reach, which
+    made every non-brand page look like an underperformer. Buckets under
+    MIN_BUCKET_IMPRESSIONS fall back to the default; the final curve is
+    forced monotonically non-increasing so a sparse bucket can't invert the
+    shape.
     """
     now = time.time()
     cached = _curve_cache.get(store_id)
@@ -120,9 +123,18 @@ def get_expected_ctr_curve(store_id):
                 (store_id, date_from, date_to),
             )
             rows = cur.fetchall()
+            cur.execute("SELECT shop_name, primary_domain, domain FROM stores WHERE id = %s", (store_id,))
+            store = cur.fetchone() or {}
+
+        from app.services.gsc_extras import brand_labels
+        from app.services.gsc_queries import brand_terms, is_branded_query
+        terms = brand_terms(store.get("shop_name"), store.get("primary_domain") or store.get("domain"))
+        labels = brand_labels(store_id)
 
         buckets = {}
         for r in rows:
+            if is_branded_query(r["query"], terms, labels):
+                continue
             pos = float(r["pos"] or 0)
             if pos <= 0:
                 continue

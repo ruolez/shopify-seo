@@ -449,6 +449,8 @@ async function loadPublishingSettings() {
         document.getElementById("content-author-name").value = author.value || "";
         const feed = await apiRequest("/api/settings/custom/features.feed_readiness");
         document.getElementById("feature-feed-readiness").checked = !!feed.value;
+        const faq = await apiRequest("/api/settings/custom/schema.emit_faq");
+        document.getElementById("schema-emit-faq").checked = !!faq.value;
     } catch (e) { /* card stays empty; saving still works */ }
 }
 
@@ -459,6 +461,9 @@ window.savePublishingSettings = async function () {
         await apiRequest("/api/settings/custom/content.author_name", { method: "POST", body: { value: author } });
         await apiRequest("/api/settings/custom/features.feed_readiness", {
             method: "POST", body: { value: document.getElementById("feature-feed-readiness").checked },
+        });
+        await apiRequest("/api/settings/custom/schema.emit_faq", {
+            method: "POST", body: { value: document.getElementById("schema-emit-faq").checked },
         });
         showToast("Publishing settings saved", "success");
     } catch (e) {

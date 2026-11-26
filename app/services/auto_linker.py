@@ -98,9 +98,11 @@ def _target(target_type, target_id):
     return {"url": f"/{_URL_PREFIX[target_type]}/{row['handle']}", "title": row["title"], "phrases": phrases}
 
 
-def add_link(store_id, source_type, source_id, target_type, target_id, client=None, allow_related=True):
+def add_link(store_id, source_type, source_id, target_type, target_id, client=None, allow_related=True,
+             phrases=None):
     """Place one link from source to target and push it. Returns
-    {status: "added"|"already"|"none", how, event_id}. Raises on Shopify errors."""
+    {status: "added"|"already"|"none", how, event_id}. Raises on Shopify errors.
+    `phrases` narrows the wordings that may become the link."""
     from app.services.apply_pipeline import ApplyRefused, _load_mirror, apply_item_changes
 
     target = _target(target_type, target_id)
@@ -110,7 +112,8 @@ def add_link(store_id, source_type, source_id, target_type, target_id, client=No
 
     for attempt in (1, 2):
         _, mirror = _load_mirror(source_type, source_id)
-        new_body, how = place_link(mirror["body"], target["url"], target["phrases"], target["title"],
+        new_body, how = place_link(mirror["body"], target["url"], phrases if phrases is not None else target["phrases"],
+                                   target["title"],
                                    min_words=min_words, allow_related=allow_related)
         if how in ("already", "none"):
             return {"status": how, "how": how, "event_id": None}
@@ -127,31 +130,6 @@ def add_link(store_id, source_type, source_id, target_type, target_id, client=No
             if refused.status != "stale" or attempt == 2:
                 raise
     return {"status": "none", "how": "none", "event_id": None}
-
-
-def link_unindexed(store_id, client=None, progress=None):
-    """Link every unindexed product people search for from the best article
-    about its brand. At most MAX_NEW_LINKS_PER_PAGE new links per article per run."""
-    from app.services.unindexed_plan import get_unindexed_plan
-
-    per_source, result = {}, {"added": 0, "already": 0, "no_source": 0, "failed": 0}
-    pages = [p for p in get_unindexed_plan(store_id)["pages"] if p["worth_indexing"] and p["item_type"] == "product"]
-    for i, page in enumerate(pages):
-        if progress:
-            progress(i, len(pages))
-        sources = [a for a in page.get("link_from") or [] if per_source.get(a["id"], 0) < MAX_NEW_LINKS_PER_PAGE]
-        if not sources:
-            result["no_source"] += 1
-            continue
-        try:
-            out = add_link(store_id, "article", sources[0]["id"], "product", page["item_id"], client=client)
-            result[out["status"] if out["status"] in result else "already"] += 1
-            if out["status"] == "added":
-                per_source[sources[0]["id"]] = per_source.get(sources[0]["id"], 0) + 1
-        except Exception:
-            logger.exception("Auto-link failed: article %s -> product %s", sources[0]["id"], page["item_id"])
-            result["failed"] += 1
-    return result
 
 
 def _published_collections(store_id):
@@ -256,9 +234,8 @@ def plan_collection_backlinks(store_id):
 
 
 def run_plan(store_id, kind, client=None, progress=None):
-    """Apply one whole plan. kind: unindexed | article_collection | collection_back."""
-    if kind == "unindexed":
-        return link_unindexed(store_id, client=client, progress=progress)
+    """Apply one whole plan. kind: article_collection | collection_back.
+    Links to unindexed pages live in unindexed_links (suggestions + review)."""
     result = {"added": 0, "already": 0, "failed": 0}
     if kind == "article_collection":
         jobs = [("article", row["article_id"], "collection", c["id"], False)

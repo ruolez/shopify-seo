@@ -184,3 +184,27 @@ def restore_missing_figures(original_html, new_html):
         if not inserted:
             out = out[:faq_start] + block + out[faq_start:]
     return out
+
+
+_HEADING_RE = re.compile(r"<h([2-4])\b[^>]*>(.*?)</h\1>", re.IGNORECASE | re.DOTALL)
+
+
+def empty_sections(html):
+    """Headings (h2-h4) with nothing under them before the next heading of
+    the same or a higher level: a sign the model dropped the section's text.
+    A subheading with content counts as content. Returns the heading texts."""
+    html = html or ""
+    heads = list(_HEADING_RE.finditer(html))
+    empty = []
+    for i, h in enumerate(heads):
+        level = int(h.group(1))
+        end = len(html)
+        for nxt in heads[i + 1:]:
+            if int(nxt.group(1)) <= level:
+                end = nxt.start()
+                break
+        body = html[h.end():end]
+        if re.search(r"<img\b", body, re.IGNORECASE) or re.sub(r"<[^>]+>", "", body).strip():
+            continue
+        empty.append(re.sub(r"<[^>]+>", "", h.group(2)).strip())
+    return empty

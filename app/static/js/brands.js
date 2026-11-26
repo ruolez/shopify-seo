@@ -586,7 +586,15 @@ function pollBrandTask(bulkTaskId, total) {
                 current.textContent = `Currently: ${task.current_product_title}`;
             }
 
-            if (task.status === "completed") {
+            if (task.status === "failed") {
+                clearInterval(interval);
+                overlay.classList.remove("active");
+                loadBrands();
+                showToast(`Stopped: ${task.error || "the job failed"} (${task.completed} finished before it stopped)`, "error");
+                return;
+            }
+
+            if (task.status === "completed" || task.status === "completed_with_errors") {
                 clearInterval(interval);
                 bar.style.width = "100%";
                 current.textContent = "";
@@ -659,7 +667,15 @@ function pollBrandLogoTask(bulkTaskId, total) {
                 current.textContent = `Currently: ${task.current_product_title}`;
             }
 
-            if (task.status === "completed") {
+            if (task.status === "failed") {
+                clearInterval(interval);
+                overlay.classList.remove("active");
+                loadBrands();
+                showToast(`Stopped: ${task.error || "the job failed"} (${task.completed} finished before it stopped)`, "error");
+                return;
+            }
+
+            if (task.status === "completed" || task.status === "completed_with_errors") {
                 clearInterval(interval);
                 bar.style.width = "100%";
                 current.textContent = "";
@@ -1339,7 +1355,15 @@ function pollBulkBrandSeo(bulkTaskId, total) {
                 current.textContent = `Currently: ${task.current_product_title}`;
             }
 
-            if (task.status === "completed") {
+            if (task.status === "failed") {
+                clearInterval(interval);
+                overlay.classList.remove("active");
+                loadBrands();
+                showToast(`Stopped: ${task.error || "the job failed"} (${task.completed} finished before it stopped)`, "error");
+                return;
+            }
+
+            if (task.status === "completed" || task.status === "completed_with_errors") {
                 clearInterval(interval);
                 bar.style.width = "100%";
                 current.textContent = "";

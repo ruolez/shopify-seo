@@ -211,7 +211,8 @@ def run_competitor_check(store_id, keyword_limit=100):
 
     alerts_count = 0
     keywords_checked = 0
-    google_failures = 0
+    search_failures = 0
+    last_search_error = None
 
     try:
         for kw_row in keywords:
@@ -223,6 +224,8 @@ def run_competitor_check(store_id, keyword_limit=100):
                 results = brave_search(keyword, count=20)
             except Exception as e:
                 logger.warning("Brave search failed for '%s': %s", keyword, str(e))
+                search_failures += 1
+                last_search_error = str(e)
                 continue
 
             if not results:
@@ -241,11 +244,13 @@ def run_competitor_check(store_id, keyword_limit=100):
                         our_position = result.get("position")
                         break
 
+            seen_competitors = set()
             for result in results:
                 result_domain = (result.get("domain") or "").lower()
 
                 for comp_id, comp_domain in comp_domains.items():
                     if comp_domain in result_domain:
+                        seen_competitors.add(comp_id)
                         pos = result.get("position")
                         url = result.get("url", "")
 
@@ -279,7 +284,21 @@ def run_competitor_check(store_id, keyword_limit=100):
                                     )
                                     alerts_count += 1
 
+            # A competitor that dropped out of the top results kept its old
+            # position forever; now it reads "not ranking" (previous kept).
+            with db.get_cursor() as cur:
+                cur.execute(
+                    """UPDATE competitor_rankings SET previous_position = position, position = NULL,
+                              url = NULL, checked_at = NOW()
+                       WHERE store_id = %s AND keyword = %s AND position IS NOT NULL
+                         AND NOT (competitor_id = ANY(%s))""",
+                    (store_id, keyword, list(seen_competitors)),
+                )
+
             time.sleep(0.3)
+
+        if keywords and keywords_checked == 0 and search_failures:
+            raise RuntimeError(f"The search API failed for every keyword ({search_failures}): {last_search_error}")
 
         with db.get_cursor() as cur:
             cur.execute(
@@ -289,11 +308,15 @@ def run_competitor_check(store_id, keyword_limit=100):
 
         logger.info("Competitor check: %d keywords, %d competitors, %d alerts for store %d",
                      keywords_checked, len(competitors), alerts_count, store_id)
+        from app.services.job_health import record_job
+        record_job("competitor_check", store_id, ok=True, detail=f"{keywords_checked} keywords")
         return {"keywords_checked": keywords_checked, "competitors_checked": len(competitors), "alerts": alerts_count}
 
     except Exception as e:
         with db.get_cursor() as cur:
             cur.execute("UPDATE competitor_check_runs SET status = 'failed', completed_at = NOW() WHERE id = %s", (run_id,))
+        from app.services.job_health import record_job
+        record_job("competitor_check", store_id, ok=False, error=e)
         raise
 
 

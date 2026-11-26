@@ -211,6 +211,7 @@ function renderItems() {
                 <span class="material-symbols-rounded">radar</span> Scan
             </button>
         </div>
+        <div id="geo-drafts-bar"></div>
         ${fixNext}
         <div class="table-container"><table>
             <thead><tr>
@@ -219,6 +220,7 @@ function renderItems() {
             </tr></thead>
             <tbody>${rows}</tbody>
         </table></div>`;
+    loadDrafts();
 }
 
 function setSortBy(value) {
@@ -278,7 +280,12 @@ async function batchOptimize(mode) {
         showToast("Nothing selected", "warning");
         return;
     }
-    if (!confirm(`Optimize ${count} ${scanType}(s)? This generates GEO content and applies it live to Shopify.`)) return;
+    const ok = await UIConfirm.ask({
+        title: `Write drafts for ${count} ${scanType}${count === 1 ? "" : "s"}?`,
+        message: `The AI rewrites each description, meta title and meta description for AI answers. Nothing changes on your store yet: each draft waits under "Drafts to review" until you apply or discard it.`,
+        confirmLabel: "Write drafts",
+    });
+    if (!ok) return;
     const prog = document.getElementById("batch-progress");
     if (prog) prog.textContent = "Starting…";
     try {
@@ -286,7 +293,7 @@ async function batchOptimize(mode) {
             method: "POST",
             body: { store_id: parseInt(storeId), type: scanType, ids },
         });
-        pollBatch(res.batch_id);
+        pollBatch(res.batch_id, "drafts");
     } catch (err) {
         showToast(`Batch failed to start: ${err.message}`, "error");
         if (prog) prog.textContent = "";
@@ -318,7 +325,7 @@ async function boostFactsBatch() {
     }
 }
 
-function pollBatch(batchId) {
+function pollBatch(batchId, kind = "apply") {
     if (batchPollTimer) clearInterval(batchPollTimer);
     let consecutiveErrors = 0;
     batchPollTimer = setInterval(async () => {
@@ -326,10 +333,15 @@ function pollBatch(batchId) {
             const s = await apiRequest(`/api/ai-seo/optimize/batch/${batchId}`);
             consecutiveErrors = 0;
             const prog = document.getElementById("batch-progress");
-            if (prog) prog.textContent = `Optimizing ${s.completed + s.failed}/${s.total}${s.current ? " · " + s.current : ""}`;
+            if (prog) prog.textContent = `${kind === "drafts" ? "Writing drafts" : "Optimizing"} ${s.completed + s.failed}/${s.total}${s.current ? " · " + s.current : ""}`;
             if (s.status === "completed" || s.status === "failed") {
                 clearInterval(batchPollTimer);
-                showToast(`Batch done — ${s.completed} optimized, ${s.failed} failed`, s.failed ? "warning" : "success");
+                if (prog) prog.textContent = "";
+                if (kind === "drafts") {
+                    showToast(`${s.completed} draft${s.completed === 1 ? "" : "s"} ready to review${s.failed ? `, ${s.failed} failed` : ""}.`, s.failed ? "warning" : "success");
+                } else {
+                    showToast(`Batch done — ${s.completed} optimized, ${s.failed} failed`, s.failed ? "warning" : "success");
+                }
                 selectedIds.clear();
                 loadItems();
                 loadOverview();
@@ -482,7 +494,7 @@ async function applyFacts(btn) {
     }
 }
 
-function renderOptimizePreview(res) {
+function renderOptimizePreview(res, opts = {}) {
     const p = res.preview || {};
     const delta = res.after_score - res.before_score;
     const deltaColor = delta >= 0 ? "var(--success)" : "var(--error)";
@@ -537,9 +549,13 @@ function renderOptimizePreview(res) {
                 <div style="font-size:14px;">Projected: <b>${res.before_score}</b> →
                     <b style="color:${deltaColor};">${res.after_score}</b>
                     <span style="color:${deltaColor};">(${delta >= 0 ? "+" : ""}${delta})</span></div>
-                <button class="btn btn-primary" style="margin-left:auto;" onclick="applyOptimization(this)">
+                ${opts.draftId ? `<button class="btn btn-secondary" style="margin-left:auto;" onclick="discardDraft(${opts.draftId}, this)">
+                    <span class="material-symbols-rounded">delete</span> Discard draft</button>
+                <button class="btn btn-primary" onclick="applyDraft(${opts.draftId}, this)">
+                    <span class="material-symbols-rounded">cloud_upload</span> Apply to Shopify</button>`
+                : `<button class="btn btn-primary" style="margin-left:auto;" onclick="applyOptimization(this)">
                     <span class="material-symbols-rounded">cloud_upload</span> Apply to Shopify
-                </button>
+                </button>`}
             </div>
             <div style="margin-bottom:12px;">${signalsHtml}</div>
             ${kwHtml}
@@ -549,7 +565,7 @@ function renderOptimizePreview(res) {
             <div style="font-size:13px;">${escapeHtml(p.meta_title || "")}</div>
             <h4 style="margin:12px 0 6px;">Meta description</h4>
             <div style="font-size:13px;">${escapeHtml(p.meta_description || "")}</div>
-            ${p.expert_verdict ? `<h4 style="margin:12px 0 6px;">Expert Verdict</h4>
+            ${p.expert_verdict ? `<h4 style="margin:12px 0 6px;">Summary</h4>
                 <div style="font-size:13px;font-style:italic;border-left:3px solid var(--primary);padding-left:10px;">${escapeHtml(p.expert_verdict)}</div>` : ""}
             ${p.product_facts && Object.keys(p.product_facts).length ? `<div style="font-size:12px;color:var(--on-surface-secondary);margin-top:8px;"><b>Specifications table sourced from your data:</b> ${Object.keys(p.product_facts).map(escapeHtml).join(", ")}</div>` : ""}
             <h4 style="margin:12px 0 6px;">Optimized description</h4>
@@ -2023,7 +2039,10 @@ function renderHeadline(latest, summary, metrics) {
         <div class="stat-card"><div class="stat-value">${fmtPct(brandKnown)}</div>
             <div class="stat-label">Brand knowledge</div>
             <div class="stat-label" style="color:var(--on-surface-secondary);">do models know your store exists</div></div>
-        ${retrCard}`;
+        ${retrCard}
+        <p style="grid-column:1/-1;margin:4px 0 0;font-size:12px;color:var(--on-surface-secondary);">
+            A directional probe, not a measurement: a few hundred answers from API models (not Google's AI Overviews or AI Mode), so
+            moves of a few points between runs are normal variation. Google's own AI reporting is in Search Console.</p>`;
 }
 
 function renderModels(d) {
@@ -2631,3 +2650,134 @@ document.addEventListener("DOMContentLoaded", async () => {
         applyAiFocus(boot.focus, boot.action, new URLSearchParams(location.search).get("sub"));
     }
 });
+
+
+// ─── GEO drafts: batch rewrites wait here until applied one by one ───
+
+let geoDrafts = [];
+
+async function loadDrafts() {
+    const bar = document.getElementById("geo-drafts-bar");
+    if (!bar) return;
+    try {
+        const res = await apiRequest(`/api/ai-seo/drafts?store_id=${getStoreId()}&type=${scanType}`);
+        geoDrafts = res.drafts || [];
+    } catch (err) {
+        bar.innerHTML = `<p style="color:var(--error);font-size:13px;">Could not load drafts: ${escapeHtml(err.message)}</p>`;
+        return;
+    }
+    bar.innerHTML = geoDrafts.length
+        ? `<div class="card" style="display:flex;align-items:center;gap:12px;padding:10px 14px;margin-bottom:12px;">
+            <span class="material-symbols-rounded" style="color:var(--primary);">rate_review</span>
+            <div style="flex:1;font-size:13px;"><strong>${geoDrafts.length} draft${geoDrafts.length === 1 ? "" : "s"} to review.</strong> Nothing has changed on your store yet.</div>
+            <button class="btn btn-primary btn-sm" onclick="openDraftList()">Review drafts</button>
+           </div>`
+        : "";
+}
+
+function openDraftList() {
+    document.getElementById("breakdown-title").textContent = `Drafts to review (${geoDrafts.length})`;
+    const rows = geoDrafts.map((d) => {
+        const delta = (d.after_score ?? 0) - (d.before_score ?? 0);
+        const col = delta >= 0 ? "var(--success)" : "var(--error)";
+        return `<tr>
+            <td style="width:30px;"><input type="checkbox" class="draft-pick" value="${d.id}" ${d.dropped_keywords.length || delta < 0 ? "" : "checked"}></td>
+            <td><a href="#" onclick="event.preventDefault();openDraft(${d.id})">${escapeHtml(d.title || "—")}</a>
+                ${d.dropped_keywords.length ? `<div style="font-size:11.5px;color:var(--error);">Drops: ${d.dropped_keywords.map(escapeHtml).join(", ")}</div>` : ""}</td>
+            <td style="white-space:nowrap;">${d.before_score ?? "—"} → <strong style="color:${col};">${d.after_score ?? "—"}</strong></td>
+            <td style="font-size:12px;color:var(--on-surface-secondary);">${d.created_at ? formatRelativeTime(d.created_at) : ""}</td>
+            <td style="text-align:right;"><button class="btn btn-secondary btn-sm" onclick="openDraft(${d.id})">Review</button></td>
+        </tr>`;
+    }).join("");
+    document.getElementById("breakdown-content").innerHTML = geoDrafts.length
+        ? `<p style="font-size:13px;color:var(--on-surface-secondary);margin:0 0 10px;">Open a draft to read it before applying. Drafts that drop one of the page's keywords or lower its score are left unticked. Every applied draft can be undone from the item's History.</p>
+           <div class="table-container"><table class="data-table"><thead><tr><th></th><th>Item</th><th>AI readiness</th><th>Written</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>
+           <div style="display:flex;gap:10px;margin-top:12px;align-items:center;">
+               <button class="btn btn-primary" onclick="applyPickedDrafts(this)"><span class="material-symbols-rounded">cloud_upload</span> Apply ticked drafts</button>
+               <button class="btn btn-secondary" onclick="discardPickedDrafts(this)">Discard ticked</button>
+               <span id="drafts-progress" style="font-size:13px;color:var(--on-surface-secondary);"></span>
+           </div>`
+        : `<p>No drafts waiting.</p>`;
+    document.getElementById("breakdown-modal").classList.add("active");
+}
+
+async function openDraft(id) {
+    const box = document.getElementById("breakdown-content");
+    box.innerHTML = `<div class="loading-spinner"><div class="spinner"></div></div>`;
+    try {
+        const res = await apiRequest(`/api/ai-seo/drafts/${id}`);
+        document.getElementById("breakdown-title").textContent = `Draft: ${res.item.title || ""}`;
+        box.innerHTML = `<button class="btn btn-secondary btn-sm" onclick="openDraftList()"><span class="material-symbols-rounded">arrow_back</span> All drafts</button><div id="optimize-result"></div>`;
+        renderOptimizePreview(res, { draftId: id });
+    } catch (err) {
+        box.innerHTML = `<p style="color:var(--error);">${escapeHtml(err.message)}</p>`;
+    }
+}
+
+async function applyDraft(id, btn) {
+    btn.disabled = true;
+    try {
+        const res = await apiRequest(`/api/ai-seo/drafts/${id}/apply`, { method: "POST", body: {} });
+        showToast(`Applied — new score ${res.new_score}`, "success");
+        await loadDrafts();
+        loadItems();
+        loadOverview();
+        openDraftList();
+    } catch (err) {
+        showToast(`Apply failed: ${err.message}`, "error");
+        btn.disabled = false;
+    }
+}
+
+async function discardDraft(id, btn) {
+    btn.disabled = true;
+    try {
+        await apiRequest(`/api/ai-seo/drafts/${id}/discard`, { method: "POST", body: {} });
+        await loadDrafts();
+        openDraftList();
+    } catch (err) {
+        showToast(`Discard failed: ${err.message}`, "error");
+        btn.disabled = false;
+    }
+}
+
+function pickedDraftIds() {
+    return [...document.querySelectorAll(".draft-pick:checked")].map((el) => parseInt(el.value));
+}
+
+async function applyPickedDrafts(btn) {
+    const ids = pickedDraftIds();
+    if (!ids.length) { showToast("Tick at least one draft", "warning"); return; }
+    const ok = await UIConfirm.ask({
+        title: `Apply ${ids.length} draft${ids.length === 1 ? "" : "s"} to Shopify?`,
+        message: "Each description, meta title and meta description goes live. A draft whose page changed after it was written is skipped. Every change can be undone from the item's History.",
+        confirmLabel: "Apply",
+    });
+    if (!ok) return;
+    btn.disabled = true;
+    const prog = document.getElementById("drafts-progress");
+    try {
+        const { task_id } = await apiRequest("/api/ai-seo/drafts/apply", { method: "POST", body: { store_id: parseInt(getStoreId()), ids } });
+        const task = await pollTaskUntilDone(`/api/tasks/${task_id}`, {
+            intervalMs: 2500, timeoutMs: 60 * 60 * 1000,
+            onProgress: (t) => { const p = t.result && t.result.progress; if (p && prog) prog.textContent = `Applying ${p.completed}/${p.total}…`; },
+        });
+        const r = task.result || {};
+        showToast(`${r.applied || 0} applied${r.skipped ? `, ${r.skipped} skipped` : ""}${r.failed ? `, ${r.failed} failed` : ""}.${(r.problems || []).length ? " " + r.problems.slice(0, 2).join(" ") : ""}`, r.failed || r.skipped ? "warning" : "success");
+    } catch (err) {
+        showToast(`Applying drafts failed: ${err.message}`, "error");
+    }
+    await loadDrafts();
+    loadItems();
+    loadOverview();
+    openDraftList();
+}
+
+async function discardPickedDrafts(btn) {
+    const ids = pickedDraftIds();
+    if (!ids.length) return;
+    btn.disabled = true;
+    await Promise.all(ids.map((id) => apiRequest(`/api/ai-seo/drafts/${id}/discard`, { method: "POST", body: {} }).catch(() => null)));
+    await loadDrafts();
+    openDraftList();
+}

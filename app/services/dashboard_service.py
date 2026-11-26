@@ -671,6 +671,9 @@ def build_action_queue(store_id, limit=15):
 
     items = []
     counts = {}
+    # Providers that raised: an empty queue then means "could not check",
+    # not "nothing to do".
+    failed_sources = []
     dismissed = _dismissed_action_keys(store_id)
 
     # Actionable priorities and re-measuring items are strictly separated: a
@@ -682,6 +685,7 @@ def build_action_queue(store_id, limit=15):
         priorities, measuring = get_queued_priorities(store_id, dismissed_keys=dismissed)
     except Exception as e:
         logger.warning("Action queue: priorities failed: %s", e)
+        failed_sources.append("page priorities")
         priorities = []
     from app.services.seo_priority_service import UNSPECIFIED_ACTION_LABEL
     for p in priorities:
@@ -733,6 +737,7 @@ def build_action_queue(store_id, limit=15):
         ctr = get_ctr_opportunities(store_id, limit=15)
     except Exception as e:
         logger.warning("Action queue: CTR scan failed: %s", e)
+        failed_sources.append("click-through scan")
         ctr = []
 
     # One meta title serves every query variant of a page — group the
@@ -867,6 +872,7 @@ def build_action_queue(store_id, limit=15):
             rows = [r for r in provider(store_id) if r["action_key"] not in dismissed]
         except Exception:
             logger.exception("Action queue: %s failed", provider.__name__)
+            failed_sources.append(provider.__name__.strip("_").replace("_rows", "").replace("_", " "))
             rows = []
         items.extend(rows)
         if rows:
@@ -925,16 +931,54 @@ def build_action_queue(store_id, limit=15):
     else:
         ms["next_complete_days"] = None
 
+    shown = items[:limit]
+    attach_serp_previews(store_id, shown)
     return {
-        "items": items[:limit],
+        "items": shown,
         # Pre-truncation count. The badge must not report a number the page
         # can't show: it used to be len(items) from a limit=50 build while the
         # dashboard renders limit=15.
         "total_items": len(items),
         "total_by_source": counts,
+        "failed_sources": failed_sources,
         "measuring": measuring_rows,
         "measuring_summary": ms,
     }
+
+
+_PREVIEW_SQL = {
+    "product": "SELECT id, handle, title, meta_title, meta_description, NULL AS blog_handle FROM synced_products WHERE store_id = %s AND id = ANY(%s)",
+    "collection": "SELECT id, handle, title, meta_title, meta_description, NULL AS blog_handle FROM synced_collections WHERE store_id = %s AND id = ANY(%s)",
+    "article": """SELECT a.id, a.handle, a.title, a.meta_title, a.meta_description, b.handle AS blog_handle
+                  FROM synced_articles a LEFT JOIN synced_blogs b ON b.id = a.blog_id
+                  WHERE a.store_id = %s AND a.id = ANY(%s)""",
+}
+
+
+def attach_serp_previews(store_id, items):
+    """Give each per-page queue item the Google result it currently shows
+    (`serp`), so Home can render the row as a search snippet."""
+    from app.services.serp_preview import serp_preview
+    wanted = {}
+    for it in items:
+        if it.get("item_type") in _PREVIEW_SQL and it.get("item_id"):
+            wanted.setdefault(it["item_type"], set()).add(it["item_id"])
+    if not wanted:
+        return
+    found = {}
+    try:
+        with db.get_cursor() as cur:
+            for item_type, ids in wanted.items():
+                cur.execute(_PREVIEW_SQL[item_type], (store_id, list(ids)))
+                for row in cur.fetchall():
+                    found[(item_type, row["id"])] = serp_preview(item_type, row, row.get("blog_handle"))
+    except Exception:
+        logger.warning("SERP previews unavailable for the action queue", exc_info=True)
+        return
+    for it in items:
+        preview = found.get((it.get("item_type"), it.get("item_id")))
+        if preview and preview["path"]:
+            it["serp"] = preview
 
 
 def get_setup_state(store_id):
@@ -1192,7 +1236,13 @@ def get_ops(store_id):
     failed_7d = int(t["failed_7d"] or 0)
     finished = completed_7d + failed_7d
 
+    from app.services.job_health import store_job_problems
+
+    jobs = [{**p, "at": p["at"].replace(tzinfo=timezone.utc).isoformat() if p["at"] else None}
+            for p in store_job_problems(store_id)]
+
     return {
+        "jobs": jobs,
         "freshness": {
             "sync": freshness_entry("sync", sync_at),
             "gsc_pull": freshness_entry("gsc_pull", gsc_at),

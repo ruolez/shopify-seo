@@ -3,7 +3,7 @@
 Run with: pytest app/services/unindexed_plan_spec.py
 """
 
-from app.services.unindexed_plan import diagnose, pick_link_sources, rank
+from app.services.unindexed_plan import diagnose, rank
 
 CRAWLED = "Crawled - currently not indexed"
 UNKNOWN = "URL is unknown to Google"
@@ -55,26 +55,3 @@ class TestRank:
         page = rank([_page(incoming_links=0, volume=100)])[0]
         assert page["reason"] == "No article or description links to it"
         assert page["action"]
-
-
-ARTICLES = [
-    {"id": 10, "title": "Swisher Sweets Flavors Ranked", "clicks": 30},
-    {"id": 11, "title": "Best Hookah Flavors for Beginners", "clicks": 50},
-    {"id": 12, "title": "Swisher vs Backwoods", "clicks": 5},
-]
-
-
-class TestPickLinkSources:
-    def test_articles_about_the_brand_fullest_match_first(self):
-        picked = pick_link_sources({"vendor": "Swisher Sweets", "product_type": "Cigarillos"}, ARTICLES, limit=2)
-        assert [a["id"] for a in picked] == [10, 12]
-
-    def test_equal_brand_matches_rank_by_clicks(self):
-        articles = [{"id": 1, "title": "Swisher guide", "clicks": 2}, {"id": 2, "title": "Swisher review", "clicks": 9}]
-        assert [a["id"] for a in pick_link_sources({"vendor": "Swisher"}, articles)] == [2, 1]
-
-    def test_product_type_alone_is_not_enough(self):
-        assert pick_link_sources({"vendor": "Zig-Zag", "product_type": "Hookah"}, ARTICLES) == []
-
-    def test_no_brand_gives_no_source(self):
-        assert pick_link_sources({"vendor": "", "product_type": "Hookah"}, ARTICLES) == []

@@ -83,11 +83,11 @@ def auto_links_add():
 
 @interlinking_bp.route("/api/auto-links/run", methods=["POST"])
 def auto_links_run():
-    """Apply a whole link plan in the background. kind: unindexed |
-    article_collection | collection_back."""
+    """Apply a whole link plan in the background. kind: article_collection |
+    collection_back."""
     data = request.get_json(silent=True) or {}
     store_id, kind = data.get("store_id"), data.get("kind")
-    if not store_id or kind not in ("unindexed", "article_collection", "collection_back"):
+    if not store_id or kind not in ("article_collection", "collection_back"):
         return jsonify({"error": "store_id and a valid kind are required"}), 400
     with db.get_cursor() as cur:
         cur.execute(
@@ -883,6 +883,7 @@ def _inject_link_via_ai(current_html, links_to_add, config):
     client = OpenAI(
         base_url="https://openrouter.ai/api/v1",
         api_key=config["api_key"],
+        timeout=120.0, max_retries=1,
     )
 
     response = client.chat.completions.create(

@@ -88,3 +88,17 @@ class TestGenerateSeoSnippet:
         opens = snippet.count("{% if ") + snippet.count("{%- if ")
         closes = snippet.count("{% endif %}") + snippet.count("{%- endif -%}")
         assert opens == closes
+
+
+from app.services.schema_generator import strip_faq_microdata
+
+FAQ_HTML = ('<div style="x" itemscope itemtype="https://schema.org/FAQPage"><div style="m" itemscope '
+            'itemprop="mainEntity" itemtype="https://schema.org/Question"><h3 itemprop="name">Q?</h3>'
+            '<div itemscope itemprop="acceptedAnswer" itemtype="https://schema.org/Answer">'
+            '<p itemprop="text">A.</p></div></div></div>')
+
+
+class TestStripFaqMicrodata:
+    def test_removes_every_faq_attribute_and_keeps_text(self):
+        assert strip_faq_microdata(FAQ_HTML) == (
+            '<div style="x"><div style="m"><h3>Q?</h3><div><p>A.</p></div></div></div>')

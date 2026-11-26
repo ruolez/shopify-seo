@@ -25,6 +25,8 @@ from app.prompt_defaults import DEFAULTS
 # (Google-Extended, CCBot, Applebot-Extended, anthropic-ai) are left out:
 # blocking them does not affect appearing in any search or answer engine.
 AI_BOTS = [
+    # Google's AI Overviews and AI Mode are fed by ordinary Googlebot crawling.
+    "Googlebot",
     "GPTBot",
     "ChatGPT-User",
     "OAI-SearchBot",
@@ -40,18 +42,11 @@ _MEASURE_RE = re.compile(
 )
 _BARE_NUMBER_RE = re.compile(r"\b\d{2,}\b")
 _CURRENCY_RE = re.compile(r"[$£€]\s?\d")
-_REVIEW_RE = re.compile(
-    r"\b\d[\d,]*\s?(?:reviews?|ratings?|customers?|sold|units?|orders?)\b", re.I
-)
-_CITATION_RE = re.compile(
-    r"according to|\bresearch\b|\bstud(?:y|ies)\b|\bsurvey\b|source:|\[\d+\]", re.I
-)
 _QUOTE_RE = re.compile(r"[\"“][^\"”]{12,}[\"”]|<blockquote", re.I)
 _TAG_RE = re.compile(r"<[^>]+>")
 _HEADING_RE = re.compile(r"<h[2-4][^>]*>(.*?)</h[2-4]>", re.I | re.S)
 _LI_RE = re.compile(r"<li\b", re.I)
 _TABLE_RE = re.compile(r"<table\b", re.I)
-_EXTERNAL_LINK_RE = re.compile(r'href=["\']https?://([^/"\']+)', re.I)
 _QUESTION_WORDS = re.compile(
     r"^(how|what|why|when|where|which|who|can|does|do|is|are|should|will)\b", re.I
 )
@@ -79,15 +74,16 @@ def _fact_density(text, thresholds):
     if wc < 20:
         return 0, "Too little text to assess fact density"
 
+    # Measured specs and prices only. Counting "N customers / sold" and the
+    # words "research" or "study" rewarded phrasing, and pushed rewrites
+    # toward social-proof numbers nobody could verify.
     strong = (
         len(_MEASURE_RE.findall(text))
         + len(_CURRENCY_RE.findall(text))
-        + len(_REVIEW_RE.findall(text))
-        + len(_CITATION_RE.findall(text))
         + len(_QUOTE_RE.findall(text))
     )
     remainder = text
-    for rx in (_MEASURE_RE, _CURRENCY_RE, _REVIEW_RE):
+    for rx in (_MEASURE_RE, _CURRENCY_RE):
         remainder = rx.sub(" ", remainder)
     bare = len(_BARE_NUMBER_RE.findall(remainder))
     bare_weight = thresholds["fact_density_per_100w"].get("bare_weight", 0.3)
@@ -210,7 +206,7 @@ def _structured_data_score(schema_types, resource_type, thresholds, primary_sche
     return score, detail
 
 
-def _entity_authority(text, html, schema_types, vendor=None, store_domain=None):
+def _entity_authority(text, schema_types, vendor=None):
     score = 0
     parts = []
     if vendor and vendor.lower() in text.lower():
@@ -219,15 +215,9 @@ def _entity_authority(text, html, schema_types, vendor=None, store_domain=None):
     if schema_types and "Organization" in schema_types:
         score += 30
         parts.append("Organization schema")
-    external = {
-        d.split(":")[0].lower()
-        for d in _EXTERNAL_LINK_RE.findall(html or "")
-        if not store_domain or store_domain.lower() not in d.lower()
-    }
-    if external:
-        score += min(40, len(external) * 20)
-        parts.append(f"{len(external)} outbound source link(s)")
-    score = min(score, 100)
+    # Outbound links are not scored: +20 per link pushed rewrites to add
+    # sources, and nothing checks an AI-added URL is real or relevant.
+    score = min(round(score / 60 * 100), 100)
     detail = ", ".join(parts) if parts else "No brand/authority signals in content"
     return score, detail
 
@@ -422,7 +412,7 @@ def analyze_ai_visibility(
         crawlability if crawlability else (50, "Store crawlability not checked")
     )
     scores["entity_authority"], details["entity_authority"] = _entity_authority(
-        text, html, schema_types, item.get("vendor"), store_domain
+        text, schema_types, item.get("vendor")
     )
     # Real content freshness only: when we optimized it, else Shopify's updatedAt.
     # synced_at is deliberately excluded — re-syncing must not fake freshness.

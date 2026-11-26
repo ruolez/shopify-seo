@@ -1,8 +1,6 @@
 {% extends "base.html" %}
 
-{% block title %}Content Calendar{% endblock %}
 
-{% block page_title %}Content Calendar <span style="font-size:13px;color:var(--on-surface-secondary);font-weight:400;">blog + news pipeline</span>{% endblock %}
 
 {% block content %}
                 <div class="toolbar-row" style="align-items:center;gap:12px;margin-bottom:16px;flex-wrap:wrap;">
@@ -12,8 +10,8 @@
                     <button class="btn btn-secondary btn-sm" onclick="calToday()">Today</button>
                     <span style="flex:1;"></span>
                     <span style="display:flex;gap:12px;font-size:11.5px;color:var(--on-surface-secondary);align-items:center;flex-wrap:wrap;">
-                        <span><span class="cal-dot" style="background:#8b5cf6;"></span> Blog</span>
-                        <span><span class="cal-dot" style="background:#f59e0b;"></span> News</span>
+                        <span><span class="cal-dot" style="background:var(--primary);"></span> Blog</span>
+                        <span><span class="cal-dot" style="background:var(--warning);"></span> News</span>
                         <span><span class="cal-dot" style="background:transparent;border:2px solid var(--on-surface-secondary);"></span> Approved, waiting</span>
                         <span><span class="cal-dot" style="background:transparent;border:2px dashed var(--on-surface-secondary);"></span> Needs approval</span>
                         <span><span class="cal-dot" style="background:var(--error);"></span> Failed</span>

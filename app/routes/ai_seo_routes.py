@@ -20,6 +20,7 @@ from flask import Blueprint, jsonify, render_template, request
 
 from app.auth import decrypt_value
 from app.database import db
+from app.services.ai_output_guard import empty_sections
 from app.services.apply_pipeline import ApplyRefused, refusal_response
 from app.services.task_runner import spawn as spawn_task, sweep_stale_jobs
 from app.services import ai_seo_analyzer
@@ -994,6 +995,33 @@ def _rescore_item(store_id, resource_type, item, live, crawlability, store_domai
     return result
 
 
+def _before_scores(store_id, resource_type, item, stored, store_domain):
+    """(breakdown, score) the item has now: the stored scan, or a fresh
+    content-only score when it was never scanned."""
+    if stored and stored.get("breakdown") is not None:
+        return stored["breakdown"], stored["score"]
+    before = ai_seo_analyzer.analyze_ai_visibility({**item, "resource_type": resource_type}, store_domain=store_domain)
+    return before["breakdown"], before["score"]
+
+
+def _project_after(store_id, resource_type, item, geo, stored, before_breakdown, store_domain):
+    """Score the rewrite would get, computed exactly as a rescan after
+    applying it would (_rescore_item): same crawl, same credited schema, same
+    site-wide types. Only the description changes; crawlability is
+    store-level and carries over."""
+    live = (stored or {}).get("live_crawl")
+    site_asset = _site_schema_asset(store_id)
+    markup = _credited_markup(_pushed_schema(store_id).get(str(item.get("shopify_id")), []), site_asset, live)
+    return ai_seo_analyzer.analyze_ai_visibility(
+        {**item, "description": geo["optimized_description_html"], "resource_type": resource_type},
+        live=live,
+        schema_markup=markup,
+        crawlability=_crawlability_from_breakdown(before_breakdown),
+        store_domain=store_domain,
+        site_schema_types=site_asset["types"],
+    )
+
+
 @ai_seo_bp.route("/api/ai-seo/optimize/preview", methods=["POST"])
 def optimize_preview():
     from app.ai_agent import run_task
@@ -1017,12 +1045,7 @@ def optimize_preview():
     store_domain = url_utils.store_host(dict(store)) if store else None
 
     stored = _stored_score(int(store_id), resource_type, resource_id)
-    before_breakdown = stored["breakdown"] if stored else None
-    if before_breakdown is None:
-        before = ai_seo_analyzer.analyze_ai_visibility({**item, "resource_type": resource_type}, store_domain=store_domain)
-        before_breakdown, before_score = before["breakdown"], before["score"]
-    else:
-        before_score = stored["score"]
+    before_breakdown, before_score = _before_scores(int(store_id), resource_type, item, stored, store_domain)
 
     task_type = "ai_seo_collection" if resource_type == "collection" else "ai_seo_product"
     id_key = "collection_id" if resource_type == "collection" else "product_id"
@@ -1033,27 +1056,10 @@ def optimize_preview():
     )
     if geo.get("error"):
         return jsonify({"error": geo["error"]}), 502
-
-    # Honest projection: reuse the real crawl schema, and only credit the schema
-    # we'd push when the published theme snippet actually renders it — pushed
-    # metafields are invisible to crawlers otherwise.
-    live_after = dict((stored or {}).get("live_crawl") or {}) if stored else {}
-    schema_after = list(live_after.get("schema_types") or [])
-    if _site_schema_asset(int(store_id))["renders_item_schema"]:
-        if geo.get("faqpage_jsonld") and "FAQPage" not in schema_after:
-            schema_after.append("FAQPage")
-        pushed_type = "CollectionPage" if resource_type == "collection" else "Product"
-        if pushed_type not in schema_after:
-            schema_after.append(pushed_type)
-    live_after["schema_types"] = schema_after
-    # Crawlability is store-level (robots.txt/llms.txt) — carry it over unchanged so
-    # content optimization never shows a spurious crawlability delta.
-    after = ai_seo_analyzer.analyze_ai_visibility(
-        {**item, "description": geo["optimized_description_html"], "resource_type": resource_type},
-        live=live_after if schema_after else None,
-        crawlability=_crawlability_from_breakdown(before_breakdown),
-        store_domain=store_domain,
-    )
+    hollow = empty_sections(geo.get("optimized_description_html"))
+    if hollow:
+        return jsonify({"error": f"The AI left {len(hollow)} section(s) empty ({'; '.join(hollow[:3])}). Try again."}), 502
+    after = _project_after(int(store_id), resource_type, item, geo, stored, before_breakdown, store_domain)
 
     return jsonify(
         {
@@ -1194,10 +1200,16 @@ def optimize_apply():
     return jsonify({"ok": True, "new_score": result["score"], "breakdown": result["breakdown"]})
 
 
-# ── Phase 2b: batch GEO optimization ────────────────────────────────────
+# ── Phase 2b: batch GEO optimization (drafts, approved one by one) ─────────
+
+
+def _body_hash(html):
+    return hashlib.sha1((html or "").encode("utf-8")).hexdigest()
 
 
 def _execute_ai_seo_batch(batch_id, store_id, resource_type, resource_ids):
+    """Write a GEO draft per item. Nothing reaches Shopify here: each draft
+    waits in bulk_task_items (status 'draft') until someone applies it."""
     from app.ai_agent import run_task
 
     with db.get_cursor() as cur:
@@ -1208,16 +1220,13 @@ def _execute_ai_seo_batch(batch_id, store_id, resource_type, resource_ids):
         with db.get_cursor() as cur:
             cur.execute("UPDATE bulk_tasks SET status = 'failed', completed_at = NOW() WHERE id = %s", (batch_id,))
         return
-    store = dict(store)
-    client = ShopifyClient(store["domain"], decrypt_value(store["access_token_enc"]), store["api_version"])
+    store_domain = url_utils.store_host(dict(store))
     table = "synced_collections" if resource_type == "collection" else "synced_products"
     task_type = "ai_seo_collection" if resource_type == "collection" else "ai_seo_product"
     id_key = "collection_id" if resource_type == "collection" else "product_id"
-    item_col = "collection_id" if resource_type == "collection" else "product_id"
-    base_url = _store_base_url(store)
+    item_col = id_key
 
     completed = failed = 0
-    applied_urls = []
     for rid in resource_ids:
         with db.get_cursor() as cur:
             cur.execute(f"SELECT * FROM {table} WHERE id = %s AND store_id = %s", (rid, int(store_id)))
@@ -1230,31 +1239,40 @@ def _execute_ai_seo_batch(batch_id, store_id, resource_type, resource_ids):
             cur.execute("UPDATE bulk_tasks SET current_product_title = %s WHERE id = %s", (item.get("title"), batch_id))
         try:
             stored = _stored_score(store_id, resource_type, rid)
-            geo = run_task(task_type, {id_key: rid, "weak_signals": _weak_signals((stored or {}).get("breakdown"))}, store_id)
+            before_breakdown, before_score = _before_scores(store_id, resource_type, item, stored, store_domain)
+            geo = run_task(task_type, {id_key: rid, "weak_signals": _weak_signals(before_breakdown)}, store_id)
             if geo.get("error"):
                 raise ValueError(geo["error"])
-            _push_and_rescore(
-                store, resource_type, item,
-                geo.get("optimized_description_html", ""), geo.get("meta_title", ""),
-                geo.get("meta_description", ""), geo.get("faqpage_jsonld"), client,
-            )
-            applied_urls.append(_item_url(base_url, resource_type, item.get("handle")))
+            if not (geo.get("optimized_description_html") or "").strip():
+                raise ValueError("The AI returned no description")
+            hollow = empty_sections(geo["optimized_description_html"])
+            if hollow:
+                raise ValueError(f"The AI left {len(hollow)} section(s) empty ({'; '.join(hollow[:3])}). Write the draft again.")
+            after = _project_after(store_id, resource_type, item, geo, stored, before_breakdown, store_domain)
+            draft = {
+                "preview": geo,
+                "before_score": before_score, "before_breakdown": before_breakdown,
+                "after_score": after["score"], "after_breakdown": after["breakdown"],
+                "base_hash": _body_hash(item.get("description")),
+            }
             completed += 1
             with db.get_cursor() as cur:
+                # A newer draft replaces any older one still waiting for this item.
                 cur.execute(
-                    f"UPDATE bulk_task_items SET status = 'completed', ai_result = %s, completed_at = NOW() WHERE bulk_task_id = %s AND {item_col} = %s",
-                    (
-                        json.dumps({
-                            "geo_edits_applied": geo.get("geo_edits_applied", []),
-                            "preserved_keywords": geo.get("preserved_keywords", []),
-                            "dropped_keywords": geo.get("dropped_keywords", []),
-                        }),
-                        batch_id, rid,
-                    ),
+                    f"""UPDATE bulk_task_items i SET status = 'superseded'
+                        FROM bulk_tasks t
+                        WHERE t.id = i.bulk_task_id AND t.store_id = %s AND t.kind = 'geo_optimize'
+                          AND i.status = 'draft' AND i.{item_col} = %s AND i.bulk_task_id <> %s""",
+                    (store_id, rid, batch_id),
+                )
+                cur.execute(
+                    f"""UPDATE bulk_task_items SET status = 'draft', ai_result = %s, completed_at = NOW()
+                        WHERE bulk_task_id = %s AND {item_col} = %s""",
+                    (json.dumps(draft, default=str), batch_id, rid),
                 )
         except Exception as e:
             failed += 1
-            logger.exception("Batch GEO item %s failed: %s", rid, e)
+            logger.exception("Batch GEO draft %s failed: %s", rid, e)
             with db.get_cursor() as cur:
                 cur.execute(
                     f"UPDATE bulk_task_items SET status = 'failed', error = %s, completed_at = NOW() WHERE bulk_task_id = %s AND {item_col} = %s",
@@ -1265,33 +1283,11 @@ def _execute_ai_seo_batch(batch_id, store_id, resource_type, resource_ids):
 
     with db.get_cursor() as cur:
         cur.execute("UPDATE bulk_tasks SET status = 'completed', completed_at = NOW(), current_product_title = NULL WHERE id = %s", (batch_id,))
-    indexnow_service.ping_async(store_id, applied_urls, "geo_batch")
-
-
-def _sweep_stale_jobs():
-    """Fail any background job that's been 'running' far longer than possible —
-    catches daemons killed without a clean restart. Runs cheaply on job start/poll."""
-    try:
-        with db.get_cursor() as cur:
-            cur.execute(
-                "UPDATE bulk_tasks SET status='failed', completed_at=NOW() "
-                "WHERE status IN ('pending','running') AND created_at < NOW() - INTERVAL '6 hours'"
-            )
-            cur.execute(
-                "UPDATE ai_tracking_runs SET status='failed', error=COALESCE(error,'Timed out'), completed_at=NOW() "
-                "WHERE status IN ('pending','running') AND started_at < NOW() - INTERVAL '2 hours'"
-            )
-            cur.execute(
-                "UPDATE ai_tasks SET status='failed', error=COALESCE(error,'Timed out'), completed_at=NOW() "
-                "WHERE status IN ('pending','running') AND created_at < NOW() - INTERVAL '2 hours'"
-            )
-    except Exception:
-        pass
 
 
 @ai_seo_bp.route("/api/ai-seo/optimize/batch", methods=["POST"])
 def optimize_batch():
-    _sweep_stale_jobs()
+    sweep_stale_jobs()
     data = request.get_json(silent=True) or {}
     store_id = data.get("store_id")
     resource_type = data.get("type", "product")
@@ -1314,7 +1310,7 @@ def optimize_batch():
     item_col = "collection_id" if resource_type == "collection" else "product_id"
     with db.get_cursor() as cur:
         cur.execute(
-            "INSERT INTO bulk_tasks (status, total, auto_apply, store_id, kind, task_type, resource_type) VALUES ('pending', %s, TRUE, %s, 'geo_optimize', 'geo_optimize', %s) RETURNING id",
+            "INSERT INTO bulk_tasks (status, total, auto_apply, store_id, kind, task_type, resource_type) VALUES ('pending', %s, FALSE, %s, 'geo_optimize', 'geo_optimize', %s) RETURNING id",
             (len(ids), int(store_id), resource_type),
         )
         batch_id = cur.fetchone()["id"]
@@ -1326,6 +1322,174 @@ def optimize_batch():
 
     spawn_task("bulk_tasks", batch_id, _execute_ai_seo_batch, batch_id, int(store_id), resource_type, ids)
     return jsonify({"ok": True, "batch_id": batch_id, "total": len(ids)}), 201
+
+
+_DRAFT_SELECT = """
+    SELECT i.id, i.status, i.ai_result, i.error, i.completed_at, t.store_id, t.resource_type,
+           COALESCE(i.product_id, i.collection_id) AS resource_id,
+           COALESCE(p.title, c.title) AS title
+    FROM bulk_task_items i
+    JOIN bulk_tasks t ON t.id = i.bulk_task_id AND t.kind = 'geo_optimize'
+    LEFT JOIN synced_products p ON p.id = i.product_id
+    LEFT JOIN synced_collections c ON c.id = i.collection_id
+"""
+
+
+def _load_draft(draft_id):
+    with db.get_cursor() as cur:
+        cur.execute(_DRAFT_SELECT + " WHERE i.id = %s", (draft_id,))
+        row = cur.fetchone()
+    return dict(row) if row else None
+
+
+@ai_seo_bp.route("/api/ai-seo/drafts", methods=["GET"])
+def list_drafts():
+    """GEO drafts waiting for review, newest first."""
+    store_id = request.args.get("store_id", type=int)
+    resource_type = request.args.get("type", "product")
+    if not store_id:
+        return jsonify({"error": "store_id is required"}), 400
+    with db.get_cursor() as cur:
+        cur.execute(
+            _DRAFT_SELECT + " WHERE t.store_id = %s AND t.resource_type = %s AND i.status = 'draft' ORDER BY i.completed_at DESC",
+            (store_id, resource_type),
+        )
+        rows = cur.fetchall()
+    out = []
+    for r in rows:
+        d = r["ai_result"] or {}
+        out.append({
+            "id": r["id"], "resource_id": r["resource_id"], "title": r["title"],
+            "before_score": d.get("before_score"), "after_score": d.get("after_score"),
+            "dropped_keywords": (d.get("preview") or {}).get("dropped_keywords") or [],
+            "created_at": r["completed_at"].isoformat() if r["completed_at"] else None,
+        })
+    return jsonify({"drafts": out})
+
+
+@ai_seo_bp.route("/api/ai-seo/drafts/<int:draft_id>", methods=["GET"])
+def get_draft(draft_id):
+    row = _load_draft(draft_id)
+    if not row:
+        return jsonify({"error": "Draft not found"}), 404
+    d = row["ai_result"] or {}
+    return jsonify({
+        "draft_id": row["id"], "status": row["status"],
+        "preview": d.get("preview") or {},
+        "item": {"id": row["resource_id"], "title": row["title"]},
+        "before_score": d.get("before_score"), "before_breakdown": d.get("before_breakdown"),
+        "after_score": d.get("after_score"), "after_breakdown": d.get("after_breakdown"),
+    })
+
+
+def _apply_draft(row, client=None, force=False):
+    """Push one draft. Raises ApplyRefused when the page changed after the
+    draft was written (unless force) or when the pipeline refuses it."""
+    resource_type = row["resource_type"]
+    table = "synced_collections" if resource_type == "collection" else "synced_products"
+    with db.get_cursor() as cur:
+        cur.execute("SELECT * FROM stores WHERE id = %s", (row["store_id"],))
+        store = dict(cur.fetchone())
+        cur.execute(f"SELECT * FROM {table} WHERE id = %s", (row["resource_id"],))
+        item = cur.fetchone()
+    if not item:
+        raise ValueError("The item no longer exists")
+    item = dict(item)
+    d = row["ai_result"] or {}
+    if not force and d.get("base_hash") and d["base_hash"] != _body_hash(item.get("description")):
+        raise ApplyRefused(
+            {"status": "blocked", "code": "draft_outdated"},
+            "This page's description changed after the draft was written. Write a new draft, or apply anyway to replace the newer text.",
+        )
+    p = d.get("preview") or {}
+    client = client or ShopifyClient(store["domain"], decrypt_value(store["access_token_enc"]), store["api_version"])
+    result = _push_and_rescore(
+        store, resource_type, item, p.get("optimized_description_html", ""), p.get("meta_title", ""),
+        p.get("meta_description", ""), p.get("faqpage_jsonld"), client, allow_dropped_primary=force,
+    )
+    with db.get_cursor() as cur:
+        cur.execute(
+            "UPDATE bulk_task_items SET status = 'applied', apply_result = %s WHERE id = %s",
+            (json.dumps({"score": result["score"]}), row["id"]),
+        )
+    indexnow_service.ping_async(
+        store["id"], [_item_url(_store_base_url(store), resource_type, item.get("handle"))], "geo_apply"
+    )
+    return result
+
+
+@ai_seo_bp.route("/api/ai-seo/drafts/<int:draft_id>/apply", methods=["POST"])
+def apply_draft(draft_id):
+    data = request.get_json(silent=True) or {}
+    row = _load_draft(draft_id)
+    if not row or row["status"] != "draft":
+        return jsonify({"error": "This draft is no longer waiting for review"}), 404
+    try:
+        result = _apply_draft(row, force=bool(data.get("force")))
+    except ApplyRefused as refused:
+        return refusal_response(refused)
+    except Exception as e:
+        logger.exception("GEO draft apply failed: %s", e)
+        return jsonify({"error": str(e)}), 502
+    return jsonify({"ok": True, "new_score": result["score"], "breakdown": result["breakdown"]})
+
+
+@ai_seo_bp.route("/api/ai-seo/drafts/<int:draft_id>/discard", methods=["POST"])
+def discard_draft(draft_id):
+    with db.get_cursor() as cur:
+        cur.execute("UPDATE bulk_task_items SET status = 'discarded' WHERE id = %s AND status = 'draft'", (draft_id,))
+        changed = cur.rowcount
+    return jsonify({"ok": bool(changed)})
+
+
+@ai_seo_bp.route("/api/ai-seo/drafts/apply", methods=["POST"])
+def apply_drafts():
+    """Apply several drafts in the background. Drafts whose page changed
+    since they were written are skipped, never forced."""
+    data = request.get_json(silent=True) or {}
+    store_id = data.get("store_id")
+    ids = [int(i) for i in data.get("ids") or []]
+    if not store_id or not ids:
+        return jsonify({"error": "store_id and ids are required"}), 400
+    with db.get_cursor() as cur:
+        cur.execute(
+            "INSERT INTO ai_tasks (store_id, task_type, status, input) VALUES (%s, 'geo_drafts_apply', 'running', %s) RETURNING id",
+            (int(store_id), json.dumps({"ids": ids})),
+        )
+        task_id = cur.fetchone()["id"]
+
+    def _run():
+        out = {"applied": 0, "skipped": 0, "failed": 0, "problems": []}
+        client = None
+        for n, draft_id in enumerate(ids):
+            row = _load_draft(draft_id)
+            if not row or row["status"] != "draft" or row["store_id"] != int(store_id):
+                out["skipped"] += 1
+                continue
+            try:
+                if client is None:
+                    with db.get_cursor() as cur:
+                        cur.execute("SELECT * FROM stores WHERE id = %s", (int(store_id),))
+                        s = cur.fetchone()
+                    client = ShopifyClient(s["domain"], decrypt_value(s["access_token_enc"]), s["api_version"])
+                _apply_draft(row, client=client)
+                out["applied"] += 1
+            except ApplyRefused as refused:
+                out["skipped"] += 1
+                out["problems"].append(f"{row['title']}: {refused}")
+            except Exception as e:
+                logger.exception("GEO draft %s apply failed", draft_id)
+                out["failed"] += 1
+                out["problems"].append(f"{row['title']}: {e}")
+            with db.get_cursor() as cur:
+                cur.execute("UPDATE ai_tasks SET result = %s WHERE id = %s",
+                            (json.dumps({**out, "progress": {"completed": n + 1, "total": len(ids)}}), task_id))
+        with db.get_cursor() as cur:
+            cur.execute("UPDATE ai_tasks SET status = 'completed', result = %s, completed_at = NOW() WHERE id = %s",
+                        (json.dumps(out), task_id))
+
+    spawn_task("ai_tasks", task_id, _run)
+    return jsonify({"task_id": task_id})
 
 
 @ai_seo_bp.route("/api/ai-seo/optimize/batch/<int:batch_id>", methods=["GET"])
@@ -1525,7 +1689,7 @@ def _execute_fact_batch(batch_id, store_id, resource_type, resource_ids):
 
 @ai_seo_bp.route("/api/ai-seo/facts/batch", methods=["POST"])
 def facts_batch():
-    _sweep_stale_jobs()
+    sweep_stale_jobs()
     data = request.get_json(silent=True) or {}
     store_id = data.get("store_id")
     resource_type = data.get("type", "product")
@@ -1706,7 +1870,7 @@ def _schema_repush_candidate_ids(store_id, resource_type, ids):
 def schema_repush():
     """Regenerate + push schema enrichment for products (and refresh collection
     schema records) as a tracked background batch. No LLM calls involved."""
-    _sweep_stale_jobs()
+    sweep_stale_jobs()
     data = request.get_json(silent=True) or {}
     store_id = data.get("store_id")
     rtype = data.get("type", "product")
@@ -1796,8 +1960,8 @@ def _spawn_ai_seo_batch(store_id, kind, resource_type, ids):
     with db.get_cursor() as cur:
         cur.execute(
             "INSERT INTO bulk_tasks (status, total, auto_apply, store_id, kind, task_type, resource_type) "
-            "VALUES ('pending', %s, TRUE, %s, %s, %s, %s) RETURNING id",
-            (len(ids), int(store_id), kind, kind, resource_type),
+            "VALUES ('pending', %s, %s, %s, %s, %s, %s) RETURNING id",
+            (len(ids), kind != "geo_optimize", int(store_id), kind, kind, resource_type),
         )
         batch_id = cur.fetchone()["id"]
         for rid in ids:
@@ -1813,7 +1977,7 @@ def _spawn_ai_seo_batch(store_id, kind, resource_type, ids):
 @ai_seo_bp.route("/api/ai-seo/batches/<int:batch_id>/retry", methods=["POST"])
 def retry_batch(batch_id):
     """Re-run only the failed items of a finished batch as a new batch."""
-    _sweep_stale_jobs()
+    sweep_stale_jobs()
     with db.get_cursor() as cur:
         cur.execute("SELECT store_id, kind, resource_type, status FROM bulk_tasks WHERE id = %s", (batch_id,))
         b = cur.fetchone()
@@ -1999,7 +2163,7 @@ def manage_prompts():
 def tracking_run():
     from app.services.ai_visibility_tracker import start_tracking_run
 
-    _sweep_stale_jobs()
+    sweep_stale_jobs()
     data = request.get_json(silent=True) or {}
     store_id = data.get("store_id")
     if not store_id:
@@ -2635,6 +2799,14 @@ def aeo_robots_apply():
         theme_id = client.get_main_theme_id()
         if not theme_id:
             return jsonify({"error": "No main theme found"}), 502
+        # Keep the merchant's own robots.txt.liquid before replacing it the
+        # first time: there was no way back to a hand-written version.
+        try:
+            previous = client.get_theme_asset(theme_id, "templates/robots.txt.liquid")
+        except Exception:
+            previous = None
+        if previous and "managed by AI SEO" not in previous:
+            _save_aeo_asset(int(store_id), "robots_txt_backup", previous, "draft")
         client.upsert_theme_asset(theme_id, "templates/robots.txt.liquid", content)
         _save_aeo_asset(int(store_id), "robots_txt", content, "published")
     except Exception as e:

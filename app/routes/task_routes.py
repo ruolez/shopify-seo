@@ -400,11 +400,15 @@ def _ownership_for(cache, store_id):
     """Per-store ownership map, built lazily — a mixed-store batch used to
     share the first item's map, guarding every item against the wrong store."""
     if store_id not in cache:
+        from app.services.keyword_resolver import get_owned_primary_keywords
         try:
-            from app.services.keyword_resolver import get_owned_primary_keywords
             cache[store_id] = get_owned_primary_keywords(store_id)
-        except Exception:
-            cache[store_id] = {}
+        except Exception as e:
+            # Running unguarded let many pages take the same primary keyword.
+            # Each item fails with this reason instead (the single-item route
+            # already refuses the same way).
+            logger.exception("Keyword ownership lookup failed for store %s", store_id)
+            raise RuntimeError(f"Could not load which keywords other pages own: {e}") from e
     return cache[store_id]
 
 
@@ -526,6 +530,10 @@ def _execute_bulk_collection_task(bulk_task_id):
                     _claim_keyword(ownership, primary_kw.split("(")[0].strip(),
                                    "collection", collection_id)
 
+            if auto_apply and ai_result.get("description_error"):
+                # Pushing only the metas would leave the page half-optimized
+                # and marked done; fail the item so it is retried.
+                raise ValueError(f"Not applied — the description step failed: {ai_result['description_error']}")
             if auto_apply and "error" not in ai_result and "raw_response" not in ai_result:
                 try:
                     client = ShopifyClient(
@@ -689,6 +697,10 @@ def _execute_bulk_task(bulk_task_id):
                     _claim_keyword(ownership, primary_kw.split("(")[0].strip(),
                                    "product", product_id)
 
+            if auto_apply and ai_result.get("description_error"):
+                # Pushing only the metas would leave the page half-optimized
+                # and marked done; fail the item so it is retried.
+                raise ValueError(f"Not applied — the description step failed: {ai_result['description_error']}")
             if auto_apply and "error" not in ai_result and "raw_response" not in ai_result:
                 try:
                     client = ShopifyClient(

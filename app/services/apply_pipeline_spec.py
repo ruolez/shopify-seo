@@ -3,6 +3,8 @@
 Run with: pytest app/services/apply_pipeline_spec.py
 """
 
+import pytest
+
 from app.services.apply_pipeline import can_revert, plan_apply, shopify_fields
 
 IMG = '<img src="https://cdn.shopify.com/hero.jpg" alt="Hero">'
@@ -126,3 +128,46 @@ class TestVisibleFaq:
 
     def test_returns_none_when_no_question_is_visible(self):
         assert visible_faq(_faq("Do you ship to Canada?"), FAQ_BODY) is None
+
+
+STYLED = '<style>.spec{color:red}</style>' + BODY
+LONG_META = "Backwoods Honey Bourbon Cigars 5 Pack Natural Leaf Wrapper Sweet"
+
+
+class TestGuardScope:
+    def test_guarded_write_strips_style_blocks(self):
+        live = {**LIVE, "body": STYLED}
+        plan = plan_apply(live, live, {"body": STYLED + "<p>Added.</p>"})
+        assert plan["pushed"]["body"] == BODY + "<p>Added.</p>"
+
+    def test_verbatim_write_keeps_style_blocks(self):
+        live = {**LIVE, "body": STYLED}
+        new_body = STYLED + "<p>Added.</p>"
+        plan = plan_apply(live, live, {"body": new_body}, guard=False)
+        assert plan == {"status": "ok", "pushed": {"body": new_body}, "old": {"body": STYLED}}
+
+    def test_verbatim_write_keeps_a_meta_title_over_sixty_characters(self):
+        plan = plan_apply(LIVE, LIVE, {"meta_title": LONG_META}, guard=False)
+        assert plan["pushed"] == {"meta_title": LONG_META}
+
+    def test_guarded_write_clamps_a_meta_title_over_sixty_characters(self):
+        plan = plan_apply(LIVE, LIVE, {"meta_title": LONG_META})
+        assert len(plan["pushed"]["meta_title"]) <= 60
+
+
+from app.services.apply_pipeline import is_content_update
+
+
+class TestIsContentUpdate:
+    def test_ai_rewrite_of_the_body_is_a_content_update(self):
+        assert is_content_update("blog", "article_refresh", {"body": "x"}) is True
+
+    @pytest.mark.parametrize("source,change_type", [
+        ("auto_links", "link_added"), ("price_refresh", "price_refresh"),
+        ("hero_image", "inline_image_regen"), ("blog", "restyle"), ("undo", "revert"),
+    ])
+    def test_wiring_edits_are_not(self, source, change_type):
+        assert is_content_update(source, change_type, {"body": "x"}) is False
+
+    def test_meta_only_change_is_not(self):
+        assert is_content_update("blog", "article_edit", {"meta_title": "x"}) is False

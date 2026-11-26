@@ -1,13 +1,11 @@
 {% extends "base.html" %}
 
-{% block title %}Interlinking{% endblock %}
 
-{% block page_title %}Interlinking <span style="font-size:13px;color:var(--on-surface-secondary);font-weight:400;">internal link health</span>{% endblock %}
 
 {% block content %}
 <div class="toolbar-row" style="justify-content:space-between;align-items:center;">
     <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
-        <button id="il-analyze-btn" class="btn btn-primary">
+        <button id="il-analyze-btn" class="btn btn-primary" data-page-action>
             <span class="material-symbols-rounded">travel_explore</span>
             <span id="il-analyze-label">Analyze</span>
         </button>
@@ -19,7 +17,7 @@
     </div>
     <div style="display:flex;align-items:center;gap:12px;">
         <span id="il-last-analyzed" style="font-size:13px;color:var(--on-surface-secondary);"></span>
-        <button class="btn btn-secondary btn-sm" onclick="TasksPanel.open({ page: '/interlinking' })">
+        <button class="btn btn-secondary" data-page-action onclick="TasksPanel.open({ page: '/interlinking' })">
             <span class="material-symbols-rounded">checklist</span> Activity
         </button>
     </div>

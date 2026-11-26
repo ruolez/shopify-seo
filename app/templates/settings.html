@@ -1,8 +1,6 @@
 {% extends "base.html" %}
 
-{% block title %}Settings{% endblock %}
 
-{% block page_title %}Settings{% endblock %}
 
 {% block content %}
                 <div class="tabs">
@@ -193,6 +191,10 @@
                         <label style="display:flex;gap:8px;align-items:center;font-size:14px;margin:8px 0 12px;">
                             <input type="checkbox" id="feature-feed-readiness">
                             Show the shopping-feed audit in AI Search <span style="color:var(--on-surface-secondary);">(off: tobacco is not accepted by Google Merchant or Shopify's AI shopping channels)</span>
+                        </label>
+                        <label style="display:flex;gap:8px;align-items:center;font-size:14px;margin:0 0 12px;">
+                            <input type="checkbox" id="schema-emit-faq">
+                            Add FAQ structured data to pages <span style="color:var(--on-surface-secondary);">(off: Google no longer shows FAQ results; visible FAQ sections stay either way)</span>
                         </label>
                         <button class="btn btn-primary btn-sm" onclick="savePublishingSettings()">Save</button>
                     </div>

@@ -8,7 +8,7 @@ calCursor.setDate(1);
 // encodes status: filled = published, outlined = approved and waiting for
 // its slot, dashed = not approved yet (the scheduler will skip it).
 // Failed entries override to red so problems always stand out.
-const CAL_KIND_COLOR = { blog: "#8b5cf6", news: "#f59e0b" }; // violet / amber
+const CAL_KIND_COLOR = { blog: "var(--primary)", news: "var(--warning)" };
 
 function calDot(entry) {
     if (entry.status === "error" || entry.status === "failed") {

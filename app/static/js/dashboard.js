@@ -1,7 +1,14 @@
 let dashStoreId = null;
+let dashDomain = "";
 const dashCharts = {};
 
 document.addEventListener("DOMContentLoaded", () => {
+    // Every headline number opens the page where you act on it.
+    document.querySelectorAll(".kpi[data-href]").forEach((el) => {
+        const go = (e) => { if (!e.target.closest("a")) window.location = el.dataset.href; };
+        el.addEventListener("click", go);
+        el.addEventListener("keydown", (e) => { if (e.key === "Enter") go(e); });
+    });
     loadDashboard();
     // Store switching is owned by the global topbar StoreSelector (ui.js).
     document.addEventListener("store:changed", (e) => {
@@ -55,15 +62,16 @@ async function loadOverview() {
 
         // Store identity + sync freshness + inventory line
         const line = document.getElementById("dash-store-line");
+        dashDomain = (stats.store && stats.store.domain) || "";
         if (stats.store && stats.store.name) {
             const synced = stats.store.last_synced_at
-                ? `Last synced ${formatRelativeTime(stats.store.last_synced_at)}`
+                ? `Synced ${formatRelativeTime(stats.store.last_synced_at)}`
                 : "Never synced";
             const c = stats.counts || {};
-            const inventory = `${(c.products ?? 0).toLocaleString()} products · ${(c.collections ?? 0).toLocaleString()} collections · ${(c.articles ?? 0).toLocaleString()} articles`;
-            line.innerHTML = `<strong>${escapeHtml(stats.store.name)}</strong>` +
-                (stats.store.domain ? ` · ${escapeHtml(stats.store.domain)}` : "") +
-                ` · ${escapeHtml(synced)} · ${escapeHtml(inventory)}`;
+            line.innerHTML = `<a href="/stores" class="aside-row"><span>${escapeHtml(synced)}</span><span class="material-symbols-rounded">sync</span></a>
+                <a href="/seo?tab=products" class="aside-row"><span>Products</span><b>${(c.products ?? 0).toLocaleString()}</b></a>
+                <a href="/seo?tab=collections" class="aside-row"><span>Collections</span><b>${(c.collections ?? 0).toLocaleString()}</b></a>
+                <a href="/blog" class="aside-row"><span>Articles</span><b>${(c.articles ?? 0).toLocaleString()}</b></a>`;
             line.style.display = "";
         } else {
             line.style.display = "none";
@@ -275,9 +283,13 @@ async function loadActionQueue() {
         const shownNote = queued > data.items.length
             ? `showing ${data.items.length} of ${queued} queued · `
             : "";
-        document.getElementById("queue-note").textContent = data.items.length
-            ? `${shownNote}${queued} queued from ${totalCount.toLocaleString()} tracked opportunities`
+        const failed = data.failed_sources || [];
+        const failedNote = failed.length
+            ? ` · could not check ${failed.join(", ")} (see the log), so this list may be incomplete`
             : "";
+        document.getElementById("queue-note").textContent = (data.items.length
+            ? `${shownNote}${queued} queued from ${totalCount.toLocaleString()} tracked opportunities`
+            : "") + failedNote;
 
         const ms = data.measuring_summary || {};
         const measuringTotal = (ms.products_measuring || 0) + (ms.collections_measuring || 0);
@@ -289,6 +301,13 @@ async function loadActionQueue() {
                </div>`
             : "";
 
+        if (!data.items.length && failed.length) {
+            container.innerHTML = `<div style="padding:16px 0;color:var(--on-surface-secondary);font-size:13px;">
+                <span class="material-symbols-rounded" style="vertical-align:middle;color:var(--warning);">warning</span>
+                The queue could not be built: ${escapeHtml(failed.join(", "))} failed. Reload in a minute; if it persists, check the app log.</div>`;
+            card.style.display = "";
+            return;
+        }
         if (!data.items.length) {
             container.innerHTML = `<div style="padding:16px 0;color:var(--on-surface-secondary);font-size:13px;">
                 <span class="material-symbols-rounded" style="vertical-align:middle;color:var(--success);">check_circle</span>
@@ -318,25 +337,27 @@ async function loadActionQueue() {
                 else if (fix.kind === "striking_distance") verb = "Optimize";
             }
             const kwChip = fix && fix.keyword
-                ? `<span class="badge" title="Target keyword" style="background:var(--surface-dim);color:var(--on-surface);font-size:10.5px;max-width:170px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(fix.keyword)}</span>`
-                : "";
-            const gain = item.est_clicks_gain
-                ? `<span style="font-size:11px;color:var(--success);white-space:nowrap;">+${item.est_clicks_gain} clicks/mo</span>`
+                ? `<span class="kw-chip" title="Target keyword">${escapeHtml(fix.keyword)}</span>`
                 : "";
             const dismiss = item.action_key
-                ? `<button class="icon-btn" style="width:28px;height:28px;" title="Snooze 7 days" onclick="event.stopPropagation();dismissQueueItem('${escapeAttr(item.action_key)}', 7, this)"><span class="material-symbols-rounded" style="font-size:16px;">snooze</span></button>
-                   <button class="icon-btn" style="width:28px;height:28px;" title="Dismiss" onclick="event.stopPropagation();dismissQueueItem('${escapeAttr(item.action_key)}', null, this)"><span class="material-symbols-rounded" style="font-size:16px;">close</span></button>`
+                ? `<button class="icon-btn" title="Snooze 7 days" onclick="event.stopPropagation();dismissQueueItem('${escapeAttr(item.action_key)}', 7, this)"><span class="material-symbols-rounded" style="font-size:16px;">snooze</span></button>
+                   <button class="icon-btn" title="Dismiss" onclick="event.stopPropagation();dismissQueueItem('${escapeAttr(item.action_key)}', null, this)"><span class="material-symbols-rounded" style="font-size:16px;">close</span></button>`
                 : "";
-            return `<div class="queue-row" style="display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--outline);cursor:pointer;" onclick="window.location='${escapeAttr(item.href)}'">
-                <span class="badge ${sevBadge[item.severity] || "badge-info"}" style="min-width:64px;text-align:center;">${QUEUE_SOURCE_LABELS[item.source] || item.source}</span>
-                <div style="flex:1;min-width:0;">
-                    <div style="font-weight:600;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(item.title)}</div>
-                    <div style="font-size:11px;color:var(--on-surface-secondary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(item.detail || "")}</div>
+            const src = `<span class="badge ${sevBadge[item.severity] || "badge-info"}">${QUEUE_SOURCE_LABELS[item.source] || item.source}</span>`;
+            const why = `<div class="queue-why">${escapeHtml(item.detail || "")}${kwChip ? " " + kwChip : ""}</div>`;
+            const main = item.serp
+                ? UISerp.html({ domain: dashDomain, path: item.serp.path, title: item.serp.title,
+                    description: item.serp.description, own: item.serp.own_description, href: item.href, lead: src }) + why
+                : `<div class="serp-url">${src}</div><a class="queue-title" href="${escapeAttr(item.href)}">${escapeHtml(item.title)}</a>${why}`;
+            const gainHtml = item.est_clicks_gain
+                ? `<div class="queue-gain">+${item.est_clicks_gain}<small>clicks / mo</small></div>`
+                : `<div class="queue-gain queue-gain-none"></div>`;
+            return `<div class="queue-row">
+                <div class="queue-main">${main}</div>
+                <div class="queue-side">
+                    ${gainHtml}
+                    <div class="queue-actions">${dismiss}<a href="${escapeAttr(item.href)}" class="btn btn-secondary btn-sm">${verb}</a></div>
                 </div>
-                ${kwChip}
-                ${gain}
-                ${dismiss}
-                <a href="${escapeAttr(item.href)}" class="btn btn-secondary btn-sm" onclick="event.stopPropagation()">${verb}</a>
             </div>`;
         };
 
@@ -346,11 +367,8 @@ async function loadActionQueue() {
             const items = data.items.filter((i) => band.sources.includes(i.source));
             items.forEach((i) => placed.add(i));
             if (!items.length) continue;
-            html += `<details ${band.open ? "open" : ""} style="margin:4px 0;">
-                <summary style="cursor:pointer;list-style:none;display:flex;align-items:center;gap:8px;padding:8px 0;font-weight:600;font-size:12.5px;color:var(--on-surface-secondary);">
-                    <span class="material-symbols-rounded" style="font-size:16px;">expand_more</span>${band.label}
-                    <span class="badge" style="background:var(--surface-dim);color:var(--on-surface);">${items.length}</span>
-                </summary>
+            html += `<details class="queue-band" ${band.open ? "open" : ""}>
+                <summary><span class="material-symbols-rounded">expand_more</span>${band.label}<span class="band-count">${items.length}</span></summary>
                 ${items.map((i) => row(i, band.verb)).join("")}
             </details>`;
         }
@@ -561,13 +579,23 @@ async function loadOps() {
         for (const [key, entry] of Object.entries(data.freshness)) {
             const [label, href] = FRESHNESS_LABELS[key] || [key, "#"];
             const age = entry.at ? formatRelativeTime(entry.at) : "never";
-            fresh += `<a href="${href}" style="display:inline-flex;align-items:center;gap:4px;color:inherit;white-space:nowrap;" title="${label}: ${age}">
-                <span style="width:7px;height:7px;border-radius:50%;background:${dotColor[entry.level] || dotColor.none};display:inline-block;"></span>
-                ${label} ${age}</a>`;
+            fresh += `<a href="${href}" class="aside-row" title="${label}: ${age}">
+                <span><i class="dot" style="background:${dotColor[entry.level] || dotColor.none}"></i>${label}</span><span>${age}</span></a>`;
+        }
+        // Background jobs that failed or stopped running. Quiet when healthy.
+        const jobColor = { failed: "var(--error)", warning: "var(--warning)", overdue: "var(--warning)" };
+        const jobWord = { failed: "failed", warning: "had problems", overdue: "last worked" };
+        let jobs = "";
+        for (const j of data.jobs || []) {
+            const when = j.at ? formatRelativeTime(j.at) : "";
+            const detail = j.error ? `<div class="job-error">${escapeHtml(j.error)}</div>` : "";
+            jobs += `<div class="job-row" title="${escapeHtml(j.error || "")}">
+                <div class="aside-row"><span><i class="dot" style="background:${jobColor[j.kind]}"></i>${escapeHtml(j.label)}</span>
+                <span>${jobWord[j.kind]} ${when}</span></div>${detail}</div>`;
         }
         const freshEl = document.getElementById("dash-freshness");
-        freshEl.innerHTML = fresh;
-        freshEl.style.display = "flex";
+        freshEl.innerHTML = jobs + fresh;
+        freshEl.style.display = "";
 
         // Content pipeline
         const p = data.pipeline || {};

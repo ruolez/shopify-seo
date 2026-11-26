@@ -179,10 +179,12 @@ function pollSyncStatus(storeId) {
                 current.textContent = "";
                 setTimeout(() => {
                     hideSyncOverlay();
-                    showToast(
-                        `Sync complete: ${status.products_synced} products, ${status.collections_synced} collections, ${status.blogs_synced || 0} blogs, ${status.articles_synced || 0} articles`,
-                        "success"
-                    );
+                    const counts = `${status.products_synced} products, ${status.collections_synced} collections, ${status.blogs_synced || 0} blogs, ${status.articles_synced || 0} articles`;
+                    if (status.error) {
+                        showToast(`Sync finished with problems (${counts}): ${status.error}`, "warning");
+                    } else {
+                        showToast(`Sync complete: ${counts}`, "success");
+                    }
                     loadStores();
                 }, 1500);
                 return;

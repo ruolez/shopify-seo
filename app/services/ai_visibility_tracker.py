@@ -246,10 +246,14 @@ def _product_titles(store_id, limit=300):
         return [r["title"] for r in cur.fetchall() if r["title"]]
 
 
-def _detect_mentions(text, brand_terms, brand_host, product_titles, competitors, intent="buyer"):
+def _detect_mentions(text, brand_terms, brand_host, product_titles, competitors, intent="buyer",
+                     citations=None):
     low = text.lower()
     brand_mentioned = any(t in low for t in brand_terms)
-    domain_cited = bool(brand_host) and brand_host in low
+    # Cited = one of the answer's source URLs is on our domain (grounded
+    # answers return them); our domain written in the text counts too.
+    cited_hosts = {urlparse(u).netloc.lower().removeprefix("www.") for u in (citations or []) if isinstance(u, str)}
+    domain_cited = bool(brand_host) and (brand_host in low or brand_host in cited_hosts)
 
     # Rank = ordinal among LIST ITEMS, not the raw line index (which counted
     # intro paragraphs and blank lines, inflating avg_rank).
@@ -785,7 +789,16 @@ def run_tracking(run_id):
 
         client, cfg, default_models = _client_and_config()
         models = run["models"] or default_models
-        budget = float(cfg.get("daily_budget") or 10.0)
+        # The budget is per day, not per run: earlier runs today count.
+        with db.get_cursor() as cur:
+            cur.execute(
+                """SELECT COALESCE(SUM(cost_estimate), 0) AS spent FROM ai_tracking_runs
+                   WHERE store_id = %s AND id <> %s
+                     AND COALESCE(completed_at, started_at)::date = CURRENT_DATE""",
+                (store_id, run_id),
+            )
+            spent_today = float(cur.fetchone()["spent"] or 0)
+        budget = max(0.0, float(cfg.get("daily_budget") or 10.0) - spent_today)
         runs_per_prompt = max(1, int(cfg.get("runs_per_prompt") or 3))
         brand_terms, brand_host = _brand_terms(store)
         brand_ck = {c for c in (_canonical_brand_key(t) for t in brand_terms) if c}
@@ -825,7 +838,8 @@ def run_tracking(run_id):
                         continue
                     grounded = _is_grounded_model(model, cfg)
                     cost += tokens * (GROUNDED_COST_PER_TOKEN if grounded else COST_PER_TOKEN)
-                    det = _detect_mentions(text, brand_terms, brand_host, titles, competitors, intent)
+                    det = _detect_mentions(text, brand_terms, brand_host, titles, competitors, intent,
+                                           citations=citations)
                     # Grounded answers cite real URLs — count our domain there too.
                     if grounded and brand_host and any(brand_host in (u or "").lower() for u in citations):
                         det["domain_cited"] = True

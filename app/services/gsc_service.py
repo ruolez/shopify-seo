@@ -10,6 +10,7 @@ from googleapiclient.discovery import build
 
 from app.auth import decrypt_value, encrypt_value
 from app.database import db
+from app.services.gsc_queries import is_junk_query
 from app.services import gsc_page_totals as page_totals
 
 logging.getLogger("googleapiclient.discovery_cache").setLevel(logging.ERROR)
@@ -21,6 +22,9 @@ GSC_API_VERSION = "v1"
 MAX_ROWS_PER_REQUEST = 25000
 BACKFILL_DAYS = 90
 INCREMENTAL_DAYS = 5
+# Final rows replace stored rows this many days back: the window earlier pulls
+# may have filled with preliminary (fresh) data.
+FRESH_DAYS_KEPT = INCREMENTAL_DAYS
 
 _pull_scheduler = None
 _snapshot_scheduler = None
@@ -262,12 +266,24 @@ def pull_data(store_id, date_from=None, date_to=None, pull_type="incremental"):
     try:
         service = _build_service(store_id)
         total_rows = 0
+        dropped_queries = 0
         start_row = 0
+        # Days that an earlier pull stored as fresh (preliminary) data. Final
+        # rows replace them; combos missing from the final data must not linger.
+        prelim_from = max(date_from, (today - timedelta(days=FRESH_DAYS_KEPT)).isoformat())
+        final_window_cleared = False
 
         while True:
             rows = _fetch_gsc_data(service, site_url, date_from, date_to, start_row)
             if not rows:
                 break
+            if not final_window_cleared and prelim_from <= date_to:
+                with db.get_cursor() as cur:
+                    cur.execute(
+                        "DELETE FROM gsc_daily_metrics WHERE store_id = %s AND date >= %s AND date <= %s",
+                        (store_id, prelim_from, date_to),
+                    )
+                final_window_cleared = True
 
             with db.get_cursor() as cur:
                 for row in rows:
@@ -275,6 +291,9 @@ def pull_data(store_id, date_from=None, date_to=None, pull_type="incremental"):
                     if len(keys) < 5:
                         continue
                     date_val, page, query, device, country = keys
+                    if is_junk_query(query):
+                        dropped_queries += 1
+                        continue
                     cur.execute(
                         """INSERT INTO gsc_daily_metrics
                            (store_id, date, page, query, clicks, impressions, ctr, position, device, country)
@@ -317,6 +336,9 @@ def pull_data(store_id, date_from=None, date_to=None, pull_type="incremental"):
                     if len(keys) < 5:
                         continue
                     date_val, page, query, device, country = keys
+                    if is_junk_query(query):
+                        dropped_queries += 1
+                        continue
                     cur.execute(
                         """INSERT INTO gsc_daily_metrics
                            (store_id, date, page, query, clicks, impressions, ctr, position, device, country)
@@ -347,14 +369,20 @@ def pull_data(store_id, date_from=None, date_to=None, pull_type="incremental"):
             page_totals.fetch_page_rows(service, site_url, fresh_from, fresh_to, "all"), is_fresh=True,
         )
 
+        from app.services.gsc_extras import pull_extras
+        extras_problems = pull_extras(service, site_url, store_id, date_from, date_to,
+                                      (today - timedelta(days=BACKFILL_DAYS)).isoformat())
+
         with db.get_cursor() as cur:
             cur.execute(
                 "UPDATE gsc_data_pulls SET status = 'completed', rows_pulled = %s, completed_at = NOW() WHERE id = %s",
                 (total_rows, pull_id),
             )
 
+        if dropped_queries:
+            logger.info("GSC pull skipped %d AI-prompt rows that are not search keywords", dropped_queries)
         logger.info("GSC pull completed: %d rows (incl. fresh) for store %d", total_rows, store_id)
-        return {"status": "completed", "rows_pulled": total_rows}
+        return {"status": "completed", "rows_pulled": total_rows, "warnings": extras_problems}
 
     except Exception as e:
         logger.error("GSC pull failed for store %d: %s", store_id, str(e))
@@ -812,9 +840,16 @@ def _attach_matched_items(store_id, rows):
                 r["matched_item"] = {"item_type": "collection", "id": m["id"], "title": m["title"]}
 
 
-def get_cannibalization(store_id, date_from, date_to, min_impressions=3, device=None, country=None):
+# A page counts as competing for a query only with real exposure on it: at
+# least this share of the query's impressions. Two pages that each show up a
+# handful of times (or a product beside its own collection on a brand search)
+# are normal, not a split.
+CANNIBALIZATION_MIN_SHARE = 0.10
+
+
+def get_cannibalization(store_id, date_from, date_to, min_impressions=10, device=None, country=None):
     where, params = _build_filters(store_id, date_from, date_to, device, country)
-    params.append(min_impressions)
+    params.extend([min_impressions, CANNIBALIZATION_MIN_SHARE, CANNIBALIZATION_MIN_SHARE])
     with db.get_cursor() as cur:
         cur.execute(
             f"""WITH query_pages AS (
@@ -828,18 +863,24 @@ def get_cannibalization(store_id, date_from, date_to, min_impressions=3, device=
                  GROUP BY query, page
                  HAVING SUM(impressions) >= %s
                ),
+               shared AS (
+                 SELECT *, total_impressions / NULLIF(SUM(total_impressions) OVER (PARTITION BY query), 0) AS share
+                 FROM query_pages
+               ),
                multi_page_queries AS (
                  SELECT query, COUNT(DISTINCT page) as page_count,
                         SUM(total_clicks) as total_clicks,
                         SUM(total_impressions) as total_impressions
-                 FROM query_pages
+                 FROM shared
+                 WHERE share >= %s
                  GROUP BY query
                  HAVING COUNT(DISTINCT page) >= 2
                )
                SELECT qp.query, qp.page, qp.total_clicks, qp.total_impressions, qp.avg_position,
                       mpq.page_count
-               FROM query_pages qp
+               FROM shared qp
                JOIN multi_page_queries mpq ON qp.query = mpq.query
+               WHERE qp.share >= %s
                ORDER BY mpq.total_impressions DESC, mpq.page_count DESC, qp.query, qp.total_clicks DESC""",
             params,
         )
@@ -969,10 +1010,19 @@ def get_cannibalization(store_id, date_from, date_to, min_impressions=3, device=
     return {"summary": summary, "groups": results}
 
 
+# Search Console final data lags ~3 days; Google needs ~2 to recrawl.
+FIX_VERIFY_LAG_DAYS = 2
+FIX_VERIFY_MIN_DAYS = 10
+FIX_VERIFY_MAX_DAYS = 28
+
+
 def verify_cannibalization_fixes(store_id):
+    """Judge each fix on data from after it only. Verified = the query still
+    gets impressions and only one page shows for it; needs attention = two
+    or more pages still split it once a full window has passed. A fix whose
+    query got no impressions since stays pending (no evidence either way)."""
     today = datetime.now(timezone.utc).date()
-    date_from = (today - timedelta(days=14)).isoformat()
-    date_to = today.isoformat()
+    data_end = today - timedelta(days=3)
 
     with db.get_cursor() as cur:
         cur.execute(
@@ -981,50 +1031,40 @@ def verify_cannibalization_fixes(store_id):
         )
         pending = cur.fetchall()
 
-    if not pending:
-        return {"verified": 0, "needs_attention": 0, "still_pending": 0}
-
-    queries = list(set(f["query"] for f in pending))
-    cannibalizing_pairs = set()
-
-    with db.get_cursor() as cur:
-        for query in queries:
+    verified = needs_attention = still_pending = 0
+    for fix in pending:
+        if not fix["applied_at"]:
+            still_pending += 1
+            continue
+        start = fix["applied_at"].date() + timedelta(days=FIX_VERIFY_LAG_DAYS)
+        stop = min(data_end, start + timedelta(days=FIX_VERIFY_MAX_DAYS - 1))
+        window_days = (stop - start).days + 1
+        if window_days < FIX_VERIFY_MIN_DAYS:
+            still_pending += 1
+            continue
+        with db.get_cursor() as cur:
             cur.execute(
-                """SELECT page, SUM(impressions) as imp
-                   FROM gsc_daily_metrics
+                """SELECT page FROM gsc_daily_metrics
                    WHERE store_id = %s AND query = %s AND date >= %s AND date <= %s
-                   GROUP BY page
-                   HAVING SUM(impressions) >= 3""",
-                (store_id, query, date_from, date_to),
+                   GROUP BY page HAVING SUM(impressions) >= 3""",
+                (store_id, fix["query"], start.isoformat(), stop.isoformat()),
             )
             pages = cur.fetchall()
-            if len(pages) >= 2:
-                for p in pages:
-                    cannibalizing_pairs.add((query, p["page"]))
-
-    verified = 0
-    needs_attention = 0
-    still_pending = 0
-
-    with db.get_cursor() as cur:
-        for fix in pending:
-            key = (fix["query"], fix["page_url"])
-            days_since = (today - fix["applied_at"].date()).days if fix["applied_at"] else 0
-
-            if key not in cannibalizing_pairs:
+            if not pages:
+                still_pending += 1
+                continue
+            if len(pages) == 1:
                 cur.execute(
                     "UPDATE cannibalization_fixes SET status = 'verified', verified_at = NOW() WHERE id = %s",
                     (fix["id"],),
                 )
                 verified += 1
-            elif days_since >= 14:
+            else:
                 cur.execute(
                     "UPDATE cannibalization_fixes SET status = 'needs_attention' WHERE id = %s",
                     (fix["id"],),
                 )
                 needs_attention += 1
-            else:
-                still_pending += 1
 
     logger.info("Fix verification for store %d: %d verified, %d needs attention, %d still pending",
                 store_id, verified, needs_attention, still_pending)
@@ -1280,13 +1320,20 @@ class PullScheduler:
             )
             stores = cur.fetchall()
 
+        from app.services.job_health import record_job, run_recorded
+
         for s in stores:
+            store_id = s["store_id"]
             try:
-                pull_data(s["store_id"], pull_type="incremental")
-                verify_cannibalization_fixes(s["store_id"])
-                _consolidate_if_stale(s["store_id"])
+                result = pull_data(store_id, pull_type="incremental")
             except Exception as e:
-                logger.error("GSC pull failed for store %d: %s", s["store_id"], str(e))
+                logger.error("GSC pull failed for store %d: %s", store_id, str(e))
+                record_job("gsc_pull", store_id, ok=False, error=e)
+                continue
+            record_job("gsc_pull", store_id, ok=True,
+                       detail=f"{(result or {}).get('rows_pulled', 0)} rows")
+            run_recorded("cannibalization_verify", store_id, verify_cannibalization_fixes, store_id)
+            _consolidate_if_stale(store_id)
 
 
 def _consolidate_if_stale(store_id, max_age_days=7):
@@ -1310,8 +1357,14 @@ def _consolidate_if_stale(store_id, max_age_days=7):
                 at = at.replace(tzinfo=timezone.utc)
             if datetime.now(timezone.utc) - at < timedelta(days=max_age_days):
                 return
+        from app.services.job_health import record_job
         from app.services.keyword_strategy_service import consolidate_master_keywords
-        consolidate_master_keywords(store_id)
+        try:
+            result = consolidate_master_keywords(store_id)
+        except Exception as e:
+            record_job("keyword_consolidation", store_id, ok=False, error=e)
+            raise
+        record_job("keyword_consolidation", store_id, ok=True, detail=f"{result.get('total', 0)} keywords")
         logger.info("Auto-consolidated master keywords for store %s after GSC pull", store_id)
         try:
             from app.services.keyword_ai_classifier import run_ai_classification

@@ -1,99 +1,95 @@
 {% extends "base.html" %}
 
-{% block title %}Dashboard{% endblock %}
 
-{% block page_title %}Home{% endblock %}
 
 {% block content %}
-                <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:16px;">
-                    <div id="dash-store-line" style="display:none;font-size:13px;color:var(--on-surface-secondary);"></div>
-                    <div id="dash-freshness" style="display:none;font-size:11px;color:var(--on-surface-secondary);gap:10px;flex-wrap:wrap;align-items:center;"></div>
-                </div>
-
+                <div class="home-grid">
+                <div class="home-main">
                 <!-- Cold-start setup checklist: shows until every step is done -->
-                <div id="setup-card" class="card" style="display:none;margin-bottom:24px;">
-                    <div class="card-header"><h3><span class="material-symbols-rounded" style="vertical-align:middle;font-size:20px;">rocket_launch</span> Finish setting up</h3></div>
-                    <div id="dash-setup" style="padding:0 16px 12px;"></div>
+                <div id="setup-card" class="card" style="display:none;">
+                    <div class="card-header"><h3>Finish setting up</h3></div>
+                    <div id="dash-setup"></div>
                 </div>
 
-                <div class="stats-grid kpi-strip" id="kpi-grid">
-                    <div class="stat-card">
-                        <div class="stat-icon blue"><span class="material-symbols-rounded">ads_click</span></div>
-                        <div class="stat-value" id="kpi-clicks">—</div>
-                        <div class="stat-label">Organic Clicks (28d)</div>
-                        <div class="stat-sub" id="kpi-clicks-delta"></div>
-                        <div style="height:34px;margin-top:6px;"><canvas id="kpi-clicks-spark"></canvas></div>
+                <div class="kpi-row" id="kpi-grid">
+                    <div class="kpi" data-href="/gsc" role="link" tabindex="0">
+                        <div class="kpi-label">Organic clicks <span>28 days</span></div>
+                        <div class="kpi-value" id="kpi-clicks">—</div>
+                        <div class="kpi-sub" id="kpi-clicks-delta"></div>
+                        <div class="kpi-spark"><canvas id="kpi-clicks-spark"></canvas></div>
                     </div>
-                    <div class="stat-card">
-                        <div class="stat-icon blue"><span class="material-symbols-rounded">trending_up</span></div>
-                        <div class="stat-value" id="kpi-position">—</div>
-                        <div class="stat-label">Avg Position (28d)</div>
-                        <div class="stat-sub" id="kpi-position-delta"></div>
-                        <div style="height:34px;margin-top:6px;"><canvas id="kpi-position-spark"></canvas></div>
+                    <div class="kpi" data-href="/gsc" role="link" tabindex="0">
+                        <div class="kpi-label">Avg position <span>28 days</span></div>
+                        <div class="kpi-value" id="kpi-position">—</div>
+                        <div class="kpi-sub" id="kpi-position-delta"></div>
+                        <div class="kpi-spark"><canvas id="kpi-position-spark"></canvas></div>
                     </div>
-                    <div class="stat-card">
-                        <div class="stat-icon orange"><span class="material-symbols-rounded">speed</span></div>
-                        <div class="stat-value" id="kpi-score">—</div>
-                        <div class="stat-label">SEO Score</div>
-                        <div class="stat-sub" id="kpi-score-sub"></div>
-                        <div style="height:34px;margin-top:6px;"><canvas id="kpi-score-spark"></canvas></div>
+                    <div class="kpi" data-href="/seo" role="link" tabindex="0">
+                        <div class="kpi-label">On-page score</div>
+                        <div class="kpi-value" id="kpi-score">—</div>
+                        <div class="kpi-sub" id="kpi-score-sub"></div>
+                        <div class="kpi-spark"><canvas id="kpi-score-spark"></canvas></div>
                     </div>
-                    <div class="stat-card">
-                        <div class="stat-icon green"><span class="material-symbols-rounded">label</span></div>
-                        <div class="stat-value" id="kpi-keywords">—</div>
-                        <div class="stat-label">Ranking Keywords</div>
-                        <div class="stat-sub" id="kpi-keywords-sub"></div>
+                    <div class="kpi" data-href="/keyword-strategy" role="link" tabindex="0">
+                        <div class="kpi-label">Ranking keywords</div>
+                        <div class="kpi-value" id="kpi-keywords">—</div>
+                        <div class="kpi-sub" id="kpi-keywords-sub"></div>
                     </div>
-                    <div class="stat-card">
-                        <div class="stat-icon blue"><span class="material-symbols-rounded">psychology</span></div>
-                        <div class="stat-value" id="kpi-visibility">—</div>
-                        <div class="stat-label">AI Visibility</div>
-                        <div class="stat-sub" id="kpi-visibility-sub"></div>
+                    <div class="kpi" data-href="/ai-seo?tab=visibility" role="link" tabindex="0">
+                        <div class="kpi-label">AI visibility</div>
+                        <div class="kpi-value" id="kpi-visibility">—</div>
+                        <div class="kpi-sub" id="kpi-visibility-sub"></div>
                     </div>
-                    <div class="stat-card" id="kpi-revenue-card" style="display:none;">
-                        <div class="stat-icon green"><span class="material-symbols-rounded">payments</span></div>
-                        <div class="stat-value" id="kpi-revenue">—</div>
-                        <div class="stat-label">Organic Revenue (28d)</div>
-                        <div class="stat-sub" id="kpi-revenue-sub"></div>
+                    <div class="kpi" id="kpi-revenue-card" style="display:none;">
+                        <div class="kpi-label">Organic revenue <span>28 days</span></div>
+                        <div class="kpi-value" id="kpi-revenue">—</div>
+                        <div class="kpi-sub" id="kpi-revenue-sub"></div>
                     </div>
                 </div>
 
-                <!-- THE lead card: unified action queue, grouped into work bands -->
-                <details id="report-card" class="card" style="display:none;margin-bottom:24px;">
-                    <summary style="cursor:pointer;padding:14px 16px;">
-                        <strong><span class="material-symbols-rounded" style="vertical-align:middle;font-size:20px;">insights</span> Last 28 days</strong>
-                        <span id="report-headline" style="font-size:13px;margin-left:6px;"></span>
-                    </summary>
-                    <div id="dash-report" style="padding:0 16px 14px;font-size:13px;"></div>
-                </details>
-                <div id="queue-card" class="card" style="display:none;margin-bottom:24px;">
-                    <div class="card-header" style="display:flex;align-items:center;justify-content:space-between;">
-                        <h3><span class="material-symbols-rounded" style="vertical-align:middle;font-size:20px;">checklist</span> What to do next <span id="queue-note" style="font-weight:400;font-size:12px;color:var(--on-surface-secondary);"></span></h3>
-                        <a href="/seo?tab=priorities" class="btn btn-primary btn-sm"><span class="material-symbols-rounded">play_arrow</span> Work through queue</a>
-                    </div>
-                    <div id="dash-queue" style="padding:0 16px 12px;"></div>
-                </div>
-
-                <!-- Two-up: what changed + how it's trending -->
-                <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:24px;margin-bottom:24px;">
-                    <div id="changes-card" class="card" style="display:none;margin-bottom:0;">
-                        <div class="card-header" style="display:flex;align-items:center;justify-content:space-between;">
-                            <h3><span class="material-symbols-rounded" style="vertical-align:middle;font-size:20px;">notifications</span> Since You Were Here <span id="changes-note" style="font-weight:400;font-size:12px;color:var(--on-surface-secondary);"></span></h3>
+                <div id="queue-card" class="queue-card" style="display:none;">
+                    <div class="section-head">
+                        <div>
+                            <h2>What to do next</h2>
+                            <p id="queue-note"></p>
                         </div>
-                        <div id="dash-changes" style="padding:0 16px 12px;"></div>
+                        <a href="/seo?tab=priorities" class="btn btn-primary"><span class="material-symbols-rounded">play_arrow</span> Work through queue</a>
                     </div>
-                    <div id="trend-card" class="card" style="display:none;margin-bottom:0;">
-                        <div class="card-header" style="display:flex;align-items:center;justify-content:space-between;">
-                            <h3>Search Performance <span id="trend-note" style="font-weight:400;font-size:12px;color:var(--on-surface-secondary);"></span></h3>
-                            <a href="/gsc" class="btn btn-secondary btn-sm">View Details</a>
-                        </div>
-                        <div style="height:220px;padding:0 8px 8px;"><canvas id="trend-chart"></canvas></div>
+                    <div id="dash-queue"></div>
+                </div>
+                </div>
+
+                <aside class="home-aside">
+                    <section class="aside-block">
+                        <h3>Store</h3>
+                        <div id="dash-store-line" class="aside-text" style="display:none;"></div>
+                    </section>
+                    <section class="aside-block">
+                        <h3>Data freshness</h3>
+                        <div id="dash-freshness" class="fresh-list" style="display:none;"></div>
+                    </section>
+                    <details id="report-card" class="aside-block report-block" style="display:none;">
+                        <summary><h3>Last 28 days</h3><span id="report-headline"></span></summary>
+                        <div id="dash-report"></div>
+                    </details>
+                    <section id="changes-card" class="aside-block" style="display:none;">
+                        <h3>Since you were here <span id="changes-note"></span></h3>
+                        <div id="dash-changes"></div>
+                    </section>
+                </aside>
+                </div>
+
+                <div id="trend-card" class="card" style="display:none;margin-bottom:20px;">
+                    <div class="card-header">
+                        <h3>Search performance <span id="trend-note" style="font-weight:400;font-size:12.5px;color:var(--on-surface-secondary);"></span></h3>
+                        <a href="/gsc" class="btn btn-secondary btn-sm">Open Search Console</a>
                     </div>
+                    <div style="height:220px;"><canvas id="trend-chart"></canvas></div>
                 </div>
 
                 <!-- CTR opportunities: collapsed by default — rows are already merged
                      into the queue above; the full table stays one click away -->
-                <details id="ctr-card" class="card" style="display:none;margin-bottom:24px;padding:0;">
+                <details id="ctr-card" class="card" style="display:none;margin-bottom:20px;padding:0;">
                     <summary style="padding:16px 20px;cursor:pointer;list-style:none;display:flex;align-items:center;gap:8px;">
                         <span class="material-symbols-rounded" style="font-size:20px;color:var(--on-surface-secondary);">mouse</span>
                         <b>CTR Opportunities</b>

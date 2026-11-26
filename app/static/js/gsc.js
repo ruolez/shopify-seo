@@ -189,13 +189,14 @@ function qp() {
 
 async function loadDashboardData() {
     loadOverview();
+    loadSearchSplit();
     loadTrends();
     loadActiveTab();
 }
 
 // Monotonic request ids per loader — a slow older response must never
 // overwrite the result of a newer load (store/filter changed mid-flight).
-const gscReqIds = { overview: 0, trends: 0, pages: 0, queries: 0 };
+const gscReqIds = { overview: 0, trends: 0, pages: 0, queries: 0, split: 0 };
 
 // ─── Overview Cards ───
 
@@ -220,6 +221,40 @@ async function loadOverview() {
         }
     } catch (err) {
         console.error("Failed to load overview:", err);
+    }
+}
+
+// Google's own brand split (brandedClassification) and Lens / image-upload
+// searches (type webMultimodal). Stored for all devices and countries.
+async function loadSearchSplit() {
+    const box = document.getElementById("gsc-search-split");
+    if (!box) return;
+    const reqId = ++gscReqIds.split;
+    try {
+        const { date_from, date_to } = getDateRange();
+        const d = await apiRequest(`/api/gsc/search-split?store_id=${currentStoreId}&date_from=${date_from}&date_to=${date_to}`);
+        if (reqId !== gscReqIds.split) return;
+        const parts = [];
+        if (d.brand) {
+            const b = d.brand.branded || { clicks: 0, impressions: 0 };
+            const n = d.brand.non_branded || { clicks: 0, impressions: 0 };
+            const total = b.clicks + n.clicks;
+            const pct = total ? Math.round((b.clicks / total) * 100) : 0;
+            parts.push(`<span title="Google's own label for searches that name your store"><strong>Searches for your store's name:</strong> ${b.clicks.toLocaleString()} clicks (${pct}% of clicks) · <strong>Other searches:</strong> ${n.clicks.toLocaleString()} clicks</span>`);
+        }
+        if (d.multimodal) {
+            const m = d.multimodal;
+            const rows = m.pages.map((p) => `<tr><td>${escapeHtml(shortenUrl(p.page))}</td><td>${p.clicks}</td><td>${p.impressions.toLocaleString()}</td><td>${p.position ?? "—"}</td></tr>`).join("");
+            parts.push(`<details style="display:inline-block;vertical-align:top;"><summary style="cursor:pointer;"><strong>Google Lens and image uploads:</strong> ${m.clicks.toLocaleString()} clicks, ${m.impressions.toLocaleString()} impressions</summary>
+                <p style="margin:6px 0;">People who searched with a photo (Lens, Circle to Search, an uploaded image) and got your page. Not included in the totals above. Clear, well-lit product photos with accurate alt text help here.</p>
+                <div class="table-container"><table class="data-table"><thead><tr><th>Page</th><th>Clicks</th><th>Impressions</th><th>Position</th></tr></thead><tbody>${rows}</tbody></table></div></details>`);
+        }
+        box.innerHTML = parts.length
+            ? `<div style="font-size:12.5px;color:var(--on-surface-secondary);display:flex;flex-direction:column;gap:4px;">${parts.map((p) => `<div>${p}</div>`).join("")}<div style="font-size:11px;">All devices and countries; the filters above don't apply to this line.</div></div>`
+            : "";
+    } catch (err) {
+        box.innerHTML = "";
+        console.error("Failed to load search split:", err);
     }
 }
 
@@ -281,7 +316,7 @@ function renderTrendChart(data) {
 
     let datasets = [];
     if (showClicks) datasets.push({ values: clicks, color: "var(--primary)", label: "Clicks", side: "left" });
-    if (showImpressions) datasets.push({ values: impressions, color: "#8b5cf6", label: "Impressions", side: "right" });
+    if (showImpressions) datasets.push({ values: impressions, color: "var(--url)", label: "Impressions", side: "right" });
 
     if (!datasets.length) {
         container.innerHTML = '<p style="text-align: center; color: var(--on-surface-secondary); padding: 40px 0;">Select at least one metric.</p>';
@@ -419,7 +454,17 @@ async function loadIndexing() {
     try {
         const data = await apiRequest(`/api/gsc/index-coverage?store_id=${currentStoreId}`);
         const s = data.summary;
-        const intro = `<p style="font-size:13px;color:var(--on-surface-secondary);margin:0 0 12px;">A page Google has not indexed cannot appear in search, however good its text is. The app checks a few hundred pages a night; every page is re-checked about every two weeks.</p>`;
+        const sm = data.sitemap || {};
+        let sitemapLine = "";
+        if (sm.error) {
+            sitemapLine = `<p style="font-size:12.5px;color:var(--warning);margin:0 0 12px;">${escapeHtml(sm.error)}</p>`;
+        } else if ((sm.problems || []).length) {
+            sitemapLine = `<p style="font-size:12.5px;color:var(--error);margin:0 0 12px;"><strong>Sitemap:</strong> ${escapeHtml(sm.problems.join(" "))}</p>`;
+        } else if ((sm.sitemaps || []).length) {
+            const s0 = sm.sitemaps[0];
+            sitemapLine = `<p style="font-size:12.5px;color:var(--on-surface-secondary);margin:0 0 12px;"><strong>Sitemap:</strong> ${s0.submitted.toLocaleString()} pages listed; Google last read it ${s0.last_downloaded ? formatRelativeTime(s0.last_downloaded) : "never"}, no errors.</p>`;
+        }
+        const intro = `<p style="font-size:13px;color:var(--on-surface-secondary);margin:0 0 12px;">A page Google has not indexed cannot appear in search, however good its text is. The app checks a few hundred pages a night; every page is re-checked about every two weeks.</p>` + sitemapLine;
         const checkBtn = `<button class="btn btn-secondary btn-sm" onclick="runIndexingCheck(this)"><span class="material-symbols-rounded">radar</span> Check more pages now</button>`;
         if (!s.checked) {
             box.innerHTML = intro + `<p>No pages checked yet.</p>` + checkBtn;
@@ -459,7 +504,7 @@ async function loadIndexing() {
 }
 
 // Which unindexed pages are worth the effort, why each is likely skipped, and
-// what to do — most-searched first.
+// what to do — most-searched first. Links come from the suggestions card.
 async function loadUnindexedPlan() {
     const box = document.getElementById("gsc-unindexed-plan");
     if (!box) return;
@@ -468,16 +513,13 @@ async function loadUnindexedPlan() {
         const typeLabel = { product: "Product", collection: "Collection", article: "Article" };
         const row = (p) => {
             const open = INDEX_ITEM_LINK[p.item_type] ? INDEX_ITEM_LINK[p.item_type](p.item_id) : null;
-            const sources = (p.link_from || []).map((a) =>
-                `<span style="white-space:nowrap;"><a href="/blog?article=${a.id}" title="Open this article">${escapeHtml(a.title.length > 30 ? a.title.slice(0, 30) + "…" : a.title)}</a>
-                 <button class="btn btn-secondary btn-sm" style="padding:1px 8px;font-size:11px;" title="Add a link to this ${p.item_type} in that article now" onclick="addIndexingLink(${a.id}, '${p.item_type}', ${p.item_id}, this)">Add link</button></span>`).join(" · ");
             return `<tr>
                 <td><span class="badge">${typeLabel[p.item_type] || p.item_type}</span> ${escapeHtml(p.title || p.url)}
                     ${p.keyword ? `<div style="font-size:11px;color:var(--on-surface-secondary);">searched as “${escapeHtml(p.keyword)}”</div>` : ""}</td>
                 <td>${p.volume ? p.volume.toLocaleString() : "—"}</td>
                 <td style="${p.incoming_links < 3 ? "color:var(--error);font-weight:600;" : ""}">${p.incoming_links}</td>
                 <td style="font-size:12.5px;">${escapeHtml(p.reason)}</td>
-                <td style="font-size:12.5px;">${escapeHtml(p.action)}${sources ? `<div style="margin-top:3px;">Link from: ${sources}</div>` : ""}
+                <td style="font-size:12.5px;">${escapeHtml(p.action)}
                     ${p.item_type !== "article" && p.reason.includes("little that is new") && open ? `<div style="margin-top:3px;"><a href="${open}">Open to rewrite the description</a></div>` : ""}</td>
                 <td style="text-align:right;white-space:nowrap;">${open ? `<a class="btn btn-secondary btn-sm" href="${open}">Open</a>` : ""}</td>
             </tr>`;
@@ -488,14 +530,9 @@ async function loadUnindexedPlan() {
         const worth = plan.pages.filter((p) => p.worth_indexing);
         const low = plan.pages.filter((p) => !p.worth_indexing);
         const starved = plan.pages.filter((p) => p.incoming_links < 3).length;
-        const linkable = worth.filter((p) => p.item_type === "product" && (p.link_from || []).length).length;
-        box.innerHTML = `<div class="card" style="margin-top:12px;">
-                <h3 style="margin:0 0 6px;">What to do about them</h3>
-                <p style="font-size:13px;margin:0 0 8px;"><strong>${starved} of ${plan.pages.length}</strong> have fewer than three articles or descriptions linking to them — the most common reason Google skips a page. Start with the ones people search for.</p>
-                ${linkable ? `<button class="btn btn-primary btn-sm" onclick="addAllIndexingLinks(${linkable}, this)"><span class="material-symbols-rounded">add_link</span> Add links for ${linkable} product${linkable === 1 ? "" : "s"} people search for</button>
-                    <span style="font-size:12px;color:var(--on-surface-secondary);margin-left:8px;">Each gets a link from the best article about its brand. Undo from that article's History.</span>` : ""}
-            </div>
-            <details class="card" style="margin-top:12px;" open>
+        box.innerHTML = `<div id="gsc-link-suggestions" style="margin-top:12px;"><div class="card"><div class="loading-spinner"><div class="spinner"></div></div></div></div>
+            <p style="font-size:13px;margin:14px 0 0;"><strong>${starved} of ${plan.pages.length}</strong> unindexed pages have fewer than three articles or descriptions linking to them — the most common reason Google skips a page.</p>
+            <details class="card" style="margin-top:12px;">
                 <summary style="cursor:pointer;font-weight:600;">Worth getting indexed — ${worth.length} page${worth.length === 1 ? "" : "s"} people search for</summary>
                 ${worth.length ? table(worth) : '<p style="font-size:13px;">None.</p>'}
             </details>
@@ -503,49 +540,163 @@ async function loadUnindexedPlan() {
                 <summary style="cursor:pointer;font-weight:600;">Low priority — ${low.length} page${low.length === 1 ? "" : "s"} with little search demand</summary>
                 ${low.length ? table(low) : '<p style="font-size:13px;">None.</p>'}
             </details>`;
+        loadLinkSuggestions();
     } catch (e) {
         box.innerHTML = `<p style="color:var(--error);">${escapeHtml(e.message)}</p>`;
     }
 }
 
-async function addIndexingLink(articleId, targetType, targetId, btn) {
+// ─── Links to unindexed pages: suggested every night, added on review or automatically ───
+
+const LINK_TYPE_LABEL = { product: "Product", collection: "Collection", article: "Article" };
+const LINK_SOURCE_OPEN = {
+    product: (id) => `/seo?optimize=product&id=${id}&store_id=${currentStoreId || ""}`,
+    collection: (id) => `/seo?optimize=collection&id=${id}&store_id=${currentStoreId || ""}`,
+    article: (id) => `/blog?article=${id}`,
+};
+
+async function loadLinkSuggestions() {
+    const box = document.getElementById("gsc-link-suggestions");
+    if (!box) return;
+    let data;
+    try {
+        data = await apiRequest(`/api/link-suggestions?store_id=${currentStoreId}`);
+    } catch (e) {
+        box.innerHTML = `<div class="card"><p style="color:var(--error);">Link suggestions: ${escapeHtml(e.message)}</p></div>`;
+        return;
+    }
+    const groups = new Map();
+    data.pending.forEach((s) => {
+        const key = `${s.target_type}:${s.target_id}`;
+        if (!groups.has(key)) groups.set(key, { target: s, items: [] });
+        groups.get(key).items.push(s);
+    });
+    const pageLink = (type, id, title) => LINK_SOURCE_OPEN[type]
+        ? `<a href="${LINK_SOURCE_OPEN[type](id)}">${escapeHtml(title || "—")}</a>` : escapeHtml(title || "—");
+    const rows = [...groups.values()].map(({ target, items }) => `<tr>
+        <td style="vertical-align:top;"><span class="badge">${LINK_TYPE_LABEL[target.target_type]}</span> ${pageLink(target.target_type, target.target_id, target.target_title)}
+            <div style="font-size:11px;color:var(--on-surface-secondary);">${escapeHtml(target.coverage_state || "")}</div></td>
+        <td>${items.map((s) => `<div style="display:flex;gap:8px;align-items:flex-start;padding:3px 0;" data-suggestion="${s.id}">
+                <div style="flex:1;font-size:12.5px;">from <span class="badge">${LINK_TYPE_LABEL[s.source_type]}</span> ${pageLink(s.source_type, s.source_id, s.source_title)}
+                    <div style="font-size:11.5px;color:var(--on-surface-secondary);">${s.how === "inline" && s.anchor ? `“${escapeHtml(s.anchor)}” becomes the link` : escapeHtml(s.reason)}</div></div>
+                <button class="btn btn-secondary btn-sm" style="padding:1px 8px;font-size:11px;" onclick="applyLinkSuggestion(${s.id}, this)">Add</button>
+                <button class="btn btn-secondary btn-sm" style="padding:1px 8px;font-size:11px;" title="Don't suggest this link again" onclick="dismissLinkSuggestion(${s.id}, this)">Dismiss</button>
+            </div>`).join("")}</td>
+    </tr>`).join("");
+    const recent = data.recent.map((s) => `<tr>
+        <td style="font-size:12.5px;">${pageLink(s.source_type, s.source_id, s.source_title)} → ${pageLink(s.target_type, s.target_id, s.target_title)}</td>
+        <td style="font-size:12px;">${s.status === "applied" ? (s.applied_by === "auto" ? "Added automatically" : "Added") : `<span style="color:var(--error);">Failed: ${escapeHtml(s.error || "")}</span>`}
+            · ${s.updated_at ? formatRelativeTime(s.updated_at) : ""}</td>
+        <td style="font-size:12px;">${s.target_indexed ? '<span style="color:var(--success);">now indexed</span>' : "not indexed yet"}</td>
+        <td style="text-align:right;">${s.undone ? '<span style="font-size:12px;">Undone</span>' : s.status === "applied" && s.event_id ? `<button class="btn btn-secondary btn-sm" style="padding:1px 8px;font-size:11px;" onclick="undoLinkSuggestion(${s.event_id}, this)">Undo</button>` : ""}</td>
+    </tr>`).join("");
+    const st = data.settings;
+    const last = data.last_run;
+    box.innerHTML = `<div class="card">
+        <div style="display:flex;gap:12px;align-items:flex-start;flex-wrap:wrap;">
+            <div style="flex:1;min-width:260px;">
+                <h3 style="margin:0 0 4px;">Links to unindexed pages</h3>
+                <p style="font-size:13px;margin:0;color:var(--on-surface-secondary);">Every night, after the indexing check, each page Google hasn't indexed gets up to two suggested links from pages Google already indexed: ones that name it, or are about the same brand or topic, best-read first. Where the page already names it, those words become the link; otherwise it joins a short "Related" line. No page gets more than five links this way.</p>
+            </div>
+            <div style="display:flex;flex-direction:column;gap:6px;align-items:flex-end;">
+                <label style="font-size:13px;display:flex;gap:6px;align-items:center;cursor:pointer;">
+                    <input type="checkbox" ${st.auto ? "checked" : ""} onchange="saveLinkAutoSettings()" id="link-auto-toggle"> Add them automatically every night</label>
+                <label style="font-size:12px;color:var(--on-surface-secondary);display:flex;gap:6px;align-items:center;">up to
+                    <input type="number" min="1" max="100" value="${st.per_night}" id="link-auto-per-night" class="form-control" style="width:64px;padding:2px 6px;" onchange="saveLinkAutoSettings()"> a night</label>
+            </div>
+        </div>
+        ${last ? `<p style="font-size:12px;margin:8px 0 0;color:${last.last_status === "ok" ? "var(--on-surface-secondary)" : "var(--error)"};">Last run ${formatRelativeTime(last.last_run_at)}: ${escapeHtml(last.last_status === "ok" ? (last.last_detail || "done") : (last.last_error || "failed"))}</p>` : ""}
+        <div style="display:flex;gap:8px;margin:12px 0 6px;align-items:center;flex-wrap:wrap;">
+            ${data.pending.length ? `<button class="btn btn-primary btn-sm" onclick="applyAllLinkSuggestions(${data.pending.length}, this)"><span class="material-symbols-rounded">add_link</span> Add all ${data.pending.length} links</button>` : ""}
+            <button class="btn btn-secondary btn-sm" onclick="refreshLinkSuggestions(this)"><span class="material-symbols-rounded">refresh</span> Suggest again now</button>
+            <span style="font-size:12px;color:var(--on-surface-secondary);">${data.pending.length} link${data.pending.length === 1 ? "" : "s"} suggested for ${groups.size} page${groups.size === 1 ? "" : "s"}. Each one can be undone.</span>
+        </div>
+        ${rows ? `<details ${groups.size <= 12 ? "open" : ""}><summary style="cursor:pointer;font-weight:600;font-size:13px;">Suggested links</summary>
+            <div class="table-container"><table class="data-table"><thead><tr><th style="width:38%;">Page Google hasn't indexed</th><th>Link to it</th></tr></thead><tbody>${rows}</tbody></table></div></details>`
+            : '<p style="font-size:13px;">No links to suggest right now.</p>'}
+        ${recent ? `<details style="margin-top:8px;"><summary style="cursor:pointer;font-weight:600;font-size:13px;">Added in the last 30 days (${data.recent.length})</summary>
+            <div class="table-container"><table class="data-table"><tbody>${recent}</tbody></table></div></details>` : ""}
+    </div>`;
+}
+
+async function applyLinkSuggestion(id, btn) {
     btn.disabled = true;
     try {
-        const res = await apiRequest("/api/auto-links/add", {
-            method: "POST",
-            body: { store_id: currentStoreId, source_type: "article", source_id: articleId, target_type: targetType, target_id: targetId },
-        });
-        btn.textContent = res.status === "added" ? "Linked ✓" : "Already linked";
-        if (res.status === "added") showToast("Link added. Undo from the article's History.", "success");
+        const r = await apiRequest(`/api/link-suggestions/${id}/apply`, { method: "POST", body: {} });
+        const line = btn.closest("[data-suggestion]");
+        line.innerHTML = `<span style="font-size:12.5px;color:var(--success);">${r.status === "applied" ? "Link added ✓" : "The page already links there"}</span>`;
     } catch (e) {
         showToast(`Could not add the link: ${e.message}`, "error");
         btn.disabled = false;
     }
 }
 
-async function addAllIndexingLinks(count, btn) {
+async function dismissLinkSuggestion(id, btn) {
+    btn.disabled = true;
+    try {
+        await apiRequest(`/api/link-suggestions/${id}/dismiss`, { method: "POST", body: {} });
+        btn.closest("[data-suggestion]").remove();
+    } catch (e) {
+        showToast(e.message, "error");
+        btn.disabled = false;
+    }
+}
+
+async function undoLinkSuggestion(eventId, btn) {
+    btn.disabled = true;
+    try {
+        await apiRequest(`/api/changes/${eventId}/revert`, { method: "POST", body: {} });
+        showToast("Link removed.", "success");
+        loadLinkSuggestions();
+    } catch (e) {
+        showToast(`Undo failed: ${e.message}`, "error");
+        btn.disabled = false;
+    }
+}
+
+async function saveLinkAutoSettings() {
+    const auto = document.getElementById("link-auto-toggle").checked;
+    const perNight = parseInt(document.getElementById("link-auto-per-night").value) || 15;
+    try {
+        await apiRequest("/api/link-suggestions/settings", { method: "POST", body: { auto, per_night: perNight } });
+        showToast(auto ? `The best ${perNight} suggested links will be added each night.` : "Links will wait for you to add them.", "success");
+    } catch (e) {
+        showToast(`Could not save: ${e.message}`, "error");
+    }
+}
+
+async function refreshLinkSuggestions(btn) {
+    btn.disabled = true;
+    btn.textContent = "Looking for links…";
+    try {
+        const r = await apiRequest("/api/link-suggestions/refresh", { method: "POST", body: { store_id: currentStoreId } });
+        showToast(`${r.suggested} links suggested for ${r.targets_covered} of ${r.targets} unindexed pages.`, "success");
+    } catch (e) {
+        showToast(`Could not suggest links: ${e.message}`, "error");
+    }
+    loadLinkSuggestions();
+}
+
+async function applyAllLinkSuggestions(count, btn) {
     const ok = await UIConfirm.ask({
-        title: `Add links for ${count} products?`,
-        message: `Each product gets one link from the most-read article about its brand, at most three new links per article. Where the article already names the product, those words become the link; otherwise it is added to a "Related" line at the end. Every link can be undone from the article's History.`,
+        title: `Add ${count} links?`,
+        message: `Each suggested link goes live on its page. Where the page already names the target, those words become the link; otherwise it joins a short "Related" line. Every link can be undone here or from the page's History.`,
         confirmLabel: "Add links",
     });
     if (!ok) return;
     btn.disabled = true;
     try {
-        const { task_id } = await apiRequest("/api/auto-links/run", { method: "POST", body: { store_id: currentStoreId, kind: "unindexed" } });
+        const { task_id } = await apiRequest("/api/link-suggestions/apply-all", { method: "POST", body: { store_id: currentStoreId } });
         const task = await pollTaskUntilDone(`/api/tasks/${task_id}`, {
             intervalMs: 3000, timeoutMs: 60 * 60 * 1000,
-            onProgress: (t) => {
-                const p = t.result && t.result.progress;
-                if (p) btn.textContent = `Adding… ${p.completed}/${p.total}`;
-            },
+            onProgress: (t) => { const p = t.result && t.result.progress; if (p) btn.textContent = `Adding… ${p.completed}/${p.total}`; },
         });
         const r = task.result || {};
-        showToast(`${r.added || 0} links added${r.no_source ? `, ${r.no_source} had no article to link from` : ""}${r.failed ? `, ${r.failed} failed` : ""}.`, r.failed ? "warning" : "success");
+        showToast(`${r.applied || 0} links added${r.already ? `, ${r.already} already there` : ""}${r.failed ? `, ${r.failed} failed (${(r.errors || [])[0] || ""})` : ""}.`, r.failed ? "warning" : "success");
     } catch (e) {
         showToast(`Adding links failed: ${e.message}`, "error");
     }
-    loadUnindexedPlan();
+    loadLinkSuggestions();
 }
 
 async function runIndexingCheck(btn) {
@@ -555,7 +706,13 @@ async function runIndexingCheck(btn) {
         const { task_id } = await apiRequest("/api/gsc/index-coverage/check", { method: "POST", body: { store_id: currentStoreId } });
         const task = await pollTaskUntilDone(`/api/tasks/${task_id}`, { intervalMs: 5000, timeoutMs: 20 * 60 * 1000 });
         const r = task.result || {};
-        showToast(`Checked ${r.checked || 0} pages — ${r.not_indexed || 0} not indexed.`, "success");
+        if (r.stopped_early) {
+            showToast(`Checked ${r.checked || 0} of ${r.due || 0} pages, then Search Console stopped answering (${r.stopped_early}). The rest is retried tonight.`, "warning");
+        } else if (!r.due) {
+            showToast("Every page was checked in the last two weeks — nothing due.", "info");
+        } else {
+            showToast(`Checked ${r.checked || 0} pages — ${r.not_indexed || 0} not indexed.`, "success");
+        }
     } catch (e) {
         showToast(`Indexing check: ${e.message}`, "error");
     }
@@ -745,7 +902,7 @@ async function loadCannibalization() {
     container.innerHTML = '<div class="spinner" style="margin: 20px auto;"></div>';
     try {
         const [response, fixes] = await Promise.all([
-            apiRequest(`/api/gsc/cannibalization?${qp()}&min_impressions=3`),
+            apiRequest(`/api/gsc/cannibalization?${qp()}&min_impressions=10`),
             apiRequest(`/api/gsc/cannibalization/fixes?store_id=${currentStoreId}`).catch(() => ({})),
         ]);
         cannibalizationData = response.groups || [];

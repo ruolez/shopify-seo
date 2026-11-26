@@ -292,7 +292,12 @@ def _repair_broken_brand_links(store_id):
                 )
             logger.info("Re-linked brand '%s' gc_id=%s to synced_collection=%s", vendor, gc_id, existing["id"])
         else:
-            logger.warning("Brand '%s' gc_id=%s: synced_collection for shopify_id=%s not found — skipping", vendor, gc_id, shopify_cid)
+            # Sync removes collections deleted in Shopify, so no mirror row
+            # means the collection is gone. Record that once (the brand then
+            # shows as having no collection) instead of warning on every load.
+            with db.get_cursor() as cur:
+                cur.execute("UPDATE generated_collections SET status = 'deleted' WHERE id = %s", (gc_id,))
+            logger.info("Brand '%s' gc_id=%s: collection %s no longer exists — marked deleted", vendor, gc_id, shopify_cid)
 
 
 @brand_bp.route("/api/brands/fix-titles", methods=["POST"])
@@ -334,13 +339,11 @@ def fix_brand_collection_titles():
                 decrypt_value(row["access_token_enc"]),
                 row["api_version"],
             )
-            client.update_collection(row["shopify_id"], {"title": original_name})
-
-            with db.get_cursor() as cur:
-                cur.execute(
-                    "UPDATE synced_collections SET title = %s WHERE id = %s",
-                    (original_name, row["collection_id"]),
-                )
+            apply_item_changes(
+                store_id, "collection", row["collection_id"], {"title": original_name},
+                source="brands", change_type="brand_title_fix", client=client,
+                allow_dropped_primary=True, stamp=False,
+            )
             fixed += 1
             logger.info("Fixed brand collection title: '%s' -> '%s'", current_title, original_name)
         except Exception:
@@ -761,6 +764,15 @@ def _build_brands_landing_html(brand_collections, store_name, vendor_product_typ
   </div>
 </div>"""
 
+    from app.services.schema_generator import faq_markup_enabled, strip_faq_microdata
+
+    faq_block = f"""<div style="margin-top:48px;padding-top:32px;border-top:1px solid #e5e5e5" itemscope itemtype="https://schema.org/FAQPage">
+    <h2 style="font-size:22px;font-weight:700;color:#111;margin:0 0 20px">Frequently Asked Questions</h2>
+    {faq_items}
+  </div>"""
+    if not faq_markup_enabled():
+        faq_block = strip_faq_microdata(faq_block)
+
     breadcrumb_style = 'style="display:flex;align-items:center;gap:6px;font-size:13px;color:#666;margin:0 0 20px;padding:0;list-style:none"'
 
     return f"""<style>{css}</style>
@@ -792,10 +804,7 @@ def _build_brands_landing_html(brand_collections, store_name, vendor_product_typ
     <meta itemprop="numberOfItems" content="{total}">
     {sections_html}
   </div>
-  <div style="margin-top:48px;padding-top:32px;border-top:1px solid #e5e5e5" itemscope itemtype="https://schema.org/FAQPage">
-    <h2 style="font-size:22px;font-weight:700;color:#111;margin:0 0 20px">Frequently Asked Questions</h2>
-    {faq_items}
-  </div>
+  {faq_block}
 </div>
 <script>
 document.querySelectorAll('.bl-alpha').forEach(function(a){{
@@ -1211,11 +1220,8 @@ def optimize_brand_seo(gc_id):
                 cur.execute("SELECT * FROM ai_tasks WHERE id = %s", (tid,))
                 task = cur.fetchone()
             result = run_task(task["task_type"], task["input"], task.get("store_id"))
-            with db.get_cursor() as cur:
-                cur.execute(
-                    "UPDATE ai_tasks SET status = 'completed', result = %s, completed_at = NOW() WHERE id = %s",
-                    (j.dumps(result), tid),
-                )
+            from app.services.task_runner import finish_task
+            finish_task(tid, result)
         except Exception as e:
             logger.exception("Brand SEO task failed")
             with db.get_cursor() as cur:

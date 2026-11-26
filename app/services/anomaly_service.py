@@ -12,6 +12,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 
 from app.database import db
+from app.services.impact_verdict import impact_verdict
 from app.prompt_defaults import DEFAULTS
 from app.services.dashboard_service import gsc_data_end_date
 from app.settings_manager import get_setting
@@ -47,8 +48,8 @@ def scan_click_drops(store_id):
             """SELECT page,
                       SUM(clicks) FILTER (WHERE date >= %s) AS cur_clicks,
                       SUM(clicks) FILTER (WHERE date < %s) AS prev_clicks
-               FROM gsc_daily_metrics
-               WHERE store_id = %s AND date >= %s AND date <= %s
+               FROM gsc_page_daily
+               WHERE store_id = %s AND date >= %s AND date <= %s AND NOT is_fresh
                GROUP BY page
                HAVING SUM(clicks) FILTER (WHERE date < %s) >= %s""",
             (cur_start, cur_start, store_id, prev_start.isoformat(), end.isoformat(),
@@ -63,9 +64,12 @@ def scan_click_drops(store_id):
         prev = int(r["prev_clicks"] or 0)
         cur_c = int(r["cur_clicks"] or 0)
         drop_pct = (prev - cur_c) / prev * 100 if prev else 0
-        if drop_pct > t["clicks_drop_pct"]:
+        # 10 -> 6 clicks is ordinary week-to-week noise; the drop must also
+        # beat Poisson noise, and only a real baseline makes it critical.
+        if drop_pct > t["clicks_drop_pct"] and impact_verdict(prev, 7, cur_c, 7)[0] == "declined":
+            severity = "critical" if prev >= t.get("critical_min_weekly_clicks", 30) else "warning"
             if emit_event(
-                store_id, "anomaly_clicks_drop", "critical",
+                store_id, "anomaly_clicks_drop", severity,
                 r["page"],
                 f"clicks_drop:{r['page']}:{week_tag}",
                 {"prev_clicks": prev, "cur_clicks": cur_c, "drop_pct": round(drop_pct, 1)},
@@ -326,7 +330,7 @@ def maybe_run_weekly_visibility(store_id):
         cur.execute(
             """SELECT MAX(completed_at) AS last_run,
                       COALESCE(SUM(cost_estimate) FILTER (WHERE completed_at::date = CURRENT_DATE), 0) AS spend_today
-               FROM ai_tracking_runs WHERE store_id = %s AND status = 'completed'""",
+               FROM ai_tracking_runs WHERE store_id = %s AND status IN ('completed', 'budget_capped')""",
             (store_id,),
         )
         row = cur.fetchone()

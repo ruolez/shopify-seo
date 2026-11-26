@@ -3,7 +3,7 @@ from flask import Blueprint, jsonify, render_template, request, session
 from app.auth import decrypt_value, encrypt_value
 from app.database import db
 from app.prompt_defaults import DEFAULTS
-from app.services.sync_service import sync_store_async
+from app.services.sync_service import start_sync_job, sync_store_async
 from app.settings_manager import get_setting
 from app.shopify_client import ShopifyClient
 
@@ -172,7 +172,8 @@ def sync_store_route(store_id):
             return jsonify({"error": "Store not found"}), 404
 
         cur.execute(
-            "SELECT id, started_at FROM sync_jobs WHERE store_id = %s AND status = 'running' ORDER BY id DESC LIMIT 1",
+            "SELECT id, started_at FROM sync_jobs WHERE store_id = %s AND kind = 'store' AND status = 'running' "
+            "ORDER BY id DESC LIMIT 1",
             (store_id,),
         )
         running_job = cur.fetchone()
@@ -187,15 +188,16 @@ def sync_store_route(store_id):
                 (f"Stale job auto-recovered after {sync_timeout_minutes} minutes", running_job["id"]),
             )
 
-    sync_store_async(store_id)
-    return jsonify({"ok": True, "message": "Sync started"})
+    job_id = start_sync_job(store_id)
+    sync_store_async(store_id, job_id)
+    return jsonify({"ok": True, "message": "Sync started", "job_id": job_id})
 
 
 @store_bp.route("/api/stores/<int:store_id>/sync-status", methods=["GET"])
 def sync_status(store_id):
     with db.get_cursor() as cur:
         cur.execute(
-            "SELECT * FROM sync_jobs WHERE store_id = %s ORDER BY id DESC LIMIT 1",
+            "SELECT * FROM sync_jobs WHERE store_id = %s AND kind = 'store' ORDER BY id DESC LIMIT 1",
             (store_id,),
         )
         job = cur.fetchone()

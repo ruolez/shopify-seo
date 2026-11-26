@@ -841,23 +841,14 @@ async function analyzeArticleAI(articleId) {
     });
 }
 
-function pollArticleAITask(taskId, articleId) {
+async function pollArticleAITask(taskId, articleId) {
     const resultDiv = document.getElementById("article-ai-result");
-    const poll = async () => {
-        try {
-            const task = await apiRequest(`/api/tasks/${taskId}`);
-            if (task.status === "completed" && task.result) {
-                renderArticleAIResult(resultDiv, task.result, articleId);
-            } else if (task.status === "failed") {
-                resultDiv.innerHTML = `<div class="card"><p style="color: var(--error);">Analysis failed: ${escapeHtml(task.error || "Unknown error")}</p></div>`;
-            } else {
-                setTimeout(poll, 2000);
-            }
-        } catch (err) {
-            resultDiv.innerHTML = `<div class="card"><p style="color: var(--error);">${escapeHtml(err.message)}</p></div>`;
-        }
-    };
-    poll();
+    try {
+        const task = await pollTaskUntilDone(`/api/tasks/${taskId}`, { intervalMs: 2000, timeoutMs: 5 * 60 * 1000 });
+        renderArticleAIResult(resultDiv, task.result || {}, articleId);
+    } catch (err) {
+        resultDiv.innerHTML = `<div class="card"><p style="color: var(--error);">Analysis failed: ${escapeHtml(err.message)}</p></div>`;
+    }
 }
 
 let lastArticleAiResult = null;
@@ -1109,7 +1100,7 @@ function renderTopicSuggestion(s) {
 
     const kwGroup = (label, words) => {
         if (!words || !words.length) return "";
-        return `<div style="margin-top: 4px; font-size: 12px;"><span style="color: var(--on-surface-secondary); text-transform: uppercase; font-size: 10px; letter-spacing: 0.5px;">${label}</span> ${words.map((w) => `<span class="badge badge-info" style="margin: 2px;">${escapeHtml(w)}</span>`).join("")}</div>`;
+        return `<div style="margin-top: 4px; font-size: 12px;"><span style="color: var(--on-surface-secondary); font-size: 10px; ">${label}</span> ${words.map((w) => `<span class="badge badge-info" style="margin: 2px;">${escapeHtml(w)}</span>`).join("")}</div>`;
     };
 
     let html = `<div class="card" style="margin-bottom: 12px; ${muted ? "opacity: 0.55;" : ""}" data-suggestion-id="${s.id}">`;
@@ -1138,7 +1129,7 @@ function renderTopicSuggestion(s) {
         html += `<p style="margin: 4px 0 0; font-size: 13px;"><strong>Slug</strong>: /blogs/news/${escapeHtml(s.url_slug)}</p>`;
     }
     if (kw.primary) {
-        html += `<div style="margin-top: 8px; font-size: 12px;"><span style="color: var(--on-surface-secondary); text-transform: uppercase; font-size: 10px; letter-spacing: 0.5px;">Primary</span> <span class="badge badge-info" style="margin: 2px; font-weight: 700;">${escapeHtml(kw.primary)}</span></div>`;
+        html += `<div style="margin-top: 8px; font-size: 12px;"><span style="color: var(--on-surface-secondary); font-size: 10px; ">Primary</span> <span class="badge badge-info" style="margin: 2px; font-weight: 700;">${escapeHtml(kw.primary)}</span></div>`;
     }
     html += kwGroup("Informational", kw.informational);
     html += kwGroup("Commercial", kw.commercial);
@@ -1156,7 +1147,7 @@ function renderTopicSuggestion(s) {
         ...(s.target_products || []).map((t) => ({ t, icon: "sell" })),
     ];
     if (links.length) {
-        html += `<div style="margin-top: 8px; font-size: 12px;"><span style="color: var(--on-surface-secondary); text-transform: uppercase; font-size: 10px; letter-spacing: 0.5px;">Link to</span> `;
+        html += `<div style="margin-top: 8px; font-size: 12px;"><span style="color: var(--on-surface-secondary); font-size: 10px; ">Link to</span> `;
         html += links.map((l) => `<span class="badge badge-info" style="margin: 2px;"><span class="material-symbols-rounded" style="font-size: 12px; vertical-align: middle;">${l.icon}</span> ${escapeHtml(l.t)}</span>`).join("");
         html += `</div>`;
     }

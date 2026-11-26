@@ -19,7 +19,7 @@ NEWS_SECTION_NAME = "seo-news-article"
 
 # Bump these to force a re-push ("outdated") on existing installs.
 NEWS_TEMPLATE_VERSION = "v1"
-NEWS_SECTION_VERSION = "v1"
+NEWS_SECTION_VERSION = "v2"
 
 NEWS_TEMPLATE_MARKER = f"A2Z News Template {NEWS_TEMPLATE_VERSION}"
 NEWS_SECTION_MARKER = f"A2Z News Section {NEWS_SECTION_VERSION}"
@@ -47,7 +47,7 @@ _SECTION_TEMPLATE = """{% comment %} @@SECTION_MARKER@@ {% endcomment %}
   <h1 class="a2z-news__headline">{{ article.title }}</h1>
 
   <p class="a2z-news__byline">
-    By A2Z
+    By {{ article.author | default: shop.name | escape }}
     <span class="a2z-news__dot">&middot;</span>
     <time datetime="{{ article.published_at | date: '%Y-%m-%d' }}">{{ article.published_at | date: '%B %-d, %Y' }}</time>
     {% if dmod != blank %}<span class="a2z-news__updated"><span class="a2z-news__dot">&middot;</span> Updated {{ dmod | date: '%B %-d, %Y' }}</span>{% endif %}
@@ -86,7 +86,8 @@ _SECTION_TEMPLATE = """{% comment %} @@SECTION_MARKER@@ {% endcomment %}
   "dateModified": "{% if dmod != blank %}{{ dmod | date: '%Y-%m-%dT%H:%M:%S%z' }}{% else %}{{ article.published_at | date: '%Y-%m-%dT%H:%M:%S%z' }}{% endif %}",
   {% if article.image %}"image": ["{{ article.image | image_url: width: 1600 | prepend: 'https:' }}"],{% endif %}
   {% if cat != blank %}"articleSection": {{ cat | json }},{% endif %}
-  "author": { "@id": "{{ shop.url }}/#organization" },
+  {%- comment -%} A named person (Settings › Publishing) is a Person; the store's own name stays the Organization. {%- endcomment -%}
+  {% if article.author != blank %}{% unless shop.name contains article.author %}"author": { "@type": "Person", "name": {{ article.author | json }} },{% else %}"author": { "@id": "{{ shop.url }}/#organization" },{% endunless %}{% else %}"author": { "@id": "{{ shop.url }}/#organization" },{% endif %}
   "publisher": { "@id": "{{ shop.url }}/#organization" },
   "mainEntityOfPage": { "@type": "WebPage", "@id": "{{ canonical_url }}" }
 }

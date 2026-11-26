@@ -409,5 +409,9 @@ def compose_article_body(body_html, inline_images, visuals=None, figure_class=BL
 
 
 def faq_jsonld_string(body_html):
+    from app.services.schema_generator import faq_markup_enabled
+
+    if not faq_markup_enabled():
+        return None
     payload = build_faqpage_jsonld(extract_faq(body_html))
     return json.dumps(payload, ensure_ascii=False) if payload else None

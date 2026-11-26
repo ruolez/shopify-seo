@@ -160,8 +160,8 @@ def backfill_score_history(store_id):
 class NightlyScheduler:
     """Rolls up daily snapshots for every active store. Ticks every few
     hours; every tick refreshes the snapshot upsert and activity mirror,
-    while the row-for-today check keeps backfill, anomaly/gap scans and
-    paid runs to once per day (restart-safe)."""
+    while job_health keeps backfill, scans, index checks and paid runs to
+    one success per day (restart-safe, and a failure retries next tick)."""
 
     def __init__(self, interval_hours=6):
         self.interval = interval_hours * 3600
@@ -191,63 +191,53 @@ class NightlyScheduler:
             self._stop_event.wait(self.interval)
 
     def _tick(self):
+        from app.services.job_health import run_recorded
+        from app.services.task_runner import sweep_stale_jobs
+
+        # Boot recovery runs once; worker threads that die later leave rows
+        # in a working state, so the leader sweeps on every tick too.
+        sweep_stale_jobs(min_interval_seconds=0)
+
         today = datetime.now(timezone.utc).date()
         with db.get_cursor() as cur:
             cur.execute("SELECT id FROM stores WHERE is_active = TRUE")
             store_ids = [r["id"] for r in cur.fetchall()]
+            # Restart-safe: a job that already succeeded today is skipped.
             cur.execute(
-                "SELECT store_id FROM store_daily_snapshot WHERE snapshot_date = %s",
+                "SELECT job, store_id FROM job_health WHERE (last_ok_at AT TIME ZONE 'UTC')::date = %s",
                 (today,),
             )
-            snapshotted_today = {r["store_id"] for r in cur.fetchall()}
+            done_today = {(r["job"], r["store_id"]) for r in cur.fetchall()}
 
         from app.services.anomaly_service import (
             maybe_run_weekly_visibility,
             mirror_activity_events,
             run_nightly_scans,
         )
+        from app.services.index_coverage import check_sitemaps, inspect_batch
+        from app.services.revenue_service import pull_orders
+        from app.services.unindexed_links import run_nightly as link_unindexed_pages
+
+        # Once-a-day jobs are tracked one by one: a failure is retried on the
+        # next tick (every 6 h) instead of waiting for tomorrow, and a failed
+        # snapshot no longer skips the rest.
+        daily_jobs = (
+            ("backfill_score_history", backfill_score_history),
+            ("nightly_scans", run_nightly_scans),
+            ("weekly_visibility_check", maybe_run_weekly_visibility),
+            ("index_coverage", inspect_batch),
+            ("sitemap_check", check_sitemaps),
+            ("unindexed_links", link_unindexed_pages),
+            ("order_pull", pull_orders),
+        )
         for store_id in store_ids:
-            first_tick_today = store_id not in snapshotted_today
-            try:
-                if first_tick_today and backfill_score_history(store_id):
-                    logger.info("Backfilled snapshot score history for store %s", store_id)
-                # Upsert is idempotent (ON CONFLICT DO UPDATE) — refresh every
-                # tick so post-apply changes show up the same day.
-                take_store_snapshot(store_id, today)
-            except Exception as e:
-                logger.error("Snapshot failed for store %s: %s", store_id, str(e))
-                continue
-            try:
-                mirror_activity_events(store_id)
-            except Exception as e:
-                logger.error("Activity mirror failed for store %s: %s", store_id, str(e))
-            if not first_tick_today:
-                continue
-            # Once per day, alongside the first snapshot: anomaly + gap scans
-            # and the opt-in weekly paid runs.
-            try:
-                run_nightly_scans(store_id)
-            except Exception as e:
-                logger.error("Nightly scans failed for store %s: %s", store_id, str(e))
-            try:
-                maybe_run_weekly_visibility(store_id)
-            except Exception as e:
-                logger.error("Weekly visibility check failed for store %s: %s", store_id, str(e))
-            # Index coverage: a daily slice of URL inspections, so every page
-            # is re-checked about every two weeks without manual sweeps.
-            try:
-                from app.services.index_coverage import inspect_batch
-                result = inspect_batch(store_id)
-                logger.info("Index coverage for store %s: %s", store_id, result)
-            except Exception as e:
-                logger.warning("Index coverage check skipped for store %s: %s", store_id, e)
-            # Order pull for revenue attribution — a missing read_orders
-            # scope logs one warning per day and the widget shows setup help.
-            try:
-                from app.services.revenue_service import pull_orders
-                pull_orders(store_id)
-            except Exception as e:
-                logger.error("Order pull failed for store %s: %s", store_id, str(e))
+            # Upsert is idempotent — refresh every tick so post-apply changes
+            # show up the same day.
+            run_recorded("daily_snapshot", store_id, take_store_snapshot, store_id, today)
+            run_recorded("activity_mirror", store_id, mirror_activity_events, store_id)
+            for name, fn in daily_jobs:
+                if (name, store_id) not in done_today:
+                    run_recorded(name, store_id, fn, store_id)
 
 
 _scheduler = None

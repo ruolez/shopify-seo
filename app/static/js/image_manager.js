@@ -52,7 +52,8 @@ async function loadImgStores() {
 }
 
 function renderImgStoreSelector(container, stores) {
-    let html = '<div class="filter-bar" style="display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 16px;">';
+    // One store: the sidebar already names it, so the picker would be noise.
+    let html = `<div class="filter-bar" style="display: ${stores.length > 1 ? "flex" : "none"}; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 16px;">`;
     html += '<span style="font-weight: 500; margin-right: 4px;">Store:</span>';
     for (const s of stores) {
         const active = imgStoreFilter === String(s.id) ? " active" : "";

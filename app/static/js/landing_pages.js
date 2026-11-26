@@ -338,6 +338,11 @@
         const data = {};
         if (currentAiResult.optimized_meta_title) data.meta_title = currentAiResult.optimized_meta_title;
         if (currentAiResult.optimized_meta_description) data.meta_description = currentAiResult.optimized_meta_description;
+        if (!Object.keys(data).length) {
+            showToast('These recommendations have no new title or description to apply.', 'warning');
+            if (btn) { btn.disabled = false; btn.innerHTML = origHtml; }
+            return;
+        }
 
         try {
             if (currentSeoPageType === 'synced') {
@@ -879,7 +884,7 @@
                             <div style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);text-align:center;width:85%;z-index:2;">
                                 <div style="color:#fff;font-size:20px;font-weight:800;text-shadow:0 2px 8px rgba(0,0,0,0.5);margin-bottom:6px;">${escapeHtml(headline)}</div>
                                 ${subheadline ? `<div style="color:rgba(255,255,255,0.9);font-size:12px;margin-bottom:10px;text-shadow:0 1px 4px rgba(0,0,0,0.3);">${escapeHtml(subheadline)}</div>` : ''}
-                                ${ctaText ? `<span style="display:inline-block;padding:6px 18px;background:#fff;color:#111;border-radius:6px;font-size:11px;font-weight:700;text-transform:uppercase;">${escapeHtml(ctaText)}</span>` : ''}
+                                ${ctaText ? `<span style="display:inline-block;padding:6px 18px;background:#fff;color:#111;border-radius:6px;font-size:11px;font-weight:700;">${escapeHtml(ctaText)}</span>` : ''}
                             </div>
                         </div>`;
                     }

@@ -8,12 +8,10 @@ for but nothing links to is a different job from one nobody looks for.
 from datetime import timedelta
 
 from app.database import db
-from app.services.keyword_identity import fold_token, tokens
 
 MIN_LINKS = 3
 MIN_DEMAND_VOLUME = 50
 UNKNOWN_STATE = "URL is unknown to Google"
-_FILLER = {"the", "and", "for", "with", "all", "pack", "packs", "count"}
 
 
 def diagnose(page):
@@ -53,23 +51,6 @@ def rank(pages):
     return out
 
 
-def _words(text):
-    return {fold_token(t) for t in tokens(text or "") if len(t) > 2 and t not in _FILLER}
-
-
-def pick_link_sources(item, articles, limit=2):
-    """Articles that could carry a link to this item: ones about its brand,
-    best brand match first, then most clicked. Product type alone is too broad
-    ("cigars" matches half the blog), so no brand match means no suggestion. Pure."""
-    brand = _words(item.get("vendor"))
-    if not brand:
-        return []
-    related = [(len(brand & _words(a["title"])), a) for a in articles]
-    related = [(shared, a) for shared, a in related if shared]
-    related.sort(key=lambda pair: (-pair[0], -pair[1]["clicks"]))
-    return [a for _, a in related[:limit]]
-
-
 def _sitemap_paths(base_url):
     """Paths listed in the store's sitemap, or None when it cannot be read."""
     import re
@@ -88,7 +69,7 @@ def _sitemap_paths(base_url):
         return None
 
 
-def get_unindexed_plan(store_id):
+def get_unindexed_plan(store_id, check_sitemap=True):
     from app.services.dashboard_service import gsc_data_end_date
     from app.services.url_utils import gsc_base_url, url_path_key
 
@@ -113,7 +94,7 @@ def get_unindexed_plan(store_id):
         cur.execute("SELECT analysis_data FROM interlinking_analysis WHERE store_id = %s", (store_id,))
         links_row = cur.fetchone()
         cur.execute(
-            """SELECT page, SUM(impressions) AS impressions FROM gsc_daily_metrics
+            """SELECT page, SUM(impressions) AS impressions FROM gsc_page_daily
                WHERE store_id = %s AND date >= %s GROUP BY page""",
             (store_id, end - timedelta(days=90)),
         )
@@ -121,16 +102,6 @@ def get_unindexed_plan(store_id):
         for r in cur.fetchall():
             key = url_path_key(r["page"]).lower()
             impressions[key] = impressions.get(key, 0) + float(r["impressions"] or 0)
-        cur.execute(
-            """SELECT sa.id, sa.title, COALESCE(g.clicks, 0) AS clicks
-               FROM synced_articles sa JOIN synced_blogs sb ON sb.id = sa.blog_id
-               LEFT JOIN (SELECT page, SUM(clicks) AS clicks FROM gsc_daily_metrics
-                          WHERE store_id = %s AND date >= %s GROUP BY page) g
-                 ON g.page LIKE '%%/blogs/' || sb.handle || '/' || sa.handle
-               WHERE sa.store_id = %s AND sa.is_published""",
-            (store_id, end - timedelta(days=28), store_id),
-        )
-        articles = [{"id": r["id"], "title": r["title"], "clicks": float(r["clicks"])} for r in cur.fetchall()]
         cur.execute("SELECT gsc_property FROM gsc_credentials WHERE store_id = %s", (store_id,))
         cred = cur.fetchone()
 
@@ -141,7 +112,7 @@ def get_unindexed_plan(store_id):
         for d in analysis.get(key) or []:
             incoming[(item_type, d.get("id"))] = d.get("incoming_count") or 0
 
-    needs_sitemap = any(p["coverage_state"] == UNKNOWN_STATE for p in pages)
+    needs_sitemap = check_sitemap and any(p["coverage_state"] == UNKNOWN_STATE for p in pages)
     sitemap = _sitemap_paths(gsc_base_url((cred or {}).get("gsc_property")).rstrip("/")) if needs_sitemap and cred else None
 
     for p in pages:
@@ -151,7 +122,6 @@ def get_unindexed_plan(store_id):
         p["incoming_links"] = incoming.get((p["item_type"], p["item_id"]), 0)
         p["in_sitemap"] = True if sitemap is None else path in sitemap
         p["last_crawl_time"] = p["last_crawl_time"].isoformat() if p["last_crawl_time"] else None
-        p["link_from"] = pick_link_sources(p, articles) if p["item_type"] == "product" else []
 
     ranked = rank(pages)
     return {

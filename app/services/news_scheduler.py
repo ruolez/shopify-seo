@@ -68,10 +68,18 @@ class NewsPublishScheduler:
         for row in due:
             by_store.setdefault(row["store_id"], []).append(row["id"])
 
+        from app.services.job_health import record_job
+
         for store_id, session_ids in by_store.items():
-            store, client = _get_store_client(store_id)
+            try:
+                store, client = _get_store_client(store_id)
+            except Exception as e:
+                store, client = None, None
+                logger.exception("Scheduler could not connect to store %s", store_id)
+                record_job("news_scheduler", store_id, ok=False,
+                           error=f"{len(session_ids)} post(s) due but the store connection failed: {e}")
             if not client:
-                continue  # store deleted mid-tick; CASCADE cleans the rows up
+                continue  # store deleted mid-tick (CASCADE cleans up) or unreachable (recorded)
             published_any = False
             for sid in session_ids:
                 # Atomic claim — identical guard to the publish-now endpoint,
@@ -79,7 +87,8 @@ class NewsPublishScheduler:
                 with db.get_cursor() as cur:
                     cur.execute(
                         "UPDATE news_sessions SET status = 'auto_publishing', updated_at = NOW() "
-                        "WHERE id = %s AND status = 'scheduled'",
+                        "WHERE id = %s AND status = 'scheduled' AND reviewed_at IS NOT NULL "
+                        "AND scheduled_for <= (NOW() AT TIME ZONE 'utc')",
                         (sid,),
                     )
                     if cur.rowcount == 0:
@@ -95,6 +104,9 @@ class NewsPublishScheduler:
                             "UPDATE news_sessions SET status = 'failed', error = %s, updated_at = NOW() WHERE id = %s",
                             (str(e), sid),
                         )
+                    record_job("news_scheduler", store_id, ok=False, error=f"Post {sid}: {e}")
+                    continue
+                record_job("news_scheduler", store_id, ok=True, detail=f"published {sid}")
             if published_any:
                 _regen_news_hub_async(store_id, client, store)
                 _regen_blog_landings_async(store_id, client, store)

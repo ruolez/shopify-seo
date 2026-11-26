@@ -20,6 +20,11 @@ def is_gone_error(e):
     must surface, or a live resource silently becomes invisible in the app."""
     return any(t in str(e).lower() for t in _GONE_ERROR_MARKERS)
 
+class ShopifyAmbiguousWrite(Exception):
+    """A create request got no clear answer; Shopify may or may not have made
+    the object. Look it up before trying again."""
+
+
 METAFIELDS_SET_MUTATION = """
 mutation ($metafields: [MetafieldsSetInput!]!) {
   metafieldsSet(metafields: $metafields) {
@@ -51,7 +56,11 @@ class ShopifyClient:
             "Content-Type": "application/json",
         }
 
-    def _graphql(self, query, variables=None):
+    def _graphql(self, query, variables=None, retry_unsafe=True):
+        """retry_unsafe=False is for create mutations: a timeout, dropped
+        connection or 5xx may mean Shopify already made the object, so resending
+        would make a second one. Those raise ShopifyAmbiguousWrite instead; 429,
+        THROTTLED and refused connections were never processed and still retry."""
         payload = {"query": query}
         if variables:
             payload["variables"] = variables
@@ -65,6 +74,8 @@ class ShopifyClient:
                     self.graphql_url, json=payload, headers=self.headers, timeout=30
                 )
             except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+                if not retry_unsafe and not isinstance(e, requests.exceptions.ConnectTimeout):
+                    raise ShopifyAmbiguousWrite(f"No answer from Shopify for a create request: {e}") from e
                 attempt += 1
                 if attempt >= max_attempts:
                     raise
@@ -73,6 +84,8 @@ class ShopifyClient:
                 time.sleep(wait)
                 continue
 
+            if resp.status_code >= 500 and not retry_unsafe:
+                raise ShopifyAmbiguousWrite(f"Shopify returned HTTP {resp.status_code} for a create request")
             if resp.status_code == 429 or resp.status_code >= 500:
                 attempt += 1
                 if attempt >= max_attempts:
@@ -213,6 +226,22 @@ class ShopifyClient:
                 if not blog_handle or (node.get("blog") or {}).get("handle") == blog_handle:
                     return True
         return False
+
+    def find_article(self, blog_shopify_id, handle=None, title=None):
+        """The article in this blog with this handle (or, without a handle,
+        this exact title), as {shopify_id, title, handle}; None when absent."""
+        if not (handle or title):
+            return None
+        q = f"handle:{handle}" if handle else f'title:"{title}"'
+        query = """query($q: String!) { articles(first: 10, query: $q, sortKey: ID, reverse: true) {
+            nodes { id title handle blog { id } } } }"""
+        data = self._graphql(query, {"q": q})
+        for node in (data.get("articles") or {}).get("nodes", []):
+            if (node.get("blog") or {}).get("id") != blog_shopify_id:
+                continue
+            if (handle and node.get("handle") == handle) or (not handle and node.get("title") == title):
+                return {"shopify_id": node["id"], "title": node.get("title", ""), "handle": node.get("handle", "")}
+        return None
 
     def blog_exists(self, handle):
         """Return True if a blog with this handle exists."""
@@ -407,6 +436,25 @@ class ShopifyClient:
         if errors:
             raise Exception(f"Shopify productUpdate error: {errors[0].get('message', str(errors))}")
         return result.get("product", {})
+
+    def add_product_tags(self, shopify_id, tags):
+        """Add tags without removing any (productUpdate replaces the whole
+        list, which drops tags smart collections and apps rely on). Returns
+        the product's full tag list as Shopify now holds it."""
+        query = """
+        mutation ($id: ID!, $tags: [String!]!) {
+          tagsAdd(id: $id, tags: $tags) {
+            node { ... on Product { id tags } }
+            userErrors { field message }
+          }
+        }
+        """
+        data = self._graphql(query, {"id": shopify_id, "tags": self._normalize_tags(tags)})
+        result = data.get("tagsAdd", {})
+        errors = result.get("userErrors", [])
+        if errors:
+            raise Exception(f"Shopify tagsAdd error: {errors[0].get('message', str(errors))}")
+        return (result.get("node") or {}).get("tags") or []
 
     def update_product_media(self, shopify_id, media_updates):
         valid = [m for m in media_updates if m.get("media_id") and m.get("alt") is not None]
@@ -683,28 +731,25 @@ class ShopifyClient:
         ]
 
     def publish_to_all_channels(self, resource_shopify_id):
-        """Publish the resource to the Online Store channel.
+        """Publish the resource to the Online Store channel only.
 
         (Name kept for caller compatibility.) Publishing to every app channel
         (Google, Faire, POS, ...) caused partial-success errors and unwanted
-        third-party listings; if the Online Store publication can't be
-        identified, falls back to the previous publish-everywhere behavior.
+        third-party listings, so a missing Online Store channel is an error,
+        never a reason to publish everywhere.
         """
         publications = self.get_publications()
-        if not publications:
-            return []
-
         online_store = [
-            p for p in publications
+            p for p in publications or []
             if (p.get("name") or "").strip().lower() == "online store"
         ]
-        if online_store:
-            publications = online_store
-        else:
-            logger.warning(
-                "Online Store publication not found among %d channels — publishing to all",
-                len(publications),
+        if not online_store:
+            raise Exception(
+                "Could not find the Online Store sales channel"
+                + (" (the app may lack the read_publications scope)" if not publications else "")
+                + " — nothing was published"
             )
+        publications = online_store
 
         publication_inputs = [{"publicationId": p["id"]} for p in publications]
         query = """
@@ -751,7 +796,7 @@ class ShopifyClient:
           }
         }
         """
-        data = self._graphql(query, {"input": collection_input})
+        data = self._graphql(query, {"input": collection_input}, retry_unsafe=False)
         result = data.get("collectionCreate", {})
         errors = result.get("userErrors", [])
         if errors:
@@ -808,7 +853,7 @@ class ShopifyClient:
             if seo_description:
                 input_vars["seo"]["description"] = seo_description
 
-        data = self._graphql(query, {"input": input_vars})
+        data = self._graphql(query, {"input": input_vars}, retry_unsafe=False)
         result = data.get("collectionCreate", {})
         errors = result.get("userErrors", [])
         if errors:
@@ -910,7 +955,7 @@ class ShopifyClient:
             file_input["filename"] = filename
         if alt_text:
             file_input["alt"] = alt_text
-        data = self._graphql(query, {"files": [file_input]})
+        data = self._graphql(query, {"files": [file_input]}, retry_unsafe=False)
         result = data.get("fileCreate", {})
         errors = result.get("userErrors", [])
         if errors:
@@ -1133,7 +1178,7 @@ class ShopifyClient:
           }
         }
         """
-        data = self._graphql(query, {"blog": {"title": title}})
+        data = self._graphql(query, {"blog": {"title": title}}, retry_unsafe=False)
         result = data.get("blogCreate", {})
         errors = result.get("userErrors", [])
         if errors:
@@ -1372,7 +1417,15 @@ class ShopifyClient:
         if "template_suffix" in fields:
             article_input["templateSuffix"] = fields["template_suffix"]
 
-        data = self._graphql(query, {"article": article_input})
+        try:
+            data = self._graphql(query, {"article": article_input}, retry_unsafe=False)
+        except ShopifyAmbiguousWrite:
+            found = self.find_article(blog_shopify_id, fields.get("handle"), fields.get("title"))
+            if not found:
+                raise
+            logger.warning("articleCreate got no answer but the article exists (%s); using it", found["shopify_id"])
+            data = {"articleCreate": {"article": {"id": found["shopify_id"], "title": found["title"],
+                                                  "handle": found["handle"]}, "userErrors": []}}
         result = data.get("articleCreate", {})
         errors = result.get("userErrors", [])
         if errors:
@@ -1381,12 +1434,15 @@ class ShopifyClient:
         image = article.get("image") or {}
         # articleCreate has no SEO fields — the meta title and description are
         # metafields. Without this a new post went live with neither.
+        seo_error = None
         if article.get("id") and (fields.get("meta_title") or fields.get("meta_description")):
             try:
                 self.set_article_seo(article["id"], fields.get("meta_title"), fields.get("meta_description"))
-            except Exception:
+            except Exception as e:
                 logger.exception("Setting SEO meta failed for new article %s", article["id"])
+                seo_error = str(e)
         return {
+            "seo_error": seo_error,
             "shopify_id": article.get("id", ""),
             "title": article.get("title", ""),
             "handle": article.get("handle", ""),
@@ -1557,22 +1613,6 @@ class ShopifyClient:
         if errors:
             raise Exception(f"Shopify articleDelete error: {errors[0].get('message', str(errors))}")
         return result.get("deletedArticleId")
-
-    def create_url_redirect(self, path, target):
-        query = """
-        mutation ($urlRedirect: UrlRedirectInput!) {
-          urlRedirectCreate(urlRedirect: $urlRedirect) {
-            urlRedirect { id path target }
-            userErrors { field message }
-          }
-        }
-        """
-        data = self._graphql(query, {"urlRedirect": {"path": path, "target": target}})
-        result = data.get("urlRedirectCreate", {})
-        errors = result.get("userErrors", [])
-        if errors:
-            raise Exception(f"Shopify urlRedirectCreate error: {errors[0].get('message', str(errors))}")
-        return result.get("urlRedirect", {})
 
     def get_pages(self, limit=50, cursor=None):
         query = """
@@ -1917,7 +1957,7 @@ class ShopifyClient:
             metafields.append({"namespace": "global", "key": "description_tag", "value": seo_description, "type": "single_line_text_field"})
         if metafields:
             page_input["metafields"] = metafields
-        data = self._graphql(query, {"page": page_input})
+        data = self._graphql(query, {"page": page_input}, retry_unsafe=False)
         result = data.get("pageCreate", {})
         errors = result.get("userErrors", [])
         if errors:
@@ -1950,10 +1990,16 @@ class ShopifyClient:
         if "template_suffix" in fields:
             page_input["templateSuffix"] = fields["template_suffix"]
         metafields = []
-        if "seo_title" in fields:
-            metafields.append({"namespace": "global", "key": "title_tag", "value": fields["seo_title"], "type": "single_line_text_field"})
-        if "seo_description" in fields:
-            metafields.append({"namespace": "global", "key": "description_tag", "value": fields["seo_description"], "type": "single_line_text_field"})
+        blanks = []
+        for field, key in (("seo_title", "title_tag"), ("seo_description", "description_tag")):
+            if field not in fields:
+                continue
+            if (fields[field] or "").strip():
+                metafields.append({"namespace": "global", "key": key, "value": fields[field],
+                                   "type": "single_line_text_field"})
+            else:
+                # Shopify rejects a blank metafield value; clearing means deleting.
+                blanks.append((shopify_id, "global", key))
         if metafields:
             page_input["metafields"] = metafields
         data = self._graphql(query, {"id": shopify_id, "page": page_input})
@@ -1961,6 +2007,8 @@ class ShopifyClient:
         errors = result.get("userErrors", [])
         if errors:
             raise Exception(f"Shopify pageUpdate error: {errors[0].get('message', str(errors))}")
+        if blanks:
+            self.delete_metafields(blanks)
         page = result.get("page", {})
         return {
             "shopify_id": page.get("id", ""),
@@ -1968,9 +2016,23 @@ class ShopifyClient:
             "handle": page.get("handle", ""),
         }
 
+    def find_url_redirect(self, path):
+        """{id, path, target} of the redirect from exactly this path, or None."""
+        query = """
+        query ($q: String!) {
+          urlRedirects(first: 5, query: $q) { nodes { id path target } }
+        }
+        """
+        data = self._graphql(query, {"q": f"path:{path}"})
+        for node in (data.get("urlRedirects") or {}).get("nodes", []):
+            if node.get("path") == path:
+                return node
+        return None
+
     def create_url_redirect(self, path, target):
-        """Create a storefront URL redirect (idempotent — an existing identical
-        path is treated as success). Returns the redirect id or None."""
+        """Make `path` redirect to `target`. Returns {"id", "status"} where
+        status is created | exists (already pointed there) | updated (an older
+        redirect from this path now points to the new target)."""
         query = """
         mutation ($redirect: UrlRedirectInput!) {
           urlRedirectCreate(urlRedirect: $redirect) {
@@ -1979,36 +2041,57 @@ class ShopifyClient:
           }
         }
         """
-        data = self._graphql(query, {"redirect": {"path": path, "target": target}})
+        try:
+            data = self._graphql(query, {"redirect": {"path": path, "target": target}}, retry_unsafe=False)
+        except ShopifyAmbiguousWrite:
+            existing = self.find_url_redirect(path)
+            if existing and existing.get("target") == target:
+                return {"id": existing["id"], "status": "created"}
+            raise
         result = data.get("urlRedirectCreate", {})
         errors = result.get("userErrors", [])
-        if errors:
-            msg = errors[0].get("message", "")
-            if "taken" in msg.lower() or "exists" in msg.lower():
-                return None
+        if not errors:
+            return {"id": (result.get("urlRedirect") or {}).get("id"), "status": "created"}
+        msg = errors[0].get("message", "")
+        if "taken" not in msg.lower() and "exists" not in msg.lower():
             raise Exception(f"Shopify urlRedirectCreate error: {msg}")
-        return (result.get("urlRedirect") or {}).get("id")
-
-    def delete_url_redirect_by_path(self, path):
-        """Best-effort: find and delete a URL redirect matching a path."""
-        query = """
-        query ($q: String!) {
-          urlRedirects(first: 5, query: $q) { edges { node { id path } } }
+        existing = self.find_url_redirect(path)
+        if not existing:
+            raise Exception(f"Shopify urlRedirectCreate error: {msg}")
+        if existing.get("target") == target:
+            return {"id": existing["id"], "status": "exists"}
+        update = """
+        mutation ($id: ID!, $redirect: UrlRedirectInput!) {
+          urlRedirectUpdate(id: $id, urlRedirect: $redirect) {
+            urlRedirect { id target }
+            userErrors { field message }
+          }
         }
         """
-        data = self._graphql(query, {"q": f"path:{path}"})
-        for edge in (data.get("urlRedirects") or {}).get("edges", []):
-            if edge["node"].get("path") == path:
-                self._graphql(
-                    """
-                    mutation ($id: ID!) {
-                      urlRedirectDelete(id: $id) { deletedUrlRedirectId userErrors { message } }
-                    }
-                    """,
-                    {"id": edge["node"]["id"]},
-                )
-                return True
-        return False
+        data = self._graphql(update, {"id": existing["id"], "redirect": {"path": path, "target": target}})
+        errors = (data.get("urlRedirectUpdate") or {}).get("userErrors", [])
+        if errors:
+            raise Exception(f"Shopify urlRedirectUpdate error: {errors[0].get('message', str(errors))}")
+        return {"id": existing["id"], "status": "updated"}
+
+    def delete_url_redirect_by_path(self, path):
+        """Delete the redirect from exactly this path. True when one was
+        deleted, False when none existed; raises when Shopify refuses."""
+        existing = self.find_url_redirect(path)
+        if not existing:
+            return False
+        data = self._graphql(
+            """
+            mutation ($id: ID!) {
+              urlRedirectDelete(id: $id) { deletedUrlRedirectId userErrors { message } }
+            }
+            """,
+            {"id": existing["id"]},
+        )
+        errors = (data.get("urlRedirectDelete") or {}).get("userErrors", [])
+        if errors:
+            raise Exception(f"Shopify urlRedirectDelete error: {errors[0].get('message', str(errors))}")
+        return True
 
     def get_collection_image(self, collection_shopify_id):
         """Live image url for one collection, "" if it has none.

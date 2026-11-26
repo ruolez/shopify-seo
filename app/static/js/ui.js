@@ -1,6 +1,6 @@
 /* Shared UI components — plain script, global namespace, opt-in only.
  * Load order: app.js → ui.js → <page>.js. Never shadows an app.js global.
- * z-index ladder: topbar 50 < sidebar 100 < drawer 160 < modal 200–340 < toast 300* < confirm 350
+ * z-index ladder: page header 50 < sidebar 100 < drawer 160 < modal 200–340 < toast 300* < confirm 350
  * (*toast at 300 predates the ladder; dynamic modals stack 200→340 and stop below confirm). */
 
 /* ── UIModal ─────────────────────────────────────────────────────────── */
@@ -166,66 +166,6 @@ const UIHistory = (() => {
     return { render, toolLabel };
 })();
 
-/* ── Page intros ─────────────────────────────────────────────────────── */
-/* One plain-language line at the top of each page: what it is for and what
- * to do there. Dismissible per page; "?" in the title brings it back. */
-const PAGE_INTROS = {
-    "/": "Your to-do list. Each row is one job, ranked by the extra clicks a month it could bring. Start at the top.",
-    "/seo": "Every product and collection with its on-page score — how well the page's own text is set up. Fix what is flagged here; how Google responds shows beside it as the search result.",
-    "/interlinking": "Links between your own pages. Pages nobody links to are hard for Google and shoppers to find; fix orphans and broken links here.",
-    "/duplicates": "Pages sharing the same title or description in Google's results. Give each its own so they stop competing.",
-    "/images": "Products with no image. Generate or upload a placeholder so the page is not bare.",
-    "/blog": "Write, schedule and improve blog posts. “Worth refreshing” lists posts Google already shows but few people click.",
-    "/news": "Turn supplier and industry news into Product News posts. Drafts wait in Scheduled until you approve them.",
-    "/content/calendar": "Everything scheduled to publish, blog and news together, on one shared posting rhythm.",
-    "/content-gaps": "Searches your competitors rank for and you do not. Each one is an idea for a new collection or article.",
-    "/landing-pages": "Standalone pages for a campaign or topic, and SEO for your store's existing pages.",
-    "/brands": "One collection page per brand you carry, each with its own description.",
-    "/home-page": "The image carousel at the top of your store's home page.",
-    "/gsc": "What Google reports about your store: searches, clicks, positions, and which pages it has indexed.",
-    "/keyword-strategy": "Which page targets which search term. One page per term, so your own pages do not compete (competing is called cannibalization).",
-    "/competitors": "Where competitors rank against you on the terms you track, checked weekly.",
-    "/semrush": "Keyword data imported from your Semrush exports. It feeds the keyword and priority tools; upload a fresh export monthly.",
-    "/ai-seo": "How ready your pages are to be quoted by AI assistants like ChatGPT and Google's AI answers, and whether they mention you.",
-    "/settings": "Connections, AI model, prompts and scoring rules.",
-};
-
-function initPageIntro() {
-    const path = window.location.pathname.replace(/\/$/, "") || "/";
-    const text = PAGE_INTROS[path];
-    const host = document.querySelector(".page-content");
-    if (!text || !host) return;
-    const key = "pageIntroDismissed:" + path;
-    const show = () => {
-        if (document.getElementById("page-intro")) return;
-        const el = document.createElement("div");
-        el.id = "page-intro";
-        el.style.cssText = "display:flex;gap:10px;align-items:flex-start;padding:10px 14px;margin-bottom:16px;border-radius:10px;background:var(--primary-light, rgba(26,115,232,.08));font-size:13px;line-height:1.5;";
-        el.innerHTML = `<span class="material-symbols-rounded" style="font-size:18px;color:var(--primary);">info</span>
-            <span style="flex:1;">${escapeHtml(text)}</span>
-            <button class="icon-btn" title="Hide" style="margin:-4px -6px 0 0;"><span class="material-symbols-rounded" style="font-size:18px;">close</span></button>`;
-        el.querySelector("button").addEventListener("click", () => {
-            el.remove();
-            try { localStorage.setItem(key, "1"); } catch (e) {}
-        });
-        host.prepend(el);
-    };
-    let dismissed = false;
-    try { dismissed = localStorage.getItem(key) === "1"; } catch (e) {}
-    if (!dismissed) show();
-    const title = document.querySelector(".topbar h2, .top-bar h2, header h2");
-    if (title && !title.querySelector(".page-intro-help")) {
-        const help = document.createElement("button");
-        help.className = "icon-btn page-intro-help";
-        help.title = "What is this page for?";
-        help.style.cssText = "margin-left:6px;vertical-align:middle;";
-        help.innerHTML = '<span class="material-symbols-rounded" style="font-size:18px;">help</span>';
-        help.addEventListener("click", show);
-        title.appendChild(help);
-    }
-}
-document.addEventListener("DOMContentLoaded", initPageIntro);
-
 /* With one store there is nothing to choose: hide the page-level store
  * dropdowns that sit beside the global one. Each page still auto-selects the
  * store, so only the redundant control disappears. */
@@ -245,12 +185,78 @@ function hideRedundantStoreSelects() {
         sel.style.display = "none";
         const label = document.querySelector(`label[for="${id}"]`);
         if (label) label.style.display = "none";
+        const group = sel.closest(".form-group");
+        if (group) group.style.display = "none";
+        hideIfEmpty(sel.closest(".toolbar-row, .page-content > div"));
     }
 }
+
+/* A toolbar left with nothing visible (its store select hidden, its button
+ * moved to the header) would leave a blank band; drop it. */
+function hideIfEmpty(row) {
+    if (!row || row.classList.contains("page-content")) return;
+    const visible = [...row.children].some((c) => getComputedStyle(c).display !== "none");
+    if (!visible) row.style.display = "none";
+}
+
+/* Page-level actions live in the header, right of the title. Templates mark
+ * them with data-page-action; listeners travel with the moved node. */
+function adoptPageActions() {
+    const host = document.querySelector(".page-header .page-actions");
+    if (!host) return;
+    document.querySelectorAll(".page-content [data-page-action]").forEach((el) => {
+        const from = el.parentElement;
+        host.appendChild(el);
+        hideIfEmpty(from && from.closest(".toolbar-row, .page-content > div"));
+    });
+}
+document.addEventListener("DOMContentLoaded", adoptPageActions);
 document.addEventListener("DOMContentLoaded", () => {
     setTimeout(hideRedundantStoreSelects, 1200);
     setTimeout(hideRedundantStoreSelects, 3000);
 });
+
+/* ── UISerp — a page shown the way Google shows it ───────────────────── */
+/* The app edits titles, URLs and descriptions, so wherever one is on screen
+ * it is drawn as a search result: green breadcrumb URL, blue title, grey
+ * description, and a meter for how much of the title fits (~580px). */
+const UISerp = (() => {
+    const TITLE_PX = 580;
+    let ctx = null;
+    function titleWidth(text) {
+        if (!ctx) ctx = document.createElement("canvas").getContext("2d");
+        ctx.font = "20px Arial";
+        return ctx.measureText(text || "").width;
+    }
+    function crumbs(domain, path) {
+        const host = String(domain || "").replace(/^https?:\/\//, "").replace(/\/$/, "");
+        const parts = String(path || "").split("/").filter(Boolean);
+        return [host].concat(parts).filter(Boolean).map(escapeHtml).join(" › ");
+    }
+    /** opts: { domain, path, title, description, own (bool), href, meter (bool), lead (html before url) } */
+    function html(o) {
+        const w = titleWidth(o.title);
+        const pct = Math.min(100, Math.round((w / TITLE_PX) * 100));
+        const cut = w > TITLE_PX;
+        const title = o.href
+            ? `<a class="serp-title" href="${escapeAttr(o.href)}">${escapeHtml(o.title || "Untitled")}</a>`
+            : `<span class="serp-title">${escapeHtml(o.title || "Untitled")}</span>`;
+        const desc = o.description
+            ? `<div class="serp-desc">${escapeHtml(o.description)}</div>`
+            : `<div class="serp-desc serp-desc-missing">${o.own === false ? "No meta description. Google writes its own from the page." : ""}</div>`;
+        const meter = o.meter === false ? "" : `<div class="serp-meter${cut ? " is-cut" : ""}" title="${cut ? "Title is cut off in Google" : "Title fits in Google"} (${Math.round(w)} of ${TITLE_PX}px)"><i style="width:${pct}%"></i></div>`;
+        return `<div class="serp">
+            <div class="serp-url">${o.lead || ""}<span>${crumbs(o.domain, o.path)}</span></div>
+            ${title}${desc}${meter}
+        </div>`;
+    }
+    function storeDomain() {
+        const stores = (typeof StoreSelector !== "undefined" && StoreSelector.getStores()) || [];
+        const s = stores.find((x) => x.id === StoreSelector.getStoreId()) || stores[0];
+        return s ? (s.primary_domain || s.domain || "") : "";
+    }
+    return { html, titleWidth, storeDomain, TITLE_PX };
+})();
 
 /* ── UISkeleton ──────────────────────────────────────────────────────── */
 const UISkeleton = {
@@ -380,15 +386,31 @@ const StoreSelector = (() => {
 
     function label(s) { return s.shop_name || s.name; }
 
+    function storeDomain(s) {
+        return String(s.primary_domain || s.domain || "").replace(/^https?:\/\//, "").replace(/\/$/, "");
+    }
+
+    function storeCard(s, multi) {
+        const name = label(s);
+        return `<span class="store-mark">${escapeHtml((name || "S").trim().charAt(0).toUpperCase())}</span>
+            <span class="store-text"><b>${escapeHtml(name)}</b><small>${escapeHtml(storeDomain(s))}</small></span>
+            ${multi ? '<span class="material-symbols-rounded store-chevron">unfold_more</span>' : ""}`;
+    }
+
     function render() {
-        if (!stores.length) { host.innerHTML = ""; return; }
-        if (stores.length === 1) {
-            host.innerHTML = `<a href="/stores" class="global-store-single" title="Manage stores">${escapeHtml(label(stores[0]))}</a>`;
+        if (!stores.length) {
+            host.innerHTML = `<a href="/stores" class="store-card"><span class="store-mark">+</span><span class="store-text"><b>Connect a store</b><small>No store yet</small></span></a>`;
             return;
         }
-        host.innerHTML = `<select class="form-control">${stores
+        const active = stores.find((s) => s.id === activeId) || stores[0];
+        if (stores.length === 1) {
+            host.innerHTML = `<a href="/stores" class="store-card" title="Manage stores">${storeCard(active, false)}</a>`;
+            return;
+        }
+        host.innerHTML = `<label class="store-card store-card-select">${storeCard(active, true)}
+            <select aria-label="Active store">${stores
             .map((s) => `<option value="${s.id}" ${s.id === activeId ? "selected" : ""}>${escapeHtml(label(s))}</option>`)
-            .join("")}<option value="__manage">Manage stores…</option></select>`;
+            .join("")}<option value="__manage">Manage stores…</option></select></label>`;
         host.querySelector("select").addEventListener("change", async (e) => {
             if (e.target.value === "__manage") { window.location.href = "/stores"; return; }
             const id = parseInt(e.target.value, 10);
@@ -401,6 +423,7 @@ const StoreSelector = (() => {
             }
             activeId = id;
             saveFilter("globalStore", id);
+            render();
             document.dispatchEvent(new CustomEvent("store:changed", { detail: { storeId: id } }));
         });
     }
@@ -430,7 +453,7 @@ const NavBadges = (() => {
             document.querySelectorAll(".nav-badge[data-badge]").forEach((el) => {
                 const key = el.dataset.badge;
                 const n = counts[key] || 0;
-                el.textContent = n ? (n > 99 ? "99+" : String(n)) : "";
+                el.textContent = n ? (n >= 1000 ? (n / 1000).toFixed(n >= 10000 ? 0 : 1).replace(/\.0$/, "") + "k" : String(n)) : "";
                 // The number sums several kinds of work; hovering says which.
                 if (n && tips[key]) el.title = tips[key];
                 else el.removeAttribute("title");
@@ -453,32 +476,18 @@ const NavBadges = (() => {
 
 /* ── CommandPalette — Cmd/Ctrl+K quick navigation & actions ──────────── */
 const CommandPalette = (() => {
-    const REGISTRY = [
-        { label: "Home", icon: "dashboard", href: "/" },
-        { label: "SEO", icon: "search", href: "/seo" },
-        { label: "Duplicates", icon: "difference", href: "/duplicates" },
-        { label: "SEO Issues", icon: "speed", href: "/seo?tab=issues" },
-        { label: "AI Search", icon: "smart_toy", href: "/ai-seo" },
-        { label: "Internal links (Interlinking)", icon: "link", href: "/interlinking" },
-        { label: "Interlinking Issues", icon: "link_off", href: "/interlinking?tab=issues" },
-        { label: "Missing images (Image Manager)", icon: "image", href: "/images" },
-        { label: "Content Calendar", icon: "calendar_month", href: "/content/calendar" },
-        { label: "Blog Posts", icon: "edit_note", href: "/blog" },
-        { label: "News", icon: "newspaper", href: "/news" },
-        { label: "Landing Pages", icon: "web", href: "/landing-pages" },
-        { label: "Home Page Carousel", icon: "home", href: "/home-page" },
-        { label: "Brands", icon: "loyalty", href: "/brands" },
-        { label: "Search Console", icon: "monitoring", href: "/gsc" },
-        { label: "Keywords (Keyword Strategy)", icon: "hub", href: "/keyword-strategy" },
-        { label: "Content ideas (Content Gaps)", icon: "target", href: "/content-gaps" },
-        { label: "Indexing — pages Google has not indexed", icon: "travel_explore", href: "/gsc?tab=indexing" },
-        { label: "Competitors", icon: "groups", href: "/competitors" },
-        { label: "Semrush Data", icon: "query_stats", href: "/semrush" },
-        { label: "Stores", icon: "store", href: "/stores" },
-        { label: "Settings", icon: "settings", href: "/settings" },
-        { label: "Open Activity", icon: "checklist", run: () => { const b = document.getElementById("tasksPanelToggle"); if (b) b.click(); } },
-        { label: "Toggle dark mode", icon: "dark_mode", run: () => { const b = document.getElementById("theme-toggle"); if (b) b.click(); } },
+    const SHORTCUTS = [
+        { label: "Page SEO › Issues", group: "Fix", icon: "rule", href: "/seo?tab=issues" },
+        { label: "Internal links › Issues", group: "Fix", icon: "link_off", href: "/interlinking?tab=issues" },
+        { label: "Blog posts › Create post", group: "Create", icon: "add_notes", href: "/blog?tab=create" },
+        { label: "Blog posts › Intro links", group: "Create", icon: "link", href: "/blog?tab=intro-links" },
+        { label: "News › Create news", group: "Create", icon: "add_notes", href: "/news?tab=create" },
+        { label: "Search Console › Indexing", group: "Research", icon: "travel_explore", href: "/gsc?tab=indexing" },
+        { label: "Search Console › Cannibalization", group: "Research", icon: "call_split", href: "/gsc?tab=cannibalization" },
+        { label: "Open Activity", group: "Action", icon: "pending_actions", run: () => { const b = document.getElementById("tasksPanelToggle"); if (b) b.click(); } },
+        { label: "Switch light / dark", group: "Action", icon: "contrast", run: () => { const b = document.getElementById("theme-toggle"); if (b) b.click(); } },
     ];
+    const REGISTRY = (window.NAV_PALETTE || []).concat(SHORTCUTS);
     let overlay = null;
     let selected = 0;
     let matches = [];
@@ -525,7 +534,7 @@ const CommandPalette = (() => {
         box.innerHTML = matches.length
             ? matches.map((m, i) => `<div class="cmdk-item ${i === selected ? "selected" : ""}" data-i="${i}">
                     <span class="material-symbols-rounded">${m.icon}</span>${escapeHtml(m.label)}
-                    <span class="cmdk-hint">${m.href ? "page" : "action"}</span>
+                    <span class="cmdk-hint">${escapeHtml(m.group || (m.href ? "Page" : "Action"))}</span>
                 </div>`).join("")
             : `<div class="cmdk-empty">No matches</div>`;
         box.querySelectorAll(".cmdk-item").forEach((el) =>

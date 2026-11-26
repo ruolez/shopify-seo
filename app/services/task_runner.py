@@ -37,6 +37,31 @@ def is_failed_result(result):
     return False
 
 
+def finish_task(task_id, result):
+    """Record an ai_tasks result: completed only when the AI output is usable,
+    failed (with the reason) when run_task signalled failure. Returns True
+    when completed."""
+    import json
+
+    failed = is_failed_result(result)
+    message = None
+    if failed:
+        message = (result.get("error") if isinstance(result, dict) else None) or \
+            "The AI reply could not be read — try again"
+    with db.get_cursor() as cur:
+        if failed:
+            cur.execute(
+                "UPDATE ai_tasks SET status = 'failed', error = %s, completed_at = NOW() WHERE id = %s",
+                (str(message)[:1000], task_id),
+            )
+        else:
+            cur.execute(
+                "UPDATE ai_tasks SET status = 'completed', result = %s, completed_at = NOW() WHERE id = %s",
+                (json.dumps(result, default=str), task_id),
+            )
+    return not failed
+
+
 def finalize_failed(table, task_id, message):
     """Mark a task row failed (public: executors bailing early — e.g. store
     deleted mid-flight — must not leave the row completed or running)."""
@@ -139,6 +164,33 @@ def sweep_stale_jobs(min_interval_seconds=60):
             cur.execute(
                 "UPDATE semrush_imports SET status='failed', error_message=COALESCE(error_message,'Interrupted') "
                 "WHERE status IN ('pending','running') AND created_at < NOW() - INTERVAL '1 hour'"
+            )
+            cur.execute(
+                "UPDATE sync_jobs SET status='failed', error=COALESCE(error,'Interrupted'), completed_at=NOW() "
+                "WHERE status = 'syncing_pages' AND started_at < NOW() - INTERVAL '1 hour'"
+            )
+            cur.execute(
+                "UPDATE competitor_check_runs SET status='failed', completed_at=NOW() "
+                "WHERE status IN ('pending','running') AND started_at < NOW() - INTERVAL '2 hours'"
+            )
+            # Pipeline sessions whose worker thread died: boot recovery only
+            # runs in the master, so a crashed worker left them in a working
+            # state (and holding a calendar slot) until the next restart.
+            cur.execute(
+                "UPDATE news_sessions SET status='failed', error=COALESCE(error,'Interrupted — try again'), updated_at=NOW() "
+                "WHERE status IN ('analyzing','publishing','auto_queued','auto_analyzing','auto_hero',"
+                "'auto_inline','auto_links','auto_publishing') AND updated_at < NOW() - INTERVAL '2 hours'"
+            )
+            cur.execute(
+                "UPDATE article_wizard_sessions SET status='failed', error=COALESCE(error,'Interrupted — try again'), updated_at=NOW() "
+                "WHERE scheduled_for IS NOT NULL AND status IN ('publishing','auto_queued','auto_researching',"
+                "'auto_outlining','auto_generating','auto_image','auto_media','auto_publishing') "
+                "AND updated_at < NOW() - INTERVAL '2 hours'"
+            )
+            cur.execute(
+                "UPDATE article_wizard_sessions SET status='error', error=COALESCE(error,'Interrupted — run this step again'), updated_at=NOW() "
+                "WHERE scheduled_for IS NULL AND status IN ('researching','outlining','generating','publishing') "
+                "AND updated_at < NOW() - INTERVAL '2 hours'"
             )
     except Exception:
         logger.exception("Stale-job sweep failed")

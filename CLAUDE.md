@@ -81,7 +81,9 @@ Blog auto mode (Blog → Create Post → "Auto mode: import briefs") imports a t
 
 ### Frontend (`app/static/`, `app/templates/`)
 
-Vanilla JavaScript with no build step. `app.js` provides shared utilities (`apiRequest`, toasts, theme toggle). Page-specific JS files correspond to each route. Templates are Jinja2 with Material Design 3 styling.
+Vanilla JavaScript with no build step. `app.js` provides shared utilities (`apiRequest`, toasts, theme toggle); `ui.js` holds shared components (modals, tabs, store selector, ⌘K palette, `UISerp` search-snippet renderer). Page-specific JS files correspond to each route. Templates are Jinja2.
+
+Visual system: `DESIGN.md` (Nov 2026 "Results Page" redesign; product context in `PRODUCT.md`). Navigation lives in one place, `app/nav.py` (groups Today / Fix / Create / Research / Setup): the sidebar, page header (group, title, purpose line, related links), browser title and ⌘K all read it via the `inject_nav` context processor in `main.py`. A new page = an entry in `nav.py`; its template only fills `content` (plus `page_actions` if needed). Page-level buttons go in the header via `data-page-action` on the element. The last block of `style.css` ("Results Page component layer") is the shared component vocabulary; keep new pages on its classes.
 
 ## Scores
 

@@ -13,15 +13,11 @@ logger = logging.getLogger(__name__)
 
 PRODUCT_BATCH_SIZE = 100
 
-_sync_locks: dict = {}
-_sync_locks_mutex = threading.Lock()
+# pg advisory lock namespace for store syncs (full and blog-only): the two
+# gunicorn workers must not sync one store at the same time.
+SYNC_LOCK_NAMESPACE = 4201
 
-
-def _get_sync_lock(store_id):
-    with _sync_locks_mutex:
-        if store_id not in _sync_locks:
-            _sync_locks[store_id] = threading.Lock()
-        return _sync_locks[store_id]
+ALREADY_RUNNING = "Another sync of this store is still running — try again when it finishes"
 
 
 def _enqueue_schema_drift_repush(store_id):
@@ -309,18 +305,34 @@ def _sync_blogs_and_articles(client, store_id, progress_cb=None):
     return blogs_synced, articles_synced, blog_errors
 
 
-def sync_store(store_id):
-    lock = _get_sync_lock(store_id)
-    if not lock.acquire(blocking=False):
-        logger.warning("Sync already running for store %s, skipping", store_id)
-        return None
-    try:
-        return _sync_store_inner(store_id)
-    finally:
-        lock.release()
+def start_sync_job(store_id):
+    """Create the job row before the sync thread starts, so the progress
+    overlay never reads the previous sync's result."""
+    with db.get_cursor() as cur:
+        cur.execute(
+            "INSERT INTO sync_jobs (store_id, status, kind, current_phase) "
+            "VALUES (%s, 'running', 'store', 'starting') RETURNING id",
+            (store_id,),
+        )
+        return cur.fetchone()["id"]
 
 
-def _sync_store_inner(store_id):
+def sync_store(store_id, job_id=None):
+    with db.advisory_lock(SYNC_LOCK_NAMESPACE, store_id) as got:
+        if not got:
+            logger.warning("Sync already running for store %s, skipping", store_id)
+            if job_id:
+                with db.get_cursor() as cur:
+                    cur.execute(
+                        "UPDATE sync_jobs SET status = 'failed', error = %s, current_phase = NULL, "
+                        "completed_at = NOW() WHERE id = %s",
+                        (ALREADY_RUNNING, job_id),
+                    )
+            return None
+        return _sync_store_inner(store_id, job_id)
+
+
+def _sync_store_inner(store_id, job_id=None):
     logger.info("Starting sync for store %s", store_id)
 
     with db.get_cursor() as cur:
@@ -344,12 +356,8 @@ def _sync_store_inner(store_id):
     except Exception:
         logger.warning("Failed to refresh shop info for store %s (non-fatal)", store_id)
 
-    with db.get_cursor() as cur:
-        cur.execute(
-            "INSERT INTO sync_jobs (store_id, status) VALUES (%s, 'running') RETURNING id",
-            (store_id,),
-        )
-        job_id = cur.fetchone()["id"]
+    if job_id is None:
+        job_id = start_sync_job(store_id)
 
     try:
         with db.get_cursor() as cur:
@@ -481,6 +489,7 @@ def _sync_store_inner(store_id):
         # Atomic collection-product mapping (Fix #1)
         logger.info("Syncing collection-product memberships for store %s (%d collections)...", store_id, len(collections))
         all_mapping_rows = []
+        unmapped = []
         collections_mapped = 0
         for c in collections:
             try:
@@ -491,6 +500,7 @@ def _sync_store_inner(store_id):
                 time.sleep(0.5)
             except Exception as e:
                 logger.warning("Failed to fetch products for collection %s: %s", c["shopify_id"], e)
+                unmapped.append(c)
             collections_mapped += 1
             with db.get_cursor() as cur:
                 cur.execute(
@@ -501,7 +511,12 @@ def _sync_store_inner(store_id):
         # Write all mappings atomically
         with db.get_conn() as conn:
             cur = conn.cursor()
-            cur.execute("DELETE FROM collection_product_map WHERE store_id = %s", (store_id,))
+            # A collection whose fetch failed keeps the memberships it had;
+            # wiping them made it look empty to every linking/content flow.
+            cur.execute(
+                "DELETE FROM collection_product_map WHERE store_id = %s AND NOT (collection_shopify_id = ANY(%s))",
+                (store_id, [c["shopify_id"] for c in unmapped]),
+            )
             if all_mapping_rows:
                 psycopg2.extras.execute_values(
                     cur,
@@ -543,11 +558,18 @@ def _sync_store_inner(store_id):
             client, store_id, progress_cb=_blog_progress
         )
 
+        problems = []
+        if unmapped:
+            problems.append(f"{len(unmapped)} collection(s) kept their previous product list "
+                            "because Shopify did not return it: "
+                            + ", ".join(c["title"] for c in unmapped[:10]))
         if blog_errors:
+            problems.append(f"{len(blog_errors)} blog(s) failed to sync: " + "; ".join(blog_errors))
+        if problems:
             with db.get_cursor() as cur:
                 cur.execute(
                     "UPDATE sync_jobs SET error = %s WHERE id = %s",
-                    (f"{len(blog_errors)} blog(s) failed to sync: " + "; ".join(blog_errors)[:1500], job_id),
+                    (" | ".join(problems)[:1800], job_id),
                 )
 
         logger.info("Blog sync complete: %d blogs, %d articles (%d failed)", blogs_synced, articles_synced, len(blog_errors))
@@ -644,8 +666,8 @@ def _sync_store_inner(store_id):
         raise
 
 
-def sync_store_async(store_id):
-    thread = threading.Thread(target=sync_store, args=(store_id,), daemon=True)
+def sync_store_async(store_id, job_id=None):
+    thread = threading.Thread(target=sync_store, args=(store_id, job_id), daemon=True)
     thread.start()
     return thread
 
@@ -653,10 +675,9 @@ def sync_store_async(store_id):
 def sync_store_blogs(store_id):
     logger.info("Starting blog sync for store %s", store_id)
 
-    lock = _get_sync_lock(store_id)
-    if not lock.acquire(blocking=False):
-        raise RuntimeError("A sync is already running for this store — try again when it finishes")
-    try:
+    with db.advisory_lock(SYNC_LOCK_NAMESPACE, store_id) as got:
+        if not got:
+            raise RuntimeError(ALREADY_RUNNING)
         with db.get_cursor() as cur:
             cur.execute("SELECT * FROM stores WHERE id = %s", (store_id,))
             store = cur.fetchone()
@@ -679,5 +700,3 @@ def sync_store_blogs(store_id):
             "blogs_failed": len(blog_errors),
             "errors": blog_errors,
         }
-    finally:
-        lock.release()

@@ -1471,9 +1471,9 @@ async function viewImpact(itemId, itemType) {
         let html = '';
         document.getElementById("impact-modal-title").textContent = `Impact: ${data.item_title}`;
 
-        const statusColors = { improving: 'var(--success)', declining: 'var(--error)', stable: 'var(--on-surface-secondary)', too_early: 'var(--warning)', no_gsc_data: 'var(--on-surface-secondary)' };
-        const statusLabels = { improving: 'Improving', declining: 'Declining', stable: 'Stable', too_early: 'Too Early to Tell', no_gsc_data: 'No GSC Data' };
-        const statusIcons = { improving: 'trending_up', declining: 'trending_down', stable: 'trending_flat', too_early: 'schedule', no_gsc_data: 'link_off' };
+        const statusColors = { improving: 'var(--success)', declining: 'var(--error)', stable: 'var(--on-surface-secondary)', too_early: 'var(--warning)', too_little_data: 'var(--on-surface-secondary)', no_gsc_data: 'var(--on-surface-secondary)' };
+        const statusLabels = { improving: 'Improving', declining: 'Declining', stable: 'No clear change', too_early: 'Too early to tell', too_little_data: 'Too little traffic to judge', no_gsc_data: 'No Search Console data' };
+        const statusIcons = { improving: 'trending_up', declining: 'trending_down', stable: 'trending_flat', too_early: 'schedule', too_little_data: 'query_stats', no_gsc_data: 'link_off' };
 
         html += `<div style="text-align:center;margin-bottom:20px;">
             <span class="material-symbols-rounded" style="font-size:40px;color:${statusColors[data.status] || 'var(--primary)'};">${statusIcons[data.status] || 'help'}</span>
@@ -1492,7 +1492,7 @@ async function viewImpact(itemId, itemType) {
             </div>`;
         }
 
-        if (data.before && data.after) {
+        if (data.before && data.after && data.delta) {
             const metrics = [
                 { label: 'Clicks', before: data.before.clicks, after: data.after.clicks, delta: data.delta.clicks, better: d => d > 0 },
                 { label: 'Impressions', before: data.before.impressions, after: data.after.impressions, delta: data.delta.impressions, better: d => d > 0 },
@@ -1516,6 +1516,17 @@ async function viewImpact(itemId, itemType) {
             html += '</tbody></table>';
         }
 
+        if (data.windows && data.before) {
+            const w = data.windows;
+            html += `<p style="margin-top:12px;font-size:12px;color:var(--on-surface-secondary);">
+                Before = the ${w.pre_days} days before the change; after = ${data.after ? data.after.days : w.post_days} days starting ${w.recrawl_lag_days} days after it (Google needs time to recrawl).
+                "No clear change" means the difference is within normal day-to-day variation for a page with this much traffic.</p>`;
+        }
+        if (data.status === 'too_little_data') {
+            html += `<div style="margin-top:16px;padding:12px;background:var(--surface-dim);border-radius:8px;font-size:12px;">
+                This page had too few impressions before the change for a before/after comparison to mean anything.
+            </div>`;
+        }
         if (data.status === 'too_early') {
             html += `<div style="margin-top:16px;padding:12px;background:var(--warning-container,#fff3cd);border-radius:8px;font-size:12px;color:var(--on-surface);">
                 <strong>Note:</strong> It typically takes 2-4 weeks for Google to reflect SEO changes. Check back later for more accurate impact data.
@@ -2052,12 +2063,10 @@ async function viewProduct(id, opts = {}) {
         html += '<div class="modal-col-main">';
 
         // SERP Preview
-        const serpUrl = p.handle ? `https://example.com/products/${p.handle}` : "https://example.com/products/...";
-        html += `<div class="serp-preview">
-            <span class="serp-preview-title">${escapeHtml(p.meta_title || p.title)}</span>
-            <span class="serp-preview-url">${escapeHtml(serpUrl)}</span>
-            <span class="serp-preview-desc">${escapeHtml(p.meta_description || "No meta description set.")}</span>
-        </div>`;
+        html += `<div class="serp-preview">${UISerp.html({
+            domain: UISerp.storeDomain(), path: p.handle ? `/products/${p.handle}` : "/products",
+            title: p.meta_title || p.title, description: p.meta_description || "", own: !!p.meta_description,
+        })}</div>`;
 
         // Description
         html += '<div class="preview-section">';

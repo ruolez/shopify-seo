@@ -36,8 +36,10 @@ _EXPLANATIONS = {
         "Link to it from pages that already get traffic so Google reaches it sooner.",
     ),
     "URL is unknown to Google": (
-        "Google has never seen this page.",
-        "Check it is in the sitemap and linked from at least one other page.",
+        "Google has not picked this URL up yet. Shopify lists every published page in the sitemap, "
+        "so this is usually crawl priority on a smaller site, not a technical block.",
+        "Link to it from pages Google visits often — collections and articles that already get "
+        "traffic (the plan above adds those links).",
     ),
     "Not found (404)": (
         "Google gets a 'not found' error for this address.",
@@ -96,6 +98,20 @@ def _due_items(store_id, limit):
     return [i for i in items if i["path"]][:limit]
 
 
+def prune_deleted(store_id):
+    """Drop results for items that no longer exist (or no longer qualify):
+    they kept counting as "not indexed" with no title."""
+    with db.get_cursor() as cur:
+        for item_type, table, _path, where in _SOURCES:
+            cur.execute(
+                f"""DELETE FROM index_status s
+                    WHERE s.store_id = %s AND s.item_type = %s
+                      AND NOT EXISTS (SELECT 1 FROM {table} t
+                                      WHERE t.id = s.item_id AND t.store_id = s.store_id AND {where})""",
+                (store_id, item_type),
+            )
+
+
 def inspect_batch(store_id, limit=DAILY_BUDGET):
     """Inspect up to `limit` due URLs. Returns {"checked": n, "not_indexed": n}."""
     from app.services.gsc_service import _build_service
@@ -109,9 +125,12 @@ def inspect_batch(store_id, limit=DAILY_BUDGET):
     site_url = row["gsc_property"]
     base = gsc_base_url(site_url).rstrip("/")
 
+    prune_deleted(store_id)
     service = _build_service(store_id)
     checked = not_indexed = 0
-    for item in _due_items(store_id, limit):
+    stopped = None
+    due = _due_items(store_id, limit)
+    for item in due:
         url = f"{base}/{item['path']}"
         try:
             response = service.urlInspection().index().inspect(
@@ -120,6 +139,9 @@ def inspect_batch(store_id, limit=DAILY_BUDGET):
             # Quota or auth trouble affects every later call too — stop and
             # pick up where this left off on the next run.
             logger.warning("URL inspection stopped at %s: %s", url, e)
+            if checked == 0:
+                raise RuntimeError(f"Search Console refused the index check: {e}") from e
+            stopped = str(e)[:300]
             break
         parsed = parse_inspection(response)
         with db.get_cursor() as cur:
@@ -138,7 +160,7 @@ def inspect_batch(store_id, limit=DAILY_BUDGET):
         checked += 1
         not_indexed += 0 if parsed["indexed"] else 1
         time.sleep(0.15)
-    return {"checked": checked, "not_indexed": not_indexed}
+    return {"checked": checked, "not_indexed": not_indexed, "due": len(due), "stopped_early": stopped}
 
 
 _TITLE_SQL = """CASE s.item_type
@@ -182,3 +204,60 @@ def get_coverage(store_id, limit=500):
         },
         "not_indexed": rows,
     }
+
+
+SITEMAP_STALE_DAYS = 14
+
+
+def sitemap_problems(sitemaps, today):
+    """What is wrong with the sitemaps Search Console knows, as sentences.
+    Pure. sitemaps: entries from the Search Console sitemaps.list API."""
+    from datetime import date
+
+    if not sitemaps:
+        return ["No sitemap is submitted in Search Console — submit /sitemap.xml so Google can find every page."]
+    problems = []
+    for s in sitemaps:
+        path = s.get("path", "sitemap")
+        if int(s.get("errors") or 0):
+            problems.append(f"{path} has {s['errors']} error(s) in Search Console.")
+        downloaded = (s.get("lastDownloaded") or "")[:10]
+        if not downloaded:
+            problems.append(f"Google has never downloaded {path}.")
+        elif (today - date.fromisoformat(downloaded)).days > SITEMAP_STALE_DAYS:
+            problems.append(f"Google last downloaded {path} on {downloaded} — more than {SITEMAP_STALE_DAYS} days ago.")
+    return problems
+
+
+def sitemap_status(store_id):
+    """Sitemaps as Search Console reports them, plus any problems."""
+    from datetime import datetime, timezone
+
+    from app.services.gsc_service import _build_service
+
+    with db.get_cursor() as cur:
+        cur.execute("SELECT gsc_property FROM gsc_credentials WHERE store_id = %s", (store_id,))
+        row = cur.fetchone()
+    if not row or not row.get("gsc_property"):
+        raise ValueError("Search Console is not connected for this store")
+    listing = _build_service(store_id).sitemaps().list(siteUrl=row["gsc_property"]).execute()
+    sitemaps = listing.get("sitemap", [])
+    today = datetime.now(timezone.utc).date()
+    return {
+        "sitemaps": [{
+            "path": s.get("path"),
+            "last_downloaded": s.get("lastDownloaded"),
+            "submitted": sum(int(c.get("submitted") or 0) for c in s.get("contents", []) if c.get("type") == "web"),
+            "errors": int(s.get("errors") or 0),
+            "warnings": int(s.get("warnings") or 0),
+        } for s in sitemaps],
+        "problems": sitemap_problems(sitemaps, today),
+    }
+
+
+def check_sitemaps(store_id):
+    """Daily job: raise when the sitemap has a problem, so Home shows it."""
+    status = sitemap_status(store_id)
+    if status["problems"]:
+        raise RuntimeError(" ".join(status["problems"]))
+    return f"{sum(s['submitted'] for s in status['sitemaps'])} URLs in sitemap"

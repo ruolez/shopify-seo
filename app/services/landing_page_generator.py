@@ -58,7 +58,9 @@ def generate_schema_json(page_data, store_domain):
 
     for section in sections:
         if section.get("type") == "faq":
-            items = section.get("data", {}).get("items") or []
+            from app.services.schema_generator import faq_markup_enabled
+
+            items = (section.get("data", {}).get("items") or []) if faq_markup_enabled() else []
             if items:
                 schemas.append({
                     "@context": "https://schema.org",

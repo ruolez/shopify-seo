@@ -28,12 +28,13 @@ def score_description_words(word_count, dw, entity_label, scores=(100, 70, 40, 2
     ladder in `dw`. Bands absent from `dw` are skipped (collections define no
     very_short band, so their ladder collapses to good/ok/short/missing)."""
     if word_count >= dw["good"]:
-        return scores[0], f"Good length ({word_count} words)"
+        return scores[0], f"Enough to be useful ({word_count} words)"
     if word_count >= dw["ok"]:
-        return scores[1], f"Acceptable ({word_count} words), aim for {dw['good']}+"
+        return scores[1], (f"Thin ({word_count} words) — add what a shopper needs to choose "
+                           f"(about {dw['good']}+ words); length itself is not the goal")
     short = dw.get("short")
     if short is not None and word_count >= short:
-        return scores[2], f"Short ({word_count} words), aim for {dw['good']}+"
+        return scores[2], f"Very thin ({word_count} words) — add what a shopper needs to choose"
     very_short = dw.get("very_short")
     if very_short is not None and word_count >= very_short:
         return scores[3], f"Very short ({word_count} words)"

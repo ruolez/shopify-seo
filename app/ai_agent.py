@@ -1720,6 +1720,21 @@ def _description_instruction(kind, target_word_count, has_existing):
     )
 
 
+class TruncatedReply(ValueError):
+    """The model stopped at its output limit: the HTML is cut off mid-page."""
+
+
+def _full_reply(response, what):
+    """Content of a long-form reply, refusing a cut-off one. Applying it
+    published half a page with unclosed tags."""
+    choice = response.choices[0] if getattr(response, "choices", None) else None
+    if choice is None:
+        raise ValueError(f"The AI returned no {what}")
+    if getattr(choice, "finish_reason", None) == "length":
+        raise TruncatedReply(f"The AI's {what} was cut off at its length limit — nothing was applied")
+    return choice.message.content or ""
+
+
 def _sanitize_description(html: str) -> str:
     """Strip AI meta-artifacts (word counts, notes, disclaimers) from generated HTML."""
     html = re.sub(
@@ -1802,7 +1817,8 @@ def _ranking_keywords_for_item(item_type, item_id, store_id, limit=12):
             sid = store_id or row["store_id"]
             cur.execute("SELECT gsc_property FROM gsc_credentials WHERE store_id = %s", (sid,))
             cred = cur.fetchone()
-        base = (cred["gsc_property"].rstrip("/") if cred and cred.get("gsc_property") else "")
+        from app.services.url_utils import gsc_base_url
+        base = gsc_base_url(cred.get("gsc_property") if cred else "").rstrip("/")
         path = f"{'products' if item_type == 'product' else 'collections'}/{row['handle']}"
         page_url = f"{base}/{path}" if base else ""
         if page_url:
@@ -1921,17 +1937,8 @@ def _geo_product_facts(item, entity_type, include_metafields=True):
         ))
         if len(opts) > 1:
             facts["Options / flavors"] = ", ".join(opts[:12])
-        prices = []
-        for v in variants:
-            try:
-                prices.append(float(v.get("price")))
-            except (ValueError, TypeError):
-                pass
-        if prices:
-            lo, hi = min(prices), max(prices)
-            facts["Price"] = f"${lo:.2f}" if lo == hi else f"${lo:.2f}–${hi:.2f}"
-        if any("available" in v for v in variants):
-            facts["Availability"] = "In stock" if any(v.get("available") for v in variants) else "Out of stock"
+        # No price or stock here: typed into a description they go stale on
+        # the next change, while the theme and Product schema show live values.
         if variants[0].get("sku"):
             facts["SKU"] = variants[0]["sku"]
         if variants[0].get("barcode"):
@@ -2265,8 +2272,7 @@ def _generate_geo_content(client, config, item, entity_type, weak_signals=None):
         members = _collection_top_members(item.get("store_id"), item.get("shopify_id"))
         if len(members) >= 2:
             lines = [
-                f"- {m['title']} | Brand: {m['brand'] or 'n/a'} | Price: {m['price'] or 'n/a'} | "
-                f"{'In stock' if m['available'] else ('Out of stock' if m['available'] is False else 'Availability: n/a')}"
+                f"- {m['title']} | Brand: {m['brand'] or 'n/a'}"
                 for m in members
             ]
             members_block = (
@@ -2278,7 +2284,7 @@ def _generate_geo_content(client, config, item, entity_type, weak_signals=None):
     # Deterministic per-item style variation so a batch run doesn't stamp one
     # identical section template across the whole catalog (a scaled-content footprint).
     style_variants = [
-        "Name the facts table 'Specifications' and the closing summary 'Expert Verdict'; place the summary last.",
+        "Name the facts table 'Specifications' and the closing summary 'Who it suits'; place the summary last.",
         "Name the facts table 'At a glance' and the closing summary 'Our verdict'; put the table right after the answer-first lead.",
         "Name the facts table 'Key details' and the closing summary 'The bottom line'; phrase section headings as How/Why questions.",
         "Name the facts table 'Quick facts' and the closing summary 'Who it's for'; phrase section headings as What/Which questions.",
@@ -2326,6 +2332,8 @@ def _generate_geo_content(client, config, item, entity_type, weak_signals=None):
     description = _sanitize_description(
         data.get("optimized_description_html") or data.get("description_html") or ""
     )
+    from app.services.table_prices import strip_table_prices
+    description = strip_table_prices(description)["html"]
     # Quotes must be traceable verbatim to what the model was given — anything
     # else is presumed fabricated and cut before the user ever previews it.
     quote_sources = " ".join(
@@ -2588,7 +2596,7 @@ def _generate_description(client, config, main_result, serp_context, serp_benchm
             temperature=0.4,
         )
 
-        desc_content = desc_response.choices[0].message.content or ""
+        desc_content = _full_reply(desc_response, "description")
 
         desc_content = re.sub(r"^```(?:html)?\s*\n?", "", desc_content)
         desc_content = re.sub(r"\n?```\s*$", "", desc_content)
@@ -2600,9 +2608,11 @@ def _generate_description(client, config, main_result, serp_context, serp_benchm
             logger.info("Description generated — %d words (target: %d)", desc_words, target_word_count)
         else:
             logger.warning("Description generation returned empty content")
+            main_result["description_error"] = "The AI returned an empty description"
 
-    except Exception:
+    except Exception as e:
         logger.exception("Description generation failed")
+        main_result["description_error"] = str(e)[:300] or "Description generation failed"
 
     return main_result
 
@@ -2762,7 +2772,7 @@ def _generate_collection_description(client, config, main_result, serp_context, 
             temperature=0.4,
         )
 
-        desc_content = desc_response.choices[0].message.content or ""
+        desc_content = _full_reply(desc_response, "description")
 
         desc_content = re.sub(r"^```(?:html)?\s*\n?", "", desc_content)
         desc_content = re.sub(r"\n?```\s*$", "", desc_content)
@@ -2774,9 +2784,11 @@ def _generate_collection_description(client, config, main_result, serp_context, 
             logger.info("Collection description generated — %d words (target: %d)", desc_words, target_word_count)
         else:
             logger.warning("Collection description generation returned empty content")
+            main_result["description_error"] = "The AI returned an empty description"
 
-    except Exception:
+    except Exception as e:
         logger.exception("Collection description generation failed")
+        main_result["description_error"] = str(e)[:300] or "Collection description generation failed"
 
     return main_result
 
@@ -2944,7 +2956,7 @@ def _generate_brand_collection_description(client, config, main_result, serp_con
             temperature=0.4,
         )
 
-        desc_content = desc_response.choices[0].message.content or ""
+        desc_content = _full_reply(desc_response, "description")
         desc_content = re.sub(r"^```(?:html)?\s*\n?", "", desc_content)
         desc_content = re.sub(r"\n?```\s*$", "", desc_content)
         desc_content = _sanitize_description(desc_content)
@@ -2979,9 +2991,11 @@ def _generate_brand_collection_description(client, config, main_result, serp_con
             logger.info("Brand description generated — %d words (target: %d)", desc_words, target_word_count)
         else:
             logger.warning("Brand description generation returned empty content")
+            main_result["description_error"] = "The AI returned an empty description"
 
-    except Exception:
+    except Exception as e:
         logger.exception("Brand collection description generation failed")
+        main_result["description_error"] = str(e)[:300] or "Brand collection description generation failed"
 
     return main_result
 
@@ -5377,7 +5391,7 @@ def run_task(task_type, task_input, store_id=None):
                     temperature=0.4,
                 )
 
-                body_content = body_response.choices[0].message.content or ""
+                body_content = _full_reply(body_response, "article body")
                 body_content = re.sub(r"^```(?:html)?\s*\n?", "", body_content)
                 body_content = re.sub(r"\n?```\s*$", "", body_content)
                 body_content = _sanitize_description(body_content)
@@ -5455,7 +5469,7 @@ def run_task(task_type, task_input, store_id=None):
             temperature=0.3,
         )
 
-        body_content = body_response.choices[0].message.content or ""
+        body_content = _full_reply(body_response, "article body")
         body_content = re.sub(r"^```(?:html)?\s*\n?", "", body_content)
         body_content = re.sub(r"\n?```\s*$", "", body_content)
         body_content = _sanitize_description(body_content)
@@ -5652,10 +5666,8 @@ def run_task(task_type, task_input, store_id=None):
                 related_products = []
                 related_collections = []
 
-        recommended = rec_word_count if rec_word_count else max(
-            int(competitor_analysis["avg_word_count"] * 1.2) if competitor_analysis["avg_word_count"] else 2000,
-            1500,
-        )
+        from app.services.content_rules import article_target_words
+        recommended = article_target_words(rec_word_count, competitor_analysis.get("avg_word_count"))
 
         return {
             "serp_results": serp_results[:15],
@@ -5854,7 +5866,9 @@ def run_task(task_type, task_input, store_id=None):
         if o_secondary_kws:
             user_parts.append(f"Secondary Keywords: {', '.join(o_secondary_kws)}")
         if research_data:
-            user_parts.append(f"Recommended Word Count: {research_data.get('recommended_word_count', 2000)}")
+            from app.services.content_rules import article_target_words
+            user_parts.append(f"Approximate length: {article_target_words(research_data.get('recommended_word_count'))} words — "
+                              "as long as a complete answer needs, no padding")
             if research_data.get("competitor_analysis", {}).get("common_headings"):
                 user_parts.append(f"Competitor Headings: {', '.join(research_data['competitor_analysis']['common_headings'][:15])}")
             if research_data.get("content_angle_suggestions"):
@@ -5932,7 +5946,8 @@ def run_task(task_type, task_input, store_id=None):
         research_data = task_input.get("research_data", {})
         gen_store_id = task_input.get("store_id") or store_id
 
-        target_word_count = research_data.get("recommended_word_count", 2000) if research_data else 2000
+        from app.services.content_rules import article_target_words
+        target_word_count = article_target_words((research_data or {}).get("recommended_word_count"))
 
         # Get linking context (prefer session selections)
         products = []
@@ -6105,7 +6120,7 @@ def run_task(task_type, task_input, store_id=None):
             temperature=0.4,
         )
 
-        body_content = body_response.choices[0].message.content or ""
+        body_content = _full_reply(body_response, "article body")
         body_content = re.sub(r"^```(?:html)?\s*\n?", "", body_content)
         body_content = re.sub(r"\n?```\s*$", "", body_content)
         body_content = _sanitize_description(body_content)

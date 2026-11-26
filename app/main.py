@@ -94,6 +94,21 @@ def require_auth():
     return None
 
 
+@app.context_processor
+def inject_nav():
+    from flask import request
+    from app import nav
+    item, group = nav.match(request.path)
+    return {
+        "nav_groups": nav.GROUPS,
+        "nav_setup": nav.SETUP,
+        "nav_item": item,
+        "nav_group": group,
+        "nav_related": nav.related(item),
+        "nav_palette": nav.palette_entries(),
+    }
+
+
 @app.after_request
 def no_cache(response):
     # Always override: Flask's static handler sets its own Cache-Control

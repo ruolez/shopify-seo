@@ -3,7 +3,8 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{% block title %}SEO Platform{% endblock %} — SEO Platform</title>
+    <title>{% block title %}{{ nav_item.label if nav_item else 'SEO' }}{% endblock %} · SEO</title>
+    <script>try{if(localStorage.getItem("theme")==="dark")document.documentElement.setAttribute("data-theme","dark")}catch(e){}</script>
     <link rel="stylesheet" href="/static/css/style.css">
 {% block head_extra %}{% endblock %}
 </head>
@@ -11,24 +12,28 @@
     <div class="app-layout">
         {% include '_sidebar.html' %}
         <div class="main-content">
-            <div class="topbar">
-                <div class="topbar-left">
-                    <button id="sidebar-toggle" class="icon-btn"><span class="material-symbols-rounded">menu</span></button>
-                    <h2>{% block page_title %}{% endblock %}</h2>
+            <header class="page-header">
+                <button id="sidebar-toggle" class="icon-btn page-header-menu" aria-label="Open navigation"><span class="material-symbols-rounded">menu</span></button>
+                <div class="page-header-main">
+                    {% if nav_group %}<div class="page-crumb">{{ nav_group }}</div>{% endif %}
+                    <h1 class="page-title">{% block page_title %}{{ nav_item.label if nav_item else '' }}{% endblock %}</h1>
+                    {% block page_desc %}{% if nav_item %}<p class="page-desc">{{ nav_item.desc }}</p>{% endif %}{% endblock %}
+                    {% if nav_related %}
+                    <nav class="page-related" aria-label="Related pages">
+                        <span>Related</span>
+                        {% for r in nav_related %}<a href="{{ r.href }}">{{ r.label }}</a>{% endfor %}
+                    </nav>
+                    {% endif %}
                 </div>
-                <div class="topbar-right">
-                    {% block topbar_extra %}{% endblock %}
-                    <div id="global-store-select"></div>
-                    <button id="cmdk-button" class="icon-btn" title="Jump to… (Cmd+K)"><span class="material-symbols-rounded">keyboard_command_key</span></button>
-                    <button id="theme-toggle" class="icon-btn"><span class="material-symbols-rounded">dark_mode</span></button>
-                </div>
-            </div>
+                <div class="page-actions">{% block page_actions %}{% endblock %}{% block topbar_extra %}{% endblock %}</div>
+            </header>
             <div class="page-content">
 {% block content %}{% endblock %}
             </div>
         </div>
     </div>
 {% block modals %}{% endblock %}
+    <script>window.NAV_PALETTE = {{ nav_palette | tojson }};</script>
     <script src="/static/js/app.js"></script>
     <script src="/static/js/ui.js"></script>
 {% block scripts %}{% endblock %}

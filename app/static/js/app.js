@@ -17,7 +17,25 @@ async function apiRequest(url, options = {}) {
         return null;
     }
 
-    const data = await response.json();
+    // nginx (502/504/413) and Flask's own 404/405 answer with HTML. Reading
+    // that as JSON surfaced "Unexpected token '<'" instead of the real problem.
+    let data;
+    const raw = await response.text();
+    try {
+        data = raw ? JSON.parse(raw) : {};
+    } catch (e) {
+        const reasons = {
+            404: "This action is not available (404).",
+            405: "This action is not available (405).",
+            413: "The upload is too large.",
+            502: "The app server did not answer (502). It may be restarting — try again in a minute.",
+            504: "The request took too long and was cut off (504). It may still finish in the background — reload before retrying.",
+        };
+        if (!response.ok) {
+            throw new Error(reasons[response.status] || `Request failed (${response.status})`);
+        }
+        throw new Error("The server sent an unexpected response.");
+    }
     // A write the server refused because it would remove protected content
     // (spec tables, internal links, the page's keyword). One place to ask
     // "apply anyway?" for every apply endpoint; the retry carries force:true.
@@ -271,11 +289,12 @@ function initThemeToggle() {
 function initSidebar() {
     const toggle = document.getElementById("sidebar-toggle");
     const sidebar = document.querySelector(".sidebar");
-    if (toggle && sidebar) {
-        toggle.addEventListener("click", () => {
-            sidebar.classList.toggle("collapsed");
-        });
-    }
+    const scrim = document.getElementById("sidebar-scrim");
+    if (!toggle || !sidebar) return;
+    const setOpen = (open) => document.body.classList.toggle("nav-open", open);
+    toggle.addEventListener("click", () => setOpen(!document.body.classList.contains("nav-open")));
+    if (scrim) scrim.addEventListener("click", () => setOpen(false));
+    document.addEventListener("keydown", (e) => { if (e.key === "Escape") setOpen(false); });
 }
 
 function saveFilter(key, value) {

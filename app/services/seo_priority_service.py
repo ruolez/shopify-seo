@@ -26,31 +26,40 @@ def _get_gsc_metrics_for_store(store_id):
         if not cred or not cred.get("gsc_property"):
             return {}
 
+        # Query-free page totals: the query-level table drops anonymised
+        # queries and undercounted these pages' clicks by about half.
         cur.execute(
             """SELECT page,
                       SUM(clicks) as clicks,
                       SUM(impressions) as impressions,
                       CASE WHEN SUM(impressions) > 0 THEN SUM(clicks) / SUM(impressions) ELSE 0 END as ctr,
                       SUM(position * impressions) / NULLIF(SUM(impressions), 0) as position
-               FROM gsc_daily_metrics
-               WHERE store_id = %s AND date >= %s AND date <= %s
+               FROM gsc_page_daily
+               WHERE store_id = %s AND date >= %s AND date <= %s AND NOT is_fresh
                GROUP BY page
                HAVING SUM(impressions) > 0""",
             (store_id, date_from, date_to),
         )
         rows = cur.fetchall()
 
-    base_url = cred["gsc_property"].rstrip("/")
+    from app.services.url_utils import url_path_key
+
     metrics = {}
     for r in rows:
-        path = r["page"].replace(base_url, "").strip("/")
-        metrics[path] = {
-            "gsc_clicks": float(r["clicks"] or 0),
-            "gsc_impressions": float(r["impressions"] or 0),
-            "gsc_ctr": round(float(r["ctr"] or 0), 4),
-            "gsc_position": round(float(r["position"] or 0), 1),
+        path = url_path_key(r["page"])
+        m = metrics.setdefault(path, {"clicks": 0.0, "impressions": 0.0, "pos_w": 0.0})
+        m["clicks"] += float(r["clicks"] or 0)
+        m["impressions"] += float(r["impressions"] or 0)
+        m["pos_w"] += float(r["position"] or 0) * float(r["impressions"] or 0)
+    return {
+        path: {
+            "gsc_clicks": m["clicks"],
+            "gsc_impressions": m["impressions"],
+            "gsc_ctr": round(m["clicks"] / m["impressions"], 4) if m["impressions"] else 0,
+            "gsc_position": round(m["pos_w"] / m["impressions"], 1) if m["impressions"] else 0,
         }
-    return metrics
+        for path, m in metrics.items()
+    }
 
 
 def _get_semrush_metrics_for_store(store_id):
@@ -206,7 +215,8 @@ def get_priority_ranked_items(store_id, item_type="product", limit=50, measuring
     with db.get_cursor() as cur:
         cur.execute("SELECT gsc_property FROM gsc_credentials WHERE store_id = %s", (store_id,))
         cred = cur.fetchone()
-    base_url = (cred["gsc_property"] or "").rstrip("/") if cred else ""
+    from app.services.url_utils import gsc_base_url
+    base_url = gsc_base_url(cred["gsc_property"] if cred else "").rstrip("/")
 
     if item_type == "product":
         with db.get_cursor() as cur:

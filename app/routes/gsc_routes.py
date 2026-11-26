@@ -241,6 +241,19 @@ def overview():
     return jsonify(data)
 
 
+@gsc_bp.route("/api/gsc/search-split")
+def search_split():
+    """Branded vs other searches and Google Lens / image-upload traffic.
+    Stored for all devices and countries, so the filters don't apply."""
+    store_id = _get_store_id()
+    if not store_id:
+        return jsonify({"error": "store_id required"}), 400
+    date_from, date_to = _parse_date_range(request.args)
+    from app.services.gsc_extras import search_split as split
+
+    return jsonify(split(store_id, date_from, date_to))
+
+
 @gsc_bp.route("/api/gsc/trends")
 def trends():
     store_id = _get_store_id()
@@ -348,9 +361,14 @@ def index_coverage():
     store_id = request.args.get("store_id", type=int)
     if not store_id:
         return jsonify({"error": "store_id is required"}), 400
-    from app.services.index_coverage import get_coverage
+    from app.services.index_coverage import get_coverage, sitemap_status
 
-    return jsonify(get_coverage(store_id))
+    data = get_coverage(store_id)
+    try:
+        data["sitemap"] = sitemap_status(store_id)
+    except Exception as e:
+        data["sitemap"] = {"error": f"Could not read sitemaps from Search Console: {e}"}
+    return jsonify(data)
 
 
 @gsc_bp.route("/api/gsc/unindexed-plan", methods=["GET"])
@@ -361,6 +379,104 @@ def unindexed_plan():
     from app.services.unindexed_plan import get_unindexed_plan
 
     return jsonify(get_unindexed_plan(store_id))
+
+
+# ── Links to unindexed pages (suggest, review, apply; optional nightly auto) ──
+
+@gsc_bp.route("/api/link-suggestions", methods=["GET"])
+def link_suggestions():
+    store_id = request.args.get("store_id", type=int)
+    if not store_id:
+        return jsonify({"error": "store_id is required"}), 400
+    from app.database import db
+    from app.services.unindexed_links import list_suggestions
+
+    data = list_suggestions(store_id)
+    with db.get_cursor() as cur:
+        cur.execute("SELECT last_status, last_error, last_detail, last_run_at FROM job_health WHERE job = 'unindexed_links' AND store_id = %s",
+                    (store_id,))
+        last = cur.fetchone()
+    data["last_run"] = {**last, "last_run_at": last["last_run_at"].isoformat()} if last else None
+    return jsonify(data)
+
+
+@gsc_bp.route("/api/link-suggestions/refresh", methods=["POST"])
+def link_suggestions_refresh():
+    store_id = (request.get_json(silent=True) or {}).get("store_id")
+    if not store_id:
+        return jsonify({"error": "store_id is required"}), 400
+    from app.services.unindexed_links import refresh_suggestions
+
+    return jsonify(refresh_suggestions(int(store_id)))
+
+
+@gsc_bp.route("/api/link-suggestions/<int:suggestion_id>/apply", methods=["POST"])
+def link_suggestion_apply(suggestion_id):
+    from app.services.unindexed_links import apply_suggestion
+
+    try:
+        result = apply_suggestion(suggestion_id)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 409
+    if result["status"] == "failed":
+        return jsonify({"error": result["error"] or "The link could not be added"}), 502
+    return jsonify(result)
+
+
+@gsc_bp.route("/api/link-suggestions/<int:suggestion_id>/dismiss", methods=["POST"])
+def link_suggestion_dismiss(suggestion_id):
+    from app.services.unindexed_links import dismiss_suggestion
+
+    return jsonify({"ok": dismiss_suggestion(suggestion_id)})
+
+
+@gsc_bp.route("/api/link-suggestions/apply-all", methods=["POST"])
+def link_suggestions_apply_all():
+    """Apply every pending suggestion (or the given ids) in the background."""
+    data = request.get_json(silent=True) or {}
+    store_id = data.get("store_id")
+    if not store_id:
+        return jsonify({"error": "store_id is required"}), 400
+    from app.database import db
+    from app.services.task_runner import spawn
+    from app.services.unindexed_links import apply_many, pending_ids
+
+    ids = [int(i) for i in data.get("ids") or []] or pending_ids(int(store_id))
+    if not ids:
+        return jsonify({"error": "No suggestions waiting"}), 400
+    with db.get_cursor() as cur:
+        cur.execute(
+            "INSERT INTO ai_tasks (store_id, task_type, status, input) VALUES (%s, 'link_suggestions', 'running', %s) RETURNING id",
+            (int(store_id), json.dumps({"ids": ids})),
+        )
+        task_id = cur.fetchone()["id"]
+
+    def _run():
+        def progress(done, total):
+            with db.get_cursor() as cur:
+                cur.execute("UPDATE ai_tasks SET result = %s WHERE id = %s",
+                            (json.dumps({"progress": {"completed": done, "total": total}}), task_id))
+
+        out = apply_many(int(store_id), ids, progress=progress)
+        with db.get_cursor() as cur:
+            cur.execute("UPDATE ai_tasks SET status = 'completed', result = %s, completed_at = NOW() WHERE id = %s",
+                        (json.dumps(out), task_id))
+
+    spawn("ai_tasks", task_id, _run)
+    return jsonify({"task_id": task_id, "total": len(ids)})
+
+
+@gsc_bp.route("/api/link-suggestions/settings", methods=["POST"])
+def link_suggestions_settings():
+    data = request.get_json(silent=True) or {}
+    from app.settings_manager import set_setting
+    from app.services.unindexed_links import auto_settings
+
+    if "auto" in data:
+        set_setting("links.auto_unindexed", bool(data["auto"]))
+    if "per_night" in data:
+        set_setting("links.auto_unindexed_per_night", max(1, min(int(data["per_night"]), 100)))
+    return jsonify(auto_settings())
 
 
 @gsc_bp.route("/api/gsc/index-coverage/check", methods=["POST"])
@@ -408,7 +524,7 @@ def cannibalization():
     if not store_id:
         return jsonify({"error": "store_id required"}), 400
     date_from, date_to = _parse_date_range(request.args)
-    min_impressions = request.args.get("min_impressions", 3, type=int)
+    min_impressions = request.args.get("min_impressions", 10, type=int)
     f = _get_filters()
     data = gsc_service.get_cannibalization(store_id, date_from, date_to, min_impressions, **f)
     return jsonify(data)
@@ -489,7 +605,7 @@ def _get_ai_client():
 
     api_key = decrypt_value(config["api_key_enc"])
     model = config.get("model") or "anthropic/claude-sonnet-4"
-    client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=api_key)
+    client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=api_key, timeout=120.0, max_retries=1)
     return client, model, None
 
 
@@ -756,14 +872,12 @@ def apply_cannibalization_fix():
             return jsonify({"error": "No changes to apply"}), 400
 
         with db.get_cursor() as cur:
-            if new_title:
-                cur.execute(f"UPDATE {table} SET title = %s WHERE id = %s", (new_title, item_id))
-            if new_meta_title:
-                cur.execute(f"UPDATE {table} SET meta_title = %s WHERE id = %s", (new_meta_title, item_id))
-            if new_meta_description:
-                cur.execute(f"UPDATE {table} SET meta_description = %s WHERE id = %s", (new_meta_description, item_id))
+            # Title and metas were mirrored by the pipeline with what Shopify
+            # stored. Alt text: patch the current row, not the snapshot read
+            # at the start of the request.
             if image_alts and item_type == "product":
-                images = item.get("images") or []
+                cur.execute("SELECT images FROM synced_products WHERE id = %s", (item_id,))
+                images = (cur.fetchone() or {}).get("images") or []
                 if isinstance(images, str):
                     images = json.loads(images)
                 alt_map = {a["media_id"]: a["alt"] for a in image_alts if a.get("media_id")}

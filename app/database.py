@@ -81,6 +81,25 @@ class Database:
             finally:
                 cur.close()
 
+    @contextmanager
+    def advisory_lock(self, namespace, key):
+        """Cross-process try-lock (both gunicorn workers see it). Yields True
+        when acquired, False when another process holds it. Uses its own
+        connection so a long job does not pin a pooled one."""
+        conn = psycopg2.connect(self.dsn)
+        conn.autocommit = True
+        try:
+            cur = conn.cursor()
+            cur.execute("SELECT pg_try_advisory_lock(%s, %s)", (namespace, key))
+            got = bool(cur.fetchone()[0])
+            try:
+                yield got
+            finally:
+                if got:
+                    cur.execute("SELECT pg_advisory_unlock(%s, %s)", (namespace, key))
+        finally:
+            conn.close()
+
     def try_acquire_leader(self):
         """Session-level advisory lock held for the process lifetime.
 
@@ -773,6 +792,22 @@ class Database:
                 EXCEPTION WHEN duplicate_column THEN NULL;
                 END $$
             """)
+            cur.execute(
+                "DO $$ BEGIN ALTER TABLE sync_jobs ADD COLUMN kind VARCHAR(20) NOT NULL DEFAULT 'store'; "
+                "EXCEPTION WHEN duplicate_column THEN NULL; END $$"
+            )
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS job_health (
+                    job VARCHAR(60) NOT NULL,
+                    store_id INTEGER NOT NULL DEFAULT 0,
+                    last_status VARCHAR(20) NOT NULL,
+                    last_error TEXT,
+                    last_detail TEXT,
+                    last_run_at TIMESTAMP NOT NULL DEFAULT NOW(),
+                    last_ok_at TIMESTAMP,
+                    PRIMARY KEY (job, store_id)
+                )
+            """)
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS index_status (
                     store_id INTEGER REFERENCES stores(id) ON DELETE CASCADE,
@@ -1152,6 +1187,58 @@ class Database:
             cur.execute("""
                 CREATE INDEX IF NOT EXISTS idx_gsc_page_daily_page
                 ON gsc_page_daily(store_id, page)
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS gsc_brand_daily (
+                    store_id INTEGER REFERENCES stores(id) ON DELETE CASCADE,
+                    date DATE NOT NULL,
+                    branded BOOLEAN NOT NULL,
+                    clicks DOUBLE PRECISION DEFAULT 0,
+                    impressions DOUBLE PRECISION DEFAULT 0,
+                    position DOUBLE PRECISION DEFAULT 0,
+                    PRIMARY KEY (store_id, date, branded)
+                )
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS gsc_query_brand (
+                    store_id INTEGER REFERENCES stores(id) ON DELETE CASCADE,
+                    query VARCHAR(500) NOT NULL,
+                    branded BOOLEAN NOT NULL,
+                    updated_at TIMESTAMP DEFAULT NOW(),
+                    PRIMARY KEY (store_id, query)
+                )
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS gsc_multimodal_daily (
+                    store_id INTEGER REFERENCES stores(id) ON DELETE CASCADE,
+                    date DATE NOT NULL,
+                    page TEXT NOT NULL,
+                    clicks DOUBLE PRECISION DEFAULT 0,
+                    impressions DOUBLE PRECISION DEFAULT 0,
+                    position DOUBLE PRECISION DEFAULT 0,
+                    PRIMARY KEY (store_id, date, page)
+                )
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS link_suggestions (
+                    id SERIAL PRIMARY KEY,
+                    store_id INTEGER REFERENCES stores(id) ON DELETE CASCADE,
+                    target_type VARCHAR(20) NOT NULL,
+                    target_id INTEGER NOT NULL,
+                    source_type VARCHAR(20) NOT NULL,
+                    source_id INTEGER NOT NULL,
+                    how VARCHAR(20) NOT NULL,
+                    anchor TEXT,
+                    reason TEXT,
+                    score DOUBLE PRECISION DEFAULT 0,
+                    status VARCHAR(20) NOT NULL DEFAULT 'pending',
+                    event_id INTEGER,
+                    error TEXT,
+                    applied_by VARCHAR(20),
+                    created_at TIMESTAMP DEFAULT NOW(),
+                    updated_at TIMESTAMP DEFAULT NOW(),
+                    UNIQUE (store_id, target_type, target_id, source_type, source_id)
+                )
             """)
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS gsc_data_pulls (

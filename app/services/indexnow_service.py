@@ -248,6 +248,11 @@ def ping_urls(store_id, urls, reason=""):
             ok = resp.status_code in (200, 202)
             _log_ping(store_id, urls, reason, resp.status_code, ok,
                       None if ok else (resp.text or "")[:500])
+            # 403/422 mean the key did not validate: every later ping is
+            # discarded too, so say so on Home instead of only in the log.
+            from app.services.job_health import record_job
+            record_job("indexnow", store_id, ok=ok,
+                       error=None if ok else f"HTTP {resp.status_code}: {(resp.text or '')[:200]}")
             return {"ok": ok, "status_code": resp.status_code, "url_count": len(urls)}
         except Exception as e:
             _log_ping(store_id, urls, reason, None, False, str(e)[:500])

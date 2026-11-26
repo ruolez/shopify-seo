@@ -1001,6 +1001,11 @@ def _apply_faq_schema(data, store_id, client):
     if not item_id:
         return jsonify({"error": "item_id is required"}), 400
     from app.services.apply_pipeline import set_faq_schema
+    from app.services.schema_generator import faq_markup_enabled
+
+    if not faq_markup_enabled():
+        return jsonify({"error": "FAQ structured data is turned off (Settings › SEO rules › Publishing). "
+                                 "Google no longer shows FAQ results, so nothing was published."}), 400
 
     try:
         published = set_faq_schema(store_id, item_type, item_id, faq_schema, client)
@@ -1041,6 +1046,7 @@ def seo_impact():
         cur.execute(
             """SELECT * FROM seo_change_events
                WHERE store_id = %s AND item_type = %s AND item_id = %s
+                 AND change_type <> 'revert' AND reverted_at IS NULL
                ORDER BY created_at DESC LIMIT 1""",
             (store_id, item_type, item_id),
         )
@@ -1053,103 +1059,60 @@ def seo_impact():
 
     change_date = event["created_at"]
     days_since = (datetime.now(timezone.utc) - change_date.replace(tzinfo=timezone.utc)).days
-
-    before_start = (change_date - timedelta(days=28)).date().isoformat()
-    before_end = change_date.date().isoformat()
-    after_start = change_date.date().isoformat()
-    after_end = (change_date + timedelta(days=28)).date().isoformat()
-
-    table = "synced_products" if item_type == "product" else "synced_collections"
-    prefix = "products" if item_type == "product" else "collections"
-
-    with db.get_cursor() as cur:
-        cur.execute(f"SELECT handle, title FROM {table} WHERE id = %s", (item_id,))
-        item = cur.fetchone()
-        if not item:
-            return jsonify({"error": "Item not found"}), 404
-
-        cur.execute("SELECT gsc_property FROM gsc_credentials WHERE store_id = %s", (store_id,))
-        cred = cur.fetchone()
-
-    if not cred or not cred.get("gsc_property"):
-        return jsonify({
-            "item_title": item["title"],
-            "optimization_date": change_date.isoformat(),
-            "days_since": days_since,
-            "status": "no_gsc_data",
-            "scores_before": {
-                "on_page": event["seo_score_before"],
-                "search": event["search_score_before"],
-                "composite": event["composite_score_before"],
-            },
-        })
-
-    base_url = cred["gsc_property"].rstrip("/")
-    page_url = f"{base_url}/{prefix}/{item['handle']}"
-
-    def _get_period_metrics(d_from, d_to):
-        with db.get_cursor() as cur:
-            cur.execute(
-                """SELECT SUM(clicks) as clicks, SUM(impressions) as impressions,
-                          CASE WHEN SUM(impressions) > 0 THEN SUM(clicks) / SUM(impressions) ELSE 0 END as ctr,
-                          SUM(position * impressions) / NULLIF(SUM(impressions), 0) as position
-                   FROM gsc_daily_metrics
-                   WHERE store_id = %s AND page = %s AND date >= %s AND date <= %s""",
-                (store_id, page_url, d_from, d_to),
-            )
-            return cur.fetchone()
-
-    before = _get_period_metrics(before_start, before_end)
-    after = _get_period_metrics(after_start, after_end)
-
-    def _safe_float(val):
-        return float(val) if val else 0
-
-    before_data = {
-        "clicks": int(_safe_float(before["clicks"])) if before else 0,
-        "impressions": int(_safe_float(before["impressions"])) if before else 0,
-        "ctr": round(_safe_float(before["ctr"]), 4) if before else 0,
-        "position": round(_safe_float(before["position"]), 1) if before else 0,
+    scores_before = {
+        "on_page": event["seo_score_before"],
+        "search": event["search_score_before"],
+        "composite": event["composite_score_before"],
     }
-    after_data = {
-        "clicks": int(_safe_float(after["clicks"])) if after else 0,
-        "impressions": int(_safe_float(after["impressions"])) if after else 0,
-        "ctr": round(_safe_float(after["ctr"]), 4) if after else 0,
-        "position": round(_safe_float(after["position"]), 1) if after else 0,
-    }
-
-    click_delta = after_data["clicks"] - before_data["clicks"]
-    impr_delta = after_data["impressions"] - before_data["impressions"]
-    pos_delta = before_data["position"] - after_data["position"]
-
-    if days_since < 14:
-        status = "too_early"
-    elif click_delta > 0 and pos_delta > 0:
-        status = "improving"
-    elif click_delta < 0 and pos_delta < -1:
-        status = "declining"
-    else:
-        status = "stable"
-
-    return jsonify({
-        "item_title": item["title"],
+    base = {
         "optimization_date": change_date.isoformat(),
         "days_since": days_since,
-        "before": before_data,
-        "after": after_data,
-        "delta": {
-            "clicks": click_delta,
-            "impressions": impr_delta,
-            "ctr": round(after_data["ctr"] - before_data["ctr"], 4),
-            "position": round(pos_delta, 1),
-        },
-        "scores_before": {
-            "on_page": event["seo_score_before"],
-            "search": event["search_score_before"],
-            "composite": event["composite_score_before"],
-        },
+        "scores_before": scores_before,
+    }
+
+    # One calculation for this modal and the Home impact card: equal
+    # 14-day windows (the post window starts 2 days after the change for
+    # recrawl), page totals that include anonymised queries, per-day rates,
+    # and a verdict only when the change beats day-to-day noise.
+    from app.services.impact_service import POST_DAYS, PRE_DAYS, RECRAWL_LAG_DAYS, item_impact
+
+    row = item_impact(int(store_id), item_type, int(item_id))
+    if not row:
+        return jsonify({**base, "item_title": "", "status": "no_gsc_data"})
+
+    def _window(w):
+        if not w:
+            return None
+        clicks, impressions = int(w.get("clicks") or 0), int(w.get("impressions") or 0)
+        return {
+            "clicks": clicks,
+            "impressions": impressions,
+            "ctr": round(clicks / impressions, 4) if impressions else 0,
+            "position": w.get("position") or 0,
+            "days": w.get("days"),
+            "clicks_per_day": w.get("clicks_per_day"),
+        }
+
+    status = {"improved": "improving", "declined": "declining", "flat": "stable",
+              "collecting": "too_early", "insufficient": "too_little_data"}[row["status"]]
+    before, after = _window(row["pre"]), _window(row["post"])
+    payload = {
+        **base,
+        "item_title": row["title"],
         "status": status,
-    })
+        "before": before,
+        "after": after,
+        "windows": {"pre_days": PRE_DAYS, "post_days": POST_DAYS, "recrawl_lag_days": RECRAWL_LAG_DAYS},
+        "clicks_change_pct": row["clicks_change_pct"],
+    }
+    if before and after:
+        payload["delta"] = {
+            "clicks": after["clicks"] - before["clicks"],
+            "impressions": after["impressions"] - before["impressions"],
+            "ctr": round(after["ctr"] - before["ctr"], 4),
+            "position": round((before["position"] or 0) - (after["position"] or 0), 1),
+        }
+    return jsonify(payload)
 
 
 @seo_bp.route("/api/seo/products/counts", methods=["GET"])
@@ -1900,7 +1863,7 @@ def _execute_bulk_apply_tags(bulk_task_id, store_id, assignments):
             last_err = None
             for attempt in range(3):
                 try:
-                    client.update_product(product["shopify_id"], {"tags": assigned_tags})
+                    stored_tags = client.add_product_tags(product["shopify_id"], assigned_tags)
                     last_err = None
                     break
                 except Exception as retry_err:
@@ -1914,7 +1877,7 @@ def _execute_bulk_apply_tags(bulk_task_id, store_id, assignments):
             with db.get_cursor() as cur:
                 cur.execute(
                     "UPDATE synced_products SET tags = %s WHERE id = %s",
-                    (", ".join(assigned_tags), product_id),
+                    (", ".join(stored_tags), product_id),
                 )
                 cur.execute(
                     "UPDATE bulk_tasks SET completed = completed + 1 WHERE id = %s",
@@ -2002,6 +1965,7 @@ def filter_tags_ai():
         client = OpenAI(
             base_url="https://openrouter.ai/api/v1",
             api_key=config["api_key"],
+            timeout=120.0, max_retries=1,
         )
 
         tag_list_str = "\n".join(
@@ -2155,10 +2119,6 @@ def _execute_generate_collections(bulk_task_id, store_id, tags, auto_optimize):
 
                 with db.get_cursor() as cur:
                     cur.execute(
-                        "UPDATE synced_collections SET products_count = %s, synced_at = NOW() WHERE id = %s",
-                        (total_products, synced_collection_id),
-                    )
-                    cur.execute(
                         """INSERT INTO generated_collections (store_id, tag, collection_id, shopify_collection_id, products_count, status)
                         VALUES (%s, %s, %s, %s, %s, 'merged')
                         ON CONFLICT (store_id, tag) DO UPDATE SET collection_id = EXCLUDED.collection_id,
@@ -2166,8 +2126,8 @@ def _execute_generate_collections(bulk_task_id, store_id, tags, auto_optimize):
                             products_count = EXCLUDED.products_count, status = EXCLUDED.status""",
                         (store_id, tag, synced_collection_id, shopify_id, total_products),
                     )
-
-                created_collection_ids.append(synced_collection_id)
+                # A pre-existing store collection only gains products; its
+                # title, description and meta stay the merchant's.
             else:
                 result = client.create_collection(collection_title)
                 shopify_id = result["shopify_id"]
@@ -2310,6 +2270,7 @@ def _execute_generate_taxonomy_collections(bulk_task_id, store_id, categories, p
             tag_to_product_ids.setdefault(tag, set()).add(pid)
 
     created_collection_ids = []
+    preexisting_ids = set()
     hierarchy = {}
 
     for cat in categories:
@@ -2338,6 +2299,7 @@ def _execute_generate_taxonomy_collections(bulk_task_id, store_id, categories, p
                 parent_shopify_id = existing_parent["shopify_id"]
                 parent_synced_id = existing_parent["id"]
                 parent_handle = existing_parent["handle"]
+                preexisting_ids.add(parent_synced_id)
             else:
                 result = client.create_collection(cat_name)
                 parent_shopify_id = result["shopify_id"]
@@ -2362,29 +2324,33 @@ def _execute_generate_taxonomy_collections(bulk_task_id, store_id, categories, p
                     )
                     cat_shopify_ids = [r["shopify_id"] for r in cur.fetchall()]
 
+                added = False
                 if cat_shopify_ids:
                     try:
                         client.add_products_to_collection(parent_shopify_id, cat_shopify_ids)
+                        added = True
                     except Exception:
                         logger.exception("Failed to add products to parent collection '%s'", cat_name)
 
-                with db.get_cursor() as cur:
-                    cur.execute(
-                        "UPDATE synced_collections SET products_count = %s, synced_at = NOW() WHERE id = %s",
-                        (len(cat_shopify_ids), parent_synced_id),
-                    )
+                if added and parent_synced_id not in preexisting_ids:
+                    with db.get_cursor() as cur:
+                        cur.execute(
+                            "UPDATE synced_collections SET products_count = %s, synced_at = NOW() WHERE id = %s",
+                            (len(cat_shopify_ids), parent_synced_id),
+                        )
 
             with db.get_cursor() as cur:
                 cur.execute(
                     """INSERT INTO generated_collections (store_id, tag, collection_id, shopify_collection_id, products_count, status, parent_collection_id, taxonomy_category, generation_mode)
-                    VALUES (%s, %s, %s, %s, %s, 'created', NULL, %s, 'taxonomy')
+                    VALUES (%s, %s, %s, %s, %s, %s, NULL, %s, 'taxonomy')
                     ON CONFLICT (store_id, tag) DO UPDATE SET collection_id = EXCLUDED.collection_id,
                         shopify_collection_id = EXCLUDED.shopify_collection_id,
                         products_count = EXCLUDED.products_count, status = EXCLUDED.status,
                         parent_collection_id = EXCLUDED.parent_collection_id,
                         taxonomy_category = EXCLUDED.taxonomy_category,
                         generation_mode = EXCLUDED.generation_mode""",
-                    (store_id, f"__category__{cat_name}", parent_synced_id, parent_shopify_id, len(all_cat_product_ids), cat_name),
+                    (store_id, f"__category__{cat_name}", parent_synced_id, parent_shopify_id, len(all_cat_product_ids),
+                     "merged" if parent_synced_id in preexisting_ids else "created", cat_name),
                 )
 
             created_collection_ids.append(parent_synced_id)
@@ -2444,6 +2410,7 @@ def _execute_generate_taxonomy_collections(bulk_task_id, store_id, categories, p
                     child_shopify_id = existing_child["shopify_id"]
                     child_synced_id = existing_child["id"]
                     child_handle = existing_child["handle"]
+                    preexisting_ids.add(child_synced_id)
 
                     if product_shopify_ids:
                         try:
@@ -2454,12 +2421,6 @@ def _execute_generate_taxonomy_collections(bulk_task_id, store_id, categories, p
                                 client.add_products_to_collection(child_shopify_id, missing)
                         except Exception:
                             logger.exception("Failed to update products for existing child collection '%s'", tag)
-
-                    with db.get_cursor() as cur:
-                        cur.execute(
-                            "UPDATE synced_collections SET products_count = %s, synced_at = NOW() WHERE id = %s",
-                            (len(product_shopify_ids), child_synced_id),
-                        )
                 else:
                     result = client.create_collection(tag)
                     child_shopify_id = result["shopify_id"]
@@ -2486,14 +2447,15 @@ def _execute_generate_taxonomy_collections(bulk_task_id, store_id, categories, p
                 with db.get_cursor() as cur:
                     cur.execute(
                         """INSERT INTO generated_collections (store_id, tag, collection_id, shopify_collection_id, products_count, status, parent_collection_id, taxonomy_category, generation_mode)
-                        VALUES (%s, %s, %s, %s, %s, 'created', %s, %s, 'taxonomy')
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'taxonomy')
                         ON CONFLICT (store_id, tag) DO UPDATE SET collection_id = EXCLUDED.collection_id,
                             shopify_collection_id = EXCLUDED.shopify_collection_id,
                             products_count = EXCLUDED.products_count, status = EXCLUDED.status,
                             parent_collection_id = EXCLUDED.parent_collection_id,
                             taxonomy_category = EXCLUDED.taxonomy_category,
                             generation_mode = EXCLUDED.generation_mode""",
-                        (store_id, tag, child_synced_id, child_shopify_id, len(product_shopify_ids), parent_synced_id, cat_name),
+                        (store_id, tag, child_synced_id, child_shopify_id, len(product_shopify_ids),
+                         "merged" if child_synced_id in preexisting_ids else "created", parent_synced_id, cat_name),
                     )
 
                 created_collection_ids.append(child_synced_id)
@@ -2529,8 +2491,9 @@ def _execute_generate_taxonomy_collections(bulk_task_id, store_id, categories, p
             (bulk_task_id,),
         )
 
-    if auto_optimize and created_collection_ids:
-        _auto_optimize_generated_collections(store_id, created_collection_ids, hierarchy)
+    new_ids = [cid for cid in created_collection_ids if cid not in preexisting_ids]
+    if auto_optimize and new_ids:
+        _auto_optimize_generated_collections(store_id, new_ids, hierarchy)
 
 
 
@@ -2605,41 +2568,21 @@ def _auto_optimize_generated_collections(store_id, collection_ids, hierarchy=Non
                     store["api_version"],
                 )
 
-                with db.get_cursor() as cur:
-                    cur.execute("SELECT shopify_id, description FROM synced_collections WHERE id = %s", (cid,))
-                    row = cur.fetchone()
-
-                if not row:
-                    continue
-
-                fields = {}
-                if ai_result.get("h1_tag"):
-                    fields["title"] = ai_result["h1_tag"]
-                if ai_result.get("optimized_description"):
-                    from app.services.ai_output_guard import restore_missing_images
-                    fields["description_html"] = restore_missing_images(
-                        row.get("description"), ai_result["optimized_description"])
-                if ai_result.get("optimized_meta_title"):
-                    fields["meta_title"] = ai_result["optimized_meta_title"]
-                if ai_result.get("optimized_meta_description"):
-                    fields["meta_description"] = ai_result["optimized_meta_description"]
-
-                guard_shopify_fields(fields)
-
-                if fields:
-                    client.update_collection(row["shopify_id"], fields)
+                fields = {
+                    "title": ai_result.get("h1_tag") or None,
+                    "body": ai_result.get("optimized_description") or None,
+                    "meta_title": ai_result.get("optimized_meta_title") or None,
+                    "meta_description": ai_result.get("optimized_meta_description") or None,
+                }
+                # The pipeline reads the live collection, restores dropped
+                # images, refuses stale or destructive rewrites and records
+                # an undoable history row.
+                apply_item_changes(
+                    store_id, "collection", cid, fields,
+                    source="generated_collections", change_type="auto_optimize", client=client,
+                )
 
                 with db.get_cursor() as cur:
-                    if fields.get("title"):
-                        cur.execute("UPDATE synced_collections SET title = %s WHERE id = %s", (fields["title"], cid))
-                    if fields.get("description_html"):
-                        cur.execute("UPDATE synced_collections SET description = %s WHERE id = %s", (fields["description_html"], cid))
-                    if fields.get("meta_title"):
-                        cur.execute("UPDATE synced_collections SET meta_title = %s WHERE id = %s", (fields["meta_title"], cid))
-                    if fields.get("meta_description"):
-                        cur.execute("UPDATE synced_collections SET meta_description = %s WHERE id = %s", (fields["meta_description"], cid))
-                    cur.execute("UPDATE synced_collections SET last_optimized_at = NOW() WHERE id = %s", (cid,))
-
                     cur.execute(
                         "UPDATE generated_collections SET status = 'optimized' WHERE collection_id = %s",
                         (cid,),
@@ -2760,15 +2703,12 @@ def generate_collection_image_preview(collection_id):
 import re as _re
 
 
-def _inject_image_into_description(client, collection, image_url, alt_text, width=1200, height=628):
-    description = collection.get("description") or ""
-
+def _with_banner(description, image_url, alt_text, width, height):
     description = _re.sub(
         r'<img[^>]+class="collection-banner-img"[^>]*/?>\s*(<br\s*/?>)?\s*',
         "",
-        description,
+        description or "",
     )
-
     # This goes live on the storefront — a quote in the alt (even a benign
     # AI-generated one) must not break out of the attribute.
     import html as _html
@@ -2780,15 +2720,29 @@ def _inject_image_into_description(client, collection, image_url, alt_text, widt
         f' loading="eager" fetchpriority="high"'
         f' style="width:100%;max-width:100%;height:auto;border-radius:8px;margin-bottom:16px;" />'
     )
-    new_description = img_tag + "\n" + description.lstrip()
+    return img_tag + "\n" + description.lstrip()
 
-    client.update_collection(collection["shopify_id"], {"description_html": new_description})
 
-    with db.get_cursor() as cur:
-        cur.execute(
-            "UPDATE synced_collections SET description = %s WHERE id = %s",
-            (new_description, collection["id"]),
-        )
+def _inject_image_into_description(client, collection, image_url, alt_text, width=1200, height=628):
+    """Put the banner at the top of the collection description through the
+    apply pipeline (live read, history, undo). Built from the mirror; when
+    Shopify holds newer text the pipeline refreshes the mirror and the one
+    retry splices into that, so an admin edit is never overwritten."""
+    from app.services.apply_pipeline import _load_mirror
+
+    for attempt in (1, 2):
+        _, mirror = _load_mirror("collection", collection["id"])
+        new_description = _with_banner(mirror.get("body"), image_url, alt_text, width, height)
+        try:
+            apply_item_changes(
+                collection["store_id"], "collection", collection["id"], {"body": new_description},
+                source="hero_image", change_type="hero_image", client=client,
+                allow_dropped_primary=True, stamp=False, restore_media=False,
+            )
+            break
+        except ApplyRefused as refused:
+            if refused.status != "stale" or attempt == 2:
+                raise
     logger.info("Injected banner image into description for collection %s", collection["id"])
 
 

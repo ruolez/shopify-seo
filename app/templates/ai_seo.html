@@ -1,13 +1,11 @@
 {% extends "base.html" %}
 
-{% block title %}AI Search{% endblock %}
 
-{% block page_title %}AI Search{% endblock %}
 
 {% block content %}
                 <div class="toolbar-row" style="margin-bottom:12px;gap:12px;">
                     <select id="store-select" class="form-control" style="max-width:240px;"></select>
-                    <button class="btn btn-secondary btn-sm" style="margin-left:auto;" title="Running and recent AI Search jobs" onclick="TasksPanel.open({ page: '/ai-seo' })">
+                    <button class="btn btn-secondary" data-page-action title="Running and recent AI Search jobs" onclick="TasksPanel.open({ page: '/ai-seo' })">
                         <span class="material-symbols-rounded">checklist</span> View activity
                     </button>
                 </div>

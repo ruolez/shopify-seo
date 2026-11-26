@@ -88,8 +88,8 @@ def sync_pages():
 
     with db.get_cursor() as cur:
         cur.execute(
-            """INSERT INTO sync_jobs (store_id, status, started_at)
-            VALUES (%s, 'syncing_pages', NOW()) RETURNING id""",
+            """INSERT INTO sync_jobs (store_id, status, kind, started_at)
+            VALUES (%s, 'syncing_pages', 'pages', NOW()) RETURNING id""",
             (store_id,),
         )
         job_id = cur.fetchone()["id"]
@@ -153,14 +153,30 @@ def sync_pages():
                         ),
                     )
 
+            # Pages deleted in Shopify left their rows behind forever. The
+            # full page list was fetched (an error above aborts before this),
+            # so anything missing is gone; the homepage row is kept when its
+            # own fetch failed.
+            fetched_ids = [p["shopify_id"] for p in pages]
             with db.get_cursor() as cur:
+                cur.execute(
+                    """DELETE FROM synced_pages
+                       WHERE store_id = %s AND NOT (shopify_id = ANY(%s)) AND shopify_id NOT LIKE %s""",
+                    (store_id, fetched_ids, "%/homepage"),
+                )
+                pruned = cur.rowcount
                 cur.execute(
                     "UPDATE sync_jobs SET status = 'completed', completed_at = NOW() WHERE id = %s",
                     (job_id,),
                 )
-            logger.info("Synced %d pages (incl. homepage) for store %s", len(pages), store_id)
+            logger.info("Synced %d pages (incl. homepage), removed %d deleted, for store %s",
+                        len(pages), pruned, store_id)
+            from app.services.job_health import record_job
+            record_job("pages_sync", store_id, ok=True, detail=f"{len(pages)} pages")
         except Exception as e:
             logger.exception("Page sync failed for store %s: %s", store_id, e)
+            from app.services.job_health import record_job
+            record_job("pages_sync", store_id, ok=False, error=e)
             with db.get_cursor() as cur:
                 cur.execute(
                     "UPDATE sync_jobs SET status = 'failed', error = %s, completed_at = NOW() WHERE id = %s",
@@ -227,11 +243,8 @@ def ai_optimize_synced(page_id):
         try:
             from app.ai_agent import run_task
             result = run_task("landing_page_seo", {"synced_page_id": page_id}, store_id=page["store_id"])
-            with db.get_cursor() as cur:
-                cur.execute(
-                    "UPDATE ai_tasks SET status = 'completed', result = %s, completed_at = NOW() WHERE id = %s",
-                    (json.dumps(result), task_id),
-                )
+            from app.services.task_runner import finish_task
+            finish_task(task_id, result)
         except Exception as e:
             logger.exception("AI optimize synced page failed: %s", e)
             with db.get_cursor() as cur:
@@ -294,15 +307,14 @@ def ai_apply_synced(page_id):
             except ApplyRefused as refused:
                 return refusal_response(refused)
 
-        with db.get_cursor() as cur:
-            if data.get("meta_title"):
-                cur.execute("UPDATE synced_pages SET seo_title = %s WHERE id = %s", (data["meta_title"], page_id))
-            if data.get("meta_description"):
-                cur.execute("UPDATE synced_pages SET seo_description = %s WHERE id = %s", (data["meta_description"], page_id))
-            if data.get("body_html") and not is_homepage:
-                cur.execute("UPDATE synced_pages SET body_html = %s WHERE id = %s", (data["body_html"], page_id))
-            if data.get("title") and not is_homepage:
-                cur.execute("UPDATE synced_pages SET title = %s WHERE id = %s", (data["title"], page_id))
+        if is_homepage:
+            # Pages are mirrored by the pipeline with what Shopify stored;
+            # only the homepage (Shop SEO, no pipeline) is mirrored here.
+            with db.get_cursor() as cur:
+                if data.get("meta_title"):
+                    cur.execute("UPDATE synced_pages SET seo_title = %s WHERE id = %s", (data["meta_title"], page_id))
+                if data.get("meta_description"):
+                    cur.execute("UPDATE synced_pages SET seo_description = %s WHERE id = %s", (data["meta_description"], page_id))
         return jsonify({"success": True})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -626,7 +638,24 @@ def publish_page(page_id):
         seo_title = clamp_meta_title(page.get("meta_title") or "")
         seo_description = clamp_meta_description(page.get("meta_description") or "")
 
-        if is_valid_page_gid:
+        if is_valid_page_gid and page.get("synced_page_id"):
+            # An existing store page: go through the pipeline so an edit made
+            # in Shopify since the import is not silently overwritten, and the
+            # publish gets a history row with undo.
+            from app.services.apply_pipeline import ApplyRefused, apply_item_changes, refusal_response
+
+            try:
+                apply_item_changes(
+                    page["store_id"], "page", page["synced_page_id"],
+                    {"title": page["title"], "body": full_html,
+                     "meta_title": seo_title or None, "meta_description": seo_description or None},
+                    source="landing_builder", change_type="landing_publish", client=client,
+                    allow_dropped_blocks=True, allow_dropped_primary=True, restore_media=False,
+                )
+            except ApplyRefused as refused:
+                return refusal_response(refused)
+            client.update_page(shopify_page_id, {"is_published": True})
+        elif is_valid_page_gid:
             client.update_page(shopify_page_id, {
                 "title": page["title"],
                 "body": full_html,
@@ -790,11 +819,8 @@ def ai_optimize_builder(page_id):
         try:
             from app.ai_agent import run_task
             result = run_task("landing_page_seo", {"landing_page_id": page_id}, store_id=page["store_id"])
-            with db.get_cursor() as cur:
-                cur.execute(
-                    "UPDATE ai_tasks SET status = 'completed', result = %s, completed_at = NOW() WHERE id = %s",
-                    (json.dumps(result), task_id),
-                )
+            from app.services.task_runner import finish_task
+            finish_task(task_id, result)
         except Exception as e:
             logger.exception("AI optimize builder page failed: %s", e)
             with db.get_cursor() as cur:
@@ -828,11 +854,8 @@ def ai_generate_page():
         try:
             from app.ai_agent import run_task
             result = run_task("landing_page_generate", {"topic": topic, "keywords": keywords, "store_id": store_id}, store_id=store_id)
-            with db.get_cursor() as cur:
-                cur.execute(
-                    "UPDATE ai_tasks SET status = 'completed', result = %s, completed_at = NOW() WHERE id = %s",
-                    (json.dumps(result), task_id),
-                )
+            from app.services.task_runner import finish_task
+            finish_task(task_id, result)
         except Exception as e:
             logger.exception("AI generate landing page failed: %s", e)
             with db.get_cursor() as cur:

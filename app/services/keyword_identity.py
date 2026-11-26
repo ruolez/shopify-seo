@@ -58,6 +58,10 @@ def is_valid_keyword(kw):
     Deliberately permissive about real short keywords — "zyn" (3 letters) and
     "3mg" (2 letters) pass — while rejecting pure numbers and single letters.
     """
+    from app.services.gsc_queries import is_junk_query
+
+    if is_junk_query(kw):
+        return False
     cleaned = norm(kw)
     if len(cleaned) < MIN_KEYWORD_LENGTH:
         return False
