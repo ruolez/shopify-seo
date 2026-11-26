@@ -5,6 +5,7 @@ articles only differ in the figure CSS class.
 """
 
 import html
+import re
 from functools import partial
 from urllib.parse import urlparse
 
@@ -71,6 +72,33 @@ def clean_sources(sources, store=None):
         seen.add(key)
         out.append({"url": u, "title": title})
     return out
+
+
+_SOURCES_BLOCK_RE = re.compile(
+    r'\s*<h2 class="a2z-blog__sources-title">.*?</h2>\s*<ul class="a2z-blog__sources">.*?</ul>', re.S)
+_ANCHOR_RE = re.compile(r'<a\b[^>]*href=["\']([^"\']+)["\'][^>]*>(.*?)</a>', re.I | re.S)
+
+
+def outbound_sources(body_html, store=None):
+    """The outside pages an article already links to, in order, as
+    [{url, title}] (title = the link's own words). Store links excluded."""
+    found = []
+    for href, label in _ANCHOR_RE.findall(_SOURCES_BLOCK_RE.sub("", body_html or "")):
+        if not href.startswith(("http://", "https://")):
+            continue
+        found.append({"url": html.unescape(href), "title": html.unescape(re.sub(r"<[^>]+>", "", label)).strip()})
+    return clean_sources(found, store)
+
+
+def with_sources_block(body_html, store=None):
+    """Body with a 'Sources' list of the outside pages it cites (replacing an
+    earlier list from this function). No outside links, no list."""
+    body = _SOURCES_BLOCK_RE.sub("", body_html or "")
+    rendered = render_sources_html(outbound_sources(body, store), store)
+    if not rendered:
+        return body
+    rendered = rendered.replace("a2z-news__sources", "a2z-blog__sources")
+    return body.rstrip() + "\n" + rendered
 
 
 def render_sources_html(sources, store=None):

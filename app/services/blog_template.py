@@ -22,7 +22,7 @@ BLOG_SECTION_NAME = "seo-blog-article"
 
 # Bump these to force a re-push ("outdated") on existing installs.
 BLOG_TEMPLATE_VERSION = "v1"
-BLOG_SECTION_VERSION = "v3"
+BLOG_SECTION_VERSION = "v5"
 
 BLOG_TEMPLATE_MARKER = f"A2Z Blog Template {BLOG_TEMPLATE_VERSION}"
 BLOG_SECTION_MARKER = f"A2Z Blog Section {BLOG_SECTION_VERSION}"
@@ -77,25 +77,32 @@ def contrast_ratio(hex_a, hex_b):
     return round((hi + 0.05) / (lo + 0.05), 2)
 
 
-def link_color_warnings(brand_color, body_text=BODY_TEXT_COLOR, bg=PAGE_BACKGROUND):
-    """WCAG checks for a link color used inside body copy.
+def readable_color(color, bg=PAGE_BACKGROUND, target=4.5):
+    """The brand color, darkened just enough to read at `target`:1 on bg
+    (WCAG AA for normal text). Hue is kept; a color that already passes is
+    returned unchanged."""
+    color = normalize_hex(color)
+    r, g, b = hex_to_rgb(color)
+    factor = 1.0
+    out = color
+    while contrast_ratio(out, bg) < target and factor > 0:
+        factor = round(factor - 0.02, 2)
+        out = "#{:02x}{:02x}{:02x}".format(*(max(0, int(c * factor)) for c in (r, g, b)))
+    return out
 
-    Links must be distinguishable from surrounding text (>= 3:1) and readable
-    against the page background (>= 4.5:1). Returns human-readable warnings;
-    empty list means the color passes both.
-    """
-    warnings = []
-    vs_text = contrast_ratio(brand_color, body_text)
-    vs_bg = contrast_ratio(brand_color, bg)
-    if vs_text < 3.0:
-        warnings.append(
-            f"Link color is only {vs_text}:1 against body text (needs 3:1) — links won't stand out."
-        )
-    if vs_bg < 4.5:
-        warnings.append(
-            f"Link color is only {vs_bg}:1 against the page background (needs 4.5:1) — hard to read."
-        )
-    return warnings
+
+def link_color_warnings(brand_color, body_text=BODY_TEXT_COLOR, bg=PAGE_BACKGROUND):
+    """What the reader will see for this link color. Body links are
+    underlined, so they stand out from the text by more than color; the
+    color only has to read at 4.5:1 on the page, and the published CSS
+    darkens it when it doesn't. Returns notes; empty means it is used as is."""
+    color = normalize_hex(brand_color)
+    vs_bg = contrast_ratio(color, bg)
+    if vs_bg >= 4.5:
+        return []
+    used = readable_color(color, bg)
+    return [f"Your color is {vs_bg}:1 on white (needs 4.5:1), so text and links use the slightly darker "
+            f"{used} ({contrast_ratio(used, bg)}:1)."]
 
 
 def _rgba(hex_color, alpha):
@@ -126,6 +133,8 @@ _ARTICLE_CSS = """
 
 .a2z-blog__figure { margin: 2em 0; }
 .a2z-blog__figure img { width: 100%; height: auto; display: block; border-radius: 12px; }
+.a2z-blog__body .a2z-blog__sources-title { font-size: 20px; margin-top: 2.2em; }
+.a2z-blog__body .a2z-blog__sources { font-size: 15px; color: #4b5563; word-break: break-word; }
 .a2z-blog__figure figcaption { font-size: 13px; color: #6b7280; margin-top: 8px; text-align: center; }
 .a2z-blog__body img:not(.a2z-blog__figure img) { max-width: 100%; height: auto; border-radius: 12px; }
 
@@ -262,7 +271,7 @@ def get_article_css(brand_color=DEFAULT_BRAND_COLOR):
     Used both inside the theme section and by the wizard preview so what the
     user reviews is what ships.
     """
-    color = normalize_hex(brand_color)
+    color = readable_color(brand_color)
     css = _ARTICLE_CSS
     css = css.replace("@@BRAND_COLOR@@", color)
     css = css.replace("@@LINK_SOFT@@", _rgba(color, 0.45))

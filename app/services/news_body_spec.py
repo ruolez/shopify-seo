@@ -58,3 +58,24 @@ class TestRenderSourcesHtml:
 
     def test_returns_empty_when_only_own_site_remains(self):
         assert render_sources_html(["https://a2ztobacco.com/p"], STORE) == ""
+
+
+from app.services.news_body import outbound_sources, with_sources_block
+
+A2Z_STORE = {"primary_domain": "a2ztobacco.com", "domain": "tobacco-nation.myshopify.com"}
+CITING = ('<p>Per the <a href="https://www.fda.gov/tobacco-products/rules">FDA rules</a> and '
+          '<a href="https://a2ztobacco.com/collections/cigars">our cigars</a>, see '
+          '<a href="/products/x">this</a>.</p>')
+
+
+class TestBlogSources:
+    def test_only_outside_links_become_sources(self):
+        assert outbound_sources(CITING, A2Z_STORE) == [{"url": "https://www.fda.gov/tobacco-products/rules", "title": "FDA rules"}]
+
+    def test_block_lists_them_once_even_when_run_twice(self):
+        once = with_sources_block(CITING, A2Z_STORE)
+        assert (with_sources_block(once, A2Z_STORE) == once, once.count('class="a2z-blog__sources"')) == (True, 1)
+
+    def test_no_outside_links_leaves_the_body_alone(self):
+        body = '<p>See <a href="https://a2ztobacco.com/x">x</a>.</p>'
+        assert with_sources_block(body, A2Z_STORE) == body

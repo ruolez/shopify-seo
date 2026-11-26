@@ -19,7 +19,7 @@ NEWS_SECTION_NAME = "seo-news-article"
 
 # Bump these to force a re-push ("outdated") on existing installs.
 NEWS_TEMPLATE_VERSION = "v1"
-NEWS_SECTION_VERSION = "v2"
+NEWS_SECTION_VERSION = "v3"
 
 NEWS_TEMPLATE_MARKER = f"A2Z News Template {NEWS_TEMPLATE_VERSION}"
 NEWS_SECTION_MARKER = f"A2Z News Section {NEWS_SECTION_VERSION}"
@@ -130,7 +130,9 @@ def generate_news_section(publisher_name, logo_url=None, brand_color="#1a73e8", 
     content = _SECTION_TEMPLATE
     content = content.replace("@@SECTION_MARKER@@", NEWS_SECTION_MARKER)
     content = content.replace("@@RELATED_LIMIT@@", str(int(related_limit)))
-    content = content.replace("@@BRAND_COLOR@@", brand_color or "#1a73e8")
+    from app.services.blog_template import readable_color
+
+    content = content.replace("@@BRAND_COLOR@@", readable_color(brand_color or "#1a73e8"))
     content = content.replace("@@PUBLISHER_NAME_JSON@@", json.dumps(publisher_name or "News"))
     content = content.replace("@@LOGO_URL_JSON@@", json.dumps(logo_url or ""))
     return content

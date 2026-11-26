@@ -1694,6 +1694,11 @@ def _wizard_step_publish(session, store, client, is_published=True):
 
         visuals = get_article_visuals(session["store_id"])
         body_html = compose_article_body(body_html, session.get("inline_images") or [], visuals)
+    # The outside pages the article cites, listed at the end (E-E-A-T: readers
+    # and answer engines can see what the claims rest on).
+    from app.services.news_body import with_sources_block
+
+    body_html = with_sources_block(body_html, store)
 
     fields = {
         "title": generated.get("title", session["topic"]),
@@ -3307,6 +3312,11 @@ def wizard_compose_preview(session_id):
         body = (session.get("generated_article") or {}).get("body_html", "")
     if _session_style(session) == STYLE_VISUAL:
         body = compose_article_body(body, session.get("inline_images") or [], get_article_visuals(session["store_id"]))
+    from app.services.news_body import with_sources_block
+
+    with db.get_cursor() as cur:
+        cur.execute("SELECT primary_domain, domain FROM stores WHERE id = %s", (session["store_id"],))
+        body = with_sources_block(body, cur.fetchone())
     body = sanitize_html(body)
     return jsonify({"body_html": body, "figures": count_figures(body)})
 
