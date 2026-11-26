@@ -254,6 +254,18 @@ def search_split():
     return jsonify(split(store_id, date_from, date_to))
 
 
+@gsc_bp.route("/api/gsc/lens")
+def lens():
+    """Pages people reached by searching with a photo, last 90 days, with
+    what would help Lens match their images."""
+    store_id = _get_store_id()
+    if not store_id:
+        return jsonify({"error": "store_id required"}), 400
+    from app.services.lens_report import lens_report
+
+    return jsonify(lens_report(store_id))
+
+
 @gsc_bp.route("/api/gsc/trends")
 def trends():
     store_id = _get_store_id()

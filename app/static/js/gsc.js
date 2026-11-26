@@ -248,10 +248,9 @@ async function loadSearchSplit() {
         }
         if (d.multimodal) {
             const m = d.multimodal;
-            const rows = m.pages.map((p) => `<tr><td>${escapeHtml(shortenUrl(p.page))}</td><td>${p.clicks}</td><td>${p.impressions.toLocaleString()}</td><td>${p.position ?? "—"}</td></tr>`).join("");
-            parts.push(`<details style="display:inline-block;vertical-align:top;"><summary style="cursor:pointer;"><strong>Google Lens and image uploads:</strong> ${m.clicks.toLocaleString()} clicks, ${m.impressions.toLocaleString()} impressions</summary>
-                <p style="margin:6px 0;">People who searched with a photo (Lens, Circle to Search, an uploaded image) and got your page. Not included in the totals above. Clear, well-lit product photos with accurate alt text help here.</p>
-                <div class="table-container"><table class="data-table"><thead><tr><th>Page</th><th>Clicks</th><th>Impressions</th><th>Position</th></tr></thead><tbody>${rows}</tbody></table></div></details>`);
+            parts.push(`<details style="display:inline-block;vertical-align:top;" ontoggle="if (this.open) loadLensReport(this)"><summary style="cursor:pointer;"><strong>Google Lens and image uploads:</strong> ${m.clicks.toLocaleString()} clicks, ${m.impressions.toLocaleString()} impressions</summary>
+                <p style="margin:6px 0;">People who searched with a photo (Lens, Circle to Search, an uploaded image) and got your page. Not included in the totals above. Lens matches the photo against your images, so each product needs clear photos from more than one angle, alt text on every image, and a first image whose alt names the product.</p>
+                <div data-lens-body><div class="loading-spinner"><div class="spinner"></div></div></div></details>`);
         }
         box.innerHTML = parts.length
             ? `<div style="font-size:12.5px;color:var(--on-surface-secondary);display:flex;flex-direction:column;gap:4px;">${parts.map((p) => `<div>${p}</div>`).join("")}<div style="font-size:11px;">All devices and countries; the filters above don't apply to this line.</div></div>`
@@ -259,6 +258,32 @@ async function loadSearchSplit() {
     } catch (err) {
         box.innerHTML = "";
         console.error("Failed to load search split:", err);
+    }
+}
+
+const LENS_ISSUE = {
+    no_images: "No image",
+    missing_alt: "Images without alt text",
+    first_alt_off_name: "First image's alt doesn't name the product",
+    one_image: "Only one photo",
+};
+
+async function loadLensReport(details) {
+    const body = details.querySelector("[data-lens-body]");
+    if (!body || body.dataset.loaded) return;
+    try {
+        const r = await apiRequest(`/api/gsc/lens?store_id=${currentStoreId}`);
+        body.dataset.loaded = "1";
+        const open = (p) => p.type === "product" ? `/seo?optimize=product&id=${p.id}` : p.type === "collection" ? `/seo?optimize=collection&id=${p.id}` : null;
+        const rows = r.pages.map((p) => `<tr>
+            <td style="font-size:12.5px;">${p.first_image ? `<img src="${escapeHtml(p.first_image + (p.first_image.includes("?") ? "&" : "?") + "width=80")}" alt="" loading="lazy" style="width:36px;height:36px;object-fit:cover;border-radius:4px;vertical-align:middle;margin-right:6px;">` : ""}${escapeHtml(p.title || shortenUrl(p.path))}</td>
+            <td>${p.clicks}</td><td>${p.impressions.toLocaleString()}</td>
+            <td style="font-size:12px;">${p.issues.length ? p.issues.map((i) => `<span class="badge" style="margin:1px;">${LENS_ISSUE[i] || i}</span>`).join("") : '<span style="color:var(--success);">OK</span>'}</td>
+            <td>${open(p) ? `<a class="btn btn-secondary btn-sm" style="padding:1px 8px;font-size:11px;" href="${open(p)}">Open</a>` : ""}</td></tr>`).join("");
+        body.innerHTML = `<p style="margin:4px 0;font-size:12px;">Last ${r.days} days: ${r.totals.pages} pages, ${r.totals.clicks} clicks, ${r.totals.impressions.toLocaleString()} impressions · ${r.totals.with_issues} product pages have image problems. Top ${r.pages.length} by clicks:</p>
+            <div class="table-container"><table class="data-table"><thead><tr><th>Page</th><th>Clicks</th><th>Impressions</th><th>Images</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>`;
+    } catch (err) {
+        body.innerHTML = `<p style="color:var(--error);">${escapeHtml(err.message)}</p>`;
     }
 }
 
@@ -563,7 +588,9 @@ const LINK_SOURCE_OPEN = {
 function linkOutcomeLine(o) {
     if (!o || !o.linked) return "";
     const c = o.counts;
-    const parts = [`<strong>${c.indexed} of ${o.checked}</strong> linked page${o.checked === 1 ? "" : "s"} checked since ${o.checked === 1 ? "is" : "are"} now indexed`];
+    const parts = [o.checked
+        ? `<strong>${c.indexed} of ${o.checked}</strong> linked page${o.checked === 1 ? "" : "s"} checked since ${o.checked === 1 ? "is" : "are"} now indexed`
+        : `${o.linked} page${o.linked === 1 ? "" : "s"} got links; none re-checked by Google yet`];
     if (c.waiting) parts.push(`${c.waiting} waiting for Google's re-check (${o.recheck_after_days} days after the first link)`);
     const stuck = o.stuck.map((s) => `<li>${LINK_SOURCE_OPEN[s.target_type] ? `<a href="${LINK_SOURCE_OPEN[s.target_type](s.target_id)}">${escapeHtml(s.title || "—")}</a>` : escapeHtml(s.title || "—")}
         <span style="color:var(--on-surface-secondary);">· ${escapeHtml(s.coverage_state || "")} · linked ${formatRelativeTime(s.linked_at)}</span></li>`).join("");
