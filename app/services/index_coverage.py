@@ -8,8 +8,10 @@ about every product, collection, article and page on a rolling daily budget
 
 import logging
 import time
+from datetime import datetime
 
 from app.database import db
+from app.services.unindexed_links import RECHECK_AFTER_LINK_DAYS
 
 logger = logging.getLogger(__name__)
 
@@ -94,8 +96,42 @@ def _due_items(store_id, limit):
                 (item_type, item_type, store_id, RECHECK_AFTER_DAYS),
             )
             items.extend(dict(r) for r in cur.fetchall())
-    items.sort(key=lambda i: (i["checked_at"] is not None, i["checked_at"] or 0))
+        # Pages that got links to help indexing are re-checked a week after
+        # the first link, ahead of the regular rotation, to measure it.
+        cur.execute(
+            """SELECT o.target_type, o.target_id FROM link_outcomes o
+               LEFT JOIN index_status s ON s.store_id = o.store_id AND s.item_type = o.target_type AND s.item_id = o.target_id
+               WHERE o.store_id = %s AND NOT COALESCE(o.indexed_at_link, FALSE)
+                 AND o.linked_at < NOW() - make_interval(days => %s)
+                 AND (s.checked_at IS NULL OR s.checked_at < o.linked_at + make_interval(days => %s))""",
+            (store_id, RECHECK_AFTER_LINK_DAYS, RECHECK_AFTER_LINK_DAYS),
+        )
+        linked = {(r["target_type"], r["target_id"]) for r in cur.fetchall()}
+    if linked:
+        known = {(i["item_type"], i["item_id"]) for i in items}
+        items.extend(_items_by_key(store_id, linked - known))
+    items.sort(key=lambda i: ((i["item_type"], i["item_id"]) not in linked, i["checked_at"] is not None,
+                              i["checked_at"] or datetime.min))
     return [i for i in items if i["path"]][:limit]
+
+
+def _items_by_key(store_id, keys):
+    """Due-item rows for specific pages, even if checked recently."""
+    rows = []
+    with db.get_cursor() as cur:
+        for item_type, table, path_sql, where in _SOURCES:
+            ids = [i for t, i in keys if t == item_type]
+            if not ids:
+                continue
+            cur.execute(
+                f"""SELECT %s AS item_type, t.id AS item_id, {path_sql} AS path, s.checked_at
+                    FROM {table} t
+                    LEFT JOIN index_status s ON s.store_id = t.store_id AND s.item_type = %s AND s.item_id = t.id
+                    WHERE t.store_id = %s AND {where} AND COALESCE(t.handle, '') <> '' AND t.id = ANY(%s)""",
+                (item_type, item_type, store_id, ids),
+            )
+            rows.extend(dict(r) for r in cur.fetchall())
+    return rows
 
 
 def prune_deleted(store_id):

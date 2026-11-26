@@ -22,55 +22,9 @@ from pathlib import Path
 
 from app.database import db
 from app.services.apply_pipeline import ApplyRefused, _client_for, apply_item_changes
-from app.services.text_prices import refresh_text_prices
+from app.services.text_prices import KEEP, TEXT_FIELDS as FIELDS, pair_variants, plan_price_text
 
 REPORT_DIR = Path("/app/data/reports")
-FIELDS = {"body": "description", "meta_description": "meta_description"}
-
-# Amounts the review pass read as packaging or market context that the
-# rules cannot tell from a store price: product id -> raw amounts.
-KEEP = {
-    192283: {"$2.49", "$2.79"},
-    197872: {"$1.69"},
-    8466: {"$1.19"},
-    8307: {"$1.29"},
-    5881: {"$1.29"},
-    8407: {"$1.99"},
-    8435: {"$0.99", "$1.49"},
-    8448: {"$1.49"},
-    8092: {"$0.99"},
-    8449: {"$1.49"},
-    8402: {"$0.25"},
-    8268: {"$2.00"},
-    5058: {"$2.49"},
-    7640: {"$1.39"},
-}
-
-
-def _products(store_id):
-    with db.get_cursor() as cur:
-        cur.execute(
-            "SELECT id, shopify_id, title, variants, description, meta_description FROM synced_products "
-            "WHERE store_id = %s AND (description ~ '\\$\\s?[0-9]' OR meta_description ~ '\\$\\s?[0-9]') ORDER BY id",
-            (store_id,),
-        )
-        return cur.fetchall()
-
-
-def _variants(mirror_variants, live_variants):
-    old = {v["id"]: v.get("price") for v in mirror_variants or []}
-    return [{"title": v["title"], "old": old.get(v["id"]), "new": v["price"]} for v in live_variants]
-
-
-def _plan(row, variants):
-    fields, changes, flags = {}, [], []
-    for field, column in FIELDS.items():
-        result = refresh_text_prices(row[column], row["title"], variants, keep=KEEP.get(row["id"], ()))
-        if result["text"] != (row[column] or ""):
-            fields[field] = result["text"]
-        changes += [(field, *c) for c in result["changes"]]
-        flags += [(field, *f) for f in result["flags"]]
-    return fields, changes, flags
 
 
 def main():
@@ -88,8 +42,8 @@ def main():
         if not product:
             counts["missing_in_shopify"] += 1
             continue
-        variants = _variants(row["variants"], product["variants"])
-        fields, changes, flags = _plan(row, variants)
+        variants = pair_variants(row["variants"], product["variants"])
+        fields, changes, flags = plan_price_text(row, variants, keep=KEEP.get(row["id"], ()))
         counts["scanned"] += 1
         counts["amounts_changed"] += len(changes)
         counts["amounts_flagged"] += len(flags)

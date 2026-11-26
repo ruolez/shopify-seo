@@ -24,6 +24,10 @@ logger = logging.getLogger(__name__)
 
 PER_TARGET = 2
 SOURCE_CAP = 5
+# Linked pages are re-checked this long after their first link, and count as
+# stuck when Google still has not indexed them this long after it.
+RECHECK_AFTER_LINK_DAYS = 7
+STUCK_AFTER_DAYS = 21
 _FILLER = {"the", "and", "for", "with", "all", "pack", "packs", "count", "box", "new", "best", "your", "how",
            "what", "why", "guide", "collection", "collections", "product", "products", "flavor", "flavors",
            "every", "top", "buy", "shop", "online", "review", "reviews", "ranked", "vs"}
@@ -321,6 +325,80 @@ def _pair_phrases(s):
     return phrases_for(target, {"title": source["title"] or ""})
 
 
+def _start_outcome(cur, store_id, target_type, target_id, linked_at=None):
+    """Remember a target's index state when it gets its first link."""
+    cur.execute(
+        """INSERT INTO link_outcomes (store_id, target_type, target_id, linked_at, indexed_at_link, state_at_link)
+           SELECT %(s)s, %(t)s, %(i)s, COALESCE(%(at)s, NOW()), x.indexed, x.coverage_state
+           FROM (SELECT 1) one
+           LEFT JOIN index_status x ON x.store_id = %(s)s AND x.item_type = %(t)s AND x.item_id = %(i)s
+                                   AND x.checked_at <= COALESCE(%(at)s, NOW())
+           ON CONFLICT (store_id, target_type, target_id) DO NOTHING""",
+        {"s": store_id, "t": target_type, "i": target_id, "at": linked_at},
+    )
+
+
+def link_outcome(linked_at, indexed_at_link, indexed_now, checked_at, now, stuck_after_days=STUCK_AFTER_DAYS):
+    """What happened to a page after its first link. Pure.
+
+    already: Google had it indexed when the link went in (not counted).
+    indexed: a check after the link found it indexed.
+    waiting: not checked since the link went in.
+    not_yet / stuck: checked since, still not indexed; stuck once the link
+    is stuck_after_days old."""
+    if indexed_at_link:
+        return "already"
+    if checked_at is None or checked_at <= linked_at:
+        return "waiting"
+    if indexed_now:
+        return "indexed"
+    return "stuck" if (now - linked_at).days >= stuck_after_days else "not_yet"
+
+
+def backfill_outcomes(store_id):
+    """Targets linked before outcomes were recorded."""
+    with db.get_cursor() as cur:
+        cur.execute(
+            """SELECT target_type, target_id, MIN(updated_at) AS linked_at FROM link_suggestions
+               WHERE store_id = %s AND status = 'applied' GROUP BY target_type, target_id""",
+            (store_id,),
+        )
+        for r in cur.fetchall():
+            _start_outcome(cur, store_id, r["target_type"], r["target_id"], r["linked_at"])
+
+
+def outcome_summary(store_id, now=None):
+    """Counts of linked pages by link_outcome, plus the stuck ones."""
+    from datetime import datetime, timezone
+
+    now = now or datetime.now(timezone.utc).replace(tzinfo=None)
+    backfill_outcomes(store_id)
+    with db.get_cursor() as cur:
+        cur.execute(
+            """SELECT o.*, i.indexed, i.checked_at, i.coverage_state,
+                      COALESCE(p.title, c.title, a.title) AS title
+               FROM link_outcomes o
+               LEFT JOIN index_status i ON i.store_id = o.store_id AND i.item_type = o.target_type AND i.item_id = o.target_id
+               LEFT JOIN synced_products p ON o.target_type = 'product' AND p.id = o.target_id
+               LEFT JOIN synced_collections c ON o.target_type = 'collection' AND c.id = o.target_id
+               LEFT JOIN synced_articles a ON o.target_type = 'article' AND a.id = o.target_id
+               WHERE o.store_id = %s ORDER BY o.linked_at""",
+            (store_id,),
+        )
+        rows = cur.fetchall()
+    counts = {"already": 0, "indexed": 0, "waiting": 0, "not_yet": 0, "stuck": 0}
+    stuck = []
+    for r in rows:
+        kind = link_outcome(r["linked_at"], r["indexed_at_link"], r["indexed"], r["checked_at"], now)
+        counts[kind] += 1
+        if kind == "stuck":
+            stuck.append({"target_type": r["target_type"], "target_id": r["target_id"], "title": r["title"],
+                          "coverage_state": r["coverage_state"], "linked_at": r["linked_at"].isoformat()})
+    checked = counts["indexed"] + counts["not_yet"] + counts["stuck"]
+    return {"counts": counts, "linked": len(rows) - counts["already"], "checked": checked,
+            "stuck": stuck, "recheck_after_days": RECHECK_AFTER_LINK_DAYS, "stuck_after_days": STUCK_AFTER_DAYS}
+
+
 def apply_suggestion(suggestion_id, applied_by="person", client=None):
     """Place the suggested link. Returns the updated status."""
     from app.services import auto_linker
@@ -348,6 +426,8 @@ def apply_suggestion(suggestion_id, applied_by="person", client=None):
                WHERE id = %s""",
             (status, event_id, (error or None) and error[:1000], applied_by, suggestion_id),
         )
+        if status == "applied":
+            _start_outcome(cur, s["store_id"], s["target_type"], s["target_id"])
     return {"status": status, "event_id": event_id, "error": error}
 
 
@@ -442,4 +522,5 @@ def list_suggestions(store_id, recent_days=30):
                 "coverage_state": r["coverage_state"], "target_indexed": r["target_indexed"], "undone": r["undone"],
                 "updated_at": r["updated_at"].isoformat() if r["updated_at"] else None}
 
-    return {"pending": [row(r) for r in pending], "recent": [row(r) for r in recent], "settings": auto_settings()}
+    return {"pending": [row(r) for r in pending], "recent": [row(r) for r in recent], "settings": auto_settings(),
+            "outcomes": outcome_summary(store_id)}

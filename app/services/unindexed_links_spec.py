@@ -1,6 +1,16 @@
 import pytest
 
-from app.services.unindexed_links import SOURCE_CAP, phrases_for, plan_links, score_source, text_of
+from datetime import datetime, timedelta
+
+from app.services.unindexed_links import (
+    STUCK_AFTER_DAYS,
+    SOURCE_CAP,
+    link_outcome,
+    phrases_for,
+    plan_links,
+    score_source,
+    text_of,
+)
 
 
 def _target(**kw):
@@ -133,3 +143,22 @@ class TestWeakOverlap:
     def test_years_and_filler_words_do_not_make_a_topic(self, target_title, source_title):
         target = _target(type="article", vendor=None, title=target_title, phrases=[target_title])
         assert score_source(target, _source(title=source_title, text="")) is None
+
+
+LINKED = datetime(2026, 11, 1)
+
+
+class TestLinkOutcome:
+    @pytest.mark.parametrize("indexed_at_link,indexed_now,checked,now_days,expected", [
+        (True, True, 10, 30, "already"),
+        (False, None, None, 30, "waiting"),
+        (False, False, -1, 30, "waiting"),
+        (None, True, 8, 9, "indexed"),
+        (False, False, 8, STUCK_AFTER_DAYS - 1, "not_yet"),
+        (False, False, 8, STUCK_AFTER_DAYS, "stuck"),
+    ], ids=["indexed-before-the-link", "never-checked", "checked-only-before", "indexed-after",
+            "not-yet-under-the-limit", "stuck-at-the-limit"])
+    def test_outcome_after_the_first_link(self, indexed_at_link, indexed_now, checked, now_days, expected):
+        checked_at = None if checked is None else LINKED + timedelta(days=checked)
+        now = LINKED + timedelta(days=now_days)
+        assert link_outcome(LINKED, indexed_at_link, indexed_now, checked_at, now) == expected

@@ -184,3 +184,46 @@ def list_duplicates():
     result["counts"]["similar_bodies"] = sum(g["count"] for g in result["similar_bodies"])
 
     return jsonify(result)
+
+
+# ── Duplicate collections (same brand or same products) ────────────────────
+
+@duplicates_bp.route("/api/duplicates/collections", methods=["GET"])
+def duplicate_collections():
+    from app.services.collection_duplicates import find_duplicate_collections, list_merges
+
+    store_id = request.args.get("store_id", type=int)
+    if not store_id:
+        return jsonify({"error": "store_id required"}), 400
+    return jsonify({"pairs": find_duplicate_collections(store_id), "merges": list_merges(store_id)})
+
+
+@duplicates_bp.route("/api/duplicates/collections/merge", methods=["POST"])
+def merge_duplicate_collections():
+    from app.services.collection_duplicates import merge_collections
+
+    data = request.get_json(silent=True) or {}
+    try:
+        store_id, keep_id, drop_id = int(data["store_id"]), int(data["keep_id"]), int(data["drop_id"])
+    except (KeyError, TypeError, ValueError):
+        return jsonify({"error": "store_id, keep_id and drop_id required"}), 400
+    try:
+        return jsonify(merge_collections(store_id, keep_id, drop_id))
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 409
+    except Exception as e:
+        logger.exception("Collection merge %s <- %s failed", keep_id, drop_id)
+        return jsonify({"error": f"Shopify refused the merge: {e}"}), 502
+
+
+@duplicates_bp.route("/api/duplicates/collections/merges/<int:merge_id>/undo", methods=["POST"])
+def undo_collection_merge(merge_id):
+    from app.services.collection_duplicates import undo_merge
+
+    try:
+        return jsonify(undo_merge(merge_id))
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 409
+    except Exception as e:
+        logger.exception("Undo of collection merge %s failed", merge_id)
+        return jsonify({"error": f"Shopify refused the undo: {e}"}), 502

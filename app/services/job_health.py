@@ -57,7 +57,8 @@ JOB_LABELS = {
     "order_pull": ("Order import (revenue)", None),
     "blog_scheduler": ("Blog publishing schedule", None),
     "news_scheduler": ("News publishing schedule", None),
-    "store_sync": ("Store sync", None),
+    "store_sync": ("Store sync", 30),
+    "price_text": ("Prices in product text", None),
     "pages_sync": ("Pages sync", None),
     "indexnow": ("IndexNow (Bing) notifications", None),
     "competitor_check": ("Competitor check", None),
@@ -102,7 +103,10 @@ def store_job_problems(store_id):
             (store_id,),
         )
         sync = cur.fetchone()
-        if sync and (sync["status"] == "failed" or sync["error"]):
+        nightly = next((r for r in rows if r["job"] == "store_sync"), None)
+        newer = sync and (not nightly or not nightly.get("last_run_at") or sync["at"] > nightly["last_run_at"])
+        if newer and (sync["status"] == "failed" or sync["error"]):
+            rows = [r for r in rows if r["job"] != "store_sync"]
             rows.append({"job": "store_sync", "last_status": "failed" if sync["status"] == "failed" else "warning",
                          "last_run_at": sync["at"],
                          "last_error": sync["error"] or "Sync failed", "last_ok_at": None})

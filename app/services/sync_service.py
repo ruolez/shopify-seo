@@ -112,6 +112,32 @@ def _recover_freed_claims(store_id, freed_keywords):
         logger.exception("Freed-claim recovery failed for store %s (non-fatal)", store_id)
 
 
+def _note_repriced(cur, store_id, products):
+    """Before the upsert overwrites them, keep the old variant prices of
+    products whose text states a price and whose price changed: the nightly
+    price_text job rewrites those amounts (first old prices win, since the
+    text was written against them)."""
+    from app.services.text_prices import prices_changed
+
+    cur.execute(
+        "SELECT id, shopify_id, variants FROM synced_products WHERE store_id = %s AND shopify_id = ANY(%s) "
+        "AND (description ~ '\\$\\s?[0-9]' OR meta_description ~ '\\$\\s?[0-9]')",
+        (store_id, list(products)),
+    )
+    repriced = [
+        (store_id, row[0], json.dumps(row[2]))
+        for row in cur.fetchall()
+        if prices_changed(row[2], products[row[1]].get("variants"))
+    ]
+    if repriced:
+        psycopg2.extras.execute_values(
+            cur,
+            "INSERT INTO price_text_pending (store_id, product_id, old_variants) VALUES %s "
+            "ON CONFLICT (store_id, product_id) DO NOTHING",
+            repriced,
+        )
+
+
 def _upsert_product_batch(store_id, batch):
     # De-dupe by shopify_id (keep the newest occurrence) — ON CONFLICT raises
     # "cannot affect row a second time" if a product appears twice in one batch.
@@ -119,6 +145,7 @@ def _upsert_product_batch(store_id, batch):
     batch = list(deduped.values())
     with db.get_conn() as conn:
         cur = conn.cursor()
+        _note_repriced(cur, store_id, deduped)
         psycopg2.extras.execute_values(
             cur,
             """

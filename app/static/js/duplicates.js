@@ -55,6 +55,7 @@ async function loadDuplicates() {
         return;
     }
     container.innerHTML = '<div class="loading-spinner" style="padding:60px 0;"><div class="spinner"></div><p>Scanning products, collections, articles &amp; pages for duplicates...</p></div>';
+    loadDuplicateCollections();
 
     try {
         const data = await apiRequest(`/api/duplicates?store_id=${storeId}`);
@@ -325,3 +326,75 @@ document.addEventListener("DOMContentLoaded", async () => {
     await loadStores();
     loadDuplicates();
 });
+
+
+// ─── Collections that duplicate each other ───
+
+const DUP_REASON = {
+    same_name: "Same brand name and shared products",
+    same_products: "Nearly the same products",
+};
+
+async function loadDuplicateCollections() {
+    const box = document.getElementById("dup-collections");
+    const storeId = getStoreId();
+    if (!box || !storeId) return;
+    let data;
+    try {
+        data = await apiRequest(`/api/duplicates/collections?store_id=${storeId}`);
+    } catch (err) {
+        box.innerHTML = `<div class="card" style="margin-bottom:12px;color:var(--error);">Duplicate collections: ${escapeHtml(err.message)}</div>`;
+        return;
+    }
+    const side = (c, role) => `<div style="flex:1;min-width:220px;">
+        <div style="font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--on-surface-secondary);">${role}</div>
+        <a href="/seo?optimize=collection&id=${c.id}" style="font-weight:600;">${escapeHtml(c.title)}</a>
+        <div style="font-size:12px;color:var(--on-surface-secondary);">/collections/${escapeHtml(c.handle)} · ${c.products} product${c.products === 1 ? "" : "s"} · ${c.clicks} clicks (90 days)
+            · ${c.indexed ? '<span style="color:var(--success);">indexed</span>' : escapeHtml(c.coverage_state || "index state unknown")}${c.generated ? " · made by this app" : ""}</div></div>`;
+    const pairs = data.pairs.map((p, i) => `<div style="padding:10px 0;border-top:1px solid var(--outline);" data-pair="${i}">
+        <div style="font-size:12px;color:var(--on-surface-secondary);margin-bottom:6px;">${DUP_REASON[p.reason] || p.reason} · ${p.shared} shared product${p.shared === 1 ? "" : "s"}</div>
+        <div style="display:flex;gap:16px;flex-wrap:wrap;align-items:flex-start;">
+            ${side(p.keep, "Keep")}${side(p.drop, "Merge into it")}
+            <button class="btn btn-primary btn-sm" onclick="mergeDuplicateCollections(${p.keep.id}, ${p.drop.id}, ${p.only_in_drop}, ${p.can_add_products}, this)">Merge</button>
+        </div></div>`).join("");
+    const merges = data.merges.map((m) => `<div style="display:flex;justify-content:space-between;gap:8px;padding:4px 0;font-size:12.5px;">
+        <span>/collections/${escapeHtml(m.drop_handle)} → <a href="/seo?optimize=collection&id=${m.keep_id}">${escapeHtml(m.keep_title || m.keep_handle)}</a>
+            <span style="color:var(--on-surface-secondary);">· ${formatRelativeTime(m.created_at)}${m.added ? ` · ${m.added} products added` : ""}</span></span>
+        ${m.undone_at ? '<span style="font-size:12px;">Undone</span>' : `<button class="btn btn-secondary btn-sm" style="padding:1px 8px;font-size:11px;" onclick="undoCollectionMerge(${m.id}, this)">Undo</button>`}</div>`).join("");
+    box.innerHTML = `<details class="card" style="margin-bottom:12px;" ${data.pairs.length ? "open" : ""}>
+        <summary style="cursor:pointer;font-weight:600;">Collections that duplicate each other — ${data.pairs.length}
+            <span style="font-weight:400;font-size:13px;color:var(--on-surface-secondary);"> · Google indexes one of each pair and splits links and clicks between them. A merge keeps one (the one Google indexed first), adds the other's missing products to it, hides the other from the Online Store and redirects its address. Undo publishes it again.</span></summary>
+        ${pairs || '<p style="font-size:13px;margin:8px 0 0;">No duplicate collections found.</p>'}
+        ${merges ? `<div style="margin-top:10px;padding-top:8px;border-top:1px solid var(--outline);"><div style="font-weight:600;font-size:13px;">Merged</div>${merges}</div>` : ""}
+    </details>`;
+}
+
+async function mergeDuplicateCollections(keepId, dropId, onlyInDrop, canAdd, btn) {
+    const extra = onlyInDrop
+        ? (canAdd ? ` ${onlyInDrop} product${onlyInDrop === 1 ? "" : "s"} only in the merged collection will be added to the kept one.`
+                  : ` The kept collection picks its products by rules, so the ${onlyInDrop} product${onlyInDrop === 1 ? "" : "s"} only in the other one won't be added.`)
+        : "";
+    const ok = await UIConfirm.ask({ title: "Merge these collections?", message: `The second collection is hidden from your Online Store and its address redirects to the first.${extra} You can undo this.`, confirmLabel: "Merge" });
+    if (!ok) return;
+    btn.disabled = true;
+    try {
+        const r = await apiRequest("/api/duplicates/collections/merge", { method: "POST", body: JSON.stringify({ store_id: getStoreId(), keep_id: keepId, drop_id: dropId }) });
+        showToast(`Merged${r.added_products ? `, ${r.added_products} products added` : ""}; redirect ${r.redirect}`, "success");
+        loadDuplicateCollections();
+    } catch (err) {
+        btn.disabled = false;
+        showToast(err.message, "error");
+    }
+}
+
+async function undoCollectionMerge(mergeId, btn) {
+    btn.disabled = true;
+    try {
+        await apiRequest(`/api/duplicates/collections/merges/${mergeId}/undo`, { method: "POST" });
+        showToast("Merge undone: the collection is published again and its redirect removed", "success");
+        loadDuplicateCollections();
+    } catch (err) {
+        btn.disabled = false;
+        showToast(err.message, "error");
+    }
+}

@@ -5,7 +5,7 @@ Run with: pytest app/services/text_prices_spec.py
 
 import pytest
 
-from app.services.text_prices import refresh_text_prices
+from app.services.text_prices import pair_variants, plan_price_text, prices_changed, refresh_text_prices
 
 CARTON = "Cheyenne Cherry Filtered Cigars - 10 Packs of 20"
 ONE_VARIANT = [{"title": "Default Title", "old": "17.15", "new": "15.99"}]
@@ -194,3 +194,35 @@ class TestUntouched:
     def test_is_idempotent(self):
         once = refreshed("Only $17.15, about $0.09 per cigar.")["text"]
         assert refreshed(once) == result(once)
+
+
+def _v(vid, price, title="Default Title"):
+    return {"id": vid, "title": title, "price": price}
+
+
+class TestPricesChanged:
+    @pytest.mark.parametrize("old,new,expected", [
+        ([_v("a", "17.15")], [_v("a", "15.99")], True),
+        ([_v("a", "17.15")], [_v("a", "17.150")], False),
+        ([_v("a", "17.15")], [_v("a", "17.15"), _v("b", "30.00")], False),
+        ([_v("a", "17.15"), _v("b", "30.00")], [_v("a", "17.15")], False),
+        ([], [_v("a", "17.15")], False),
+        ([_v("a", None)], [_v("a", "17.15")], False),
+    ], ids=["repriced", "same-price-other-format", "variant-added", "variant-removed", "new-product", "unknown-old"])
+    def test_only_a_known_variant_with_a_new_price_counts(self, old, new, expected):
+        assert prices_changed(old, new) is expected
+
+
+class TestPlanPriceText:
+    def test_body_and_meta_both_take_the_new_price(self):
+        row = {"title": CARTON, "description": "<p>Only $17.15 a carton.</p>", "meta_description": "Buy for $17.15."}
+        variants = pair_variants([_v("a", "17.15")], [_v("a", "15.99")])
+        assert plan_price_text(row, variants) == (
+            {"body": "<p>Only $15.99 a carton.</p>", "meta_description": "Buy for $15.99."},
+            [("body", "$17.15", "$15.99"), ("meta_description", "$17.15", "$15.99")],
+            [],
+        )
+
+    def test_text_without_prices_plans_nothing(self):
+        row = {"title": CARTON, "description": "<p>Smooth.</p>", "meta_description": None}
+        assert plan_price_text(row, pair_variants([_v("a", "1")], [_v("a", "2")])) == ({}, [], [])

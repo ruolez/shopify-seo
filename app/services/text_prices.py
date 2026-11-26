@@ -9,6 +9,28 @@ never guessed.
 
 import re
 
+# Amounts the review pass read as packaging or market context that the
+# rules cannot tell from a store price: product id -> raw amounts.
+KEEP = {
+    192283: {"$2.49", "$2.79"},
+    197872: {"$1.69"},
+    8466: {"$1.19"},
+    8307: {"$1.29"},
+    5881: {"$1.29"},
+    8407: {"$1.99"},
+    8435: {"$0.99", "$1.49"},
+    8448: {"$1.49"},
+    8092: {"$0.99"},
+    8449: {"$1.49"},
+    8402: {"$0.25"},
+    8268: {"$2.00"},
+    5058: {"$2.49"},
+    7640: {"$1.39"},
+}
+
+# canonical field -> synced_products column
+TEXT_FIELDS = {"body": "description", "meta_description": "meta_description"}
+
 _AMOUNT = r"\$\s?(\d[\d,]*(?:\.\d{1,2})?)"
 _MENTION_RE = re.compile(_AMOUNT + r"(?:\s?([–-])\s?\$?\s?(\d[\d,]*(?:\.\d{1,2})?))?")
 _TAG_RE = re.compile(r"<[^>]+>")
@@ -181,3 +203,40 @@ def refresh_text_prices(text, title, variants, keep=()):
             pos = m.end()
     out.append(text[pos:])
     return {"text": "".join(out), "changes": changes, "flags": flags}
+
+
+def _price_key(value):
+    try:
+        return round(float(value), 2)
+    except (TypeError, ValueError):
+        return None
+
+
+def prices_changed(old_variants, new_variants):
+    """True when any variant both lists has a different price now. Variants
+    that were added or removed do not count: the text never named them."""
+    old = {v.get("id"): _price_key(v.get("price")) for v in old_variants or []}
+    return any(
+        v.get("id") in old and old[v.get("id")] is not None and _price_key(v.get("price")) != old[v.get("id")]
+        for v in new_variants or []
+    )
+
+
+def pair_variants(old_variants, new_variants):
+    """[{title, old, new}] for refresh_text_prices: old = the price the text
+    was written against (None when unknown), new = the current price."""
+    old = {v.get("id"): v.get("price") for v in old_variants or []}
+    return [{"title": v.get("title"), "old": old.get(v.get("id")), "new": v.get("price")} for v in new_variants or []]
+
+
+def plan_price_text(row, variants, keep=()):
+    """Refresh every text field of a product row. Returns (fields to write
+    keyed canonically, changes [(field, old, new)], flags [(field, amount, reason)])."""
+    fields, changes, flags = {}, [], []
+    for field, column in TEXT_FIELDS.items():
+        result = refresh_text_prices(row.get(column), row.get("title"), variants, keep=keep)
+        if result["text"] != (row.get(column) or ""):
+            fields[field] = result["text"]
+        changes += [(field, *c) for c in result["changes"]]
+        flags += [(field, *f) for f in result["flags"]]
+    return fields, changes, flags

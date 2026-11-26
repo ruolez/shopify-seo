@@ -240,7 +240,11 @@ async function loadSearchSplit() {
             const n = d.brand.non_branded || { clicks: 0, impressions: 0 };
             const total = b.clicks + n.clicks;
             const pct = total ? Math.round((b.clicks / total) * 100) : 0;
-            parts.push(`<span title="Google's own label for searches that name your store"><strong>Searches for your store's name:</strong> ${b.clicks.toLocaleString()} clicks (${pct}% of clicks) · <strong>Other searches:</strong> ${n.clicks.toLocaleString()} clicks</span>`);
+            const other = d.brand.named_as_other || 0;
+            const note = other
+                ? ` <span title="Searches like &quot;a2z smoke shop&quot; name your store, but Google files them as non-branded. The app's click-through baselines count them as branded.">· Google files another ${other.toLocaleString()} clicks from searches naming your store under other</span>`
+                : "";
+            parts.push(`<span title="Google's own label for searches that name your store"><strong>Searches for your store's name:</strong> ${b.clicks.toLocaleString()} clicks (${pct}% of clicks) · <strong>Other searches:</strong> ${n.clicks.toLocaleString()} clicks${note}</span>`);
         }
         if (d.multimodal) {
             const m = d.multimodal;
@@ -555,6 +559,20 @@ const LINK_SOURCE_OPEN = {
     article: (id) => `/blog?article=${id}`,
 };
 
+// Did the links help? Pages that got links, checked again by Google since.
+function linkOutcomeLine(o) {
+    if (!o || !o.linked) return "";
+    const c = o.counts;
+    const parts = [`<strong>${c.indexed} of ${o.checked}</strong> linked page${o.checked === 1 ? "" : "s"} checked since ${o.checked === 1 ? "is" : "are"} now indexed`];
+    if (c.waiting) parts.push(`${c.waiting} waiting for Google's re-check (${o.recheck_after_days} days after the first link)`);
+    const stuck = o.stuck.map((s) => `<li>${LINK_SOURCE_OPEN[s.target_type] ? `<a href="${LINK_SOURCE_OPEN[s.target_type](s.target_id)}">${escapeHtml(s.title || "—")}</a>` : escapeHtml(s.title || "—")}
+        <span style="color:var(--on-surface-secondary);">· ${escapeHtml(s.coverage_state || "")} · linked ${formatRelativeTime(s.linked_at)}</span></li>`).join("");
+    return `<div style="font-size:12.5px;margin:10px 0 0;padding:8px 10px;border-radius:8px;background:var(--surface-variant, rgba(0,0,0,.04));">
+        <div>Did it help? ${parts.join(" · ")}.</div>
+        ${stuck ? `<details style="margin-top:4px;"><summary style="cursor:pointer;">${c.stuck} still not indexed ${o.stuck_after_days}+ days after linking — these need more than links (better content, or merging into a stronger page)</summary><ul style="margin:6px 0 0 18px;">${stuck}</ul></details>` : ""}
+    </div>`;
+}
+
 async function loadLinkSuggestions() {
     const box = document.getElementById("gsc-link-suggestions");
     if (!box) return;
@@ -605,6 +623,7 @@ async function loadLinkSuggestions() {
                     <input type="number" min="1" max="100" value="${st.per_night}" id="link-auto-per-night" class="form-control" style="width:64px;padding:2px 6px;" onchange="saveLinkAutoSettings()"> a night</label>
             </div>
         </div>
+        ${linkOutcomeLine(data.outcomes)}
         ${last ? `<p style="font-size:12px;margin:8px 0 0;color:${last.last_status === "ok" ? "var(--on-surface-secondary)" : "var(--error)"};">Last run ${formatRelativeTime(last.last_run_at)}: ${escapeHtml(last.last_status === "ok" ? (last.last_detail || "done") : (last.last_error || "failed"))}</p>` : ""}
         <div style="display:flex;gap:8px;margin:12px 0 6px;align-items:center;flex-wrap:wrap;">
             ${data.pending.length ? `<button class="btn btn-primary btn-sm" onclick="applyAllLinkSuggestions(${data.pending.length}, this)"><span class="material-symbols-rounded">add_link</span> Add all ${data.pending.length} links</button>` : ""}

@@ -157,6 +157,25 @@ def backfill_score_history(store_id):
         return cur.rowcount
 
 
+def nightly_store_sync(store_id):
+    """Sync products, collections and articles once a day, unless a sync
+    finished in the last 20 hours. A failure raises so job_health shows it."""
+    from app.services.sync_service import ALREADY_RUNNING, start_sync_job, sync_store
+
+    with db.get_cursor() as cur:
+        cur.execute(
+            "SELECT 1 FROM sync_jobs WHERE store_id = %s AND kind = 'store' AND status = 'completed' "
+            "AND completed_at > NOW() - INTERVAL '20 hours' LIMIT 1",
+            (store_id,),
+        )
+        if cur.fetchone():
+            return "synced recently"
+    result = sync_store(store_id, start_sync_job(store_id))
+    if result is None:
+        raise RuntimeError(ALREADY_RUNNING)
+    return f"{result.get('products_synced', 0)} products, {result.get('collections_synced', 0)} collections"
+
+
 class NightlyScheduler:
     """Rolls up daily snapshots for every active store. Ticks every few
     hours; every tick refreshes the snapshot upsert and activity mirror,
@@ -215,13 +234,17 @@ class NightlyScheduler:
             run_nightly_scans,
         )
         from app.services.index_coverage import check_sitemaps, inspect_batch
+        from app.services.price_text_refresh import run_pending as refresh_price_text
         from app.services.revenue_service import pull_orders
         from app.services.unindexed_links import run_nightly as link_unindexed_pages
 
         # Once-a-day jobs are tracked one by one: a failure is retried on the
         # next tick (every 6 h) instead of waiting for tomorrow, and a failed
         # snapshot no longer skips the rest.
+        # The store sync runs first so every later job reads today's catalog.
         daily_jobs = (
+            ("store_sync", nightly_store_sync),
+            ("price_text", refresh_price_text),
             ("backfill_score_history", backfill_score_history),
             ("nightly_scans", run_nightly_scans),
             ("weekly_visibility_check", maybe_run_weekly_visibility),

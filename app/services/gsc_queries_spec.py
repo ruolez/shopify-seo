@@ -49,11 +49,13 @@ class TestBrandedQueries:
 
 class TestGoogleBrandLabels:
     @pytest.mark.parametrize("query,labels,expected", [
-        ("a2z tobacco", {"a2z tobacco": False}, False),
+        ("a2z tobacco", {"a2z tobacco": False}, True),
+        ("  A2Z smoke shop ", {"a2z smoke shop": False}, True),
         ("backwoods honey", {"backwoods honey": True}, True),
-        ("  A2Z Tobacco ", {"a2z tobacco": False}, False),
+        ("backwoods honey", {"backwoods honey": False}, False),
         ("a2z tobacco", {"other": True}, True),
         ("backwoods honey", None, False),
-    ])
-    def test_google_label_wins_and_regex_fills_gaps(self, query, labels, expected):
+    ], ids=["own-name-google-says-no", "own-name-padded", "google-says-yes", "both-say-no",
+            "no-label", "no-labels"])
+    def test_branded_when_google_or_the_store_name_says_so(self, query, labels, expected):
         assert is_branded_query(query, A2Z, labels) is expected

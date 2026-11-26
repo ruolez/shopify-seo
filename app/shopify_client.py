@@ -767,6 +767,26 @@ class ShopifyClient:
             raise Exception(f"Shopify publishablePublish error: {errors[0].get('message', str(errors))}")
         return publications
 
+    def unpublish_from_online_store(self, resource_shopify_id):
+        """Hide the resource from the Online Store channel (other channels
+        untouched). Its storefront URL then 404s, so a redirect from it works."""
+        online_store = [p for p in self.get_publications() or []
+                        if (p.get("name") or "").strip().lower() == "online store"]
+        if not online_store:
+            raise Exception("Could not find the Online Store sales channel — nothing was hidden")
+        query = """
+        mutation ($id: ID!, $input: [PublicationInput!]!) {
+          publishableUnpublish(id: $id, input: $input) {
+            userErrors { field message }
+          }
+        }
+        """
+        data = self._graphql(query, {"id": resource_shopify_id, "input": [{"publicationId": online_store[0]["id"]}]})
+        errors = (data.get("publishableUnpublish") or {}).get("userErrors", [])
+        if errors:
+            raise Exception(f"Shopify publishableUnpublish error: {errors[0].get('message', str(errors))}")
+        return True
+
     def delete_collection(self, shopify_id):
         query = """
         mutation ($input: CollectionDeleteInput!) {

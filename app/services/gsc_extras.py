@@ -148,6 +148,25 @@ def brand_labels(store_id):
         return {}
 
 
+def _store_name_clicks_google_calls_other(store_id, date_from, date_to):
+    """Clicks from searches that name the store but that Google labels
+    non-branded ("a2z smoke shop"). The app counts them as branded."""
+    from app.services.gsc_queries import brand_terms, is_branded_query
+
+    with db.get_cursor() as cur:
+        cur.execute("SELECT shop_name, primary_domain, domain FROM stores WHERE id = %s", (store_id,))
+        store = cur.fetchone() or {}
+        cur.execute(
+            """SELECT m.query, SUM(m.clicks) AS clicks FROM gsc_daily_metrics m
+               JOIN gsc_query_brand b ON b.store_id = m.store_id AND b.query = LOWER(TRIM(m.query)) AND NOT b.branded
+               WHERE m.store_id = %s AND m.date BETWEEN %s AND %s GROUP BY m.query""",
+            (store_id, date_from, date_to),
+        )
+        rows = cur.fetchall()
+    terms = brand_terms(store.get("shop_name"), store.get("primary_domain") or store.get("domain"))
+    return int(sum(r["clicks"] or 0 for r in rows if is_branded_query(r["query"], terms)))
+
+
 def search_split(store_id, date_from, date_to, top_pages=10):
     """Branded vs other searches, and Lens / image-upload traffic, for a range.
     Values are None when Google returned nothing for that part."""
@@ -167,6 +186,8 @@ def search_split(store_id, date_from, date_to, top_pages=10):
             (store_id, date_from, date_to),
         )
         pages = cur.fetchall()
+    if split:
+        split["named_as_other"] = _store_name_clicks_google_calls_other(store_id, date_from, date_to)
     multimodal = None
     if pages:
         multimodal = {

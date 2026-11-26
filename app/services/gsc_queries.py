@@ -43,13 +43,13 @@ def brand_terms(shop_name, domain):
 
 
 def is_branded_query(query, terms, labels=None):
-    """Google's own label (Search Console brandedClassification) when it has
-    one for this query; otherwise the store-name match. Pure."""
+    """Branded when the query names the store, or when Google's own label
+    (Search Console brandedClassification) says so. Google calls searches
+    like "a2z smoke shop" non-branded; they still find the store by name, so
+    the store-name match wins. Pure."""
     text = (query or "").lower()
-    if labels:
-        label = labels.get(text.strip())
-        if label is not None:
-            return label
     if any(c in re.sub(r"[^a-z0-9]", "", text) for c in terms["compact"]):
         return True
-    return bool(terms["words"] & set(re.findall(r"[a-z0-9]+", text)))
+    if terms["words"] & set(re.findall(r"[a-z0-9]+", text)):
+        return True
+    return bool(labels and labels.get(text.strip()))

@@ -1220,6 +1220,42 @@ class Database:
                 )
             """)
             cur.execute("""
+                CREATE TABLE IF NOT EXISTS price_text_pending (
+                    store_id INTEGER REFERENCES stores(id) ON DELETE CASCADE,
+                    product_id INTEGER NOT NULL,
+                    old_variants JSONB NOT NULL,
+                    created_at TIMESTAMP DEFAULT NOW(),
+                    PRIMARY KEY (store_id, product_id)
+                )
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS collection_merges (
+                    id SERIAL PRIMARY KEY,
+                    store_id INTEGER REFERENCES stores(id) ON DELETE CASCADE,
+                    keep_id INTEGER NOT NULL,
+                    drop_id INTEGER NOT NULL,
+                    keep_handle TEXT,
+                    drop_handle TEXT,
+                    added_products TEXT[] DEFAULT '{}',
+                    redirect_id TEXT,
+                    redirect_status VARCHAR(20),
+                    merged_by VARCHAR(20),
+                    created_at TIMESTAMP DEFAULT NOW(),
+                    undone_at TIMESTAMP
+                )
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS link_outcomes (
+                    store_id INTEGER REFERENCES stores(id) ON DELETE CASCADE,
+                    target_type VARCHAR(20) NOT NULL,
+                    target_id INTEGER NOT NULL,
+                    linked_at TIMESTAMP NOT NULL,
+                    indexed_at_link BOOLEAN,
+                    state_at_link VARCHAR(120),
+                    PRIMARY KEY (store_id, target_type, target_id)
+                )
+            """)
+            cur.execute("""
                 CREATE TABLE IF NOT EXISTS link_suggestions (
                     id SERIAL PRIMARY KEY,
                     store_id INTEGER REFERENCES stores(id) ON DELETE CASCADE,
