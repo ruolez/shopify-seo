@@ -1,6 +1,7 @@
 import json
 import logging
 import random
+import html as html_mod
 import re
 from urllib.parse import urlparse
 
@@ -2190,7 +2191,10 @@ def _strip_unverifiable_quotes(description_html, source_text):
     )
 
     def _drop_bad_container(m):
-        for qm in _QUOTED_SPAN_RE.finditer(m.group(1)):
+        # Quotes in the visible text only: attribute values (href="/collections/…")
+        # are not quotes, and matching them deleted paragraphs with links.
+        visible = html_mod.unescape(re.sub(r"<[^>]+>", " ", m.group(1)))
+        for qm in _QUOTED_SPAN_RE.finditer(visible):
             if not _verified(qm.group(1)):
                 removed.append(qm.group(1).strip()[:120])
                 return ""
@@ -2340,7 +2344,14 @@ def _generate_geo_content(client, config, item, entity_type, weak_signals=None):
         [item.get("description") or "", item.get("title") or "", research]
         + [str(v) for v in facts.values()]
     )
+    from app.services.ai_output_guard import drop_empty_headings, empty_sections
+
+    empty_before = empty_sections(description)
     description, removed_quotes = _strip_unverifiable_quotes(description, quote_sources)
+    if removed_quotes:
+        # A cut quote can take a section's only paragraph with it; a heading
+        # with nothing under it is dropped rather than shipped bare.
+        description = drop_empty_headings(description, keep=empty_before)
     meta_title = (data.get("meta_title") or "").strip()
     meta_description = (data.get("meta_description") or "").strip()
 
@@ -4901,17 +4912,9 @@ def run_task(task_type, task_input, store_id=None):
                     )
 
             description_rules = (
-                "- Description: if there are failing description checks (keyword_density, body_first_100_has_keyword, "
-                "description_word_count, heading_structure), propose an improved HTML description\n"
-                "- Keep the existing description content and structure, but enhance it to fix the failing checks\n"
-                "- Use the primary keyword naturally in the first paragraph and in 1-2 headings; cover "
-                "related terms and synonyms; never force repetition\n"
-                + stuffing_instruction
-                + "- If word count is low, expand with relevant product information (features, usage, benefits)\n"
-                "- If headings are missing, add H2/H3 subheadings to structure the content\n"
-                "- NEVER use <h1> tags in the description — the page already has an H1 (the title); use h2/h3 only\n"
-                "- Output valid HTML (p, h2, h3, ul, li tags — plus any preserved a/img tags listed above)\n"
-                + links_instruction
+                get_setting("prompts.technical_fix_description_rules", DEFAULTS["prompts.technical_fix_description_rules"])
+                .replace("{stuffing_instruction}", stuffing_instruction)
+                .replace("{links_instruction}", links_instruction)
             )
 
         _tech_fix_template = get_setting("prompts.technical_seo_fix", DEFAULTS["prompts.technical_seo_fix"])

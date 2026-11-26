@@ -208,3 +208,22 @@ def empty_sections(html):
             continue
         empty.append(re.sub(r"<[^>]+>", "", h.group(2)).strip())
     return empty
+
+
+def drop_empty_headings(html, keep=()):
+    """Remove headings that have nothing under them (see empty_sections),
+    except those whose text is in keep. Used after a cleanup step deleted a
+    section's only paragraph, so no bare heading is left behind."""
+    html = html or ""
+    keep = set(keep)
+    while True:
+        targets = [h for h in empty_sections(html) if h not in keep]
+        if not targets:
+            return html
+        target = targets[0]
+        for m in _HEADING_RE.finditer(html):
+            if re.sub(r"<[^>]+>", "", m.group(2)).strip() == target:
+                html = html[:m.start()] + html[m.end():]
+                break
+        else:
+            return html

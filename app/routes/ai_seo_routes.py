@@ -915,6 +915,43 @@ def feed_items():
 # ── Phase 2: review-first GEO optimization ──────────────────────────────
 
 
+def _run_geo(task_type, id_key, resource_id, weak, store_id):
+    """One GEO rewrite. When it leaves a heading with nothing under it, or
+    drops keywords the page ranks for, one more try that names them.
+    Returns (result, still-empty headings)."""
+    from app.ai_agent import run_task
+
+    geo = run_task(task_type, {id_key: resource_id, "weak_signals": weak}, store_id)
+    if geo.get("error"):
+        return geo, []
+    hollow = empty_sections(geo.get("optimized_description_html"))
+    dropped = geo.get("dropped_keywords") or []
+    if hollow or dropped:
+        logger.info("GEO draft for %s %s: %d empty section(s), %d dropped keyword(s); retrying once",
+                    task_type, resource_id, len(hollow), len(dropped))
+        retry_weak = list(weak or [])
+        if hollow:
+            retry_weak.append(
+                "Your previous draft left these headings with no text under them: "
+                + "; ".join(f'"{h}"' for h in hollow[:5])
+                + ". Every heading must be followed by its own paragraph, list or table; keep the existing "
+                "section text under its heading."
+            )
+        if dropped:
+            retry_weak.append(
+                "Your previous draft dropped these phrases the page ranks for: "
+                + "; ".join(f'"{k}"' for k in dropped[:8])
+                + ". Keep each one, worded naturally, where the current page has it."
+            )
+        second = run_task(task_type, {id_key: resource_id, "weak_signals": retry_weak}, store_id)
+        if not second.get("error"):
+            second_hollow = empty_sections(second.get("optimized_description_html"))
+            # Fewer empty sections wins (those fail the draft), then fewer dropped keywords.
+            if (len(second_hollow), len(second.get("dropped_keywords") or [])) <= (len(hollow), len(dropped)):
+                geo, hollow = second, second_hollow
+    return geo, hollow
+
+
 def _weak_signals(breakdown, n=3):
     """Return the n lowest-scoring components as 'Label: detail' strings."""
     if not breakdown:
@@ -1049,14 +1086,9 @@ def optimize_preview():
 
     task_type = "ai_seo_collection" if resource_type == "collection" else "ai_seo_product"
     id_key = "collection_id" if resource_type == "collection" else "product_id"
-    geo = run_task(
-        task_type,
-        {id_key: resource_id, "weak_signals": _weak_signals(before_breakdown)},
-        store_id,
-    )
+    geo, hollow = _run_geo(task_type, id_key, resource_id, _weak_signals(before_breakdown), store_id)
     if geo.get("error"):
         return jsonify({"error": geo["error"]}), 502
-    hollow = empty_sections(geo.get("optimized_description_html"))
     if hollow:
         return jsonify({"error": f"The AI left {len(hollow)} section(s) empty ({'; '.join(hollow[:3])}). Try again."}), 502
     after = _project_after(int(store_id), resource_type, item, geo, stored, before_breakdown, store_domain)
@@ -1240,12 +1272,11 @@ def _execute_ai_seo_batch(batch_id, store_id, resource_type, resource_ids):
         try:
             stored = _stored_score(store_id, resource_type, rid)
             before_breakdown, before_score = _before_scores(store_id, resource_type, item, stored, store_domain)
-            geo = run_task(task_type, {id_key: rid, "weak_signals": _weak_signals(before_breakdown)}, store_id)
+            geo, hollow = _run_geo(task_type, id_key, rid, _weak_signals(before_breakdown), store_id)
             if geo.get("error"):
                 raise ValueError(geo["error"])
             if not (geo.get("optimized_description_html") or "").strip():
                 raise ValueError("The AI returned no description")
-            hollow = empty_sections(geo["optimized_description_html"])
             if hollow:
                 raise ValueError(f"The AI left {len(hollow)} section(s) empty ({'; '.join(hollow[:3])}). Write the draft again.")
             after = _project_after(store_id, resource_type, item, geo, stored, before_breakdown, store_domain)

@@ -1,6 +1,6 @@
 import pytest
 
-from app.services.ai_output_guard import empty_sections
+from app.services.ai_output_guard import drop_empty_headings, empty_sections
 
 
 class TestEmptySections:
@@ -22,3 +22,12 @@ class TestEmptySections:
 
     def test_no_headings(self):
         assert empty_sections("<p>Just text</p>") == []
+
+
+class TestDropEmptyHeadings:
+    def test_removes_only_new_empty_headings(self):
+        html = "<h2>Kept empty</h2><h2>Emptied</h2>\n\n<h2>Full</h2><p>Text</p>"
+        assert drop_empty_headings(html, keep=["Kept empty"]) == "<h2>Kept empty</h2>\n\n<h2>Full</h2><p>Text</p>"
+
+    def test_parent_emptied_by_dropping_its_last_subheading_goes_too(self):
+        assert drop_empty_headings("<p>Intro</p><h2>Section</h2><h3>Sub</h3>") == "<p>Intro</p>"

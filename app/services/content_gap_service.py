@@ -651,15 +651,8 @@ def generate_content(store_id, gap_id, selected_title, content_type):
         f"HEADING STRUCTURE TO FOLLOW:\n{heading_text}\n\n"
         f"QUESTIONS TO ANSWER:\n{questions}\n\n"
         f"INTERNAL LINKS TO INCLUDE:\n{internal_links}\n\n"
-        f"INSTRUCTIONS:\n"
-        f"- Write in HTML format with proper heading tags\n"
-        f"- Include the primary keyword naturally in the first paragraph\n"
-        f"- Use secondary keywords throughout\n"
-        f"- Answer the listed questions within the content\n"
-        f"- Include internal links as <a href='...'> tags naturally in the text\n"
-        f"- Write compelling, conversion-focused copy for an ecommerce audience\n"
-        f"- Do NOT use puffery words (premium, best, top, ultimate, finest)\n"
-        f"- Aim for exactly {word_count} words\n"
+        + get_setting("prompts.content_gap_page_rules", DEFAULTS["prompts.content_gap_page_rules"])
+        .replace("{word_count}", str(word_count))
     )
 
     cannibal_risk = brief.get("cannibalization_risk", {})
@@ -1100,15 +1093,9 @@ def optimize_existing_page(store_id, gap_id, override_keyword=None, override_vol
         f"- Monthly Search Volume: {gap.get('search_volume', 0)}\n"
         f"- Search Intent: {gap.get('intent', 'commercial')}\n"
         f"- Competition: {gap.get('competition', 'unknown')}\n\n"
-        f"OPTIMIZATION INSTRUCTIONS:\n"
-        f"- Incorporate \"{gap['keyword']}\" into the meta title and meta description\n"
-        f"- DO NOT remove or weaken targeting for protected keywords\n"
-        f"- Keep the meta title under 60 characters\n"
-        f"- Keep the meta description between 145-160 characters\n"
-        f"- Mention the new keyword naturally once in each — never force repetition\n"
-        f"- Do NOT write or rewrite the page description\n"
-        f"- Do NOT use puffery words (premium, best, top, ultimate, finest)\n\n"
-        f"Return JSON only:\n"
+        + get_setting("prompts.content_gap_optimize_rules", DEFAULTS["prompts.content_gap_optimize_rules"])
+        .replace("{keyword}", gap["keyword"])
+        + f"Return JSON only:\n"
         f'{{"strategy": "2-3 sentence explanation of what changes you made and why",'
         f' "new_title": "optimized page title or null if no change needed",'
         f' "new_meta_title": "optimized meta title (50-60 chars)",'

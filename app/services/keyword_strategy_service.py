@@ -1820,38 +1820,10 @@ def generate_implementation_steps(store_id, assignment_id):
                 + f"    Recommended Action: {cp['action']}\n"
             )
 
-    system_prompt = (
-        "You are an expert Shopify SEO strategist. Generate a concrete implementation plan "
-        "to assign a keyword to a target page and resolve any keyword cannibalization.\n\n"
-        "For each step, specify the exact field to change, the current value, and the proposed new value.\n\n"
-        "Rules:\n"
-        "- meta_title must be under 60 characters\n"
-        "- meta_description must be under 160 characters\n"
-        "- Include the primary keyword naturally, don't just prepend it\n"
-        "- For de-optimize steps, replace the keyword with a more specific long-tail variant or remove it\n"
-        "- For differentiate steps, shift focus to a related but distinct keyword\n"
-        "- A competing page's OWN PRIMARY KEYWORD is protected: de-optimize/differentiate steps must "
-        "only touch the contested keyword, never that page's own primary\n"
-        "- Only propose changes to fields that actually need modification\n"
-        "- Be specific with proposed values — write the actual text, not placeholders\n\n"
-        "Return ONLY valid JSON in this exact format:\n"
-        "{\n"
-        '  "summary": "Brief 1-2 sentence strategy explanation",\n'
-        '  "steps": [\n'
-        "    {\n"
-        '      "step_number": 1,\n'
-        '      "action": "optimize|de-optimize|differentiate",\n'
-        '      "item_type": "product|collection|article|page",\n'
-        '      "item_id": 123,\n'
-        '      "title": "Page Title",\n'
-        '      "field": "meta_title|meta_description|title|tags",\n'
-        '      "current_value": "current text",\n'
-        '      "proposed_value": "new optimized text",\n'
-        '      "explanation": "Why this change is needed"\n'
-        "    }\n"
-        "  ]\n"
-        "}"
-    )
+    from app.prompt_defaults import DEFAULTS
+    from app.settings_manager import get_setting
+
+    system_prompt = get_setting("prompts.keyword_assign_plan", DEFAULTS["prompts.keyword_assign_plan"])
 
     user_prompt = (
         f"KEYWORD: {keyword}\n"
